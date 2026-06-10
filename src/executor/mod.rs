@@ -79,8 +79,9 @@ impl Executor {
                 }
                 "cd" => self.do_cd(cmd),
                 "export" => self.do_export(cmd),
-                "true" => { self.exit_code = 0; Ok(()) }
-                "false" => { self.exit_code = 1; Ok(()) }
+                ":" => { self.exit_code = crate::builtins::colon::colon(); Ok(()) }
+                "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
+                "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
                 "env" => { self.do_env(); Ok(()) }
                 "set" => { self.exit_code = 0; Ok(()) }
                 "unset" => self.do_unset(cmd),
@@ -249,6 +250,15 @@ mod unit_tests {
     #[test]
     fn test_true_command() {
         let tokens = tokenize("true");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.execute_ast(&ast).ok();
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_colon_command() {
+        let tokens = tokenize(":");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
         executor.execute_ast(&ast).ok();
