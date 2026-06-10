@@ -3,15 +3,15 @@
 # License: GPL-3.0-or-later
 
 [package]
-name = "rust_shell"
+name = "rubash"
 version = "0.1.1"
 edition = "2021"
 rust-version = "1.70"
 authors = ["unixwin team <arookieofc@gmail.com>"]
 description = "A Rust implementation of the GNU Bash shell"
 readme = "README.md"
-homepage = "https://github.com/unixwin/rust_shell"
-repository = "https://github.com/unixwin/rust_shell"
+homepage = "https://github.com/unixwin/rubash"
+repository = "https://github.com/unixwin/rubash"
 license = "GPL-3.0-or-later"
 keywords = ["shell", "bash", "cli", "posix"]
 categories = ["command-line-utilities", "development-tools"]

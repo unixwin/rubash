@@ -1,15 +1,15 @@
-# Rust_Shell
+# Rubash
 
 一个使用 Rust 编写的 GNU Bash 重新实现。
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/unixwin/rust_shell)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/unixwin/rubash)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
-[![Crates.io](https://img.shields.io/crates/v/rust_shell)](https://crates.io/crates/rust_shell)
+[![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
 ## 概述
 
-Rust-Shell 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零编写。它旨在提供一个安全、快速的 Bash 替代方案，同时保持与现有 bash 脚本的兼容性。
+Rubash 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零编写。它旨在提供一个安全、快速的 Bash 替代方案，同时保持与现有 bash 脚本的兼容性。
 
 **注意**: 此项目目前处于 alpha 阶段，不建议用于生产环境。
 

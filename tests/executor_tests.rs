@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo test --test executor_tests
 
-use rust_shell::lexer::tokenize;
-use rust_shell::parser::parse;
-use rust_shell::executor::Executor;
+use rubash::lexer::tokenize;
+use rubash::parser::parse;
+use rubash::executor::Executor;
 
 mod simple_execution {
     use super::*;

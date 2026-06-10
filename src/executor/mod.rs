@@ -21,10 +21,10 @@ pub enum ExecuteError {
 impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecuteError::CommandNotFound(cmd) => write!(f, "bash-rs: {}: command not found", cmd),
-            ExecuteError::IoError(e) => write!(f, "bash-rs: {}", e),
+            ExecuteError::CommandNotFound(cmd) => write!(f, "rubash: {}: command not found", cmd),
+            ExecuteError::IoError(e) => write!(f, "rubash: {}", e),
             ExecuteError::ExitCode(code) => write!(f, "exit code: {}", code),
-            ExecuteError::UnknownBuiltin(name) => write!(f, "bash-rs: {}: builtin command not found", name),
+            ExecuteError::UnknownBuiltin(name) => write!(f, "rubash: {}: builtin command not found", name),
         }
     }
 }
