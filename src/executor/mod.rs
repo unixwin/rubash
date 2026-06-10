@@ -82,6 +82,11 @@ impl Executor {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
+                "printf" => {
+                    self.exit_code =
+                        crate::builtins::printf::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
                 "cd" => {
                     self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
