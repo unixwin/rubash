@@ -3,19 +3,11 @@
 //! Executes parsed AST commands.
 
 use crate::parser::{Ast, CommandNode};
-use std::process::{Command, Stdio};
-use std::fs::File;
+use std::collections::HashMap;
 use std::env;
-
-/// Exit code storage
-#[derive(Debug, Clone)]
-pub struct ExitCode(pub i32);
-
-impl Default for ExitCode {
-    fn default() -> Self {
-        Self(0)
-    }
-}
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// Execution error
 #[derive(Debug)]
@@ -23,14 +15,16 @@ pub enum ExecuteError {
     CommandNotFound(String),
     IoError(std::io::Error),
     ExitCode(i32),
+    UnknownBuiltin(String),
 }
 
 impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecuteError::CommandNotFound(cmd) => write!(f, "command not found: {}", cmd),
-            ExecuteError::IoError(e) => write!(f, "IO error: {}", e),
+            ExecuteError::CommandNotFound(cmd) => write!(f, "bashrs: {}: command not found", cmd),
+            ExecuteError::IoError(e) => write!(f, "bashrs: {}", e),
             ExecuteError::ExitCode(code) => write!(f, "exit code: {}", code),
+            ExecuteError::UnknownBuiltin(name) => write!(f, "bashrs: {}: builtin command not found", name),
         }
     }
 }
@@ -44,9 +38,10 @@ impl From<std::io::Error> for ExecuteError {
 }
 
 /// Command executor
+#[derive(Debug)]
 pub struct Executor {
     exit_code: i32,
-    env_vars: std::collections::HashMap<String, String>,
+    env_vars: HashMap<String, String>,
 }
 
 impl Executor {
@@ -59,10 +54,7 @@ impl Executor {
 
     /// Execute an AST
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
-        for (i, cmd) in ast.commands.iter().enumerate() {
-            if i > 0 {
-                // Pipeline - pass output to next command
-            }
+        for cmd in &ast.commands {
             self.execute_command(cmd)?;
         }
         Ok(())
@@ -70,60 +62,104 @@ impl Executor {
 
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        // Handle builtins first
         if let Some(word) = cmd.words.first() {
             match word.as_str() {
                 "exit" => {
                     let code = cmd.words.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
                     self.exit_code = code;
-                    return Err(ExecuteError::ExitCode(code));
+                    Err(ExecuteError::ExitCode(code))
                 }
                 "echo" => {
-                    let args: Vec<&str> = cmd.words.iter().skip(1).map(|s| s.as_str()).collect();
-                    println!("{}", args.join(" "));
-                    return Ok(());
+                    self.do_echo(cmd);
+                    Ok(())
                 }
                 "pwd" => {
-                    if let Ok(cwd) = env::current_dir() {
-                        println!("{}", cwd.display());
-                    }
-                    return Ok(());
+                    self.do_pwd();
+                    Ok(())
                 }
-                "cd" => {
-                    let dir = cmd.words.get(1).map(|s| s.as_str()).unwrap_or("~");
-                    let dir = if dir == "~" {
-                        env::var("HOME").unwrap_or_else(|_| ".".to_string())
-                    } else {
-                        dir.to_string()
-                    };
-                    env::set_current_dir(&dir)?;
-                    return Ok(());
-                }
-                "export" => {
-                    if let Some(var) = cmd.words.get(1) {
-                        if let Some(pos) = var.find('=') {
-                            let name = &var[..pos];
-                            let value = &var[pos+1..];
-                            self.env_vars.insert(name.to_string(), value.to_string());
-                            env::set_var(name, value);
-                        }
-                    }
-                    return Ok(());
-                }
-                "true" => {
-                    self.exit_code = 0;
-                    return Ok(());
-                }
-                "false" => {
-                    self.exit_code = 1;
-                    return Ok(());
-                }
-                _ => {}
+                "cd" => self.do_cd(cmd),
+                "export" => self.do_export(cmd),
+                "true" => { self.exit_code = 0; Ok(()) }
+                "false" => { self.exit_code = 1; Ok(()) }
+                "env" => { self.do_env(); Ok(()) }
+                "set" => { self.exit_code = 0; Ok(()) }
+                "unset" => self.do_unset(cmd),
+                "test" | "[" => self.do_test(cmd),
+                _ => self.execute_external(cmd),
             }
+        } else {
+            Ok(())
+        }
+    }
+
+    fn do_echo(&mut self, cmd: &CommandNode) {
+        let args: Vec<&str> = cmd.words.iter().skip(1).map(|s| s.as_str()).collect();
+        let mut stdout = std::io::stdout();
+        let _ = writeln!(stdout, "{}", args.join(" "));
+        self.exit_code = 0;
+    }
+
+    fn do_pwd(&mut self) {
+        if let Ok(cwd) = env::current_dir() {
+            println!("{}", cwd.display());
+        }
+        self.exit_code = 0;
+    }
+
+    fn do_cd(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let dir = cmd.words.get(1).map(|s| s.as_str()).unwrap_or("~");
+        let dir = if dir == "~" {
+            env::var("HOME").unwrap_or_else(|_| ".".to_string())
+        } else if dir == "-" {
+            env::var("OLDPWD").unwrap_or_else(|_| ".".to_string())
+        } else {
+            dir.to_string()
+        };
+
+        if let Ok(cwd) = env::current_dir() {
+            let _ = env::set_var("OLDPWD", cwd.to_string_lossy().as_ref());
         }
 
-        // External command execution
-        self.execute_external(cmd)
+        env::set_current_dir(&dir)?;
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn do_export(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if cmd.words.len() == 1 {
+            for (key, value) in &self.env_vars {
+                println!("{}={}", key, value);
+            }
+        } else if let Some(var) = cmd.words.get(1) {
+            if let Some(pos) = var.find('=') {
+                let name = &var[..pos];
+                let value = &var[pos + 1..];
+                self.set_env(name, value);
+            }
+        }
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn do_env(&mut self) {
+        for (key, value) in &self.env_vars {
+            println!("{}={}", key, value);
+        }
+        self.exit_code = 0;
+    }
+
+    fn do_unset(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(var) = cmd.words.get(1) {
+            self.env_vars.remove(var);
+            env::remove_var(var);
+        }
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn do_test(&mut self, _cmd: &CommandNode) -> Result<(), ExecuteError> {
+        self.exit_code = 0;
+        Ok(())
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -134,15 +170,8 @@ impl Executor {
         let mut process = Command::new(&cmd.words[0]);
         process.args(&cmd.words[1..]);
 
-        // If there's an assignment, execute with modified environment
         for (var_name, var_value) in &cmd.assignments {
             process.env(var_name, var_value);
-        }
-
-        // Handle redirections
-        if let Some(ref redirect) = cmd.redirect_out {
-            let file = File::create(&redirect.target)?;
-            process.stdout(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.redirect_in {
@@ -150,16 +179,23 @@ impl Executor {
             process.stdin(Stdio::from(file));
         }
 
+        if let Some(ref redirect) = cmd.redirect_out {
+            let file = File::create(&redirect.target)?;
+            process.stdout(Stdio::from(file));
+        }
+
         if let Some(ref redirect) = cmd.append {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&redirect.target)?;
+            let file = OpenOptions::new().create(true).append(true).open(&redirect.target)?;
             process.stdout(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.redirect_err {
             let file = File::create(&redirect.target)?;
+            process.stderr(Stdio::from(file));
+        }
+
+        if let Some(ref redirect) = cmd.redirect_err_append {
+            let file = OpenOptions::new().create(true).append(true).open(&redirect.target)?;
             process.stderr(Stdio::from(file));
         }
 
@@ -173,9 +209,17 @@ impl Executor {
         Ok(())
     }
 
-    /// Get the last exit code
     pub fn last_exit_code(&self) -> i32 {
         self.exit_code
+    }
+
+    pub fn set_env(&mut self, name: &str, value: &str) {
+        self.env_vars.insert(name.to_string(), value.to_string());
+        env::set_var(name, value);
+    }
+
+    pub fn get_env(&self, name: &str) -> Option<&str> {
+        self.env_vars.get(name).map(|s| s.as_str())
     }
 }
 
@@ -207,5 +251,30 @@ mod unit_tests {
         let result = executor.execute_ast(&ast);
         assert!(result.is_err());
         assert_eq!(executor.last_exit_code(), 5);
+    }
+
+    #[test]
+    fn test_true_command() {
+        let tokens = tokenize("true");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.execute_ast(&ast).ok();
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_false_command() {
+        let tokens = tokenize("false");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.execute_ast(&ast).ok();
+        assert_eq!(executor.last_exit_code(), 1);
+    }
+
+    #[test]
+    fn test_env_var() {
+        let mut executor = Executor::new();
+        executor.set_env("TEST_VAR", "hello");
+        assert_eq!(executor.get_env("TEST_VAR"), Some("hello"));
     }
 }
