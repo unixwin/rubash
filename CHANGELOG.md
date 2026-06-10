@@ -100,5 +100,5 @@
 
 ## 链接
 
-- [GitHub Releases](https://github.com/bashrs/bashrs/releases)
-- [问题跟踪器](https://github.com/bashrs/bashrs/issues)
+- [GitHub Releases](https://github.com/unixwin/rubash/releases)
+- [问题跟踪器](https://github.com/unixwin/rubash/issues)

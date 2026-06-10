@@ -22,8 +22,8 @@
 #### 1. Fork 并克隆仓库
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/bashrs.git
-cd bashrs
+git clone https://github.com/YOUR_USERNAME/rubash.git
+cd rubash
 ```
 
 #### 2. 创建功能分支
