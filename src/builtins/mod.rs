@@ -2,6 +2,7 @@
 
 pub mod cd;
 pub mod colon;
+pub mod command;
 pub mod echo;
 pub mod exit;
 pub mod printf;

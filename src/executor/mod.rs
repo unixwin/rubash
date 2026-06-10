@@ -87,6 +87,20 @@ impl Executor {
                         crate::builtins::printf::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
+                "command" => match crate::builtins::command::execute(&cmd.words[1..])? {
+                    crate::builtins::command::CommandAction::Complete(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                    crate::builtins::command::CommandAction::Execute {
+                        words,
+                        use_standard_path: _,
+                    } => {
+                        let mut command = cmd.clone();
+                        command.words = words;
+                        self.execute_command(&command)
+                    }
+                },
                 "cd" => {
                     self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
