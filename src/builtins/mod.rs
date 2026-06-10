@@ -1,2 +1,3 @@
-//! Module placeholder for `src/builtins/mod.rs`.
+//! Builtin command implementations.
 
+pub mod echo;

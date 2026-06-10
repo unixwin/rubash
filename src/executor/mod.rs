@@ -6,7 +6,6 @@ use crate::parser::{Ast, CommandNode};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Execution error
@@ -70,7 +69,8 @@ impl Executor {
                     Err(ExecuteError::ExitCode(code))
                 }
                 "echo" => {
-                    self.do_echo(cmd);
+                    crate::builtins::echo::execute(&cmd.words[1..])?;
+                    self.exit_code = 0;
                     Ok(())
                 }
                 "pwd" => {
@@ -90,13 +90,6 @@ impl Executor {
         } else {
             Ok(())
         }
-    }
-
-    fn do_echo(&mut self, cmd: &CommandNode) {
-        let args: Vec<&str> = cmd.words.iter().skip(1).map(|s| s.as_str()).collect();
-        let mut stdout = std::io::stdout();
-        let _ = writeln!(stdout, "{}", args.join(" "));
-        self.exit_code = 0;
     }
 
     fn do_pwd(&mut self) {
