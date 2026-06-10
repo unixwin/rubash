@@ -96,7 +96,10 @@ impl Executor {
                 "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
                 "env" => { self.do_env(); Ok(()) }
                 "set" => { self.exit_code = 0; Ok(()) }
-                "unset" => self.do_unset(cmd),
+                "unset" => {
+                    self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
                 "test" | "[" => self.do_test(cmd),
                 _ => self.execute_external(cmd),
             }
@@ -110,15 +113,6 @@ impl Executor {
             println!("{}={}", key, value);
         }
         self.exit_code = 0;
-    }
-
-    fn do_unset(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if let Some(var) = cmd.words.get(1) {
-            self.env_vars.remove(var);
-            env::remove_var(var);
-        }
-        self.exit_code = 0;
-        Ok(())
     }
 
     fn do_test(&mut self, _cmd: &CommandNode) -> Result<(), ExecuteError> {
