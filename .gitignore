@@ -1,2 +1,36 @@
+# Rust build artifacts
 /target
-bash/
+**/*.rs.bk
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+.vscode/
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Environment files
+.env
+.env.local
+
+# Original bash source (not part of this project)
+/bash/
+
+# Generated documentation
+doc/
+
+# Release builds (keep source)
+/release/
