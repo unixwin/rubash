@@ -27,6 +27,8 @@ pub struct CommandNode {
     pub append: Option<Redirect>,
     /// Stderr redirect
     pub redirect_err: Option<Redirect>,
+    /// Stderr append redirect
+    pub redirect_err_append: Option<Redirect>,
     /// Pipe to next command
     pub pipe: Option<usize>,
     /// Background execution (&)
@@ -42,9 +44,15 @@ impl CommandNode {
             redirect_out: None,
             append: None,
             redirect_err: None,
+            redirect_err_append: None,
             pipe: None,
             background: false,
         }
+    }
+
+    /// Returns Some(true) for &&, Some(false) for ||, None otherwise
+    pub fn and_or(&self) -> Option<bool> {
+        None
     }
 }
 
@@ -135,6 +143,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             fd: Some(2),
                             target: tokens[i + 1].value.clone(),
                             append: false,
+                        });
+                        i += 1;
+                    }
+                }
+            }
+            TokenKind::RedirectErrAppend => {
+                if i + 1 < tokens.len() {
+                    if let TokenKind::Word = tokens[i + 1].kind {
+                        current_cmd.redirect_err_append = Some(Redirect {
+                            fd: Some(2),
+                            target: tokens[i + 1].value.clone(),
+                            append: true,
                         });
                         i += 1;
                     }
