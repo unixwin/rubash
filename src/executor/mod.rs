@@ -74,7 +74,7 @@ impl Executor {
                     Ok(())
                 }
                 "pwd" => {
-                    self.do_pwd();
+                    self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
                 "cd" => self.do_cd(cmd),
@@ -91,13 +91,6 @@ impl Executor {
         } else {
             Ok(())
         }
-    }
-
-    fn do_pwd(&mut self) {
-        if let Ok(cwd) = env::current_dir() {
-            println!("{}", cwd.display());
-        }
-        self.exit_code = 0;
     }
 
     fn do_cd(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {

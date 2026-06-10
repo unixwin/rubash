@@ -36,7 +36,7 @@ This appendix assigns each implementation-shaped GNU Bash source file to a Rubas
 | `builtins/break.def` | `src/builtins/break.rs` |
 | `builtins/builtin.def` | `src/builtins/builtin.rs` |
 | `builtins/caller.def` | `src/builtins/caller.rs` |
-| `builtins/cd.def` | `src/builtins/cd.rs` |
+| `builtins/cd.def` | `src/builtins/cd.rs`, `src/builtins/pwd.rs` |
 | `builtins/colon.def` | `src/builtins/colon.rs` |
 | `builtins/command.def` | `src/builtins/command.rs` |
 | `builtins/common.c` | `src/builtins/common.rs` |
