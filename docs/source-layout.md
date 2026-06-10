@@ -96,6 +96,16 @@ pinned GNU Bash tree has 487 implementation-shaped files (`.c`, `.h`, `.y`, and
 `builtins/*.def`). Most of those should have an explicit Rubash ownership target
 even when they are not ported yet. See `docs/bash-implementation-inventory.md`.
 
+Current scaffold status:
+
+| Item | Count |
+|---|---:|
+| GNU Bash implementation-shaped files | 487 |
+| Rubash Rust owner targets in inventory | 307 |
+| Existing inventory owner target files | 307 |
+| Total `src/**/*.rs` files, including `mod.rs` and entrypoints | 324 |
+| Explicit skip categories | 3 |
+
 ## Create Now
 
 - `src/parser/ast.rs`: command AST, control-flow nodes, and shell syntax data
