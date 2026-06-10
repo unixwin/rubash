@@ -6,8 +6,9 @@ subsystems, generated parser files, autotools support, portability shims, and
 interactive shell infrastructure. Rust modules should be organized around
 semantic ownership, state boundaries, and testable behavior.
 
-Use `docs/bash-source-map.md` to keep every Rubash module traceable to the
-corresponding GNU Bash source files and upstream test groups.
+Use `docs/bash-source-map.md` to keep every Rubash subsystem traceable to the
+corresponding GNU Bash source files and upstream test groups. Use
+`docs/bash-implementation-inventory.md` for the file-by-file ownership map.
 
 ## Target Layout
 
@@ -26,20 +27,30 @@ src/
   expand/
     mod.rs
     braces.rs
+    bracecomp.rs
     tilde.rs
     parameter.rs
     command.rs
+    arithmetic.rs
+    word.rs
     pathname.rs
+    glob/
 
   shell/
     mod.rs
+    alias.rs
+    arrays/
     options.rs
+    runtime.rs
     status.rs
     variables.rs
 
   executor/
     mod.rs
     command.rs
+    eval.rs
+    hash.rs
+    hashlib.rs
     redirection.rs
     pipeline.rs
     path.rs
@@ -52,13 +63,38 @@ src/
     export.rs
     unset.rs
     test.rs
+    common.rs
+    getopt.rs
 
   jobs/
     mod.rs
+    jobs.rs
+    signals.rs
+    trap.rs
 
   input/
     mod.rs
+    bashline.rs
+    input.rs
+    readline/
+
+  complete/
+    mod.rs
+
+  history/
+    mod.rs
+
+  locale/
+    mod.rs
+
+  sys/
+    mod.rs
 ```
+
+The target layout is intentionally more granular than a 25-file shell. The
+pinned GNU Bash tree has 487 implementation-shaped files (`.c`, `.h`, `.y`, and
+`builtins/*.def`). Most of those should have an explicit Rubash ownership target
+even when they are not ported yet. See `docs/bash-implementation-inventory.md`.
 
 ## Create Now
 
@@ -91,9 +127,11 @@ architecture.
 
 ## Policy
 
-- Do not port GNU Bash C files line-by-line.
+- Do not port GNU Bash C files line-by-line, but do assign each
+  implementation-shaped upstream file to a Rubash owner.
 - Do not mirror generated files such as `y.tab.c` and `y.tab.h`.
-- Every new semantic module should update `docs/bash-source-map.md`.
+- Every new semantic module should update `docs/bash-source-map.md` and, when
+  needed, `docs/bash-implementation-inventory.md`.
 - Every compatibility PR should name the upstream `tests/run-*` group it moves.
 - Small builtins may share modules when that keeps the Rust implementation
   clearer; complex builtins should get their own files.

@@ -23,11 +23,11 @@ builtin definitions, and parser grammar:
 | `builtins/` files | 56 | Builtin definitions plus helper code. |
 | `doc/` files | 37 | Manual/reference documentation. |
 
-This document intentionally maps those files at subsystem granularity. A full
-487-row file-by-file map would be noisy and would incorrectly imply that Rubash
-should mirror Bash's C file boundaries. When a Rubash module is added or moved,
-the relevant row below should be updated with the GNU Bash source files and
-upstream `tests/run-*` groups it is meant to cover.
+This document maps those files at subsystem granularity. The file-by-file owner
+map lives in `docs/bash-implementation-inventory.md`; it assigns every
+implementation-shaped GNU Bash file to a Rubash target module or an explicit
+skip category. When a Rubash module is added or moved, update both maps as
+needed.
 
 | GNU Bash source | Rubash module | Status | Notes |
 |---|---|---:|---|
