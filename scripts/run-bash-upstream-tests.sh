@@ -15,7 +15,10 @@ if [[ ! -d "$BASH_TEST_DIR" ]]; then
   exit 2
 fi
 
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" >/dev/null
+if ! cargo build --manifest-path "$ROOT_DIR/Cargo.toml" >/dev/null; then
+  echo "Failed to build rubash before running Bash upstream tests" >&2
+  exit 2
+fi
 
 SHELL_BIN="$ROOT_DIR/target/debug/rubash"
 if [[ -x "$SHELL_BIN.exe" ]]; then

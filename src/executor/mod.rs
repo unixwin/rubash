@@ -77,7 +77,10 @@ impl Executor {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
-                "cd" => self.do_cd(cmd),
+                "cd" => {
+                    self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
                 "export" => self.do_export(cmd),
                 ":" => { self.exit_code = crate::builtins::colon::colon(); Ok(()) }
                 "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
@@ -91,25 +94,6 @@ impl Executor {
         } else {
             Ok(())
         }
-    }
-
-    fn do_cd(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        let dir = cmd.words.get(1).map(|s| s.as_str()).unwrap_or("~");
-        let dir = if dir == "~" {
-            env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        } else if dir == "-" {
-            env::var("OLDPWD").unwrap_or_else(|_| ".".to_string())
-        } else {
-            dir.to_string()
-        };
-
-        if let Ok(cwd) = env::current_dir() {
-            env::set_var("OLDPWD", cwd.to_string_lossy().as_ref());
-        }
-
-        env::set_current_dir(&dir)?;
-        self.exit_code = 0;
-        Ok(())
     }
 
     fn do_export(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
