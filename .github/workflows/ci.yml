@@ -44,4 +44,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bash-upstream-test-progress
-          path: target/bash-upstream-tests
+          path: |
+            target/bash-upstream-tests/summary.md
+            target/bash-upstream-tests/results.tsv
+            target/bash-upstream-tests/logs
