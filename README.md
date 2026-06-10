@@ -112,6 +112,9 @@ BASH_UPSTREAM_STRICT=1 scripts/run-bash-upstream-tests.sh
 
 ### 代码结构
 
+目录结构决策见 [docs/source-layout.md](docs/source-layout.md)，GNU Bash 源码到
+Rubash 模块的对应关系见 [docs/bash-source-map.md](docs/bash-source-map.md)。
+
 ```
 src/
 ├── lexer/mod.rs     # 词法分析器
