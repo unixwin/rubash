@@ -28,6 +28,11 @@ Rubash 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零
 ## 快速开始
 
 ### 安装
+从cargo
+```bash
+cargo install Rubash
+```
+
 
 ```bash
 # 克隆仓库
