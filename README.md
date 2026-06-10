@@ -36,8 +36,8 @@ cargo install Rubash
 
 ```bash
 # 克隆仓库
-git clone https://github.com/unixwin/rust_shell.git
-cd rust_shell
+git clone https://github.com/unixwin/rubash.git
+cd rubash
 
 # 构建项目
 cargo build --release
@@ -127,8 +127,8 @@ tests/
 
 ## 联系方式
 
-- GitHub Issues: https://github.com/unixwin/rust_shell/issues
-- 讨论区: https://github.com/unixwin/rust_shell/discussions
+- GitHub Issues: https://github.com/unixwin/rubash/issues
+- 讨论区: https://github.com/unixwin/rubash/discussions
 
 ## 致谢
 
