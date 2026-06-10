@@ -86,7 +86,11 @@ impl Executor {
                     self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
-                "export" => self.do_export(cmd),
+                "export" => {
+                    self.exit_code =
+                        crate::builtins::setattr::export(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
                 ":" => { self.exit_code = crate::builtins::colon::colon(); Ok(()) }
                 "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
                 "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
@@ -99,22 +103,6 @@ impl Executor {
         } else {
             Ok(())
         }
-    }
-
-    fn do_export(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if cmd.words.len() == 1 {
-            for (key, value) in &self.env_vars {
-                println!("{}={}", key, value);
-            }
-        } else if let Some(var) = cmd.words.get(1) {
-            if let Some(pos) = var.find('=') {
-                let name = &var[..pos];
-                let value = &var[pos + 1..];
-                self.set_env(name, value);
-            }
-        }
-        self.exit_code = 0;
-        Ok(())
     }
 
     fn do_env(&mut self) {
