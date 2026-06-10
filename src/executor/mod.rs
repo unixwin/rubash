@@ -78,6 +78,17 @@ impl Executor {
                     self.exit_code = 0;
                     Ok(())
                 }
+                "eval" => match crate::builtins::eval::execute(&cmd.words[1..])? {
+                    crate::builtins::eval::EvalAction::Complete(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                    crate::builtins::eval::EvalAction::Execute(source) => {
+                        let tokens = crate::lexer::tokenize(&source);
+                        let ast = crate::parser::parse(&tokens);
+                        self.execute_ast(&ast)
+                    }
+                },
                 "pwd" => {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())

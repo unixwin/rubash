@@ -4,6 +4,7 @@ pub mod cd;
 pub mod colon;
 pub mod command;
 pub mod echo;
+pub mod eval;
 pub mod exit;
 pub mod printf;
 pub mod pwd;
