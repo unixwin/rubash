@@ -95,7 +95,10 @@ impl Executor {
                 "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
                 "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
                 "env" => { self.do_env(); Ok(()) }
-                "set" => { self.exit_code = 0; Ok(()) }
+                "set" => {
+                    self.exit_code = crate::builtins::set::set(&cmd.words[1..], &self.env_vars)?;
+                    Ok(())
+                }
                 "unset" => {
                     self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
