@@ -122,6 +122,10 @@ impl Executor {
                     self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
+                "times" => {
+                    self.exit_code = crate::builtins::times::execute(&cmd.words[1..])?;
+                    Ok(())
+                }
                 "test" => {
                     self.exit_code =
                         crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
