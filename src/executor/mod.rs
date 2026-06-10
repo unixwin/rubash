@@ -63,11 +63,16 @@ impl Executor {
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if let Some(word) = cmd.words.first() {
             match word.as_str() {
-                "exit" => {
-                    let code = cmd.words.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    self.exit_code = code;
-                    Err(ExecuteError::ExitCode(code))
-                }
+                "exit" => match crate::builtins::exit::execute(&cmd.words[1..], self.exit_code)? {
+                    crate::builtins::exit::ExitAction::Exit(code) => {
+                        self.exit_code = code;
+                        Err(ExecuteError::ExitCode(code))
+                    }
+                    crate::builtins::exit::ExitAction::Continue(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                },
                 "echo" => {
                     crate::builtins::echo::execute(&cmd.words[1..])?;
                     self.exit_code = 0;
