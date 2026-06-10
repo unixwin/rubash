@@ -34,3 +34,4 @@ doc/
 
 # Release builds (keep source)
 /release/
+.cargo/

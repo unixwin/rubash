@@ -1,4 +1,4 @@
-//! bashrs - A Rust implementation of GNU Bash
+//! bash-rs - A Rust implementation of GNU Bash
 //!
 //! This crate provides a complete implementation of a POSIX-compatible shell.
 

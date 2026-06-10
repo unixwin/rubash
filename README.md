@@ -1,14 +1,15 @@
-# BashRS
+# Rust_Shell
 
 一个使用 Rust 编写的 GNU Bash 重新实现。
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/bashrs/bashrs)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/unixwin/rust_shell)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
+[![Crates.io](https://img.shields.io/crates/v/rust_shell)](https://crates.io/crates/rust_shell)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
 ## 概述
 
-BashRS 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零编写。它旨在提供一个安全、快速的 Bash 替代方案，同时保持与现有 bash 脚本的兼容性。
+Rust-Shell 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零编写。它旨在提供一个安全、快速的 Bash 替代方案，同时保持与现有 bash 脚本的兼容性。
 
 **注意**: 此项目目前处于 alpha 阶段，不建议用于生产环境。
 
@@ -30,14 +31,14 @@ BashRS 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零
 
 ```bash
 # 克隆仓库
-git clone https://github.com/bashrs/bashrs.git
-cd bashrs
+git clone https://github.com/unixwin/rust_shell.git
+cd rust_shell
 
 # 构建项目
 cargo build --release
 
 # 运行
-./target/release/bashrs
+./target/release/rust-shell
 ```
 
 ### 使用
@@ -51,7 +52,7 @@ total 64
 drwxr-xr-x 2 user user 4096 Jun 11 00:00 .
 
 $ pwd
-/home/user/projects/bashrs
+/home/user/projects/rust_shell
 
 $ export MY_VAR=hello
 $ echo $MY_VAR
@@ -121,8 +122,8 @@ tests/
 
 ## 联系方式
 
-- GitHub Issues: https://github.com/bashrs/bashrs/issues
-- 讨论区: https://github.com/bashrs/bashrs/discussions
+- GitHub Issues: https://github.com/unixwin/rust_shell/issues
+- 讨论区: https://github.com/unixwin/rust_shell/discussions
 
 ## 致谢
 

@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo test --test executor_tests
 
-use bashrs::lexer::tokenize;
-use bashrs::parser::parse;
-use bashrs::executor::Executor;
+use rust_shell::lexer::tokenize;
+use rust_shell::parser::parse;
+use rust_shell::executor::Executor;
 
 mod simple_execution {
     use super::*;

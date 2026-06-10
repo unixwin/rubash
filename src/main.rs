@@ -1,13 +1,13 @@
-//! bashrs - A Rust implementation of GNU Bash
+//! bash-rs - A Rust implementation of GNU Bash
 //!
 //! Run with: cargo run
 
-use bashrs::lexer::tokenize;
-use bashrs::parser::parse;
-use bashrs::executor::Executor;
+use rust_shell::lexer::tokenize;
+use rust_shell::parser::parse;
+use rust_shell::executor::Executor;
 
 fn main() {
-    println!("bashrs - A Rust implementation of GNU Bash");
+    println!("bash-rs - A Rust implementation of GNU Bash");
     println!("Type 'exit' to quit.\n");
 
     let mut executor = Executor::new();

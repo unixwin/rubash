@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo test --test lexer_tests
 
-use bashrs::lexer::{tokenize, TokenKind};
+use rust_shell::lexer::{tokenize, TokenKind};
 
 // ============================================================================
 // Test Module: Basic Tokens
