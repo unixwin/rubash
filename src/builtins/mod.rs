@@ -7,3 +7,4 @@ pub mod exit;
 pub mod pwd;
 pub mod set;
 pub mod setattr;
+pub mod test;

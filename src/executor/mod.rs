@@ -100,7 +100,16 @@ impl Executor {
                     self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
-                "test" | "[" => self.do_test(cmd),
+                "test" => {
+                    self.exit_code =
+                        crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
+                    Ok(())
+                }
+                "[" => {
+                    self.exit_code =
+                        crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
+                    Ok(())
+                }
                 _ => self.execute_external(cmd),
             }
         } else {
@@ -113,11 +122,6 @@ impl Executor {
             println!("{}={}", key, value);
         }
         self.exit_code = 0;
-    }
-
-    fn do_test(&mut self, _cmd: &CommandNode) -> Result<(), ExecuteError> {
-        self.exit_code = 0;
-        Ok(())
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
