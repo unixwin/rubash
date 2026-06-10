@@ -2,7 +2,7 @@
 
 一个使用 Rust 编写的 GNU Bash 重新实现。
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/bashrs/bashrs)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/unixwin/rubash)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
@@ -30,8 +30,8 @@ BashRS 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零
 
 ```bash
 # 克隆仓库
-git clone https://github.com/bashrs/bashrs.git
-cd bashrs
+git clone https://github.com/unixwin/rubash.git
+cd rubash
 
 # 构建项目
 cargo build --release
@@ -121,8 +121,8 @@ tests/
 
 ## 联系方式
 
-- GitHub Issues: https://github.com/bashrs/bashrs/issues
-- 讨论区: https://github.com/bashrs/bashrs/discussions
+- GitHub Issues: https://github.com/unixwin/rubash/issues
+- 讨论区: https://github.com/unixwin/rubash/discussions
 
 ## 致谢
 
