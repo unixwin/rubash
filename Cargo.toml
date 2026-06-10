@@ -1,17 +1,30 @@
-# bashrs - A Rust implementation of GNU Bash
-# Copyright 2024
-# License: GPL v3+
+# BashRS - A Rust implementation of GNU Bash
+# Copyright 2024 BashRS Contributors
+# License: GPL-3.0-or-later
 
 [package]
 name = "bashrs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.70"
-authors = ["BashRS Team"]
-description = "A Rust implementation of GNU Bash shell"
+authors = ["BashRS Team <bashrs@example.com>"]
+description = "A Rust implementation of the GNU Bash shell"
+readme = "README.md"
+homepage = "https://github.com/bashrs/bashrs"
+repository = "https://github.com/bashrs/bashrs"
 license = "GPL-3.0-or-later"
+keywords = ["shell", "bash", "cli", "posix"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 
 [dev-dependencies]
 pretty_assertions = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 0
