@@ -2,9 +2,9 @@
 //!
 //! Run with: cargo test --test executor_tests
 
-use bashrs::lexer::tokenize;
-use bashrs::parser::parse;
-use bashrs::executor::Executor;
+use rubash::lexer::tokenize;
+use rubash::parser::parse;
+use rubash::executor::Executor;
 
 mod simple_execution {
     use super::*;

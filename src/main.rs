@@ -1,13 +1,13 @@
-//! bashrs - A Rust implementation of GNU Bash
+//! Rubash - A Rust implementation of GNU Bash
 //!
 //! Run with: cargo run
 
-use bashrs::lexer::tokenize;
-use bashrs::parser::parse;
-use bashrs::executor::Executor;
+use rubash::lexer::tokenize;
+use rubash::parser::parse;
+use rubash::executor::Executor;
 
 fn main() {
-    println!("bashrs - A Rust implementation of GNU Bash");
+    println!("Rubash - A Rust implementation of GNU Bash");
     println!("Type 'exit' to quit.\n");
 
     let mut executor = Executor::new();

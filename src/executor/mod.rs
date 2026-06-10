@@ -21,10 +21,10 @@ pub enum ExecuteError {
 impl std::fmt::Display for ExecuteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ExecuteError::CommandNotFound(cmd) => write!(f, "bashrs: {}: command not found", cmd),
-            ExecuteError::IoError(e) => write!(f, "bashrs: {}", e),
+            ExecuteError::CommandNotFound(cmd) => write!(f, "rubash: {}: command not found", cmd),
+            ExecuteError::IoError(e) => write!(f, "rubash: {}", e),
             ExecuteError::ExitCode(code) => write!(f, "exit code: {}", code),
-            ExecuteError::UnknownBuiltin(name) => write!(f, "bashrs: {}: builtin command not found", name),
+            ExecuteError::UnknownBuiltin(name) => write!(f, "rubash: {}: builtin command not found", name),
         }
     }
 }
@@ -117,7 +117,7 @@ impl Executor {
         };
 
         if let Ok(cwd) = env::current_dir() {
-            let _ = env::set_var("OLDPWD", cwd.to_string_lossy().as_ref());
+            env::set_var("OLDPWD", cwd.to_string_lossy().as_ref());
         }
 
         env::set_current_dir(&dir)?;

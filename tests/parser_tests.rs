@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo test --test parser_tests
 
-use bashrs::lexer::tokenize;
-use bashrs::parser::{parse, Ast, CommandNode};
+use rubash::lexer::tokenize;
+use rubash::parser::{parse, Ast, CommandNode};
 
 mod simple_commands {
     use super::*;

@@ -36,7 +36,7 @@ fn is_assignment(word: &str) -> bool {
     let Some(pos) = word.find('=') else { return false };
     let var_name = &word[..pos];
     !var_name.is_empty()
-        && var_name.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        && var_name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && var_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
@@ -47,9 +47,9 @@ fn is_brace_expansion(word: &str) -> bool {
 
 /// Tokenize a string into tokens
 pub fn tokenize(input: &str) -> Vec<Token> {
-    let mut lexer = Lexer::new(input);
+    let lexer = Lexer::new(input);
     let mut tokens = Vec::new();
-    while let Some(token) = lexer.next() {
+    for token in lexer {
         if token.kind == TokenKind::Eof { break; }
         tokens.push(token);
     }
@@ -131,7 +131,7 @@ impl<'a> Lexer<'a> {
                     self.skip_word(); Some(Token::new(TokenKind::Word, self.slice(start), start))
                 }
             }
-            '#' => { while self.advance().map_or(false, |ch| ch != '\n') {} self.next_token() }
+            '#' => { while self.advance().is_some_and(|ch| ch != '\n') {} self.next_token() }
             '$' => {
                 match self.peek() {
                     Some('(') => { self.advance(); self.skip_cmd_subst(); Some(Token::new(TokenKind::CommandSubst, self.slice(start), start)) }
@@ -169,9 +169,9 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn skip_backtick(&mut self) { while let Some(c) = self.advance() { if c == '`' { break; } if c == '\\' { self.advance(); } } }
+    fn skip_backtick(&mut self) { while let Some(c) = self.advance() { if c == '`' { break; } else if c == '\\' { self.advance(); } } }
     fn skip_single(&mut self) { while let Some(c) = self.advance() { if c == '\'' { break; } } }
-    fn skip_double(&mut self) { while let Some(c) = self.advance() { if c == '"' { break; } if c == '\\' { self.advance(); } } }
+    fn skip_double(&mut self) { while let Some(c) = self.advance() { if c == '"' { break; } else if c == '\\' { self.advance(); } } }
     fn skip_braced(&mut self) { while let Some(c) = self.advance() { if c == '}' { break; } } }
     fn skip_brace(&mut self) { while let Some(c) = self.advance() { if c == '}' { break; } } }
 }
