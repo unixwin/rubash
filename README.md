@@ -2,7 +2,7 @@
 
 一个使用 Rust 编写的 GNU Bash 重新实现。
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/unixwin/rubash)
+[![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
@@ -84,6 +84,30 @@ cargo test --test executor_tests
 
 # 带详细输出
 cargo test -- --nocapture
+```
+
+### GNU Bash 上游测试进度
+
+本仓库通过 `third_party/bash` submodule 固定 GNU Bash 上游源码，并用
+`scripts/run-bash-upstream-tests.sh` 跑上游 `tests/run-*` 套件。该 job 已纳入
+GitHub Actions；每个 PR 都会生成当前兼容性进度 summary 和日志 artifact。
+
+```bash
+git submodule update --init --depth 1 third_party/bash
+scripts/run-bash-upstream-tests.sh
+```
+
+当前基线:
+
+| 环境 | 总数 | 通过 | 失败 | 通过率 |
+|------|------|------|------|--------|
+| Windows + Git Bash 本地完整 upstream run | 86 | 0 | 86 | 0.00% |
+
+`Bash upstream test progress` CI job 默认不阻塞 PR，用来追踪兼容性曲线。需要把
+上游失败作为硬门禁时，可设置:
+
+```bash
+BASH_UPSTREAM_STRICT=1 scripts/run-bash-upstream-tests.sh
 ```
 
 ### 代码结构
