@@ -4,6 +4,31 @@ This map keeps Rubash implementation work traceable to GNU Bash 5.3 sources
 without forcing a file-for-file port. The `Status` column describes whether the
 Rubash module should exist now or later.
 
+## Upstream Inventory
+
+The pinned GNU Bash submodule currently contains 1603 tracked files. The files
+that most directly shape Rubash implementation are the C sources, headers,
+builtin definitions, and parser grammar:
+
+| Group | Count | Notes |
+|---|---:|---|
+| Total tracked files | 1603 | Full GNU Bash source tree, including docs, tests, translations, build support, and examples. |
+| `.c` files | 301 | C implementation files across the root, `builtins/`, `lib/`, examples, and support tools. |
+| `.h` files | 141 | C headers and generated/config headers. |
+| `builtins/*.def` files | 43 | Bash builtin command definitions. |
+| `.y` files | 2 | Parser grammars, including `parse.y`. |
+| C/header/def/parser total | 487 | The main implementation-shaped inventory Rubash should track semantically. |
+| `tests/` files | 738 | Upstream conformance and regression suite data. |
+| `lib/` files | 316 | Readline, glob, tilde, sh portability helpers, malloc, intl, termcap. |
+| `builtins/` files | 56 | Builtin definitions plus helper code. |
+| `doc/` files | 37 | Manual/reference documentation. |
+
+This document intentionally maps those files at subsystem granularity. A full
+487-row file-by-file map would be noisy and would incorrectly imply that Rubash
+should mirror Bash's C file boundaries. When a Rubash module is added or moved,
+the relevant row below should be updated with the GNU Bash source files and
+upstream `tests/run-*` groups it is meant to cover.
+
 | GNU Bash source | Rubash module | Status | Notes |
 |---|---|---:|---|
 | `parse.y`, `parser.h`, `y.tab.c`, `y.tab.h` | `src/parser/` | Now | Parser grammar reference only; do not mirror generated `y.tab.*`. |
