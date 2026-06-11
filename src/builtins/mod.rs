@@ -12,3 +12,4 @@ pub mod set;
 pub mod setattr;
 pub mod test;
 pub mod times;
+pub mod r#type;
