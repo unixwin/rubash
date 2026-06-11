@@ -46,9 +46,35 @@ shell that can run script files:
 THIS_SH=/path/to/shell sh run-test
 ```
 
-`bashrs` currently does not provide enough Bash-compatible invocation behavior
-to run the full upstream suite directly. Before enabling these tests in CI, add
-or adapt support for at least:
+Use the project runner instead of invoking upstream scripts directly:
+
+```sh
+scripts/run-bash-upstream-tests.sh
+```
+
+The runner copies `third_party/bash/tests` into a temporary per-test worktree
+under `target/bash-upstream-tests/work/` before running each upstream `run-*`
+script. This is required because the upstream tests create and delete files in
+their working directory.
+
+The runner writes:
+
+- `target/bash-upstream-tests/summary.md`
+- `target/bash-upstream-tests/results.tsv`
+- `target/bash-upstream-tests/logs/*.log`
+
+By default the upstream progress run is non-blocking and exits successfully even
+when upstream tests fail. Set `BASH_UPSTREAM_STRICT=1` to make any upstream
+failure fail the command.
+
+Current local baseline:
+
+| Environment | Total | Passed | Failed | Pass rate |
+|-------------|-------|--------|--------|-----------|
+| Windows + Git Bash full upstream run | 86 | 0 | 86 | 0.00% |
+
+Rubash currently does not provide enough Bash-compatible behavior to pass the
+full upstream suite. Before making these tests strict in CI, implement or adapt:
 
 - executing a script file passed as argv;
 - `-c` command execution;

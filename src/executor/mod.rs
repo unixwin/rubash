@@ -6,7 +6,6 @@ use crate::parser::{Ast, CommandNode};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Execution error
@@ -64,27 +63,94 @@ impl Executor {
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if let Some(word) = cmd.words.first() {
             match word.as_str() {
-                "exit" => {
-                    let code = cmd.words.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                    self.exit_code = code;
-                    Err(ExecuteError::ExitCode(code))
-                }
+                "exit" => match crate::builtins::exit::execute(&cmd.words[1..], self.exit_code)? {
+                    crate::builtins::exit::ExitAction::Exit(code) => {
+                        self.exit_code = code;
+                        Err(ExecuteError::ExitCode(code))
+                    }
+                    crate::builtins::exit::ExitAction::Continue(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                },
                 "echo" => {
-                    self.do_echo(cmd);
+                    crate::builtins::echo::execute(&cmd.words[1..])?;
+                    self.exit_code = 0;
                     Ok(())
                 }
+                "eval" => match crate::builtins::eval::execute(&cmd.words[1..])? {
+                    crate::builtins::eval::EvalAction::Complete(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                    crate::builtins::eval::EvalAction::Execute(source) => {
+                        let tokens = crate::lexer::tokenize(&source);
+                        let ast = crate::parser::parse(&tokens);
+                        self.execute_ast(&ast)
+                    }
+                },
                 "pwd" => {
-                    self.do_pwd();
+                    self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
-                "cd" => self.do_cd(cmd),
-                "export" => self.do_export(cmd),
-                "true" => { self.exit_code = 0; Ok(()) }
-                "false" => { self.exit_code = 1; Ok(()) }
+                "printf" => {
+                    self.exit_code =
+                        crate::builtins::printf::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
+                "command" => match crate::builtins::command::execute(&cmd.words[1..])? {
+                    crate::builtins::command::CommandAction::Complete(status) => {
+                        self.exit_code = status;
+                        Ok(())
+                    }
+                    crate::builtins::command::CommandAction::Execute {
+                        words,
+                        use_standard_path: _,
+                    } => {
+                        let mut command = cmd.clone();
+                        command.words = words;
+                        self.execute_command(&command)
+                    }
+                },
+                "cd" => {
+                    self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
+                "export" => {
+                    self.exit_code =
+                        crate::builtins::setattr::export(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
+                ":" => { self.exit_code = crate::builtins::colon::colon(); Ok(()) }
+                "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
+                "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
                 "env" => { self.do_env(); Ok(()) }
-                "set" => { self.exit_code = 0; Ok(()) }
-                "unset" => self.do_unset(cmd),
-                "test" | "[" => self.do_test(cmd),
+                "set" => {
+                    self.exit_code = crate::builtins::set::set(&cmd.words[1..], &self.env_vars)?;
+                    Ok(())
+                }
+                "unset" => {
+                    self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
+                "times" => {
+                    self.exit_code = crate::builtins::times::execute(&cmd.words[1..])?;
+                    Ok(())
+                }
+                "type" => {
+                    self.exit_code = crate::builtins::r#type::execute(&cmd.words[1..])?;
+                    Ok(())
+                }
+                "test" => {
+                    self.exit_code =
+                        crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
+                    Ok(())
+                }
+                "[" => {
+                    self.exit_code =
+                        crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
+                    Ok(())
+                }
                 _ => self.execute_external(cmd),
             }
         } else {
@@ -92,74 +158,11 @@ impl Executor {
         }
     }
 
-    fn do_echo(&mut self, cmd: &CommandNode) {
-        let args: Vec<&str> = cmd.words.iter().skip(1).map(|s| s.as_str()).collect();
-        let mut stdout = std::io::stdout();
-        let _ = writeln!(stdout, "{}", args.join(" "));
-        self.exit_code = 0;
-    }
-
-    fn do_pwd(&mut self) {
-        if let Ok(cwd) = env::current_dir() {
-            println!("{}", cwd.display());
-        }
-        self.exit_code = 0;
-    }
-
-    fn do_cd(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        let dir = cmd.words.get(1).map(|s| s.as_str()).unwrap_or("~");
-        let dir = if dir == "~" {
-            env::var("HOME").unwrap_or_else(|_| ".".to_string())
-        } else if dir == "-" {
-            env::var("OLDPWD").unwrap_or_else(|_| ".".to_string())
-        } else {
-            dir.to_string()
-        };
-
-        if let Ok(cwd) = env::current_dir() {
-            env::set_var("OLDPWD", cwd.to_string_lossy().as_ref());
-        }
-
-        env::set_current_dir(&dir)?;
-        self.exit_code = 0;
-        Ok(())
-    }
-
-    fn do_export(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if cmd.words.len() == 1 {
-            for (key, value) in &self.env_vars {
-                println!("{}={}", key, value);
-            }
-        } else if let Some(var) = cmd.words.get(1) {
-            if let Some(pos) = var.find('=') {
-                let name = &var[..pos];
-                let value = &var[pos + 1..];
-                self.set_env(name, value);
-            }
-        }
-        self.exit_code = 0;
-        Ok(())
-    }
-
     fn do_env(&mut self) {
         for (key, value) in &self.env_vars {
             println!("{}={}", key, value);
         }
         self.exit_code = 0;
-    }
-
-    fn do_unset(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if let Some(var) = cmd.words.get(1) {
-            self.env_vars.remove(var);
-            env::remove_var(var);
-        }
-        self.exit_code = 0;
-        Ok(())
-    }
-
-    fn do_test(&mut self, _cmd: &CommandNode) -> Result<(), ExecuteError> {
-        self.exit_code = 0;
-        Ok(())
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -256,6 +259,15 @@ mod unit_tests {
     #[test]
     fn test_true_command() {
         let tokens = tokenize("true");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.execute_ast(&ast).ok();
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn test_colon_command() {
+        let tokens = tokenize(":");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
         executor.execute_ast(&ast).ok();

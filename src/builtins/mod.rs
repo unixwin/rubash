@@ -1,0 +1,15 @@
+//! Builtin command implementations.
+
+pub mod cd;
+pub mod colon;
+pub mod command;
+pub mod echo;
+pub mod eval;
+pub mod exit;
+pub mod printf;
+pub mod pwd;
+pub mod set;
+pub mod setattr;
+pub mod test;
+pub mod times;
+pub mod r#type;
