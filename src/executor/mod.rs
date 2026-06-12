@@ -4,8 +4,8 @@
 
 mod path;
 
-use crate::parser::{Ast, CommandNode};
 use crate::builtins::alias::Alias;
+use crate::parser::{Ast, CaseCommand, CommandNode, ForCommand};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -29,7 +29,9 @@ impl std::fmt::Display for ExecuteError {
             ExecuteError::CommandNotFound(cmd) => write!(f, "rubash: {}: command not found", cmd),
             ExecuteError::IoError(e) => write!(f, "rubash: {}", e),
             ExecuteError::ExitCode(code) => write!(f, "exit code: {}", code),
-            ExecuteError::UnknownBuiltin(name) => write!(f, "rubash: {}: builtin command not found", name),
+            ExecuteError::UnknownBuiltin(name) => {
+                write!(f, "rubash: {}: builtin command not found", name)
+            }
         }
     }
 }
@@ -73,6 +75,14 @@ impl Executor {
 
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(for_command) = &cmd.for_command {
+            return self.execute_for_command(for_command);
+        }
+
+        if let Some(case_command) = &cmd.case_command {
+            return self.execute_case_command(case_command);
+        }
+
         if cmd.words.is_empty() {
             for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_word(value);
@@ -103,6 +113,10 @@ impl Executor {
             };
             &expanded
         };
+
+        if self.execute_assignment_words(cmd) {
+            return Ok(());
+        }
 
         if let Some(word) = cmd.words.first() {
             match word.as_str() {
@@ -157,7 +171,8 @@ impl Executor {
                     }
                 },
                 "cd" => {
-                    self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code =
+                        crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
                 "alias" => {
@@ -180,10 +195,22 @@ impl Executor {
                         crate::builtins::setattr::export(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
-                ":" => { self.exit_code = crate::builtins::colon::colon(); Ok(()) }
-                "true" => { self.exit_code = crate::builtins::colon::true_builtin(); Ok(()) }
-                "false" => { self.exit_code = crate::builtins::colon::false_builtin(); Ok(()) }
-                "env" => { self.do_env(); Ok(()) }
+                ":" => {
+                    self.exit_code = crate::builtins::colon::colon();
+                    Ok(())
+                }
+                "true" => {
+                    self.exit_code = crate::builtins::colon::true_builtin();
+                    Ok(())
+                }
+                "false" => {
+                    self.exit_code = crate::builtins::colon::false_builtin();
+                    Ok(())
+                }
+                "env" => {
+                    self.do_env();
+                    Ok(())
+                }
                 "set" => {
                     self.exit_code = crate::builtins::set::set(&cmd.words[1..], &self.env_vars)?;
                     Ok(())
@@ -197,7 +224,8 @@ impl Executor {
                     Ok(())
                 }
                 "unset" => {
-                    self.exit_code = crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code =
+                        crate::builtins::set::unset(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
                 "times" => {
@@ -225,6 +253,82 @@ impl Executor {
         }
     }
 
+    fn execute_for_command(&mut self, for_command: &ForCommand) -> Result<(), ExecuteError> {
+        // TODO(parse.y/execute_cmd.c): Bash `execute_for_command` applies the
+        // full expansion pipeline, loop-control state, traps, and redirections.
+        // This only covers `for name in words; do compound_list; done`.
+        for word in &for_command.words {
+            let value = self.expand_word(word);
+            self.env_vars
+                .insert(for_command.variable.clone(), value.clone());
+            env::set_var(&for_command.variable, value);
+
+            let body = Ast {
+                commands: for_command.body.clone(),
+            };
+            self.execute_ast(&body)?;
+        }
+
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn execute_case_command(&mut self, case_command: &CaseCommand) -> Result<(), ExecuteError> {
+        // TODO(parse.y/execute_cmd.c/pathexp.c): Bash case execution uses the
+        // full pattern matcher, fall-through operators, expansion flags, and
+        // compound-list control flow. This handles exact patterns and `*`.
+        let word = self.expand_word(&case_command.word);
+        for clause in &case_command.clauses {
+            if clause
+                .patterns
+                .iter()
+                .any(|pattern| case_pattern_matches(pattern, &word))
+            {
+                let body = Ast {
+                    commands: clause.body.clone(),
+                };
+                self.execute_ast(&body)?;
+                return Ok(());
+            }
+        }
+
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn execute_assignment_words(&mut self, cmd: &CommandNode) -> bool {
+        // TODO(variables.c/arrayfunc.c/subst.c): Bash recognizes assignment
+        // words after alias expansion and routes compound array assignments
+        // through `assign_array_var_from_string`. This only handles commands
+        // made entirely of `name=value` words.
+        if cmd.words.is_empty() || !cmd.assignments.is_empty() {
+            return false;
+        }
+
+        let mut assignments = Vec::new();
+        for word in &cmd.words {
+            let Some((name, value)) = split_assignment_word(word) else {
+                return false;
+            };
+            assignments.push((name.to_string(), self.expand_assignment_value(value)));
+        }
+
+        for (name, value) in assignments {
+            self.env_vars.insert(name.clone(), value.clone());
+            env::set_var(name, value);
+        }
+        self.exit_code = 0;
+        true
+    }
+
+    fn expand_assignment_value(&self, value: &str) -> String {
+        if let Some(array_value) = normalize_single_element_array_assignment(value) {
+            return array_value;
+        }
+
+        self.expand_word(value)
+    }
+
     fn do_env(&mut self) {
         for (key, value) in &self.env_vars {
             println!("{}={}", key, value);
@@ -237,7 +341,10 @@ impl Executor {
             return self.exit_code.to_string();
         }
 
-        if let Some(name) = word.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
+        if let Some(name) = word
+            .strip_prefix("${")
+            .and_then(|rest| rest.strip_suffix('}'))
+        {
             return self
                 .env_vars
                 .get(name)
@@ -330,8 +437,7 @@ impl Executor {
         for word in words {
             if expand_next {
                 let mut seen = Vec::new();
-                let (mut alias_words, alias_expand_next) =
-                    self.expand_alias_word(word, &mut seen);
+                let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
                 expanded.append(&mut alias_words);
                 expand_next = alias_expand_next;
             } else {
@@ -394,11 +500,7 @@ impl Executor {
         };
 
         seen.push(word.to_string());
-        let mut parts: Vec<String> = alias
-            .value
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        let mut parts: Vec<String> = alias.value.split_whitespace().map(str::to_string).collect();
 
         if let Some(first) = parts.first().cloned() {
             let (mut first_expanded, _) = self.expand_alias_word(&first, seen);
@@ -578,8 +680,39 @@ fn is_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
+fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
+    let (name, value) = word.split_once('=')?;
+    if is_shell_name(name) {
+        Some((name, value))
+    } else {
+        None
+    }
+}
+
+fn normalize_single_element_array_assignment(value: &str) -> Option<String> {
+    let inner = value.strip_prefix('(')?.strip_suffix(')')?;
+    Some(format!("({})", strip_matching_quotes(inner.trim())))
+}
+
+fn strip_matching_quotes(value: &str) -> &str {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    }
+}
+
+fn case_pattern_matches(pattern: &str, word: &str) -> bool {
+    pattern == "*" || pattern == word
+}
+
 fn needs_parser_level_alias_expansion(value: &str) -> bool {
-    value.chars().any(|ch| matches!(ch, ';' | '\n' | '<' | '>' | '|' | '&'))
+    value
+        .chars()
+        .any(|ch| matches!(ch, ';' | '\n' | '<' | '>' | '|' | '&'))
 }
 
 fn shell_safe_value(value: &str) -> String {

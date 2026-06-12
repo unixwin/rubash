@@ -19,6 +19,11 @@ pub struct Alias {
 
 impl Alias {
     pub fn new(value: &str) -> Self {
+        // TODO(parse.y/alias.c): Bash re-reads alias replacement text through
+        // the parser, where backslash-newline pairs are removed before token
+        // recognition. Keep this narrow normalization until alias expansion is
+        // fully parser-stream based.
+        let value = value.replace("\\\n", "");
         Self {
             value: value.to_string(),
             expand_next: value.ends_with(' ') || value.ends_with('\t'),
@@ -128,7 +133,12 @@ where
     W: Write,
 {
     let prefix = if name.starts_with('-') { "-- " } else { "" };
-    writeln!(stdout, "alias {prefix}{}='{}'", name, quote_single(&alias.value))
+    writeln!(
+        stdout,
+        "alias {prefix}{}='{}'",
+        name,
+        quote_single(&alias.value)
+    )
 }
 
 fn valid_alias_name(name: &str) -> bool {
@@ -145,4 +155,3 @@ fn valid_alias_name(name: &str) -> bool {
 fn quote_single(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
-
