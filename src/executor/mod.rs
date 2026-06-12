@@ -112,9 +112,36 @@ impl Executor {
                 }
                 Err(error) => return Err(error),
             }
-            index += 1;
+
+            if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                index = next_index;
+            } else {
+                index += 1;
+            }
         }
         Ok(())
+    }
+
+    fn skip_and_or_rhs(&self, ast: &Ast, index: usize) -> Option<usize> {
+        // TODO(parse.y/execute_cmd.c): Bash executes AND_AND/OR_OR lists from
+        // the grammar, not by scanning flattened commands. This narrow bridge
+        // keeps `cmd || { echo ...; exit 1; }` failure handlers from running
+        // after a successful command in upstream source8.sub.
+        let connector = ast.commands.get(index)?.and_or()?;
+        let should_skip = (connector && self.exit_code != 0) || (!connector && self.exit_code == 0);
+        if !should_skip {
+            return None;
+        }
+
+        let start_line = ast.commands.get(index + 1).and_then(|command| command.line);
+        let mut next_index = index + 1;
+        while next_index < ast.commands.len()
+            && ast.commands[next_index].line == start_line
+            && ast.commands[next_index].and_or().is_none()
+        {
+            next_index += 1;
+        }
+        Some(next_index.max(index + 1))
     }
 
     fn execute_alias_escaped_pipe(
@@ -488,6 +515,10 @@ impl Executor {
                 }
                 "times" => {
                     self.exit_code = crate::builtins::times::execute(&cmd.words[1..])?;
+                    Ok(())
+                }
+                "trap" => {
+                    self.exit_code = crate::builtins::trap::execute(&cmd.words[1..])?;
                     Ok(())
                 }
                 "type" => {
