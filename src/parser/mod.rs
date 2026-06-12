@@ -321,7 +321,16 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
     i += 1;
 
     let body_start = i;
-    while i < tokens.len() && !is_keyword(tokens, i, "done") {
+    let mut depth = 0usize;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "for") {
+            depth += 1;
+        } else if is_keyword(tokens, i, "done") {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
         i += 1;
     }
 

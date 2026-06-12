@@ -20,6 +20,8 @@ pub enum ExecuteError {
     CommandNotFound(String),
     IoError(std::io::Error),
     ExitCode(i32),
+    Break(usize),
+    Continue(usize),
     UnknownBuiltin(String),
 }
 
@@ -29,6 +31,8 @@ impl std::fmt::Display for ExecuteError {
             ExecuteError::CommandNotFound(cmd) => write!(f, "rubash: {}: command not found", cmd),
             ExecuteError::IoError(e) => write!(f, "rubash: {}", e),
             ExecuteError::ExitCode(code) => write!(f, "exit code: {}", code),
+            ExecuteError::Break(level) => write!(f, "break {}", level),
+            ExecuteError::Continue(level) => write!(f, "continue {}", level),
             ExecuteError::UnknownBuiltin(name) => {
                 write!(f, "rubash: {}: builtin command not found", name)
             }
@@ -52,6 +56,7 @@ pub struct Executor {
     aliases: HashMap<String, Alias>,
     positional_params: Vec<String>,
     expanding_aliases: Vec<String>,
+    loop_depth: usize,
 }
 
 impl Executor {
@@ -62,6 +67,7 @@ impl Executor {
             aliases: HashMap::new(),
             positional_params: Vec::new(),
             expanding_aliases: Vec::new(),
+            loop_depth: 0,
         }
     }
 
@@ -84,7 +90,13 @@ impl Executor {
                 continue;
             }
 
-            self.execute_command(&ast.commands[index])?;
+            match self.execute_command(&ast.commands[index]) {
+                Ok(()) => {}
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.loop_depth == 0 => {
+                    self.exit_code = 0;
+                }
+                Err(error) => return Err(error),
+            }
             index += 1;
         }
         Ok(())
@@ -321,6 +333,8 @@ impl Executor {
                         self.execute_ast(&ast)
                     }
                 },
+                "break" => Err(ExecuteError::Break(loop_control_level(&cmd.words[1..]))),
+                "continue" => Err(ExecuteError::Continue(loop_control_level(&cmd.words[1..]))),
                 "pwd" => {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
@@ -440,7 +454,25 @@ impl Executor {
             let body = Ast {
                 commands: for_command.body.clone(),
             };
-            self.execute_ast(&body)?;
+            self.loop_depth += 1;
+            let result = self.execute_ast(&body);
+            self.loop_depth -= 1;
+            match result {
+                Ok(()) => {}
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         self.exit_code = 0;
@@ -1068,6 +1100,21 @@ fn is_reserved_word(word: &str) -> bool {
             | "time"
             | "coproc"
     )
+}
+
+fn loop_control_level(args: &[String]) -> usize {
+    // TODO(builtins/break.def): Bash validates numeric arguments and reports
+    // diagnostics for invalid levels. For upstream builtins tests, parsing the
+    // optional level and `--` is enough to drive loop control.
+    let mut args = args.iter().map(String::as_str);
+    let first = match args.next() {
+        Some("--") => args.next(),
+        other => other,
+    };
+
+    first.and_then(|value| value.parse::<usize>().ok())
+        .filter(|level| *level > 0)
+        .unwrap_or(1)
 }
 
 fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
