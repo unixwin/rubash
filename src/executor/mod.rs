@@ -359,8 +359,7 @@ impl Executor {
                     Ok(())
                 }
                 "unalias" => {
-                    self.exit_code =
-                        crate::builtins::alias::unalias(&cmd.words[1..], &mut self.aliases)?;
+                    self.exit_code = self.execute_unalias(cmd)?;
                     Ok(())
                 }
                 "export" => {
@@ -503,6 +502,36 @@ impl Executor {
             }
             _ => self.execute_external(cmd),
         }
+    }
+
+    fn execute_unalias(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        // TODO(redir.c/execute_cmd.c): Bash applies redirections around
+        // builtins using unwind-protected fd mutation. This only handles
+        // stderr redirection for upstream alias tests.
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                let mut sink = std::io::sink();
+                return Ok(crate::builtins::alias::unalias_with_io(
+                    &cmd.words[1..],
+                    &mut self.aliases,
+                    &mut sink,
+                )?);
+            }
+
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            let mut file = File::create(path)?;
+            return Ok(crate::builtins::alias::unalias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut file,
+            )?);
+        }
+
+        Ok(crate::builtins::alias::unalias(
+            &cmd.words[1..],
+            &mut self.aliases,
+        )?)
     }
 
     fn execute_alias_expanded_syntax(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
@@ -1045,6 +1074,10 @@ fn case_pattern_matches(pattern: &str, word: &str) -> bool {
 fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
     (start..ast.commands.len())
         .find(|index| ast.commands[*index].words.first().map(String::as_str) == Some("done"))
+}
+
+fn is_null_device(path: &str) -> bool {
+    matches!(path, "/dev/null" | "NUL")
 }
 
 fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {

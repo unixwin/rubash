@@ -85,7 +85,7 @@ where
     Ok(status)
 }
 
-fn unalias_with_io<E>(
+pub fn unalias_with_io<E>(
     args: &[String],
     aliases: &mut HashMap<String, Alias>,
     stderr: &mut E,
