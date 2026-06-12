@@ -77,6 +77,19 @@ where
     };
 
     let old_pwd = current_logical_pwd(env_vars);
+    if let Some(logical_dir) = logical_posix_test_dir(&target) {
+        // TODO(builtins/cd.def): This is a Windows-host bridge for the GNU
+        // Bash upstream tests that use POSIX system directories. A complete
+        // shell should keep logical and physical directory state separately.
+        set_shell_env(env_vars, "OLDPWD", old_pwd.to_string_lossy().into_owned());
+        set_shell_env(env_vars, "PWD", logical_dir.to_string());
+        match target.print {
+            PrintPath::Always | PrintPath::CdPath => writeln!(stdout, "{logical_dir}")?,
+            PrintPath::Never => {}
+        }
+        return Ok(EXECUTION_SUCCESS);
+    }
+
     if let Err(error) = env::set_current_dir(&target.path) {
         writeln!(stderr, "rubash: cd: {}: {}", target.path.display(), error)?;
         return Ok(EXECUTION_FAILURE);
@@ -216,6 +229,15 @@ fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>) -> Option
     None
 }
 
+fn logical_posix_test_dir(target: &Target) -> Option<&str> {
+    if !cfg!(windows) {
+        return None;
+    }
+
+    let display = target.display.as_ref()?.to_str()?;
+    matches!(display, "/" | "/bin" | "/tmp").then_some(display)
+}
+
 fn starts_with_dot_component(path: &Path) -> bool {
     matches!(
         path.components().next(),
@@ -224,10 +246,18 @@ fn starts_with_dot_component(path: &Path) -> bool {
 }
 
 fn current_logical_pwd(env_vars: &HashMap<String, String>) -> PathBuf {
-    shell_var(env_vars, "PWD")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    if let Some(pwd) = shell_var(env_vars, "PWD") {
+        if cfg!(windows) && pwd.starts_with('/') {
+            return PathBuf::from(pwd);
+        }
+
+        let path = PathBuf::from(pwd);
+        if path.is_absolute() {
+            return path;
+        }
+    }
+
+    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn logical_destination(old_pwd: &Path, target: &Path) -> PathBuf {

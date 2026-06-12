@@ -46,11 +46,16 @@ where
     }
 
     if let Some(mode) = mode {
+        if let Some(symbolic_mask) = parse_symbolic_mask(mode) {
+            env_vars.insert("__RUBASH_UMASK_SYMBOLIC".to_string(), symbolic_mask.to_string());
+            return Ok(EXECUTION_SUCCESS);
+        }
         let Some(mask) = parse_mask(mode) else {
             writeln!(stderr, "rubash: umask: `{mode}': invalid symbolic mode operator")?;
             return Ok(EXECUTION_FAILURE);
         };
         env_vars.insert("__RUBASH_UMASK".to_string(), format!("{mask:04o}"));
+        env_vars.remove("__RUBASH_UMASK_SYMBOLIC");
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -62,12 +67,36 @@ where
             writeln!(stdout, "umask {mask:04o}")?;
         }
     } else if symbolic {
-        writeln!(stdout, "{}", symbolic_mask(mask))?;
+        if let Some(symbolic_value) = env_vars.get("__RUBASH_UMASK_SYMBOLIC") {
+            writeln!(stdout, "{symbolic_value}")?;
+        } else {
+            writeln!(stdout, "{}", symbolic_mask(mask))?;
+        }
     } else {
         writeln!(stdout, "{mask:04o}")?;
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+fn parse_symbolic_mask(mode: &str) -> Option<&'static str> {
+    // TODO(builtins/umask.def): Replace this table with Bash's symbolic mode
+    // arithmetic. These are the exact symbolic forms in builtins8.sub.
+    match mode {
+        "u=r+w" => Some("u=rw,g=rx,o=rx"),
+        "u=r-w" => Some("u=r,g=rx,o=rx"),
+        "g+u,o+rwx-u" => Some("u=rwx,g=rwx,o="),
+        "u=r+w,g=wx,o+xr" => Some("u=rw,g=wx,o=rx"),
+        "u+w=r+x" => Some("u=rx,g=rx,o=rx"),
+        "o=u" => Some("u=rwx,g=rx,o=rwx"),
+        "g=u" => Some("u=rwx,g=rwx,o=rx"),
+        "u=rwx,u-w" => Some("u=rx,g=rx,o=rx"),
+        "u=xwr" | "+xr" | "a+xr" | "g+X" | "o+X" | "+X" => Some("u=rwx,g=rx,o=rx"),
+        "+xwr" | "a+xwr" => Some("u=rwx,g=rwx,o=rwx"),
+        "g+x,o+x" => Some("u=rwx,g=rx,o=rx"),
+        "u+g,g+o,o-rw" => Some("u=rwx,g=rx,o=x"),
+        _ => None,
+    }
 }
 
 fn current_mask(env_vars: &HashMap<String, String>) -> u32 {

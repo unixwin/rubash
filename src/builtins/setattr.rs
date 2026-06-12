@@ -10,6 +10,7 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
+const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExportMode {
@@ -121,10 +122,12 @@ where
                 .unwrap_or_default();
             env_vars.insert(name.to_string(), value.clone());
             env::set_var(name, value);
+            mark_exported(env_vars, name);
         }
         ExportMode::Unset => {
             env_vars.remove(name);
             env::remove_var(name);
+            unmark_exported(env_vars, name);
         }
     }
 
@@ -139,6 +142,9 @@ where
     vars.sort_by(|left, right| left.0.cmp(right.0));
 
     for (name, value) in vars {
+        if name.starts_with("__RUBASH_") {
+            continue;
+        }
         writeln!(
             stdout,
             "declare -x {}=\"{}\"",
@@ -148,6 +154,33 @@ where
     }
 
     Ok(())
+}
+
+fn mark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
+    let mut exported = exported_vars(env_vars);
+    exported.insert(name.to_string());
+    let value = exported.into_iter().collect::<Vec<_>>().join("\x1f");
+    env_vars.insert(EXPORTED_VARS.to_string(), value);
+}
+
+fn unmark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
+    let mut exported = exported_vars(env_vars);
+    exported.remove(name);
+    let value = exported.into_iter().collect::<Vec<_>>().join("\x1f");
+    env_vars.insert(EXPORTED_VARS.to_string(), value);
+}
+
+fn exported_vars(env_vars: &HashMap<String, String>) -> std::collections::HashSet<String> {
+    env_vars
+        .get(EXPORTED_VARS)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn split_assignment(arg: &str) -> (&str, Option<&str>) {

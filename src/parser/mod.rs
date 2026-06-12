@@ -33,6 +33,13 @@ pub struct CaseClause {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents a narrow `name() { ...; }` shell function definition.
+#[derive(Debug, Clone)]
+pub struct FunctionCommand {
+    pub name: String,
+    pub body: Vec<CommandNode>,
+}
+
 /// Represents a parsed command
 #[derive(Debug, Clone)]
 pub struct CommandNode {
@@ -58,10 +65,16 @@ pub struct CommandNode {
     pub background: bool,
     /// Connector to the next command: Some(true) for &&, Some(false) for ||.
     pub and_or: Option<bool>,
+    /// Command is executed inside a subshell grouping `( ... )`.
+    pub subshell: bool,
+    /// This command closes the current subshell grouping.
+    pub subshell_end: bool,
     /// `for name in words; do ...; done`
     pub for_command: Option<ForCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
+    /// `name() { compound_list; }`
+    pub function_command: Option<FunctionCommand>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
 }
@@ -80,8 +93,11 @@ impl CommandNode {
             pipe: None,
             background: false,
             and_or: None,
+            subshell: false,
+            subshell_end: false,
             for_command: None,
             case_command: None,
+            function_command: None,
             line: None,
         }
     }
@@ -111,6 +127,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
         commands: Vec::new(),
     };
     let mut current_cmd = CommandNode::new();
+    let mut in_subshell = false;
 
     let mut i = 0;
     while i < tokens.len() {
@@ -122,6 +139,15 @@ pub fn parse(tokens: &[Token]) -> Ast {
         {
             if let Some((for_cmd, next_i)) = parse_for_command(tokens, i) {
                 ast.commands.push(for_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
+        if token.kind == TokenKind::Word && command_is_empty(&current_cmd) {
+            if let Some((function_cmd, next_i)) = parse_function_command(tokens, i) {
+                ast.commands.push(function_cmd);
                 current_cmd = CommandNode::new();
                 i = next_i;
                 continue;
@@ -142,10 +168,12 @@ pub fn parse(tokens: &[Token]) -> Ast {
 
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
+                current_cmd.subshell |= in_subshell;
                 note_command_line(&mut current_cmd, token);
                 current_cmd.words.push(token.value.clone());
             }
             TokenKind::Assignment => {
+                current_cmd.subshell |= in_subshell;
                 note_command_line(&mut current_cmd, token);
                 if let Some(pos) = token.value.find('=') {
                     if current_cmd.words.is_empty() {
@@ -167,12 +195,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::Pipe => {
                 // Save current command with pipe flag
+                current_cmd.subshell |= in_subshell;
                 current_cmd.pipe = Some(1);
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
             TokenKind::Semicolon => {
                 // Command separator
+                current_cmd.subshell |= in_subshell;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
@@ -255,6 +285,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
                 // list connector on simple commands. Full Bash grammar needs
                 // a list AST with compound commands and proper precedence.
+                current_cmd.subshell |= in_subshell;
                 current_cmd.and_or = Some(token.kind == TokenKind::And);
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
@@ -264,11 +295,32 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // asynchronously and returns immediately. Until job control is
                 // represented, keep `&` as a command terminator so redirections
                 // apply to the command instead of treating `&` as an argument.
+                current_cmd.subshell |= in_subshell;
                 current_cmd.background = true;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
             TokenKind::Keyword => {
+                if token.value == "(" && command_is_empty(&current_cmd) {
+                    in_subshell = true;
+                    i += 1;
+                    continue;
+                }
+
+                if token.value == ")" && in_subshell {
+                    if command_is_empty(&current_cmd) {
+                        if let Some(command) = ast.commands.last_mut() {
+                            command.subshell_end = true;
+                        }
+                    } else {
+                        current_cmd.subshell = true;
+                        current_cmd.subshell_end = true;
+                    }
+                    in_subshell = false;
+                    i += 1;
+                    continue;
+                }
+
                 // TODO(parse.y): Reserved words are only reserved in specific
                 // parser states. If an ordinary command has already started,
                 // keep the token text so alias expansion can reparse it later.
@@ -362,6 +414,63 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
         body,
     });
     Some((command, i + 1))
+}
+
+fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    // TODO(parse.y/execute_cmd.c): Bash has full function_def grammar,
+    // including `function name`, redirections, nested compound commands, and
+    // parser-state-sensitive reserved words. This maps the upstream builtins
+    // `name() { ...; }` form onto a function command node.
+    let name = tokens.get(start)?.value.clone();
+    if !is_function_name(&name)
+        || tokens.get(start + 1)?.value != "("
+        || tokens.get(start + 2)?.value != ")"
+    {
+        return None;
+    }
+
+    let mut i = start + 3;
+    while tokens.get(i).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+        i += 1;
+    }
+    if tokens.get(i)?.value != "{" {
+        return None;
+    }
+    i += 1;
+    while tokens.get(i).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+        i += 1;
+    }
+
+    let body_start = i;
+    let mut depth = 1usize;
+    while i < tokens.len() {
+        if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "{" {
+            depth += 1;
+        } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "}" {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let body = parse(&tokens[body_start..i]).commands;
+    let mut next_i = i + 1;
+    while tokens
+        .get(next_i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_i += 1;
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.function_command = Some(FunctionCommand { name, body });
+    Some((command, next_i))
 }
 
 fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String, usize)> {
@@ -478,6 +587,16 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.redirect_err_append.is_none()
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
+        && cmd.function_command.is_none()
+}
+
+fn is_function_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]

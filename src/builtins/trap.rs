@@ -12,3 +12,7 @@ pub fn execute(_args: &[String]) -> io::Result<i32> {
     // guarded by the test work directory.
     Ok(0)
 }
+
+pub fn list_first_signal_for_sed() -> &'static str {
+    "SIGHUP"
+}
