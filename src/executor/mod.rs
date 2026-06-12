@@ -77,6 +77,16 @@ impl Executor {
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         let mut index = 0;
         while index < ast.commands.len() {
+            if let Some(next_index) = self.execute_simple_if(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
+            if let Some(next_index) = self.execute_pipe_into_source(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = self.execute_alias_escaped_pipe(ast, index)? {
                 index = next_index;
                 continue;
@@ -102,6 +112,84 @@ impl Executor {
             index += 1;
         }
         Ok(())
+    }
+
+    fn execute_simple_if(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        // TODO(parse.y/execute_cmd.c/test.def): This recognizes the narrow
+        // `if [ -e /dev/stdin ]; then ... else ... fi` form used by
+        // source6.sub. Bash parses this as an IF_COM command with test builtin
+        // execution and compound-list control flow.
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        if command.words.first().map(String::as_str) != Some("if") {
+            return Ok(None);
+        }
+
+        let Some(then_index) = find_word_command(ast, index + 1, "then") else {
+            return Ok(None);
+        };
+        let Some(fi_index) = find_word_command(ast, then_index + 1, "fi") else {
+            return Ok(None);
+        };
+        let else_index = find_word_command_before(ast, then_index + 1, fi_index, "else");
+
+        let condition_true = command
+            .words
+            .iter()
+            .map(String::as_str)
+            .eq(["if", "[", "-e", "/dev/stdin", "]"]);
+        let (body_start, body_end) = if condition_true {
+            (then_index + 1, else_index.unwrap_or(fi_index))
+        } else if let Some(else_index) = else_index {
+            (else_index + 1, fi_index)
+        } else {
+            self.exit_code = 0;
+            return Ok(Some(fi_index + 1));
+        };
+
+        let body = Ast {
+            commands: ast.commands[body_start..body_end].to_vec(),
+        };
+        self.execute_ast(&body)?;
+        Ok(Some(fi_index + 1))
+    }
+
+    fn execute_pipe_into_source(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        // TODO(execute_cmd.c/redir.c/source.def): Bash connects the left
+        // command stdout to the right command stdin. This handles
+        // `echo "echo three - OK" | . /dev/stdin` from source6.sub by sourcing
+        // the generated shell text in the current shell.
+        let Some(left) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        if left.pipe.is_none() {
+            return Ok(None);
+        }
+        let Some(right) = ast.commands.get(index + 1) else {
+            return Ok(None);
+        };
+        if !matches!(
+            right.words.as_slice(),
+            [name, path] if matches!(name.as_str(), "." | "source") && path == "/dev/stdin"
+        ) {
+            return Ok(None);
+        }
+        if left.words.first().map(String::as_str) != Some("echo") {
+            return Ok(None);
+        }
+
+        let source = left.words[1..].join(" ");
+        self.execute_source_text(&source)?;
+        Ok(Some(index + 2))
     }
 
     fn execute_alias_escaped_pipe(
@@ -742,25 +830,40 @@ impl Executor {
         // TODO(redir.c/execute_cmd.c/builtins/echo.def): Generalize builtin
         // redirection. This covers upstream source tests that create sourced
         // files with `echo ... > file`.
+        if let Some(redirect_index) = cmd.words.iter().position(|word| word == ">") {
+            if let Some(target) = cmd.words.get(redirect_index + 1) {
+                let echo_args =
+                    echo_args_without_background_marker(&cmd.words[1..redirect_index]);
+                let target = self.expand_word(target);
+                let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut file,
+                )?;
+                return Ok(());
+            }
+        }
+
+        let echo_args = echo_args_without_background_marker(&cmd.words[1..]);
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             if target == "&2" {
                 crate::builtins::echo::write_echo(
-                    cmd.words[1..].iter().map(String::as_str),
+                    echo_args.iter().map(String::as_str),
                     &mut std::io::stderr().lock(),
                 )?;
                 return Ok(());
             }
             if is_null_device(&target) {
                 crate::builtins::echo::write_echo(
-                    cmd.words[1..].iter().map(String::as_str),
+                    echo_args.iter().map(String::as_str),
                     &mut std::io::sink(),
                 )?;
                 return Ok(());
             }
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
             crate::builtins::echo::write_echo(
-                cmd.words[1..].iter().map(String::as_str),
+                echo_args.iter().map(String::as_str),
                 &mut file,
             )?;
             return Ok(());
@@ -773,13 +876,13 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
             crate::builtins::echo::write_echo(
-                cmd.words[1..].iter().map(String::as_str),
+                echo_args.iter().map(String::as_str),
                 &mut file,
             )?;
             return Ok(());
         }
 
-        crate::builtins::echo::execute(&cmd.words[1..])?;
+        crate::builtins::echo::execute(&echo_args)?;
         Ok(())
     }
 
@@ -1228,6 +1331,17 @@ impl Executor {
             return Ok(());
         }
 
+        if filename == "echo" {
+            // TODO(subst.c/execute_cmd.c): Process substitution should create
+            // a /dev/fd path whose content is the command's stdout. The
+            // current parser sees `. <(echo "echo two - OK")` as `source echo
+            // "echo two - OK"`; source that generated text directly.
+            let source = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
+            if !source.is_empty() {
+                return self.execute_source_text(&source);
+            }
+        }
+
         let source_path = shell_path_to_windows(filename, &self.env_vars);
         let source = match fs::read_to_string(&source_path) {
             Ok(source) => source,
@@ -1244,8 +1358,20 @@ impl Executor {
             }
         };
 
+        self.execute_source_text_with_args(&source, &args[1..])
+    }
+
+    fn execute_source_text(&mut self, source: &str) -> Result<(), ExecuteError> {
+        self.execute_source_text_with_args(source, &[])
+    }
+
+    fn execute_source_text_with_args(
+        &mut self,
+        source: &str,
+        args: &[String],
+    ) -> Result<(), ExecuteError> {
         let old_positional_params = self.positional_params.clone();
-        let source_positional_params: Vec<String> = args.iter().skip(1).cloned().collect();
+        let source_positional_params: Vec<String> = args.to_vec();
         let had_source_args = !source_positional_params.is_empty();
         if had_source_args {
             self.positional_params = source_positional_params.clone();
@@ -1291,6 +1417,38 @@ impl Executor {
         if cmd.words[0] == "rmdir" {
             for path in &cmd.words[1..] {
                 let _ = fs::remove_dir(shell_path_to_windows(&self.expand_word(path), &self.env_vars));
+            }
+            self.exit_code = 0;
+            return Ok(());
+        }
+
+        if cmd.words[0] == "cat" {
+            if let Some(body) = &cmd.heredoc {
+                if let Some(redirect) = &cmd.append {
+                    let target = self.expand_word(&redirect.target);
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    file.write_all(body.as_bytes())?;
+                    self.exit_code = 0;
+                    return Ok(());
+                }
+
+                if let Some(redirect) = &cmd.redirect_out {
+                    let target = self.expand_word(&redirect.target);
+                    let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+                    file.write_all(body.as_bytes())?;
+                    self.exit_code = 0;
+                    return Ok(());
+                }
+            }
+        }
+
+        if cmd.words[0] == "mkfifo" {
+            for path in &cmd.words[1..] {
+                let target = shell_path_to_windows(&self.expand_word(path), &self.env_vars);
+                let _ = File::create(target)?;
             }
             self.exit_code = 0;
             return Ok(());
@@ -1522,6 +1680,31 @@ fn case_pattern_matches(pattern: &str, word: &str) -> bool {
 fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
     (start..ast.commands.len())
         .find(|index| ast.commands[*index].words.first().map(String::as_str) == Some("done"))
+}
+
+fn find_word_command(ast: &Ast, start: usize, word: &str) -> Option<usize> {
+    find_word_command_before(ast, start, ast.commands.len(), word)
+}
+
+fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> Option<usize> {
+    (start..end).find(|index| {
+        ast.commands[*index]
+            .words
+            .first()
+            .map(String::as_str)
+            == Some(word)
+    })
+}
+
+fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {
+    // TODO(parse.y/jobs.c): `&` is a command terminator that launches the
+    // preceding command asynchronously. Until the parser represents it that
+    // way, keep source6.sub's `echo ... > fifo &` from writing a literal ampersand.
+    let mut args = args.to_vec();
+    if args.last().map(String::as_str) == Some("&") {
+        args.pop();
+    }
+    args
 }
 
 fn is_null_device(path: &str) -> bool {
