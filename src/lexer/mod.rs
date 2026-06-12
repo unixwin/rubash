@@ -409,7 +409,7 @@ impl<'a> Lexer<'a> {
 
     fn skip_word(&mut self) {
         while let Some(c) = self.peek() {
-            if " \t\n|&;<>#`(){}".contains(c) {
+            if " \t\n|&;<>`(){}".contains(c) {
                 break;
             }
             match c {
@@ -542,6 +542,17 @@ fn remove_shell_quotes(raw: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match ch {
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                let mut quoted = String::new();
+                for quoted_ch in chars.by_ref() {
+                    if quoted_ch == '\'' {
+                        break;
+                    }
+                    quoted.push(quoted_ch);
+                }
+                out.push_str(&decode_ansi_c_quoted(&quoted));
+            }
             '\'' => {
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
@@ -580,4 +591,41 @@ fn remove_shell_quotes(raw: &str) -> String {
     }
 
     out
+}
+
+fn decode_ansi_c_quoted(value: &str) -> String {
+    // TODO(parse.y/subst.c): Bash $'...' performs full ANSI-C escape decoding,
+    // including octal/hex/unicode escapes and locale-aware behavior. This
+    // covers the escapes currently exercised by upstream alias tests.
+    let mut output = String::new();
+    let mut chars = value.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('a') => output.push('\x07'),
+            Some('b') => output.push('\x08'),
+            Some('e') | Some('E') => output.push('\x1b'),
+            Some('f') => output.push('\x0c'),
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some('t') => output.push('\t'),
+            Some('v') => output.push('\x0b'),
+            Some('\\') => output.push('\\'),
+            Some('\'') => output.push('\''),
+            Some('"') => output.push('"'),
+            Some('?') => output.push('?'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+
+    output
 }
