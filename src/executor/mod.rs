@@ -9,9 +9,10 @@ use crate::builtins::alias::Alias;
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::process::{Command, Stdio};
 
-use self::path::{find_shell, find_user_command, should_run_with_shell};
+use self::path::{find_shell, find_user_command, shell_path_to_windows, should_run_with_shell};
 
 /// Execution error
 #[derive(Debug)]
@@ -47,6 +48,8 @@ pub struct Executor {
     exit_code: i32,
     env_vars: HashMap<String, String>,
     aliases: HashMap<String, Alias>,
+    positional_params: Vec<String>,
+    expanding_aliases: Vec<String>,
 }
 
 impl Executor {
@@ -55,6 +58,8 @@ impl Executor {
             exit_code: 0,
             env_vars: std::env::vars().collect(),
             aliases: HashMap::new(),
+            positional_params: Vec::new(),
+            expanding_aliases: Vec::new(),
         }
     }
 
@@ -75,6 +80,10 @@ impl Executor {
                 env::set_var(name, expanded_value);
             }
             self.exit_code = 0;
+            return Ok(());
+        }
+
+        if self.execute_parser_level_alias(cmd)? {
             return Ok(());
         }
 
@@ -229,7 +238,11 @@ impl Executor {
         }
 
         if let Some(name) = word.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
-            return self.env_vars.get(name).cloned().unwrap_or_default();
+            return self
+                .env_vars
+                .get(name)
+                .map(|value| shell_safe_value(value))
+                .unwrap_or_default();
         }
 
         if let Some(name) = word.strip_prefix('$') {
@@ -269,7 +282,21 @@ impl Executor {
                         }
                         name.push(name_ch);
                     }
-                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                    if let Some(value) = self.env_vars.get(&name) {
+                        output.push_str(&shell_safe_value(value));
+                    }
+                }
+                Some(first) if first.is_ascii_digit() => {
+                    chars.next();
+                    let index = first.to_digit(10).unwrap_or(0) as usize;
+                    if index > 0 {
+                        output.push_str(
+                            self.positional_params
+                                .get(index - 1)
+                                .map(String::as_str)
+                                .unwrap_or(""),
+                        );
+                    }
                 }
                 Some(first) if is_shell_name_start(first) => {
                     let mut name = String::new();
@@ -280,7 +307,9 @@ impl Executor {
                         chars.next();
                         name.push(name_ch);
                     }
-                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                    if let Some(value) = self.env_vars.get(&name) {
+                        output.push_str(&shell_safe_value(value));
+                    }
                 }
                 Some(other) => {
                     chars.next();
@@ -312,6 +341,42 @@ impl Executor {
         }
 
         expanded
+    }
+
+    fn execute_parser_level_alias(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        // TODO(parse.y/alias.c): GNU Bash pushes alias text back into the
+        // parser input stream (`alias_expand_token` + `push_string`). This
+        // reparses complex alias values at command position so aliases that
+        // introduce `;`, newlines, or redirections behave closer to Bash until
+        // Rubash has a real parser input stack.
+        let Some(word) = cmd.words.first() else {
+            return Ok(false);
+        };
+
+        if self.expanding_aliases.iter().any(|alias| alias == word) {
+            return Ok(false);
+        }
+
+        let Some(alias) = self.aliases.get(word).cloned() else {
+            return Ok(false);
+        };
+
+        if !needs_parser_level_alias_expansion(&alias.value) {
+            return Ok(false);
+        }
+
+        let mut source = alias.value.clone();
+        if !source.ends_with(' ') && !source.ends_with('\t') && !cmd.words[1..].is_empty() {
+            source.push(' ');
+        }
+        source.push_str(&cmd.words[1..].join(" "));
+
+        self.expanding_aliases.push(word.clone());
+        let tokens = crate::lexer::tokenize(&source);
+        let ast = crate::parser::parse(&tokens);
+        let result = self.execute_ast(&ast);
+        self.expanding_aliases.pop();
+        result.map(|_| true)
     }
 
     fn expand_alias_word(&self, word: &str, seen: &mut Vec<String>) -> (Vec<String>, bool) {
@@ -356,7 +421,8 @@ impl Executor {
             return Ok(());
         };
 
-        let source = match fs::read_to_string(filename) {
+        let source_path = shell_path_to_windows(filename, &self.env_vars);
+        let source = match fs::read_to_string(&source_path) {
             Ok(source) => source,
             Err(error) => {
                 eprintln!("rubash: source: {filename}: {error}");
@@ -365,9 +431,15 @@ impl Executor {
             }
         };
 
+        let old_positional_params = std::mem::replace(
+            &mut self.positional_params,
+            args.iter().skip(1).cloned().collect(),
+        );
         let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
-        self.execute_ast(&ast)
+        let result = self.execute_ast(&ast);
+        self.positional_params = old_positional_params;
+        result
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -400,34 +472,65 @@ impl Executor {
             process.env(var_name, var_value);
         }
 
-        if let Some(ref redirect) = cmd.redirect_in {
-            let file = File::open(&redirect.target)?;
+        if cmd.heredoc.is_some() {
+            // TODO(redir.c/parse.y): This implements the simple stdin pipe for
+            // here-documents. GNU Bash stores REDIRECT nodes, tracks quoted
+            // delimiters, strips tabs for <<-, and conditionally expands the
+            // body before do_redirections applies it.
+            process.stdin(Stdio::piped());
+        } else if let Some(ref redirect) = cmd.redirect_in {
+            let target = self.expand_word(&redirect.target);
+            let file = File::open(shell_path_to_windows(&target, &self.env_vars))?;
             process.stdin(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.redirect_out {
-            let file = File::create(&redirect.target)?;
+            let target = self.expand_word(&redirect.target);
+            let file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
             process.stdout(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.append {
-            let file = OpenOptions::new().create(true).append(true).open(&redirect.target)?;
+            let target = self.expand_word(&redirect.target);
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
             process.stdout(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.redirect_err {
-            let file = File::create(&redirect.target)?;
+            let target = self.expand_word(&redirect.target);
+            let file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
             process.stderr(Stdio::from(file));
         }
 
         if let Some(ref redirect) = cmd.redirect_err_append {
-            let file = OpenOptions::new().create(true).append(true).open(&redirect.target)?;
+            let target = self.expand_word(&redirect.target);
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
             process.stderr(Stdio::from(file));
         }
 
-        match process.status() {
-            Ok(status) => {
-                self.exit_code = status.code().unwrap_or(1);
+        match process.spawn() {
+            Ok(mut child) => {
+                if let Some(ref body) = cmd.heredoc {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(body.as_bytes())?;
+                    }
+                }
+
+                match child.wait() {
+                    Ok(status) => {
+                        self.exit_code = status.code().unwrap_or(1);
+                    }
+                    Err(error) => {
+                        eprintln!("rubash: {}: {}", cmd.words[0], error);
+                        self.exit_code = 126;
+                    }
+                }
             }
             Err(error) => {
                 eprintln!("rubash: {}: {}", cmd.words[0], error);
@@ -473,6 +576,32 @@ fn is_shell_name_start(ch: char) -> bool {
 
 fn is_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn needs_parser_level_alias_expansion(value: &str) -> bool {
+    value.chars().any(|ch| matches!(ch, ';' | '\n' | '<' | '>' | '|' | '&'))
+}
+
+fn shell_safe_value(value: &str) -> String {
+    // TODO(subst.c/findcmd.c): On Windows, Git Bash passes many environment
+    // paths to native executables as `C:\...`. If those values are substituted
+    // back into shell input for alias reparsing, backslashes are treated as
+    // shell escapes. Keep absolute drive paths in `/c/...` form until Rubash
+    // has a dedicated shell path type.
+    if cfg!(windows) {
+        let bytes = value.as_bytes();
+        if bytes.len() >= 3
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/')
+            && bytes[0].is_ascii_alphabetic()
+        {
+            let drive = (bytes[0] as char).to_ascii_lowercase();
+            let rest = value[3..].replace('\\', "/");
+            return format!("/{drive}/{rest}");
+        }
+    }
+
+    value.to_string()
 }
 
 #[cfg(test)]

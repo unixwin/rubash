@@ -41,14 +41,7 @@ fn print_usage() {
 }
 
 fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
-    let mut last_status = 0;
-    for line in command.lines() {
-        last_status = run_line(executor, line, false);
-        if matches!(line.trim(), "exit" | "quit") {
-            break;
-        }
-    }
-    last_status
+    run_source(executor, command, false)
 }
 
 fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
@@ -61,14 +54,7 @@ fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
         }
     };
 
-    let mut last_status = 0;
-    for line in contents.lines() {
-        last_status = run_line(executor, line, false);
-        if matches!(line.trim(), "exit" | "quit") {
-            break;
-        }
-    }
-    last_status
+    run_source(executor, &contents, false)
 }
 
 fn run_repl(executor: &mut Executor) {
@@ -105,6 +91,14 @@ fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
         return executor.last_exit_code();
     }
 
+    run_source(executor, input, interactive)
+}
+
+fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
+    // TODO(shell.c/eval.c/parse.y): GNU Bash parses complete command streams,
+    // including pending here-documents, rather than executing script files one
+    // physical line at a time. This keeps batch input whole; interactive mode
+    // still feeds one line at a time from the REPL.
     let tokens = tokenize(input);
     let ast = parse(&tokens);
 

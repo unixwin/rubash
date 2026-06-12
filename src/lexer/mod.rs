@@ -9,7 +9,7 @@ use std::str::from_utf8;
 pub enum TokenKind {
     Word, Pipe, Semicolon, RedirectOut, RedirectIn, Append,
     RedirectErr, RedirectErrAppend, HereDoc, And, Or,
-    Keyword, Variable, Assignment, CommandSubst, BraceExpand, Eof,
+    Keyword, Variable, Assignment, CommandSubst, BraceExpand, HereDocBody, Eof,
 }
 
 /// A single token with its kind, value, and position
@@ -47,6 +47,43 @@ fn is_brace_expansion(word: &str) -> bool {
 
 /// Tokenize a string into tokens
 pub fn tokenize(input: &str) -> Vec<Token> {
+    tokenize_with_heredocs(input)
+}
+
+fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
+    // TODO(parse.y/redir.c): Bash parses here-documents after reading the
+    // complete command and performs delimiter-specific expansion rules. This
+    // line-oriented collector handles the simple `<<word` and `<<'word'`
+    // forms used by early upstream alias tests.
+    let mut output = Vec::new();
+    let mut lines = input.lines();
+    let mut position = 0;
+
+    while let Some(line) = lines.next() {
+        let mut line_tokens = tokenize_plain(line);
+        let delimiter = heredoc_delimiter(&line_tokens);
+        output.append(&mut line_tokens);
+        position += line.len() + 1;
+
+        if let Some(delimiter) = delimiter {
+            let mut body = String::new();
+            for body_line in lines.by_ref() {
+                position += body_line.len() + 1;
+                if body_line == delimiter {
+                    break;
+                }
+                body.push_str(body_line);
+                body.push('\n');
+            }
+            output.push(Token::new(TokenKind::HereDocBody, &body, position));
+        }
+        output.push(Token::new(TokenKind::Semicolon, ";", position));
+    }
+
+    output
+}
+
+fn tokenize_plain(input: &str) -> Vec<Token> {
     let lexer = Lexer::new(input);
     let mut tokens = Vec::new();
     for token in lexer {
@@ -54,6 +91,13 @@ pub fn tokenize(input: &str) -> Vec<Token> {
         tokens.push(token);
     }
     tokens
+}
+
+fn heredoc_delimiter(tokens: &[Token]) -> Option<String> {
+    tokens
+        .windows(2)
+        .find(|pair| pair[0].kind == TokenKind::HereDoc)
+        .map(|pair| pair[1].value.clone())
 }
 
 pub struct Lexer<'a> {
@@ -82,7 +126,7 @@ impl<'a> Lexer<'a> {
 
     fn skip_ws(&mut self) {
         while let Some(c) = self.peek() {
-            if c == ' ' || c == '\t' || c == '\n' { self.advance(); } else { break; }
+            if c == ' ' || c == '\t' { self.advance(); } else { break; }
         }
     }
 
@@ -99,6 +143,7 @@ impl<'a> Lexer<'a> {
         let c = self.advance()?;
 
         match c {
+            '\n' => Some(Token::new(TokenKind::Semicolon, ";", start)),
             '|' => {
                 if self.peek() == Some('|') { self.advance(); Some(Token::new(TokenKind::Or, "||", start)) }
                 else { Some(Token::new(TokenKind::Pipe, "|", start)) }
@@ -107,6 +152,7 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('&') { self.advance(); Some(Token::new(TokenKind::And, "&&", start)) }
                 else { self.skip_word(); Some(Token::new(TokenKind::Word, self.slice(start), start)) }
             }
+            '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
             ';' => {
                 if self.peek() == Some(';') { self.advance(); Some(Token::new(TokenKind::Word, ";;", start)) }
                 else { Some(Token::new(TokenKind::Semicolon, ";", start)) }
@@ -165,7 +211,7 @@ impl<'a> Lexer<'a> {
 
     fn skip_word(&mut self) {
         while let Some(c) = self.peek() {
-            if " \t\n|&;<>#`{}".contains(c) { break; }
+            if " \t\n|&;<>#`(){}".contains(c) { break; }
             match c {
                 '\'' => {
                     self.advance();
