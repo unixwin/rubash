@@ -93,7 +93,7 @@ fn has_path_separator(name: &str) -> bool {
     name.contains('/') || name.contains('\\')
 }
 
-fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
+pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
     if !cfg!(windows) {
         return PathBuf::from(path);
     }

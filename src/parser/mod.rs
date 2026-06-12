@@ -29,6 +29,8 @@ pub struct CommandNode {
     pub redirect_err: Option<Redirect>,
     /// Stderr append redirect
     pub redirect_err_append: Option<Redirect>,
+    /// Here-document stdin body
+    pub heredoc: Option<String>,
     /// Pipe to next command
     pub pipe: Option<usize>,
     /// Background execution (&)
@@ -45,6 +47,7 @@ impl CommandNode {
             append: None,
             redirect_err: None,
             redirect_err_append: None,
+            heredoc: None,
             pipe: None,
             background: false,
         }
@@ -106,7 +109,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectIn => {
                 if i + 1 < tokens.len() {
-                    if let TokenKind::Word = tokens[i + 1].kind {
+                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_in = Some(Redirect {
                             fd: None,
                             target: tokens[i + 1].value.clone(),
@@ -118,7 +121,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectOut => {
                 if i + 1 < tokens.len() {
-                    if let TokenKind::Word = tokens[i + 1].kind {
+                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_out = Some(Redirect {
                             fd: None,
                             target: tokens[i + 1].value.clone(),
@@ -130,7 +133,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::Append => {
                 if i + 1 < tokens.len() {
-                    if let TokenKind::Word = tokens[i + 1].kind {
+                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.append = Some(Redirect {
                             fd: None,
                             target: tokens[i + 1].value.clone(),
@@ -142,7 +145,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectErr => {
                 if i + 1 < tokens.len() {
-                    if let TokenKind::Word = tokens[i + 1].kind {
+                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_err = Some(Redirect {
                             fd: Some(2),
                             target: tokens[i + 1].value.clone(),
@@ -154,7 +157,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectErrAppend => {
                 if i + 1 < tokens.len() {
-                    if let TokenKind::Word = tokens[i + 1].kind {
+                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_err_append = Some(Redirect {
                             fd: Some(2),
                             target: tokens[i + 1].value.clone(),
@@ -163,6 +166,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         i += 1;
                     }
                 }
+            }
+            TokenKind::HereDoc => {
+                if i + 1 < tokens.len() {
+                    i += 1;
+                }
+            }
+            TokenKind::HereDocBody => {
+                current_cmd.heredoc = Some(token.value.clone());
             }
             TokenKind::And | TokenKind::Or => {
                 // TODO: Handle logical operators
@@ -181,7 +192,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
     }
 
     // Don't forget the last command
-    if !current_cmd.words.is_empty() || !current_cmd.assignments.is_empty() {
+    if !current_cmd.words.is_empty() || !current_cmd.assignments.is_empty() || current_cmd.heredoc.is_some() {
         ast.commands.push(current_cmd);
     }
 
