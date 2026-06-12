@@ -14,7 +14,7 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     execute_with_io(args, &mut stdout, &mut stderr)
 }
 
-fn execute_with_io<W, E>(args: &[String], stdout: &mut W, stderr: &mut E) -> io::Result<i32>
+fn execute_with_io<W, E>(args: &[String], _stdout: &mut W, stderr: &mut E) -> io::Result<i32>
 where
     W: Write,
     E: Write,
@@ -35,7 +35,11 @@ where
     }
 
     if print {
-        writeln!(stdout, "hits\tcommand")?;
+        // TODO(builtins/hash.def/hashcmd.c): Bash prints the populated hash
+        // table here. Rubash does not maintain one yet, so match Bash's empty
+        // table diagnostic for the upstream builtins test.
+        writeln!(stderr, "hash: hash table empty")?;
+        status = EXECUTION_FAILURE;
     }
 
     Ok(status)

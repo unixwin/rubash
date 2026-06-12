@@ -581,7 +581,11 @@ fn remove_shell_quotes(raw: &str) -> String {
                     if quoted == '\'' {
                         break;
                     }
-                    out.push(quoted);
+                    if quoted == '$' {
+                        out.push('\x1f');
+                    } else {
+                        out.push(quoted);
+                    }
                 }
             }
             '"' => {
@@ -594,7 +598,11 @@ fn remove_shell_quotes(raw: &str) -> String {
                             {
                                 chars.next();
                                 if escaped != '\n' {
-                                    out.push(escaped);
+                                    if escaped == '$' {
+                                        out.push('\x1f');
+                                    } else {
+                                        out.push(escaped);
+                                    }
                                 }
                             } else {
                                 out.push('\\');
@@ -606,7 +614,11 @@ fn remove_shell_quotes(raw: &str) -> String {
             }
             '\\' => {
                 if let Some(escaped) = chars.next() {
-                    out.push(escaped);
+                    if escaped == '$' {
+                        out.push('\x1f');
+                    } else {
+                        out.push(escaped);
+                    }
                 }
             }
             _ => out.push(ch),

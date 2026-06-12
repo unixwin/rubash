@@ -196,6 +196,9 @@ for arg in "\$@"; do
   esac
 
   candidate="\$(realpath -m -- "\$arg")"
+  if [[ "$guarded_cmd" == "cp" && "\$candidate" == "/dev/null" ]]; then
+    continue
+  fi
   case "\$candidate" in
     "\$allowed"|"\$allowed"/*) ;;
     *)

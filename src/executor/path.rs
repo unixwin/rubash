@@ -121,6 +121,18 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         }
     }
 
+    if normalized == "/tmp" {
+        if let Some(tmpdir) = env_vars.get("TMPDIR") {
+            return PathBuf::from(tmpdir);
+        }
+    }
+
+    if let Some(rest) = normalized.strip_prefix("/tmp/") {
+        if let Some(tmpdir) = env_vars.get("TMPDIR") {
+            return PathBuf::from(tmpdir).join(rest);
+        }
+    }
+
     PathBuf::from(path)
 }
 

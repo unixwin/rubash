@@ -88,20 +88,14 @@ where
         }
         Mode::Physical => env::current_dir().unwrap_or_else(|_| target.path.clone()),
     };
+    let new_pwd_display = shell_display_path(&new_pwd);
 
     set_shell_env(env_vars, "OLDPWD", old_pwd.to_string_lossy().into_owned());
-    set_shell_env(env_vars, "PWD", new_pwd.to_string_lossy().into_owned());
+    set_shell_env(env_vars, "PWD", new_pwd_display.clone());
 
     match target.print {
-        PrintPath::Always => writeln!(stdout, "{}", new_pwd.display())?,
-        PrintPath::CdPath
-            if target
-                .display
-                .as_ref()
-                .is_some_and(|path| path.is_absolute()) =>
-        {
-            writeln!(stdout, "{}", new_pwd.display())?
-        }
+        PrintPath::Always => writeln!(stdout, "{}", new_pwd_display)?,
+        PrintPath::CdPath => writeln!(stdout, "{}", new_pwd_display)?,
         _ => {}
     }
 
@@ -179,7 +173,7 @@ where
             }
         },
         Some(dir) => Ok(Some(Target {
-            path: PathBuf::from(dir),
+            path: filesystem_path_for_display(dir, env_vars),
             display: Some(PathBuf::from(dir)),
             print: PrintPath::Never,
         })),
@@ -194,7 +188,8 @@ fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>) -> Option
     let cdpath = shell_var(env_vars, "CDPATH")?;
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
-        let candidate = Path::new(base).join(&target.path);
+        let candidate = filesystem_path_for_display(base, env_vars).join(&target.path);
+        let display = Path::new(base).join(&target.path);
 
         if candidate.is_dir() {
             return Some(Target {
@@ -203,7 +198,7 @@ fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>) -> Option
                 } else {
                     PrintPath::CdPath
                 },
-                display: Some(candidate.clone()),
+                display: Some(display),
                 path: candidate,
             });
         }
@@ -266,7 +261,41 @@ fn shell_var(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn filesystem_path_for_display(dir: &str, env_vars: &HashMap<String, String>) -> PathBuf {
+    // TODO(general.c/pathnames.h): In the Windows upstream-test harness, keep
+    // Bash-visible /tmp paths logical while backing them with TMPDIR under the
+    // guarded work directory.
+    if cfg!(windows) {
+        if dir == "/tmp" {
+            if let Some(tmpdir) = shell_var(env_vars, "TMPDIR") {
+                return PathBuf::from(tmpdir);
+            }
+        }
+        if let Some(rest) = dir.strip_prefix("/tmp/") {
+            if let Some(tmpdir) = shell_var(env_vars, "TMPDIR") {
+                return PathBuf::from(tmpdir).join(rest);
+            }
+        }
+    }
+
+    PathBuf::from(dir)
+}
+
 fn set_shell_env(env_vars: &mut HashMap<String, String>, name: &str, value: String) {
     env_vars.insert(name.to_string(), value.clone());
     env::set_var(name, OsString::from(value));
+}
+
+fn shell_display_path(path: &Path) -> String {
+    let mut value = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) {
+        if value.len() >= 3 && value.as_bytes()[1] == b':' && value.as_bytes()[2] == b'/' {
+            value = value[2..].to_string();
+        }
+    }
+    if value.is_empty() {
+        "/".to_string()
+    } else {
+        value
+    }
 }

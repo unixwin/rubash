@@ -11,7 +11,7 @@ pub fn execute(args: &[String]) -> io::Result<()> {
     write_echo(args.iter().map(String::as_str), &mut stdout)
 }
 
-fn write_echo<'a, I, W>(args: I, writer: &mut W) -> io::Result<()>
+pub(crate) fn write_echo<'a, I, W>(args: I, writer: &mut W) -> io::Result<()>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
