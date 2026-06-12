@@ -235,7 +235,7 @@ fn logical_posix_test_dir(target: &Target) -> Option<&str> {
     }
 
     let display = target.display.as_ref()?.to_str()?;
-    matches!(display, "/" | "/bin" | "/tmp").then_some(display)
+    matches!(display, "/" | "/bin" | "/etc" | "/tmp" | "/usr").then_some(display)
 }
 
 fn starts_with_dot_component(path: &Path) -> bool {

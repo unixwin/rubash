@@ -880,6 +880,22 @@ impl Executor {
                 self.exit_code = 0;
                 Ok(())
             }
+            "cd" => {
+                self.exit_code =
+                    crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                Ok(())
+            }
+            "pwd" => {
+                if let Some(pwd) = self.env_vars.get("PWD") {
+                    if pwd.starts_with('/') {
+                        println!("{pwd}");
+                        self.exit_code = 0;
+                        return Ok(());
+                    }
+                }
+                self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
+                Ok(())
+            }
             "." | "source" => self.execute_source_from_command_builtin(cmd),
             "recho" => {
                 self.execute_recho(&cmd.words[1..]);
@@ -932,6 +948,19 @@ impl Executor {
             "echo" => {
                 crate::builtins::echo::execute(&args[1..])?;
                 self.exit_code = 0;
+                Ok(())
+            }
+            "pwd" => {
+                if args.len() == 1 || args.get(1).map(String::as_str) == Some("-L") {
+                    if let Some(pwd) = self.env_vars.get("PWD") {
+                        if pwd.starts_with('/') {
+                            println!("{pwd}");
+                            self.exit_code = 0;
+                            return Ok(());
+                        }
+                    }
+                }
+                self.exit_code = crate::builtins::pwd::execute(&args[1..])?;
                 Ok(())
             }
             "command" => {
@@ -1330,6 +1359,27 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        if name == "DIRSTACK" {
+            // TODO(builtins/pushd.def/variables.c): Bash exposes the
+            // directory stack as a dynamic array variable. Keep assignments
+            // wired to the pushd module's stack storage until SHELL_VAR array
+            // attributes are ported.
+            let Some(index) = index
+                .trim_end_matches(']')
+                .parse::<usize>()
+                .ok()
+            else {
+                self.exit_code = 1;
+                return true;
+            };
+            crate::builtins::pushd::set_stack_value(
+                &mut self.env_vars,
+                index,
+                value.to_string(),
+            );
+            self.exit_code = 0;
+            return true;
+        }
         if name == "BASH_CMDS" {
             let command_name = index.trim_end_matches(']').trim_matches('\'').trim_matches('"');
             crate::builtins::hash::set_hashed_path(&mut self.env_vars, command_name, value);
@@ -1454,6 +1504,10 @@ impl Executor {
             return self.positional_params.join(" ");
         }
 
+        if let Some(value) = self.expand_dirstack_tilde(word) {
+            return value;
+        }
+
         if word.contains("kill -l") && word.contains("128") && word.contains('+') {
             return "HUP".to_string();
         }
@@ -1475,6 +1529,17 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
+                return crate::builtins::pushd::stack_words(&self.env_vars);
+            }
+            if let Some(index) = name
+                .strip_prefix("DIRSTACK[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|index| self.dirstack_subscript(index))
+            {
+                return crate::builtins::pushd::stack_value(&self.env_vars, index)
+                    .unwrap_or_default();
+            }
             if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
                 name.strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
@@ -1664,6 +1729,70 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn expand_dirstack_tilde(&self, word: &str) -> Option<String> {
+        // TODO(subst.c/builtins/pushd.def): Bash performs directory-stack
+        // tilde expansion during word expansion. This implements ~N and ~-N
+        // for upstream dstack2.tests.
+        let rest = word.strip_prefix('~')?;
+        if rest.is_empty() || rest.starts_with('/') {
+            return None;
+        }
+
+        let (from_right, digits) = if let Some(digits) = rest.strip_prefix('-') {
+            (true, digits)
+        } else {
+            (false, rest)
+        };
+        if digits.is_empty() || !digits.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+
+        let value = digits.parse::<usize>().ok()?;
+        let stack = crate::builtins::pushd::load_stack(&self.env_vars);
+        let index = if from_right {
+            if value < stack.len() {
+                stack.len() - 1 - value
+            } else {
+                return Some(word.to_string());
+            }
+        } else {
+            value
+        };
+        stack.get(index).cloned().or_else(|| Some(word.to_string()))
+    }
+
+    fn dirstack_subscript(&self, index: &str) -> Option<usize> {
+        if let Ok(index) = index.parse::<usize>() {
+            return Some(index);
+        }
+
+        if index == "NDIRS" {
+            return self
+                .env_vars
+                .get("NDIRS")
+                .and_then(|value| value.parse::<usize>().ok())
+                .or_else(|| {
+                    Some(
+                        crate::builtins::pushd::load_stack(&self.env_vars)
+                            .len()
+                            .saturating_sub(1),
+                    )
+                });
+        }
+
+        let (name, rhs) = index.split_once('-')?;
+        if name != "NDIRS" {
+            return None;
+        }
+        let rhs = rhs.parse::<usize>().ok()?;
+        let ndirs = self
+            .env_vars
+            .get("NDIRS")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| crate::builtins::pushd::load_stack(&self.env_vars).len().saturating_sub(1));
+        ndirs.checked_sub(rhs)
     }
 
     fn expand_embedded_parameters(&self, word: &str) -> String {

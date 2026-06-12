@@ -8,7 +8,7 @@ use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
-const DIR_STACK: &str = "__RUBASH_DIR_STACK";
+pub(crate) const DIR_STACK: &str = "__RUBASH_DIR_STACK";
 const SEP: char = '\x1f';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,10 +54,61 @@ where
 
     match builtin {
         StackBuiltin::Dirs => {
-            if args.first().copied() == Some("-p") {
+            let args = strip_double_dash(&args);
+            if args.first().copied() == Some("-c") {
+                save_stack(env_vars, &[]);
+                return Ok(EXECUTION_SUCCESS);
+            }
+            if let Some(status) = dirs_index_or_error(&args, &stack, diagnostic_prefix, stdout, stderr)? {
+                return Ok(status);
+            }
+            if args.first().copied() == Some("-v") {
+                if let Some(index_arg) = args.get(1).copied().filter(|arg| is_stack_index(arg)) {
+                    let Some(index) = stack_index(index_arg, stack.len()) else {
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}dirs: {}: directory stack index out of range",
+                            index_arg.trim_start_matches(['+', '-'])
+                        )?;
+                        return Ok(EXECUTION_FAILURE);
+                    };
+                    writeln!(stdout, "{index:2}  {}", stack[index])?;
+                    return Ok(EXECUTION_SUCCESS);
+                }
+                for (index, dir) in stack.iter().enumerate() {
+                    writeln!(stdout, "{index:2}  {dir}")?;
+                }
+            } else if args.first().copied() == Some("-p") {
                 for dir in &stack {
                     writeln!(stdout, "{dir}")?;
                 }
+            } else if args.first().copied() == Some("-l") {
+                writeln!(stdout, "{}", stack.join(" "))?;
+            } else if args.first().is_some_and(|arg| arg.starts_with('-')) {
+                writeln!(
+                    stderr,
+                    "{diagnostic_prefix}dirs: {}: invalid number",
+                    args[0]
+                )?;
+                writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
+                return Ok(EXECUTION_FAILURE);
+            } else if !args.is_empty() {
+                writeln!(
+                    stderr,
+                    "{diagnostic_prefix}dirs: {}: invalid option",
+                    args[0]
+                )?;
+                writeln!(stderr, "dirs: usage: dirs [-clpv] [+N] [-N]")?;
+                return Ok(EXECUTION_FAILURE);
+            } else if stack.is_empty() {
+                writeln!(
+                    stdout,
+                    "{}",
+                    env_vars
+                        .get("PWD")
+                        .cloned()
+                        .unwrap_or_else(|| "/".to_string())
+                )?;
             } else {
                 writeln!(stdout, "{}", stack.join(" "))?;
             }
@@ -71,19 +122,57 @@ where
 
             match operand {
                 PushdOperand::Swap => {
-                    if stack.len() >= 2 {
-                        stack.swap(0, 1);
+                    if stack.len() < 2 {
+                        writeln!(stderr, "{diagnostic_prefix}pushd: no other directory")?;
+                        return Ok(EXECUTION_FAILURE);
                     }
+                    stack.swap(0, 1);
+                    set_pwd_from_stack(env_vars, &stack, true);
                 }
-                PushdOperand::Dir(dir) => {
+                PushdOperand::Index {
+                    index,
+                    from_right,
+                    no_cd,
+                } => {
+                    let index = resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
+                    if index >= stack.len() {
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}pushd: {}: directory stack index out of range",
+                            args.last().copied().unwrap_or_default()
+                        )?;
+                        return Ok(EXECUTION_FAILURE);
+                    }
+                    if no_cd {
+                        save_stack(env_vars, &stack);
+                        return Ok(EXECUTION_SUCCESS);
+                    }
+                    stack.rotate_left(index);
+                    set_pwd_from_stack(env_vars, &stack, true);
+                }
+                PushdOperand::Dir { dir, no_cd } => {
+                    if !logical_dir_exists(&dir) {
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}pushd: {dir}: No such file or directory"
+                        )?;
+                        return Ok(EXECUTION_FAILURE);
+                    }
                     let old_pwd = stack
                         .first()
                         .cloned()
                         .or_else(|| env_vars.get("PWD").cloned())
                         .unwrap_or_else(|| "/".to_string());
-                    stack.insert(0, dir.clone());
-                    env_vars.insert("OLDPWD".to_string(), old_pwd);
-                    env_vars.insert("PWD".to_string(), dir);
+                    if stack.is_empty() {
+                        stack.push(old_pwd.clone());
+                    }
+                    if no_cd && !stack.is_empty() {
+                        stack.insert(1, dir);
+                    } else {
+                        stack.insert(0, dir.clone());
+                        env_vars.insert("OLDPWD".to_string(), old_pwd);
+                        env_vars.insert("PWD".to_string(), dir);
+                    }
                 }
             }
 
@@ -99,11 +188,18 @@ where
 
             match operand {
                 PopdOperand::Top => {
-                    if !stack.is_empty() {
-                        stack.remove(0);
+                    if stack.is_empty() {
+                        writeln!(stderr, "{diagnostic_prefix}popd: directory stack empty")?;
+                        return Ok(EXECUTION_FAILURE);
                     }
+                    stack.remove(0);
                 }
-                PopdOperand::Index(index) => {
+                PopdOperand::Index {
+                    index,
+                    from_right,
+                    no_cd,
+                } => {
+                    let index = resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
                     if index >= stack.len() {
                         writeln!(
                             stderr,
@@ -113,6 +209,11 @@ where
                         return Ok(EXECUTION_FAILURE);
                     }
                     stack.remove(index);
+                    if no_cd {
+                        save_stack(env_vars, &stack);
+                        writeln!(stdout, "{}", stack.join(" "))?;
+                        return Ok(EXECUTION_SUCCESS);
+                    }
                 }
             }
 
@@ -128,13 +229,22 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PushdOperand {
     Swap,
-    Dir(String),
+    Index {
+        index: usize,
+        from_right: bool,
+        no_cd: bool,
+    },
+    Dir { dir: String, no_cd: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopdOperand {
     Top,
-    Index(usize),
+    Index {
+        index: usize,
+        from_right: bool,
+        no_cd: bool,
+    },
 }
 
 fn parse_pushd_operand<W>(
@@ -146,6 +256,7 @@ where
     W: Write,
 {
     let args = strip_double_dash(args);
+    let (no_cd, args) = strip_no_cd(args);
     if args.is_empty() {
         return Ok(Some(PushdOperand::Swap));
     }
@@ -157,7 +268,18 @@ where
         return Ok(None);
     }
 
-    Ok(Some(PushdOperand::Dir(arg.to_string())))
+    if is_stack_index(arg) {
+        return Ok(Some(PushdOperand::Index {
+            index: arg[1..].parse::<usize>().unwrap_or(usize::MAX),
+            from_right: arg.starts_with('-'),
+            no_cd,
+        }));
+    }
+
+    Ok(Some(PushdOperand::Dir {
+        dir: arg.to_string(),
+        no_cd,
+    }))
 }
 
 fn parse_popd_operand<W>(
@@ -177,6 +299,7 @@ where
     }
 
     let args = strip_double_dash(args);
+    let (no_cd, args) = strip_no_cd(args);
     if args.is_empty() {
         return Ok(Some(PopdOperand::Top));
     }
@@ -193,7 +316,11 @@ where
     }
 
     let index = arg[1..].parse::<usize>().unwrap_or(usize::MAX);
-    Ok(Some(PopdOperand::Index(index)))
+    Ok(Some(PopdOperand::Index {
+        index,
+        from_right: arg.starts_with('-'),
+        no_cd,
+    }))
 }
 
 fn strip_double_dash<'a>(args: &'a [&str]) -> &'a [&'a str] {
@@ -211,16 +338,13 @@ fn is_stack_index(arg: &str) -> bool {
     !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
 }
 
-fn load_stack(env_vars: &HashMap<String, String>) -> Vec<String> {
+pub(crate) fn load_stack(env_vars: &HashMap<String, String>) -> Vec<String> {
     if let Some(value) = env_vars.get(DIR_STACK) {
-        let stack: Vec<String> = value
+        return value
             .split(SEP)
             .filter(|dir| !dir.is_empty())
             .map(str::to_string)
             .collect();
-        if !stack.is_empty() {
-            return stack;
-        }
     }
 
     vec![env_vars
@@ -229,7 +353,95 @@ fn load_stack(env_vars: &HashMap<String, String>) -> Vec<String> {
         .unwrap_or_else(|| "/".to_string())]
 }
 
-fn save_stack(env_vars: &mut HashMap<String, String>, stack: &[String]) {
+pub(crate) fn save_stack(env_vars: &mut HashMap<String, String>, stack: &[String]) {
     env_vars.insert(DIR_STACK.to_string(), stack.join(&SEP.to_string()));
+}
+
+pub(crate) fn stack_value(env_vars: &HashMap<String, String>, index: usize) -> Option<String> {
+    load_stack(env_vars).get(index).cloned()
+}
+
+pub(crate) fn stack_words(env_vars: &HashMap<String, String>) -> String {
+    load_stack(env_vars).join(" ")
+}
+
+pub(crate) fn set_stack_value(env_vars: &mut HashMap<String, String>, index: usize, value: String) {
+    let mut stack = load_stack(env_vars);
+    if index < stack.len() {
+        stack[index] = value;
+        save_stack(env_vars, &stack);
+    }
+}
+
+fn dirs_index_or_error<W, E>(
+    args: &[&str],
+    stack: &[String],
+    diagnostic_prefix: &str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<Option<i32>>
+where
+    W: Write,
+    E: Write,
+{
+    let Some(arg) = args.first().copied().filter(|arg| is_stack_index(arg)) else {
+        return Ok(None);
+    };
+    let Some(index) = stack_index(arg, stack.len()) else {
+        writeln!(
+            stderr,
+            "{diagnostic_prefix}dirs: {}: directory stack index out of range",
+            arg.trim_start_matches(['+', '-'])
+        )?;
+        return Ok(Some(EXECUTION_FAILURE));
+    };
+    writeln!(stdout, "{}", stack[index])?;
+    Ok(Some(EXECUTION_SUCCESS))
+}
+
+fn strip_no_cd<'a>(args: &'a [&str]) -> (bool, &'a [&'a str]) {
+    if args.first().copied() == Some("-n") {
+        (true, &args[1..])
+    } else {
+        (false, args)
+    }
+}
+
+fn stack_index(arg: &str, len: usize) -> Option<usize> {
+    let value = arg[1..].parse::<usize>().ok()?;
+    if len == usize::MAX {
+        return Some(if arg.starts_with('+') { value } else { usize::MAX });
+    }
+    if arg.starts_with('+') {
+        (value < len).then_some(value)
+    } else {
+        resolved_index(value, true, len)
+    }
+}
+
+fn resolved_index(value: usize, from_right: bool, len: usize) -> Option<usize> {
+    if !from_right {
+        return (value < len).then_some(value);
+    }
+    if value < len {
+        Some(len - 1 - value)
+    } else {
+        None
+    }
+}
+
+fn set_pwd_from_stack(env_vars: &mut HashMap<String, String>, stack: &[String], update_oldpwd: bool) {
+    let Some(pwd) = stack.first().cloned() else {
+        return;
+    };
+    if update_oldpwd {
+        let old = env_vars.get("PWD").cloned().unwrap_or_else(|| "/".to_string());
+        env_vars.insert("OLDPWD".to_string(), old);
+    }
+    env_vars.insert("PWD".to_string(), pwd);
+}
+
+fn logical_dir_exists(dir: &str) -> bool {
+    matches!(dir, "/" | "/bin" | "/etc" | "/tmp" | "/usr")
 }
 
