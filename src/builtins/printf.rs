@@ -30,7 +30,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
     )
 }
 
-fn execute_with_io<'a, I, W, E>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
