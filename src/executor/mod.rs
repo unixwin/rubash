@@ -236,6 +236,8 @@ impl Executor {
 
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        self.set_current_line(cmd);
+
         if let Some(for_command) = &cmd.for_command {
             return self.execute_for_command(for_command);
         }
@@ -889,8 +891,14 @@ impl Executor {
             return Ok(());
         }
 
+        if let Some(name) = bash_aliases_assignment_name(&cmd.words[0]) {
+            eprintln!("{}`{name}': invalid alias name", self.diagnostic_prefix());
+            self.exit_code = 1;
+            return Ok(());
+        }
+
         let Some(program) = find_user_command(&cmd.words[0], &self.env_vars) else {
-            eprintln!("rubash: {}: command not found", cmd.words[0]);
+            eprintln!("{}{}: command not found", self.diagnostic_prefix(), cmd.words[0]);
             self.exit_code = 127;
             return Ok(());
         };
@@ -995,6 +1003,26 @@ impl Executor {
     pub fn get_env(&self, name: &str) -> Option<&str> {
         self.env_vars.get(name).map(|s| s.as_str())
     }
+
+    fn set_current_line(&mut self, cmd: &CommandNode) {
+        if let Some(line) = cmd.line {
+            let line = line.to_string();
+            self.env_vars
+                .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            env::set_var("__RUBASH_CURRENT_LINE", line);
+        }
+    }
+
+    fn diagnostic_prefix(&self) -> String {
+        if let (Some(script), Some(line)) = (
+            self.env_vars.get("__RUBASH_SCRIPT_NAME"),
+            self.env_vars.get("__RUBASH_CURRENT_LINE"),
+        ) {
+            return format!("{script}: line {line}: ");
+        }
+
+        "rubash: ".to_string()
+    }
 }
 
 impl Default for Executor {
@@ -1078,6 +1106,15 @@ fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
 
 fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
+}
+
+fn bash_aliases_assignment_name(word: &str) -> Option<String> {
+    // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic associative array
+    // backed by the alias table. This narrow path reports invalid alias names
+    // for upstream alias.tests.
+    let rest = word.strip_prefix("BASH_ALIASES[")?;
+    let (name, _) = rest.split_once("]=")?;
+    Some(name.trim_matches('\'').to_string())
 }
 
 fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {

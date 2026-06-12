@@ -60,6 +60,8 @@ pub struct CommandNode {
     pub for_command: Option<ForCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
+    /// Script line number where this command starts, when known.
+    pub line: Option<usize>,
 }
 
 impl CommandNode {
@@ -77,6 +79,7 @@ impl CommandNode {
             background: false,
             for_command: None,
             case_command: None,
+            line: None,
         }
     }
 
@@ -136,9 +139,11 @@ pub fn parse(tokens: &[Token]) -> Ast {
 
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
+                note_command_line(&mut current_cmd, token);
                 current_cmd.words.push(token.value.clone());
             }
             TokenKind::Assignment => {
+                note_command_line(&mut current_cmd, token);
                 if let Some(pos) = token.value.find('=') {
                     if current_cmd.words.is_empty() {
                         let var_name = token.value[..pos].to_string();
@@ -169,6 +174,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd = CommandNode::new();
             }
             TokenKind::RedirectIn => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_in = Some(Redirect {
@@ -181,6 +187,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::RedirectOut => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_out = Some(Redirect {
@@ -193,6 +200,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::Append => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.append = Some(Redirect {
@@ -205,6 +213,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::RedirectErr => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_err = Some(Redirect {
@@ -217,6 +226,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::RedirectErrAppend => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
                         current_cmd.redirect_err_append = Some(Redirect {
@@ -229,11 +239,13 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::HereDoc => {
+                note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
                     i += 1;
                 }
             }
             TokenKind::HereDocBody => {
+                note_command_line(&mut current_cmd, token);
                 current_cmd.heredoc = Some(token.value.clone());
             }
             TokenKind::And | TokenKind::Or => {
@@ -246,6 +258,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // parser states. If an ordinary command has already started,
                 // keep the token text so alias expansion can reparse it later.
                 if !matches!(token.value.as_str(), "(" | ")" | "{" | "}") {
+                    note_command_line(&mut current_cmd, token);
                     current_cmd.words.push(token.value.clone());
                 }
             }
@@ -318,6 +331,7 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
 
     let body = parse(&tokens[body_start..i]).commands;
     let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
         variable,
         words,
@@ -412,8 +426,15 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
     }
 
     let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(CaseCommand { word, clauses });
     Some((command, i + 1))
+}
+
+fn note_command_line(cmd: &mut CommandNode, token: &Token) {
+    if cmd.line.is_none() {
+        cmd.line = Some(token.position);
+    }
 }
 
 fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {

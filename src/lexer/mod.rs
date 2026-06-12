@@ -102,14 +102,20 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
     let mut output = Vec::new();
     let mut lines = input.lines();
     let mut position = 0;
+    let mut line_number = 1;
+    let mut logical_start_line = 1;
     let mut logical_line = String::new();
 
     while let Some(line) = lines.next() {
+        if logical_line.is_empty() {
+            logical_start_line = line_number;
+        }
         if !logical_line.is_empty() {
             logical_line.push('\n');
         }
         logical_line.push_str(line);
         position += line.len() + 1;
+        line_number += 1;
 
         if has_unclosed_quotes(&logical_line)
             && (is_multiline_alias_definition(&logical_line)
@@ -119,6 +125,9 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         }
 
         let mut line_tokens = tokenize_plain(&logical_line);
+        for token in &mut line_tokens {
+            token.position = logical_start_line;
+        }
         let delimiter = heredoc_delimiter(&line_tokens);
         output.append(&mut line_tokens);
         logical_line.clear();
@@ -135,13 +144,16 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
             }
             output.push(Token::new(TokenKind::HereDocBody, &body, position));
         }
-        output.push(Token::new(TokenKind::Semicolon, ";", position));
+        output.push(Token::new(TokenKind::Semicolon, ";", logical_start_line));
     }
 
     if !logical_line.is_empty() {
         let mut line_tokens = tokenize_plain(&logical_line);
+        for token in &mut line_tokens {
+            token.position = logical_start_line;
+        }
         output.append(&mut line_tokens);
-        output.push(Token::new(TokenKind::Semicolon, ";", position));
+        output.push(Token::new(TokenKind::Semicolon, ";", logical_start_line));
     }
 
     output
