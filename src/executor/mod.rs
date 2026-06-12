@@ -2,11 +2,15 @@
 //!
 //! Executes parsed AST commands.
 
+mod path;
+
 use crate::parser::{Ast, CommandNode};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::process::{Command, Stdio};
+
+use self::path::{find_shell, find_user_command, should_run_with_shell};
 
 /// Execution error
 #[derive(Debug)]
@@ -41,6 +45,7 @@ impl From<std::io::Error> for ExecuteError {
 pub struct Executor {
     exit_code: i32,
     env_vars: HashMap<String, String>,
+    aliases: HashMap<String, String>,
 }
 
 impl Executor {
@@ -48,6 +53,7 @@ impl Executor {
         Self {
             exit_code: 0,
             env_vars: std::env::vars().collect(),
+            aliases: HashMap::new(),
         }
     }
 
@@ -61,6 +67,26 @@ impl Executor {
 
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let expanded;
+        let cmd = if let Some(word) = cmd.words.first() {
+            if let Some(value) = self.aliases.get(word) {
+                let mut words: Vec<String> = value
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect();
+                words.extend(cmd.words.iter().skip(1).cloned());
+                expanded = CommandNode {
+                    words,
+                    ..cmd.clone()
+                };
+                &expanded
+            } else {
+                cmd
+            }
+        } else {
+            cmd
+        };
+
         if let Some(word) = cmd.words.first() {
             match word.as_str() {
                 "exit" => match crate::builtins::exit::execute(&cmd.words[1..], self.exit_code)? {
@@ -116,6 +142,16 @@ impl Executor {
                     self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
+                "alias" => {
+                    self.exit_code =
+                        crate::builtins::alias::alias(&cmd.words[1..], &mut self.aliases)?;
+                    Ok(())
+                }
+                "unalias" => {
+                    self.exit_code =
+                        crate::builtins::alias::unalias(&cmd.words[1..], &mut self.aliases)?;
+                    Ok(())
+                }
                 "export" => {
                     self.exit_code =
                         crate::builtins::setattr::export(&cmd.words[1..], &mut self.env_vars)?;
@@ -127,6 +163,14 @@ impl Executor {
                 "env" => { self.do_env(); Ok(()) }
                 "set" => {
                     self.exit_code = crate::builtins::set::set(&cmd.words[1..], &self.env_vars)?;
+                    Ok(())
+                }
+                "shopt" => {
+                    self.exit_code = crate::builtins::shopt::execute(&cmd.words[1..])?;
+                    Ok(())
+                }
+                "hash" => {
+                    self.exit_code = crate::builtins::hash::execute(&cmd.words[1..])?;
                     Ok(())
                 }
                 "unset" => {
@@ -170,8 +214,26 @@ impl Executor {
             return Ok(());
         }
 
-        let mut process = Command::new(&cmd.words[0]);
-        process.args(&cmd.words[1..]);
+        let Some(program) = find_user_command(&cmd.words[0], &self.env_vars) else {
+            eprintln!("rubash: {}: command not found", cmd.words[0]);
+            self.exit_code = 127;
+            return Ok(());
+        };
+
+        let mut process = if should_run_with_shell(&program) {
+            if let Some(shell) = find_shell(&self.env_vars) {
+                let mut command = Command::new(shell);
+                command.arg(&program);
+                command.args(&cmd.words[1..]);
+                command
+            } else {
+                Command::new(&program)
+            }
+        } else {
+            let mut command = Command::new(&program);
+            command.args(&cmd.words[1..]);
+            command
+        };
 
         for (var_name, var_value) in &cmd.assignments {
             process.env(var_name, var_value);
@@ -202,11 +264,14 @@ impl Executor {
             process.stderr(Stdio::from(file));
         }
 
-        let status = process.status()?;
-        self.exit_code = status.code().unwrap_or(0);
-
-        if !status.success() {
-            return Err(ExecuteError::ExitCode(self.exit_code));
+        match process.status() {
+            Ok(status) => {
+                self.exit_code = status.code().unwrap_or(1);
+            }
+            Err(error) => {
+                eprintln!("rubash: {}: {}", cmd.words[0], error);
+                self.exit_code = 126;
+            }
         }
 
         Ok(())

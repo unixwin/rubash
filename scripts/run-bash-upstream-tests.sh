@@ -1,13 +1,58 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
+
+PATH="/c/Users/caomengxuan/.cargo/bin:/usr/bin:/bin:$PATH"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASH_UPSTREAM_DIR="${BASH_UPSTREAM_DIR:-"$ROOT_DIR/third_party/bash"}"
+BASH_UPSTREAM_DIR="$ROOT_DIR/third_party/bash"
 BASH_TEST_DIR="$BASH_UPSTREAM_DIR/tests"
-OUT_DIR="${BASH_UPSTREAM_OUT_DIR:-"$ROOT_DIR/target/bash-upstream-tests"}"
+OUT_DIR="$ROOT_DIR/target/bash-upstream-tests"
 STRICT="${BASH_UPSTREAM_STRICT:-0}"
 
+real_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$1"
+  else
+    (cd "$(dirname "$1")" && printf '%s/%s\n' "$PWD" "$(basename "$1")")
+  fi
+}
+
+ROOT_REAL="$(real_path "$ROOT_DIR")"
+ROOT_REAL="${ROOT_REAL%/}"
+EXPECTED_ROOT_REAL="/c/Users/caomengxuan/repo/rubash"
+if [[ "$ROOT_REAL" != "$EXPECTED_ROOT_REAL" ]]; then
+  echo "Refusing to run Bash upstream tests outside fixed repo root: $ROOT_REAL" >&2
+  echo "Expected: $EXPECTED_ROOT_REAL" >&2
+  exit 2
+fi
+
+OUT_REAL="$(real_path "$OUT_DIR")"
+WORK_ROOT="$OUT_DIR/work"
+WORK_ROOT_REAL="$(real_path "$WORK_ROOT")"
+HOME_REAL="$(real_path "${HOME:-}")"
+
 mkdir -p "$OUT_DIR/logs"
+
+refuse_unsafe_dir() {
+  local dir="$1"
+  local real
+  real="$(real_path "$dir")"
+
+  case "$real" in
+    "$WORK_ROOT_REAL"/*) ;;
+    *)
+      echo "Refusing to run Bash upstream tests outside isolated work dir: $real" >&2
+      exit 2
+      ;;
+  esac
+
+  case "$real" in
+    ""|"/"|"$HOME_REAL"|"$ROOT_REAL"|"$OUT_REAL")
+      echo "Refusing unsafe Bash upstream test directory: $real" >&2
+      exit 2
+      ;;
+  esac
+}
 
 if [[ ! -d "$BASH_TEST_DIR" ]]; then
   echo "Bash upstream tests not found at $BASH_TEST_DIR" >&2
@@ -52,26 +97,88 @@ SUMMARY_MD="$OUT_DIR/summary.md"
 printf "test\tstatus\texit_code\tlog\n" > "$RESULTS_TSV"
 
 for runner in "${RUNNERS[@]}"; do
+  if [[ "$runner" == */* || "$runner" == *\\* ]]; then
+    echo "Refusing runner name with path separators: $runner" >&2
+    exit 2
+  fi
+
   TOTAL=$((TOTAL + 1))
   log="$OUT_DIR/logs/$runner.log"
   workdir="$OUT_DIR/work/$runner"
   test_workdir="$workdir/tests"
+  expected_dir="$workdir/expected"
   tmpdir="$workdir/tmp"
+  test_home="$workdir/home"
+  guard_bin="$workdir/guard-bin"
+  shell_wrapper="$workdir/rubash-wrapper"
+  refuse_unsafe_dir "$workdir"
   rm -rf "$workdir"
-  mkdir -p "$tmpdir"
+  mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
   cp -R "$BASH_TEST_DIR" "$test_workdir"
+  cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
+  refuse_unsafe_dir "$test_workdir"
+  workdir_real="$(real_path "$workdir")"
+  expected_dir_real="$(real_path "$expected_dir")"
 
+  find "$test_workdir" -maxdepth 1 -type f -name 'run-*' -exec \
+    sed -i -E "s@([[:alnum:]_.+-]+\\.right)@$expected_dir_real/\\1@g" {} +
+
+  for guarded_cmd in rm touch mkdir cp mv ln; do
+    guarded_path="$(command -v "$guarded_cmd")"
+    cat >"$guard_bin/$guarded_cmd" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+PATH="/usr/bin:/bin:\$PATH"
+allowed="$workdir_real"
+cwd="\$(realpath -m "\$PWD")"
+case "\$cwd" in
+  "\$allowed"|"\$allowed"/*) ;;
+  *)
+    echo "Refusing $guarded_cmd outside Bash upstream work dir: \$cwd" >&2
+    echo "Allowed: \$allowed" >&2
+    exit 126
+    ;;
+esac
+exec "$guarded_path" "\$@"
+EOF
+    chmod +x "$guard_bin/$guarded_cmd"
+  done
+
+  cat >"$shell_wrapper" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+PATH="$guard_bin:/usr/bin:/bin:\$PATH"
+allowed="$workdir_real"
+cwd="\$(realpath -m "\$PWD")"
+case "\$cwd" in
+  "\$allowed"|"\$allowed"/*) ;;
+  *)
+    echo "Refusing to start rubash outside Bash upstream work dir: \$cwd" >&2
+    echo "Allowed: \$allowed" >&2
+    exit 126
+    ;;
+esac
+export HOME="$test_home"
+export TMPDIR="$tmpdir"
+exec "$SHELL_BIN" "\$@"
+EOF
+  chmod +x "$shell_wrapper"
+
+  set +e
   (
     cd "$test_workdir"
+    refuse_unsafe_dir "$PWD"
     env \
-      THIS_SH="$SHELL_BIN" \
+      HOME="$test_home" \
+      THIS_SH="$shell_wrapper" \
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
-      PATH="$BASH_TEST_DIR:$PATH" \
+      PATH="$guard_bin:$BASH_TEST_DIR:$PATH" \
       sh "./$runner"
   ) >"$log" 2>&1
   status=$?
+  set -e
 
   if [[ "$status" -eq 0 && ! -s "$log" ]]; then
     PASS=$((PASS + 1))
