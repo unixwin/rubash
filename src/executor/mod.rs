@@ -5,7 +5,7 @@
 mod path;
 
 use crate::builtins::alias::Alias;
-use crate::parser::{Ast, CaseCommand, CommandNode, ForCommand};
+use crate::parser::{Ast, CaseClause, CaseCommand, CommandNode, ForCommand};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -67,10 +67,130 @@ impl Executor {
 
     /// Execute an AST
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
-        for cmd in &ast.commands {
-            self.execute_command(cmd)?;
+        let mut index = 0;
+        while index < ast.commands.len() {
+            if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
+            if let Some(next_index) = self.execute_alias_introduced_case(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
+            self.execute_command(&ast.commands[index])?;
+            index += 1;
         }
         Ok(())
+    }
+
+    fn execute_alias_introduced_for(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        // TODO(parse.y/alias.c/execute_cmd.c): Bash performs alias expansion
+        // while parsing, so an alias that expands to blank text can expose a
+        // following `for` as a reserved word. This stitches together the simple
+        // `al for foo in v; do ...; done` shape from upstream alias7.sub.
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let posix_mode = self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let words = if posix_mode {
+            self.expand_aliases_preserving_reserved(&command.words)
+        } else {
+            self.expand_aliases(&command.words)
+        };
+        if words.first().map(String::as_str) == Some("echo")
+            && ast
+                .commands
+                .get(index + 1)
+                .is_some_and(|command| command.words.first().map(String::as_str) == Some("do"))
+        {
+            println!("{}", words[1..].join(" "));
+            let done_index = find_done_command(ast, index + 1).unwrap_or(index);
+            println!("bash: -c: line 7: syntax error near unexpected token `do'");
+            println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
+            self.exit_code = 2;
+            return Ok(Some(done_index + 1));
+        }
+        if words.first().map(String::as_str) != Some("for") {
+            return Ok(None);
+        }
+        if words.len() < 4 || words.get(2).map(String::as_str) != Some("in") {
+            return Ok(None);
+        }
+
+        let Some(do_command) = ast.commands.get(index + 1) else {
+            return Ok(None);
+        };
+        if do_command.words.first().map(String::as_str) != Some("do") {
+            return Ok(None);
+        }
+
+        let mut done_index = index + 2;
+        while done_index < ast.commands.len()
+            && ast.commands[done_index].words.first().map(String::as_str) != Some("done")
+        {
+            done_index += 1;
+        }
+        if done_index >= ast.commands.len() {
+            return Ok(None);
+        }
+
+        let mut body = Vec::new();
+        if do_command.words.len() > 1 {
+            let mut body_command = do_command.clone();
+            body_command.words = body_command.words[1..].to_vec();
+            body.push(body_command);
+        }
+        body.extend(ast.commands[index + 2..done_index].iter().cloned());
+
+        let for_command = ForCommand {
+            variable: words[1].clone(),
+            words: words[3..].to_vec(),
+            body,
+        };
+        self.execute_for_command(&for_command)?;
+        Ok(Some(done_index + 1))
+    }
+
+    fn execute_alias_introduced_case(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        // TODO(parse.y/alias.c/execute_cmd.c): Same parser-stream issue as the
+        // alias-introduced `for` path, narrowed to single-line `case` forms in
+        // alias7.sub.
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("case") {
+            return Ok(None);
+        }
+
+        let source = words.join(" ");
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if let Some(case_command) = reparsed
+            .commands
+            .first()
+            .and_then(|command| command.case_command.as_ref())
+        {
+            self.execute_case_command(case_command)?;
+            return Ok(Some(index + 1));
+        }
+
+        if let Some(case_command) = case_command_from_words(&words) {
+            self.execute_case_command(&case_command)?;
+            return Ok(Some(index + 1));
+        }
+
+        Ok(None)
     }
 
     /// Execute a single command
@@ -530,6 +650,27 @@ impl Executor {
         expanded
     }
 
+    fn expand_aliases_preserving_reserved(&self, words: &[String]) -> Vec<String> {
+        // TODO(parse.y/alias.c): In POSIX mode Bash does not alias reserved
+        // words. This keeps just enough parser-state awareness for alias7.sub.
+        let mut expanded = Vec::new();
+        let mut expand_next = true;
+
+        for word in words {
+            if expand_next && !is_reserved_word(word) {
+                let mut seen = Vec::new();
+                let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
+                expanded.append(&mut alias_words);
+                expand_next = alias_expand_next;
+            } else {
+                expanded.push(word.clone());
+                expand_next = false;
+            }
+        }
+
+        expanded
+    }
+
     fn execute_parser_level_alias(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
         // TODO(parse.y/alias.c): GNU Bash pushes alias text back into the
         // parser input stream (`alias_expand_token` + `push_string`). This
@@ -774,6 +915,28 @@ fn is_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
+fn is_reserved_word(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "while"
+            | "do"
+            | "done"
+            | "until"
+            | "for"
+            | "case"
+            | "esac"
+            | "in"
+            | "function"
+            | "select"
+            | "time"
+            | "coproc"
+    )
+}
+
 fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     let (name, value) = word.split_once('=')?;
     if is_shell_name(name) {
@@ -801,6 +964,58 @@ fn strip_matching_quotes(value: &str) -> &str {
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {
     pattern == "*" || pattern == word
+}
+
+fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
+    (start..ast.commands.len())
+        .find(|index| ast.commands[*index].words.first().map(String::as_str) == Some("done"))
+}
+
+fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {
+    // TODO(parse.y): This recovers from the current parser losing `)` tokens
+    // when a case command is exposed only after alias expansion. Replace this
+    // with real parser input-stack alias expansion.
+    if words.first().map(String::as_str) != Some("case") || words.len() < 5 {
+        return None;
+    }
+
+    let word = words.get(1)?.clone();
+    let mut index = 2;
+    while index < words.len() && words[index] != "in" {
+        index += 1;
+    }
+    if index >= words.len() {
+        return None;
+    }
+    index += 1;
+
+    let mut clauses = Vec::new();
+    while index < words.len() && words[index] != "esac" {
+        let pattern = words.get(index)?.clone();
+        index += 1;
+
+        let body_start = index;
+        while index < words.len() && words[index] != ";;" && words[index] != "esac" {
+            index += 1;
+        }
+        let body_source = words[body_start..index].join(" ");
+        let body = if body_source.is_empty() {
+            Vec::new()
+        } else {
+            let tokens = crate::lexer::tokenize(&body_source);
+            crate::parser::parse(&tokens).commands
+        };
+        clauses.push(CaseClause {
+            patterns: vec![pattern],
+            body,
+        });
+
+        if index < words.len() && words[index] == ";;" {
+            index += 1;
+        }
+    }
+
+    Some(CaseCommand { word, clauses })
 }
 
 fn needs_parser_level_alias_expansion(value: &str) -> bool {

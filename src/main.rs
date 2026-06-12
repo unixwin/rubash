@@ -15,21 +15,7 @@ fn main() {
     let mut executor = Executor::new();
 
     if args.len() > 1 {
-        let code = match args[1].as_str() {
-            "-c" => {
-                if let Some(command) = args.get(2) {
-                    run_command_string(&mut executor, command)
-                } else {
-                    eprintln!("rubash: -c: option requires an argument");
-                    2
-                }
-            }
-            "--help" | "-h" => {
-                print_usage();
-                0
-            }
-            script => run_script_file(&mut executor, script),
-        };
+        let code = run_args(&mut executor, &args[1..]);
         std::process::exit(code);
     }
 
@@ -38,6 +24,35 @@ fn main() {
 
 fn print_usage() {
     println!("Usage: rubash [-c command] [script]");
+}
+
+fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
+    // TODO(shell.c): GNU Bash has a full option parser and shell-name handling.
+    // This narrow parser supports the `-c` and `-o posix -c` forms used by
+    // upstream alias tests.
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-o" if args.get(index + 1).map(String::as_str) == Some("posix") => {
+                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                index += 2;
+            }
+            "-c" => {
+                if let Some(command) = args.get(index + 1) {
+                    return run_command_string(executor, command);
+                }
+                eprintln!("rubash: -c: option requires an argument");
+                return 2;
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return 0;
+            }
+            script => return run_script_file(executor, script),
+        }
+    }
+
+    0
 }
 
 fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
