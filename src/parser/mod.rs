@@ -56,6 +56,8 @@ pub struct CommandNode {
     pub pipe: Option<usize>,
     /// Background execution (&)
     pub background: bool,
+    /// Connector to the next command: Some(true) for &&, Some(false) for ||.
+    pub and_or: Option<bool>,
     /// `for name in words; do ...; done`
     pub for_command: Option<ForCommand>,
     /// `case word in pattern) ... ;; esac`
@@ -77,6 +79,7 @@ impl CommandNode {
             heredoc: None,
             pipe: None,
             background: false,
+            and_or: None,
             for_command: None,
             case_command: None,
             line: None,
@@ -85,7 +88,7 @@ impl CommandNode {
 
     /// Returns Some(true) for &&, Some(false) for ||, None otherwise
     pub fn and_or(&self) -> Option<bool> {
-        None
+        self.and_or
     }
 }
 
@@ -249,7 +252,19 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd.heredoc = Some(token.value.clone());
             }
             TokenKind::And | TokenKind::Or => {
-                // TODO: Handle logical operators
+                // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
+                // list connector on simple commands. Full Bash grammar needs
+                // a list AST with compound commands and proper precedence.
+                current_cmd.and_or = Some(token.kind == TokenKind::And);
+                ast.commands.push(current_cmd);
+                current_cmd = CommandNode::new();
+            }
+            TokenKind::Background => {
+                // TODO(parse.y/jobs.c): Bash starts the preceding pipeline
+                // asynchronously and returns immediately. Until job control is
+                // represented, keep `&` as a command terminator so redirections
+                // apply to the command instead of treating `&` as an argument.
+                current_cmd.background = true;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }

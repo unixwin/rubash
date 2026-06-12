@@ -10,16 +10,18 @@ use crate::executor::path::shell_path_to_windows;
 use crate::executor::{ExecuteError, Executor};
 use crate::parser::Ast;
 use std::fs;
+use std::path::PathBuf;
 
 pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteError> {
     // TODO(builtins/source.def): GNU Bash `source_builtin` searches PATH,
     // handles `-p`, temporarily replaces positional parameters, and uses
     // unwind/trap machinery around `source_file`.
-    let Some(filename) = args.first() else {
+    let Some(invocation) = SourceInvocation::parse(args) else {
         eprintln!("rubash: source: filename argument required");
         executor.set_exit_code(2);
         return Ok(());
     };
+    let filename = invocation.filename;
 
     if is_null_device(filename) {
         executor.set_exit_code(0);
@@ -37,7 +39,18 @@ pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteEr
         }
     }
 
-    let source_path = shell_path_to_windows(filename, executor.env_vars());
+    let Some(source_path) = invocation.resolve_path(executor) else {
+        eprintln!(
+            "{}{filename}: No such file or directory",
+            executor.diagnostic_prefix()
+        );
+        executor.set_exit_code(1);
+        if executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
+            return Err(ExecuteError::ExitCode(1));
+        }
+        return Ok(());
+    };
+
     let source = match fs::read_to_string(&source_path) {
         Ok(source) => source,
         Err(_) => {
@@ -53,7 +66,7 @@ pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteEr
         }
     };
 
-    execute_text_with_args(executor, &source, &args[1..])
+    execute_text_with_args(executor, &source, invocation.args)
 }
 
 pub fn execute_text(executor: &mut Executor, source: &str) -> Result<(), ExecuteError> {
@@ -178,4 +191,59 @@ fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> 
 
 fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
+}
+
+struct SourceInvocation<'a> {
+    filename: &'a str,
+    args: &'a [String],
+    path: Option<&'a str>,
+}
+
+impl<'a> SourceInvocation<'a> {
+    fn parse(args: &'a [String]) -> Option<Self> {
+        match args {
+            [flag, path, filename, rest @ ..] if flag == "-p" => Some(Self {
+                filename,
+                args: rest,
+                path: Some(path),
+            }),
+            [filename, rest @ ..] => Some(Self {
+                filename,
+                args: rest,
+                path: None,
+            }),
+            [] => None,
+        }
+    }
+
+    fn resolve_path(&self, executor: &Executor) -> Option<PathBuf> {
+        if let Some(path) = self.path {
+            return source_path_search(path, self.filename, executor);
+        }
+
+        let source_path = shell_path_to_windows(self.filename, executor.env_vars());
+        source_path.exists().then_some(source_path)
+    }
+}
+
+fn source_path_search(path: &str, filename: &str, executor: &Executor) -> Option<PathBuf> {
+    // TODO(builtins/source.def/findcmd.c): Bash `source -p path file` searches
+    // the supplied path list instead of sourcepath/PATH. Empty components mean
+    // the current directory. This keeps ownership with source.def while path
+    // canonicalization still lives in the findcmd.c-mapped executor::path.
+    for entry in path.split(':') {
+        let candidate = if entry.is_empty() || entry == "." {
+            PathBuf::from(filename)
+        } else {
+            let mut base = shell_path_to_windows(entry, executor.env_vars());
+            base.push(filename);
+            base
+        };
+
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }

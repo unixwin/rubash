@@ -19,5 +19,6 @@ pub mod shopt;
 pub mod source;
 pub mod test;
 pub mod times;
+pub mod trap;
 pub mod r#type;
 pub mod umask;

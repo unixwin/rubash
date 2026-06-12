@@ -275,6 +275,17 @@ fn filesystem_path_for_display(dir: &str, env_vars: &HashMap<String, String>) ->
     // Bash-visible /tmp paths logical while backing them with TMPDIR under the
     // guarded work directory.
     if cfg!(windows) {
+        if dir.len() >= 3
+            && dir.as_bytes()[0] == b'/'
+            && dir.as_bytes()[2] == b'/'
+            && dir.as_bytes()[1].is_ascii_alphabetic()
+        {
+            let drive = dir.as_bytes()[1] as char;
+            return PathBuf::from(
+                format!("{}:\\{}", drive.to_ascii_uppercase(), &dir[3..]).replace('/', "\\"),
+            );
+        }
+
         if dir == "/tmp" {
             if let Some(tmpdir) = shell_var(env_vars, "TMPDIR") {
                 return PathBuf::from(tmpdir);

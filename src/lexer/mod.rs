@@ -16,6 +16,7 @@ pub enum TokenKind {
     RedirectErr,
     RedirectErrAppend,
     HereDoc,
+    Background,
     And,
     Or,
     Keyword,
@@ -305,9 +306,11 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('&') {
                     self.advance();
                     Some(Token::new(TokenKind::And, "&&", start))
-                } else {
+                } else if self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
                     self.skip_word();
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
+                } else {
+                    Some(Token::new(TokenKind::Background, "&", start))
                 }
             }
             '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
