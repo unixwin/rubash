@@ -165,7 +165,7 @@ impl<'a> Lexer<'a> {
 
     fn skip_word(&mut self) {
         while let Some(c) = self.peek() {
-            if " \t\n|&;<>#$`{}".contains(c) { break; }
+            if " \t\n|&;<>#`{}".contains(c) { break; }
             match c {
                 '\'' => {
                     self.advance();
@@ -178,6 +178,20 @@ impl<'a> Lexer<'a> {
                 '\\' => {
                     self.advance();
                     self.advance();
+                }
+                '$' => {
+                    self.advance();
+                    match self.peek() {
+                        Some('{') => {
+                            self.advance();
+                            self.skip_braced();
+                        }
+                        Some('(') => {
+                            self.advance();
+                            self.skip_cmd_subst();
+                        }
+                        _ => {}
+                    }
                 }
                 _ => {
                     self.advance();

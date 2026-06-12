@@ -5,9 +5,10 @@
 mod path;
 
 use crate::parser::{Ast, CommandNode};
+use crate::builtins::alias::Alias;
 use std::collections::HashMap;
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::process::{Command, Stdio};
 
 use self::path::{find_shell, find_user_command, should_run_with_shell};
@@ -45,7 +46,7 @@ impl From<std::io::Error> for ExecuteError {
 pub struct Executor {
     exit_code: i32,
     env_vars: HashMap<String, String>,
-    aliases: HashMap<String, String>,
+    aliases: HashMap<String, Alias>,
 }
 
 impl Executor {
@@ -69,8 +70,9 @@ impl Executor {
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if cmd.words.is_empty() {
             for (name, value) in &cmd.assignments {
-                self.env_vars.insert(name.clone(), value.clone());
-                env::set_var(name, value);
+                let expanded_value = self.expand_word(value);
+                self.env_vars.insert(name.clone(), expanded_value.clone());
+                env::set_var(name, expanded_value);
             }
             self.exit_code = 0;
             return Ok(());
@@ -84,23 +86,13 @@ impl Executor {
             .collect();
 
         let expanded;
-        let cmd = if let Some(word) = variable_expanded.words.first() {
-            if let Some(value) = self.aliases.get(word) {
-                let mut words: Vec<String> = value
-                    .split_whitespace()
-                    .map(str::to_string)
-                    .collect();
-                words.extend(variable_expanded.words.iter().skip(1).cloned());
-                expanded = CommandNode {
-                    words,
-                    ..variable_expanded.clone()
-                };
-                &expanded
-            } else {
-                &variable_expanded
-            }
-        } else {
-            &variable_expanded
+        let cmd = {
+            let words = self.expand_aliases(&variable_expanded.words);
+            expanded = CommandNode {
+                words,
+                ..variable_expanded.clone()
+            };
+            &expanded
         };
 
         if let Some(word) = cmd.words.first() {
@@ -135,6 +127,7 @@ impl Executor {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
+                "source" | "." => self.execute_source(&cmd.words[1..]),
                 "printf" => {
                     self.exit_code =
                         crate::builtins::printf::execute(&cmd.words[1..], &mut self.env_vars)?;
@@ -240,10 +233,141 @@ impl Executor {
         }
 
         if let Some(name) = word.strip_prefix('$') {
-            return self.env_vars.get(name).cloned().unwrap_or_default();
+            if is_shell_name(name) {
+                return self.env_vars.get(name).cloned().unwrap_or_default();
+            }
         }
 
-        word.to_string()
+        self.expand_embedded_parameters(word)
+    }
+
+    fn expand_embedded_parameters(&self, word: &str) -> String {
+        // TODO(subst.c/subst.h): This is a narrow parameter-expansion subset.
+        // GNU Bash handles quoting state, operators like ${name:-word},
+        // positional/special parameters, arrays, command substitution, and IFS
+        // word splitting here. Keep extending this toward subst.c semantics.
+        let mut output = String::new();
+        let mut chars = word.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                output.push(ch);
+                continue;
+            }
+
+            match chars.peek().copied() {
+                Some('?') => {
+                    chars.next();
+                    output.push_str(&self.exit_code.to_string());
+                }
+                Some('{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    for name_ch in chars.by_ref() {
+                        if name_ch == '}' {
+                            break;
+                        }
+                        name.push(name_ch);
+                    }
+                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                }
+                Some(first) if is_shell_name_start(first) => {
+                    let mut name = String::new();
+                    while let Some(name_ch) = chars.peek().copied() {
+                        if !is_shell_name_char(name_ch) {
+                            break;
+                        }
+                        chars.next();
+                        name.push(name_ch);
+                    }
+                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                }
+                Some(other) => {
+                    chars.next();
+                    output.push('$');
+                    output.push(other);
+                }
+                None => output.push('$'),
+            }
+        }
+
+        output
+    }
+
+    fn expand_aliases(&self, words: &[String]) -> Vec<String> {
+        let mut expanded = Vec::new();
+        let mut expand_next = true;
+
+        for word in words {
+            if expand_next {
+                let mut seen = Vec::new();
+                let (mut alias_words, alias_expand_next) =
+                    self.expand_alias_word(word, &mut seen);
+                expanded.append(&mut alias_words);
+                expand_next = alias_expand_next;
+            } else {
+                expanded.push(word.clone());
+                expand_next = false;
+            }
+        }
+
+        expanded
+    }
+
+    fn expand_alias_word(&self, word: &str, seen: &mut Vec<String>) -> (Vec<String>, bool) {
+        // TODO(alias.c/alias.h/parse.y): Bash marks AL_BEINGEXPANDED in
+        // parse.y::alias_expand_token and re-reads parser input. This executor-level
+        // approximation preserves AL_EXPANDNEXT and recursion suppression, but it
+        // cannot make redirections or compound commands introduced by aliases parse
+        // exactly like GNU Bash yet.
+        if seen.iter().any(|seen_word| seen_word == word) {
+            return (vec![word.to_string()], false);
+        }
+
+        let Some(alias) = self.aliases.get(word) else {
+            return (vec![word.to_string()], false);
+        };
+
+        seen.push(word.to_string());
+        let mut parts: Vec<String> = alias
+            .value
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+
+        if let Some(first) = parts.first().cloned() {
+            let (mut first_expanded, _) = self.expand_alias_word(&first, seen);
+            parts.remove(0);
+            first_expanded.extend(parts);
+            (first_expanded, alias.expand_next)
+        } else {
+            (Vec::new(), alias.expand_next)
+        }
+    }
+
+    fn execute_source(&mut self, args: &[String]) -> Result<(), ExecuteError> {
+        // TODO(builtins/source.def): GNU Bash `source_builtin` searches PATH,
+        // handles `-p`, temporarily replaces positional parameters, and uses
+        // unwind/trap machinery around `source_file`. This is the minimal
+        // current-shell execution path needed by upstream alias subtests.
+        let Some(filename) = args.first() else {
+            eprintln!("rubash: source: filename argument required");
+            self.exit_code = 2;
+            return Ok(());
+        };
+
+        let source = match fs::read_to_string(filename) {
+            Ok(source) => source,
+            Err(error) => {
+                eprintln!("rubash: source: {filename}: {error}");
+                self.exit_code = 1;
+                return Ok(());
+            }
+        };
+
+        let tokens = crate::lexer::tokenize(&source);
+        let ast = crate::parser::parse(&tokens);
+        self.execute_ast(&ast)
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -332,6 +456,23 @@ impl Default for Executor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn is_shell_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    is_shell_name_start(first) && chars.all(is_shell_name_char)
+}
+
+fn is_shell_name_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_shell_name_char(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]
