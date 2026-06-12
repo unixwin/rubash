@@ -153,6 +153,11 @@ for runner in "${RUNNERS[@]}"; do
   mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
   cp -R "$BASH_TEST_DIR" "$test_workdir"
   cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
+  # Normalize expected output line endings for Windows worktrees. The upstream
+  # Bash tests compare byte-for-byte, while Rubash writes LF on all platforms.
+  # TODO(tests/redir.c): replace this harness normalization once the test
+  # workspace checkout is forced to LF independent of host git attributes.
+  sed -i 's/\r$//' "$expected_dir"/*.right
   refuse_unsafe_dir "$test_workdir"
   workdir_real="$(real_path "$workdir")"
   expected_dir_real="$(real_path "$expected_dir")"

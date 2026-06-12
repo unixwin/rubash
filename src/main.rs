@@ -69,6 +69,7 @@ fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
         }
     };
 
+    executor.set_env("__RUBASH_SCRIPT_NAME", script);
     run_source(executor, &contents, false)
 }
 

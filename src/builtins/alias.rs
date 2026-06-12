@@ -6,6 +6,7 @@
 //! - builtins/alias.def (`alias_builtin`, `unalias_builtin`)
 
 use std::collections::HashMap;
+use std::env;
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -69,7 +70,7 @@ where
     for arg in args {
         if let Some((name, value)) = arg.split_once('=') {
             if !valid_alias_name(name) {
-                writeln!(stderr, "rubash: alias: `{name}': invalid alias name")?;
+                writeln!(stderr, "{}alias: `{name}': invalid alias name", diagnostic_prefix())?;
                 status = EXECUTION_FAILURE;
                 continue;
             }
@@ -77,7 +78,7 @@ where
         } else if let Some(alias) = aliases.get(arg) {
             print_alias(arg, alias, stdout)?;
         } else {
-            writeln!(stderr, "rubash: alias: {}: not found", arg)?;
+            writeln!(stderr, "{}alias: {}: not found", diagnostic_prefix(), arg)?;
             status = EXECUTION_FAILURE;
         }
     }
@@ -106,7 +107,7 @@ where
         }
 
         if aliases.remove(arg).is_none() {
-            writeln!(stderr, "rubash: unalias: {}: not found", arg)?;
+            writeln!(stderr, "{}unalias: {}: not found", diagnostic_prefix(), arg)?;
             status = EXECUTION_FAILURE;
         }
     }
@@ -154,4 +155,15 @@ fn valid_alias_name(name: &str) -> bool {
 
 fn quote_single(value: &str) -> String {
     value.replace('\'', "'\\''")
+}
+
+fn diagnostic_prefix() -> String {
+    if let (Ok(script), Ok(line)) = (
+        env::var("__RUBASH_SCRIPT_NAME"),
+        env::var("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+
+    "rubash: ".to_string()
 }
