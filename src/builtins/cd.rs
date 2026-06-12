@@ -181,6 +181,15 @@ where
 }
 
 fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>) -> Option<Target> {
+    if target
+        .display
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .is_some_and(|path| path.starts_with('/'))
+    {
+        return None;
+    }
+
     if target.path.is_absolute() || starts_with_dot_component(&target.path) {
         return None;
     }
