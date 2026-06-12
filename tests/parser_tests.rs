@@ -3,7 +3,7 @@
 //! Run with: cargo test --test parser_tests
 
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, Ast, CommandNode};
+use rubash::parser::parse;
 
 mod simple_commands {
     use super::*;
@@ -92,6 +92,26 @@ mod assignment_tests {
     }
 }
 
+mod variable_tests {
+    use super::*;
+
+    #[test]
+    fn test_variable_words_are_preserved_for_expansion() {
+        let input = "echo alias: $?";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, vec!["echo", "alias:", "$?"]);
+    }
+
+    #[test]
+    fn test_braced_variable_can_be_command_word() {
+        let input = "${THIS_SH} ./script";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, vec!["${THIS_SH}", "./script"]);
+    }
+}
+
 mod redirection_tests {
     use super::*;
 
@@ -123,22 +143,31 @@ mod redirection_tests {
     }
 }
 
-mod quote_preservation {
+mod quote_removal {
     use super::*;
 
     #[test]
-    fn test_single_quotes_preserved() {
+    fn test_single_quotes_removed() {
         let input = "echo 'hello world'";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands[0].words[1], "'hello world'");
+        assert_eq!(ast.commands[0].words[1], "hello world");
     }
 
     #[test]
-    fn test_double_quotes_preserved() {
+    fn test_double_quotes_removed() {
         let input = "echo \"hello world\"";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands[0].words[1], "\"hello world\"");
+        assert_eq!(ast.commands[0].words[1], "hello world");
+    }
+
+    #[test]
+    fn test_assignment_after_command_is_word() {
+        let input = "alias foo='echo '";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, vec!["alias", "foo=echo "]);
+        assert!(ast.commands[0].assignments.is_empty());
     }
 }

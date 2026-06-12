@@ -140,19 +140,49 @@ impl<'a> Lexer<'a> {
                 }
             }
             '`' => { self.skip_backtick(); Some(Token::new(TokenKind::CommandSubst, self.slice(start), start)) }
-            '\'' => { self.skip_single(); Some(Token::new(TokenKind::Word, self.slice(start), start)) }
-            '"' => { self.skip_double(); Some(Token::new(TokenKind::Word, self.slice(start), start)) }
-            '\\' => { self.advance(); self.skip_word(); Some(Token::new(TokenKind::Word, self.slice(start), start)) }
+            '\'' => { self.skip_single(); Some(self.finish_word_token(start, false)) }
+            '"' => { self.skip_double(); Some(self.finish_word_token(start, false)) }
+            '\\' => { self.advance(); Some(self.finish_word_token(start, false)) }
             '{' => { self.skip_brace(); let v = self.slice(start); let kind = if is_brace_expansion(v) { TokenKind::BraceExpand } else { TokenKind::Keyword }; Some(Token::new(kind, v, start)) }
             '}' => Some(Token::new(TokenKind::Keyword, "}", start)),
-            _ => { self.skip_word(); let v = self.slice(start); let kind = if is_keyword(v) { TokenKind::Keyword } else if is_assignment(v) { TokenKind::Assignment } else { TokenKind::Word }; Some(Token::new(kind, v, start)) }
+            _ => Some(self.finish_word_token(start, true))
         }
+    }
+
+    fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
+        self.skip_word();
+        let raw = self.slice(start);
+        let value = remove_shell_quotes(raw);
+        let kind = if allow_keyword && is_keyword(raw) {
+            TokenKind::Keyword
+        } else if is_assignment(&value) {
+            TokenKind::Assignment
+        } else {
+            TokenKind::Word
+        };
+        Token::new(kind, &value, start)
     }
 
     fn skip_word(&mut self) {
         while let Some(c) = self.peek() {
-            if " \t\n|&;<>\"'#$`{}".contains(c) { break; }
-            self.advance();
+            if " \t\n|&;<>#$`{}".contains(c) { break; }
+            match c {
+                '\'' => {
+                    self.advance();
+                    self.skip_single();
+                }
+                '"' => {
+                    self.advance();
+                    self.skip_double();
+                }
+                '\\' => {
+                    self.advance();
+                    self.advance();
+                }
+                _ => {
+                    self.advance();
+                }
+            }
         }
     }
 
@@ -197,4 +227,48 @@ impl<'a> Iterator for Lexer<'a> {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].value, "ls");
     }
+}
+
+fn remove_shell_quotes(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                for quoted in chars.by_ref() {
+                    if quoted == '\'' {
+                        break;
+                    }
+                    out.push(quoted);
+                }
+            }
+            '"' => {
+                while let Some(quoted) = chars.next() {
+                    match quoted {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) = chars.peek().copied() {
+                                chars.next();
+                                if escaped != '\n' {
+                                    out.push(escaped);
+                                }
+                            } else {
+                                out.push('\\');
+                            }
+                        }
+                        _ => out.push(quoted),
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
 }
