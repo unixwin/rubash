@@ -7,7 +7,7 @@ use rubash::lexer::tokenize;
 use rubash::parser::parse;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Read, Write};
 use std::path::Path;
 
 fn main() {
@@ -19,7 +19,11 @@ fn main() {
         std::process::exit(code);
     }
 
-    run_repl(&mut executor);
+    if io::stdin().is_terminal() {
+        run_repl(&mut executor);
+    } else {
+        std::process::exit(run_stdin_script(&mut executor));
+    }
 }
 
 fn print_usage() {
@@ -102,6 +106,47 @@ fn run_repl(executor: &mut Executor) {
 
         run_line(executor, input, true);
     }
+}
+
+fn run_stdin_script(executor: &mut Executor) -> i32 {
+    // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
+    // prompting, while commands launched from that stream inherit the same
+    // input. Keep this line-oriented until parse.y owns incremental input.
+    let mut input = String::new();
+
+    loop {
+        input.clear();
+        match read_unbuffered_line(&mut input) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        run_line(executor, &input, false);
+    }
+
+    executor.last_exit_code()
+}
+
+fn read_unbuffered_line(output: &mut String) -> io::Result<usize> {
+    // TODO(input.c): This intentionally avoids BufRead prefetching so a child
+    // shell script can inherit unread bytes from the same redirected stdin.
+    let mut stdin = io::stdin().lock();
+    let mut bytes = [0_u8; 1];
+    let mut read = 0;
+    loop {
+        match stdin.read(&mut bytes)? {
+            0 => break,
+            count => {
+                read += count;
+                output.push(bytes[0] as char);
+                if bytes[0] == b'\n' {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(read)
 }
 
 fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
