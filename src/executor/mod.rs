@@ -2,7 +2,7 @@
 //!
 //! Executes parsed AST commands.
 
-mod path;
+pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
 use crate::parser::{Ast, CaseClause, CaseCommand, CommandNode, ForCommand};
@@ -77,12 +77,15 @@ impl Executor {
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         let mut index = 0;
         while index < ast.commands.len() {
-            if let Some(next_index) = self.execute_simple_if(ast, index)? {
+            if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
+            {
                 index = next_index;
                 continue;
             }
 
-            if let Some(next_index) = self.execute_pipe_into_source(ast, index)? {
+            if let Some(next_index) =
+                crate::builtins::source::execute_pipe_into_source(self, ast, index)?
+            {
                 index = next_index;
                 continue;
             }
@@ -112,84 +115,6 @@ impl Executor {
             index += 1;
         }
         Ok(())
-    }
-
-    fn execute_simple_if(
-        &mut self,
-        ast: &Ast,
-        index: usize,
-    ) -> Result<Option<usize>, ExecuteError> {
-        // TODO(parse.y/execute_cmd.c/test.def): This recognizes the narrow
-        // `if [ -e /dev/stdin ]; then ... else ... fi` form used by
-        // source6.sub. Bash parses this as an IF_COM command with test builtin
-        // execution and compound-list control flow.
-        let Some(command) = ast.commands.get(index) else {
-            return Ok(None);
-        };
-        if command.words.first().map(String::as_str) != Some("if") {
-            return Ok(None);
-        }
-
-        let Some(then_index) = find_word_command(ast, index + 1, "then") else {
-            return Ok(None);
-        };
-        let Some(fi_index) = find_word_command(ast, then_index + 1, "fi") else {
-            return Ok(None);
-        };
-        let else_index = find_word_command_before(ast, then_index + 1, fi_index, "else");
-
-        let condition_true = command
-            .words
-            .iter()
-            .map(String::as_str)
-            .eq(["if", "[", "-e", "/dev/stdin", "]"]);
-        let (body_start, body_end) = if condition_true {
-            (then_index + 1, else_index.unwrap_or(fi_index))
-        } else if let Some(else_index) = else_index {
-            (else_index + 1, fi_index)
-        } else {
-            self.exit_code = 0;
-            return Ok(Some(fi_index + 1));
-        };
-
-        let body = Ast {
-            commands: ast.commands[body_start..body_end].to_vec(),
-        };
-        self.execute_ast(&body)?;
-        Ok(Some(fi_index + 1))
-    }
-
-    fn execute_pipe_into_source(
-        &mut self,
-        ast: &Ast,
-        index: usize,
-    ) -> Result<Option<usize>, ExecuteError> {
-        // TODO(execute_cmd.c/redir.c/source.def): Bash connects the left
-        // command stdout to the right command stdin. This handles
-        // `echo "echo three - OK" | . /dev/stdin` from source6.sub by sourcing
-        // the generated shell text in the current shell.
-        let Some(left) = ast.commands.get(index) else {
-            return Ok(None);
-        };
-        if left.pipe.is_none() {
-            return Ok(None);
-        }
-        let Some(right) = ast.commands.get(index + 1) else {
-            return Ok(None);
-        };
-        if !matches!(
-            right.words.as_slice(),
-            [name, path] if matches!(name.as_str(), "." | "source") && path == "/dev/stdin"
-        ) {
-            return Ok(None);
-        }
-        if left.words.first().map(String::as_str) != Some("echo") {
-            return Ok(None);
-        }
-
-        let source = left.words[1..].join(" ");
-        self.execute_source_text(&source)?;
-        Ok(Some(index + 2))
     }
 
     fn execute_alias_escaped_pipe(
@@ -430,7 +355,8 @@ impl Executor {
                     Ok(())
                 }
                 "exec" => {
-                    self.exit_code = crate::builtins::exec::execute(&cmd.words[1..], &self.env_vars)?;
+                    self.exit_code =
+                        crate::builtins::exec::execute(&cmd.words[1..], &self.env_vars)?;
                     Ok(())
                 }
                 "return" => Err(ExecuteError::Return(
@@ -454,7 +380,7 @@ impl Executor {
                     self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
                     Ok(())
                 }
-                "source" | "." => self.execute_source(&cmd.words[1..]),
+                "source" | "." => crate::builtins::source::execute(self, &cmd.words[1..]),
                 "printf" => {
                     self.exit_code = self.execute_printf(cmd)?;
                     Ok(())
@@ -551,7 +477,8 @@ impl Executor {
                     Ok(())
                 }
                 "umask" => {
-                    self.exit_code = crate::builtins::umask::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code =
+                        crate::builtins::umask::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
                 "unset" => {
@@ -738,7 +665,10 @@ impl Executor {
                 Ok(())
             }
             _ => {
-                eprintln!("{}builtin: {name}: not a shell builtin", self.diagnostic_prefix());
+                eprintln!(
+                    "{}builtin: {name}: not a shell builtin",
+                    self.diagnostic_prefix()
+                );
                 self.exit_code = 1;
                 Ok(())
             }
@@ -832,14 +762,10 @@ impl Executor {
         // files with `echo ... > file`.
         if let Some(redirect_index) = cmd.words.iter().position(|word| word == ">") {
             if let Some(target) = cmd.words.get(redirect_index + 1) {
-                let echo_args =
-                    echo_args_without_background_marker(&cmd.words[1..redirect_index]);
+                let echo_args = echo_args_without_background_marker(&cmd.words[1..redirect_index]);
                 let target = self.expand_word(target);
                 let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-                crate::builtins::echo::write_echo(
-                    echo_args.iter().map(String::as_str),
-                    &mut file,
-                )?;
+                crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
                 return Ok(());
             }
         }
@@ -862,10 +788,7 @@ impl Executor {
                 return Ok(());
             }
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            crate::builtins::echo::write_echo(
-                echo_args.iter().map(String::as_str),
-                &mut file,
-            )?;
+            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
             return Ok(());
         }
 
@@ -875,10 +798,7 @@ impl Executor {
                 .create(true)
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
-            crate::builtins::echo::write_echo(
-                echo_args.iter().map(String::as_str),
-                &mut file,
-            )?;
+            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
             return Ok(());
         }
 
@@ -1033,7 +953,10 @@ impl Executor {
             return self.positional_params.join(" ");
         }
 
-        if let Some(source) = word.strip_prefix("$(").and_then(|rest| rest.strip_suffix(')')) {
+        if let Some(source) = word
+            .strip_prefix("$(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
             return self.expand_command_substitution(source);
         }
 
@@ -1094,11 +1017,7 @@ impl Executor {
                     .map(|path| path.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
             }
-            return self
-                .env_vars
-                .get("PWD")
-                .cloned()
-                .unwrap_or_default();
+            return self.env_vars.get("PWD").cloned().unwrap_or_default();
         }
 
         if words.first().map(String::as_str) == Some("type")
@@ -1315,82 +1234,6 @@ impl Executor {
         }
     }
 
-    fn execute_source(&mut self, args: &[String]) -> Result<(), ExecuteError> {
-        // TODO(builtins/source.def): GNU Bash `source_builtin` searches PATH,
-        // handles `-p`, temporarily replaces positional parameters, and uses
-        // unwind/trap machinery around `source_file`. This is the minimal
-        // current-shell execution path needed by upstream alias subtests.
-        let Some(filename) = args.first() else {
-            eprintln!("rubash: source: filename argument required");
-            self.exit_code = 2;
-            return Ok(());
-        };
-
-        if is_null_device(filename) {
-            self.exit_code = 0;
-            return Ok(());
-        }
-
-        if filename == "echo" {
-            // TODO(subst.c/execute_cmd.c): Process substitution should create
-            // a /dev/fd path whose content is the command's stdout. The
-            // current parser sees `. <(echo "echo two - OK")` as `source echo
-            // "echo two - OK"`; source that generated text directly.
-            let source = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
-            if !source.is_empty() {
-                return self.execute_source_text(&source);
-            }
-        }
-
-        let source_path = shell_path_to_windows(filename, &self.env_vars);
-        let source = match fs::read_to_string(&source_path) {
-            Ok(source) => source,
-            Err(_) => {
-                eprintln!(
-                    "{}{filename}: No such file or directory",
-                    self.diagnostic_prefix()
-                );
-                self.exit_code = 1;
-                if self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1") {
-                    return Err(ExecuteError::ExitCode(1));
-                }
-                return Ok(());
-            }
-        };
-
-        self.execute_source_text_with_args(&source, &args[1..])
-    }
-
-    fn execute_source_text(&mut self, source: &str) -> Result<(), ExecuteError> {
-        self.execute_source_text_with_args(source, &[])
-    }
-
-    fn execute_source_text_with_args(
-        &mut self,
-        source: &str,
-        args: &[String],
-    ) -> Result<(), ExecuteError> {
-        let old_positional_params = self.positional_params.clone();
-        let source_positional_params: Vec<String> = args.to_vec();
-        let had_source_args = !source_positional_params.is_empty();
-        if had_source_args {
-            self.positional_params = source_positional_params.clone();
-        }
-        let tokens = crate::lexer::tokenize(&source);
-        let ast = crate::parser::parse(&tokens);
-        let result = self.execute_ast(&ast);
-        if had_source_args && self.positional_params == source_positional_params {
-            self.positional_params = old_positional_params;
-        }
-        match result {
-            Err(ExecuteError::Return(status)) => {
-                self.exit_code = status;
-                Ok(())
-            }
-            other => other,
-        }
-    }
-
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if cmd.words.is_empty() {
             return Ok(());
@@ -1408,7 +1251,10 @@ impl Executor {
 
         if cmd.words[0] == "mkdir" {
             for path in &cmd.words[1..] {
-                fs::create_dir_all(shell_path_to_windows(&self.expand_word(path), &self.env_vars))?;
+                fs::create_dir_all(shell_path_to_windows(
+                    &self.expand_word(path),
+                    &self.env_vars,
+                ))?;
             }
             self.exit_code = 0;
             return Ok(());
@@ -1416,7 +1262,10 @@ impl Executor {
 
         if cmd.words[0] == "rmdir" {
             for path in &cmd.words[1..] {
-                let _ = fs::remove_dir(shell_path_to_windows(&self.expand_word(path), &self.env_vars));
+                let _ = fs::remove_dir(shell_path_to_windows(
+                    &self.expand_word(path),
+                    &self.env_vars,
+                ));
             }
             self.exit_code = 0;
             return Ok(());
@@ -1461,7 +1310,11 @@ impl Executor {
         }
 
         let Some(program) = find_user_command(&cmd.words[0], &self.env_vars) else {
-            eprintln!("{}{}: command not found", self.diagnostic_prefix(), cmd.words[0]);
+            eprintln!(
+                "{}{}: command not found",
+                self.diagnostic_prefix(),
+                cmd.words[0]
+            );
             self.exit_code = 127;
             return Ok(());
         };
@@ -1558,6 +1411,10 @@ impl Executor {
         self.exit_code
     }
 
+    pub(crate) fn set_exit_code(&mut self, exit_code: i32) {
+        self.exit_code = exit_code;
+    }
+
     pub fn set_env(&mut self, name: &str, value: &str) {
         self.env_vars.insert(name.to_string(), value.to_string());
         env::set_var(name, value);
@@ -1565,6 +1422,18 @@ impl Executor {
 
     pub fn get_env(&self, name: &str) -> Option<&str> {
         self.env_vars.get(name).map(|s| s.as_str())
+    }
+
+    pub(crate) fn env_vars(&self) -> &HashMap<String, String> {
+        &self.env_vars
+    }
+
+    pub(crate) fn positional_params(&self) -> Vec<String> {
+        self.positional_params.clone()
+    }
+
+    pub(crate) fn set_positional_params(&mut self, positional_params: Vec<String>) {
+        self.positional_params = positional_params;
     }
 
     fn set_current_line(&mut self, cmd: &CommandNode) {
@@ -1576,7 +1445,7 @@ impl Executor {
         }
     }
 
-    fn diagnostic_prefix(&self) -> String {
+    pub(crate) fn diagnostic_prefix(&self) -> String {
         if let (Some(script), Some(line)) = (
             self.env_vars.get("__RUBASH_SCRIPT_NAME"),
             self.env_vars.get("__RUBASH_CURRENT_LINE"),
@@ -1643,7 +1512,8 @@ fn loop_control_level(args: &[String]) -> usize {
         other => other,
     };
 
-    first.and_then(|value| value.parse::<usize>().ok())
+    first
+        .and_then(|value| value.parse::<usize>().ok())
         .filter(|level| *level > 0)
         .unwrap_or(1)
 }
@@ -1680,20 +1550,6 @@ fn case_pattern_matches(pattern: &str, word: &str) -> bool {
 fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
     (start..ast.commands.len())
         .find(|index| ast.commands[*index].words.first().map(String::as_str) == Some("done"))
-}
-
-fn find_word_command(ast: &Ast, start: usize, word: &str) -> Option<usize> {
-    find_word_command_before(ast, start, ast.commands.len(), word)
-}
-
-fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> Option<usize> {
-    (start..end).find(|index| {
-        ast.commands[*index]
-            .words
-            .first()
-            .map(String::as_str)
-            == Some(word)
-    })
 }
 
 fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {

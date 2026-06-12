@@ -16,6 +16,7 @@ pub mod pwd;
 pub mod set;
 pub mod setattr;
 pub mod shopt;
+pub mod source;
 pub mod test;
 pub mod times;
 pub mod r#type;
