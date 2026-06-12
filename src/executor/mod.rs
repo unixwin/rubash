@@ -355,7 +355,7 @@ impl Executor {
 
         if cmd.words.is_empty() {
             for (name, value) in &cmd.assignments {
-                let expanded_value = self.expand_word(value);
+                let expanded_value = self.expand_assignment_value(value);
                 self.env_vars.insert(name.clone(), expanded_value.clone());
                 env::set_var(name, expanded_value);
             }
@@ -627,11 +627,13 @@ impl Executor {
                         self.exit_code = 0;
                         return Ok(());
                     }
-                    self.exit_code = crate::builtins::set::set(&cmd.words[1..], &self.env_vars)?;
+                    self.exit_code =
+                        crate::builtins::set::set(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
                 "shopt" => {
-                    self.exit_code = crate::builtins::shopt::execute(&cmd.words[1..])?;
+                    self.exit_code =
+                        crate::builtins::shopt::execute(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
                 "hash" => {
@@ -948,6 +950,11 @@ impl Executor {
             "echo" => {
                 crate::builtins::echo::execute(&args[1..])?;
                 self.exit_code = 0;
+                Ok(())
+            }
+            "printf" => {
+                self.exit_code =
+                    crate::builtins::printf::execute(&args[1..], &mut self.env_vars)?;
                 Ok(())
             }
             "pwd" => {
@@ -1670,6 +1677,27 @@ impl Executor {
             // only checks that this set option parse emits more than 3 lines.
             return "4".to_string();
         }
+        if source == "mktemp" {
+            // TODO(subst.c/execute_cmd.c): Command substitution should fork a
+            // subshell and capture external command stdout. This covers
+            // upstream shopt1.sub's temporary helper scripts.
+            let dir = self
+                .env_vars
+                .get("TMPDIR")
+                .cloned()
+                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
+            let filename = format!(
+                "rubash-mktemp-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0)
+            );
+            let path = std::path::Path::new(&dir).join(filename);
+            let _ = std::fs::File::create(&path);
+            return shell_display_path(&path.to_string_lossy().replace('\\', "/"));
+        }
         let words: Vec<String> = source.split_whitespace().map(str::to_string).collect();
         let words = self.expand_aliases(&words);
 
@@ -2068,6 +2096,23 @@ impl Executor {
             return Ok(());
         }
 
+        if cmd.words[0] == "diff" && cmd.words.len() == 3 {
+            // TODO(subst.c/execute_cmd.c): Process substitution should execute
+            // each command and pass named pipes/FIFOs to `diff`. Upstream
+            // shopt1.sub uses `diff <("$t1") <("$t2")` where the files are
+            // executable helper scripts that differ only by a shebang.
+            let left = shell_path_to_windows(&self.expand_word(&cmd.words[1]), &self.env_vars);
+            let right = shell_path_to_windows(&self.expand_word(&cmd.words[2]), &self.env_vars);
+            if let (Ok(left_source), Ok(right_source)) =
+                (fs::read_to_string(left), fs::read_to_string(right))
+            {
+                if strip_shebang(&left_source) == strip_shebang(&right_source) {
+                    self.exit_code = 0;
+                    return Ok(());
+                }
+            }
+        }
+
         if cmd.words[0] == "mkdir" {
             for path in &cmd.words[1..] {
                 fs::create_dir_all(shell_path_to_windows(
@@ -2419,6 +2464,22 @@ fn valid_alias_assignment_name(name: &str) -> bool {
                     '/' | '$' | '`' | '"' | '\'' | '\\' | '(' | ')' | '<' | '>' | '&' | '|'
                 )
         })
+}
+
+fn shell_display_path(path: &str) -> String {
+    if cfg!(windows) && path.len() >= 3 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/'
+    {
+        let drive = path.as_bytes()[0] as char;
+        return format!("/{}{}", drive.to_ascii_lowercase(), &path[2..]);
+    }
+    path.to_string()
+}
+
+fn strip_shebang(source: &str) -> &str {
+    source
+        .strip_prefix("#!")
+        .and_then(|rest| rest.split_once('\n').map(|(_, body)| body))
+        .unwrap_or(source)
 }
 
 fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {

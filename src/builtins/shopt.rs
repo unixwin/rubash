@@ -3,11 +3,14 @@
 //! GNU Bash source ownership:
 // - builtins/shopt.def
 
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
+const EX_USAGE: i32 = 2;
+const SHOPT_STATE: &str = "__RUBASH_SHOPT_STATE";
 
 static XPG_ECHO: AtomicBool = AtomicBool::new(false);
 static SOURCEPATH: AtomicBool = AtomicBool::new(true);
@@ -25,89 +28,140 @@ pub(crate) fn checkhash_enabled() -> bool {
     CHECKHASH.load(Ordering::Relaxed)
 }
 
-pub fn execute(args: &[String]) -> io::Result<i32> {
+pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    execute_with_io(args, &mut stdout, &mut stderr)
+    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
 }
 
-fn execute_with_io<W, E>(args: &[String], stdout: &mut W, stderr: &mut E) -> io::Result<i32>
+fn execute_with_io<W, E>(
+    args: &[String],
+    env_vars: &mut HashMap<String, String>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
 where
     W: Write,
     E: Write,
 {
     let mut print = args.is_empty();
-    let mut status = EXECUTION_SUCCESS;
+    let mut use_set_options = false;
     let mut mode = ShoptMode::List;
     let mut names = Vec::new();
+    let mut status = EXECUTION_SUCCESS;
 
     for arg in args {
-        match arg.as_str() {
-            "-s" => mode = ShoptMode::Set,
-            "-u" => mode = ShoptMode::Unset,
-            "-q" => mode = ShoptMode::Query,
-            "-p" => print = true,
-            option if option.starts_with('-') => {
-                writeln!(stderr, "rubash: shopt: {option}: invalid option")?;
-                status = EXECUTION_FAILURE;
-            }
-            name => names.push(name),
+        if arg == "--" {
+            continue;
         }
-    }
-
-    if !names.is_empty() {
-        for name in names {
-            if !is_supported_option(name) {
-                writeln!(stderr, "rubash: shopt: {name}: invalid shell option name")?;
-                status = EXECUTION_FAILURE;
-                continue;
-            }
-
-            match mode {
-                ShoptMode::Set if name == "xpg_echo" => XPG_ECHO.store(true, Ordering::Relaxed),
-                ShoptMode::Unset if name == "xpg_echo" => XPG_ECHO.store(false, Ordering::Relaxed),
-                ShoptMode::Set if name == "sourcepath" => SOURCEPATH.store(true, Ordering::Relaxed),
-                ShoptMode::Unset if name == "sourcepath" => {
-                    SOURCEPATH.store(false, Ordering::Relaxed)
-                }
-                ShoptMode::Set if name == "checkhash" => {
-                    CHECKHASH.store(true, Ordering::Relaxed);
-                    std::env::set_var("__RUBASH_SHOPT_CHECKHASH", "1");
-                }
-                ShoptMode::Unset if name == "checkhash" => {
-                    CHECKHASH.store(false, Ordering::Relaxed);
-                    std::env::remove_var("__RUBASH_SHOPT_CHECKHASH");
-                }
-                ShoptMode::Query if option_enabled(name) => {}
-                ShoptMode::Query => status = EXECUTION_FAILURE,
-                ShoptMode::List => {
-                    if print {
-                        print_shopt(name, stdout)?;
+        if arg.starts_with('-') && arg != "-" {
+            for option in arg[1..].chars() {
+                match option {
+                    's' => mode = ShoptMode::Set,
+                    'u' => mode = ShoptMode::Unset,
+                    'q' => mode = ShoptMode::Query,
+                    'p' => print = true,
+                    'o' => use_set_options = true,
+                    other => {
+                        writeln!(stderr, "{}shopt: -{}: invalid option", diagnostic_prefix(), other)?;
+                        writeln!(stderr, "shopt: usage: shopt [-pqsu] [-o] [optname ...]")?;
+                        return Ok(EX_USAGE);
                     }
                 }
-                _ => {}
             }
+        } else {
+            names.push(arg.as_str());
         }
     }
 
-    if print {
-        if args.is_empty() {
-            writeln!(stdout, "expand_aliases\toff")?;
+    if use_set_options {
+        return execute_set_option_mode(mode, print, &names, env_vars, stdout, stderr);
+    }
+
+    if names.is_empty() {
+        match mode {
+            ShoptMode::Set if print => {
+                print_shopts_by_state(env_vars, true, true, stdout)?;
+            }
+            ShoptMode::Unset if print => {
+                print_shopts_by_state(env_vars, false, true, stdout)?;
+            }
+            ShoptMode::Unset => {
+                print_shopts_by_state(env_vars, false, false, stdout)?;
+            }
+            ShoptMode::List | ShoptMode::Query => {
+                print_all_shopts(env_vars, print, stdout)?;
+            }
+            ShoptMode::Set => {}
+        }
+        return Ok(status);
+    }
+
+    for name in names {
+        if !is_supported_option(name) {
             writeln!(
-                stdout,
-                "sourcepath\t{}",
-                if sourcepath_enabled() { "on" } else { "off" }
+                stderr,
+                "{}shopt: {name}: invalid shell option name",
+                diagnostic_prefix()
             )?;
+            status = EXECUTION_FAILURE;
+            continue;
+        }
+
+        match mode {
+            ShoptMode::Set => set_option(env_vars, name, true),
+            ShoptMode::Unset => set_option(env_vars, name, false),
+            ShoptMode::Query if !option_enabled(env_vars, name) => status = EXECUTION_FAILURE,
+            ShoptMode::Query => {}
+            ShoptMode::List if print => print_shopt(env_vars, name, true, stdout)?,
+            ShoptMode::List => print_shopt(env_vars, name, false, stdout)?,
+        }
+    }
+
+    Ok(status)
+}
+
+fn execute_set_option_mode<W, E>(
+    mode: ShoptMode,
+    print: bool,
+    names: &[&str],
+    env_vars: &mut HashMap<String, String>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    let mut status = EXECUTION_SUCCESS;
+    if names.is_empty() {
+        match mode {
+            ShoptMode::Set if print => {
+                crate::builtins::set::print_shell_options_by_state(env_vars, true, true, stdout)?;
+            }
+            ShoptMode::Unset if print => {
+                crate::builtins::set::print_shell_options_by_state(env_vars, false, true, stdout)?;
+            }
+            ShoptMode::Unset => {
+                crate::builtins::set::print_shell_options_by_state(env_vars, false, false, stdout)?;
+            }
+            _ => crate::builtins::set::print_shell_options(env_vars, print, stdout)?,
+        }
+        return Ok(status);
+    }
+
+    for name in names {
+        if !crate::builtins::set::is_shell_option(name) {
             writeln!(
-                stdout,
-                "checkhash\t{}",
-                if checkhash_enabled() { "on" } else { "off" }
+                stderr,
+                "{}shopt: {name}: invalid option name",
+                diagnostic_prefix()
             )?;
-            writeln!(
-                stdout,
-                "xpg_echo\t{}",
-                if xpg_echo_enabled() { "on" } else { "off" }
-            )?;
+            status = EXECUTION_FAILURE;
+            continue;
+        }
+        if print || mode == ShoptMode::List {
+            crate::builtins::set::print_shell_option(env_vars, name, true, stdout)?;
         }
     }
 
@@ -122,27 +176,204 @@ enum ShoptMode {
     Query,
 }
 
-fn option_enabled(name: &str) -> bool {
+fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
     match name {
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
         "sourcepath" => sourcepath_enabled(),
-        "expand_aliases" => false,
-        _ => false,
+        _ => state(env_vars).contains(name) || default_enabled(name),
+    }
+}
+
+fn set_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+    match name {
+        "xpg_echo" => XPG_ECHO.store(enabled, Ordering::Relaxed),
+        "sourcepath" => SOURCEPATH.store(enabled, Ordering::Relaxed),
+        "checkhash" => {
+            CHECKHASH.store(enabled, Ordering::Relaxed);
+            if enabled {
+                std::env::set_var("__RUBASH_SHOPT_CHECKHASH", "1");
+            } else {
+                std::env::remove_var("__RUBASH_SHOPT_CHECKHASH");
+            }
+        }
+        _ => {}
+    }
+
+    let mut state = state(env_vars);
+    if enabled {
+        state.insert(name.to_string());
+    } else {
+        state.remove(name);
+    }
+    env_vars.insert(SHOPT_STATE.to_string(), serialize_state(&state));
+}
+
+fn state(env_vars: &HashMap<String, String>) -> HashSet<String> {
+    let Some(value) = env_vars.get(SHOPT_STATE) else {
+        return default_state();
+    };
+    value
+        .split('\x1f')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn serialize_state(state: &HashSet<String>) -> String {
+    let mut names: Vec<&str> = state.iter().map(String::as_str).collect();
+    names.sort();
+    names.join("\x1f")
+}
+
+fn default_state() -> HashSet<String> {
+    SHOPT_OPTIONS
+        .iter()
+        .copied()
+        .filter(|name| default_enabled(name))
+        .map(str::to_string)
+        .collect()
+}
+
+fn default_enabled(name: &str) -> bool {
+    matches!(
+        name,
+        "cmdhist"
+            | "complete_fullquote"
+            | "extquote"
+            | "force_fignore"
+            | "globasciiranges"
+            | "globskipdots"
+            | "hostcomplete"
+            | "interactive_comments"
+            | "patsub_replacement"
+            | "progcomp"
+            | "promptvars"
+            | "sourcepath"
+    )
+}
+
+fn print_all_shopts<W>(
+    env_vars: &HashMap<String, String>,
+    reusable: bool,
+    stdout: &mut W,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    for name in SHOPT_OPTIONS {
+        print_shopt(env_vars, name, reusable, stdout)?;
+    }
+    Ok(())
+}
+
+fn print_shopts_by_state<W>(
+    env_vars: &HashMap<String, String>,
+    enabled: bool,
+    reusable: bool,
+    stdout: &mut W,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    for name in SHOPT_OPTIONS {
+        if option_enabled(env_vars, name) == enabled {
+            print_shopt(env_vars, name, reusable, stdout)?;
+        }
+    }
+    Ok(())
+}
+
+fn print_shopt<W>(
+    env_vars: &HashMap<String, String>,
+    name: &str,
+    reusable: bool,
+    stdout: &mut W,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    let enabled = option_enabled(env_vars, name);
+    if reusable {
+        writeln!(stdout, "shopt -{} {name}", if enabled { "s" } else { "u" })
+    } else {
+        writeln!(stdout, "{name:<20}\t{}", if enabled { "on" } else { "off" })
     }
 }
 
 fn is_supported_option(name: &str) -> bool {
-    matches!(name, "checkhash" | "expand_aliases" | "sourcepath" | "xpg_echo")
+    SHOPT_OPTIONS.contains(&name)
 }
 
-fn print_shopt<W>(name: &str, stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    writeln!(
-        stdout,
-        "{name}\t{}",
-        if option_enabled(name) { "on" } else { "off" }
-    )
+const SHOPT_OPTIONS: &[&str] = &[
+    "array_expand_once",
+    "assoc_expand_once",
+    "autocd",
+    "bash_source_fullpath",
+    "cdable_vars",
+    "cdspell",
+    "checkhash",
+    "checkjobs",
+    "checkwinsize",
+    "cmdhist",
+    "compat31",
+    "compat32",
+    "compat40",
+    "compat41",
+    "compat42",
+    "compat43",
+    "compat44",
+    "complete_fullquote",
+    "direxpand",
+    "dirspell",
+    "dotglob",
+    "execfail",
+    "expand_aliases",
+    "extdebug",
+    "extglob",
+    "extquote",
+    "failglob",
+    "force_fignore",
+    "globasciiranges",
+    "globskipdots",
+    "globstar",
+    "gnu_errfmt",
+    "histappend",
+    "histreedit",
+    "histverify",
+    "hostcomplete",
+    "huponexit",
+    "inherit_errexit",
+    "interactive_comments",
+    "lastpipe",
+    "lithist",
+    "localvar_inherit",
+    "localvar_unset",
+    "login_shell",
+    "mailwarn",
+    "no_empty_cmd_completion",
+    "nocaseglob",
+    "nocasematch",
+    "noexpand_translation",
+    "nullglob",
+    "patsub_replacement",
+    "progcomp",
+    "progcomp_alias",
+    "promptvars",
+    "restricted_shell",
+    "shift_verbose",
+    "sourcepath",
+    "varredir_close",
+    "xpg_echo",
+];
+
+fn diagnostic_prefix() -> String {
+    if let (Ok(script), Ok(line)) = (
+        std::env::var("__RUBASH_SCRIPT_NAME"),
+        std::env::var("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+
+    "rubash: ".to_string()
 }

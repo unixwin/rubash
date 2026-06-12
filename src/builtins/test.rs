@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::Path;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -129,19 +128,23 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-n" => Ok(!operand.is_empty()),
         "-v" => Ok(variable_is_set(operand, env_vars)),
         "-R" => Ok(false),
-        "-a" | "-e" => Ok(Path::new(operand).exists()),
-        "-d" => Ok(Path::new(operand).is_dir()),
-        "-f" => Ok(Path::new(operand).is_file()),
-        "-h" | "-L" => Ok(fs::symlink_metadata(operand)
+        "-a" | "-e" => Ok(test_path(operand, env_vars).exists()),
+        "-d" => Ok(test_path(operand, env_vars).is_dir()),
+        "-f" => Ok(test_path(operand, env_vars).is_file()),
+        "-h" | "-L" => Ok(fs::symlink_metadata(test_path(operand, env_vars))
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false)),
-        "-s" => Ok(fs::metadata(operand)
+        "-s" => Ok(fs::metadata(test_path(operand, env_vars))
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)),
-        "-r" | "-w" | "-x" => Ok(Path::new(operand).exists()),
+        "-r" | "-w" | "-x" => Ok(test_path(operand, env_vars).exists()),
         "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" | "-O" | "-G" | "-N" => Ok(false),
         _ => Err(format!("{}: unary operator expected", op)),
     }
+}
+
+fn test_path(operand: &str, env_vars: &HashMap<String, String>) -> std::path::PathBuf {
+    crate::executor::path::shell_path_to_windows(operand, env_vars)
 }
 
 fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {

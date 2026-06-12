@@ -45,6 +45,10 @@ where
     let mut output_var = None;
     let mut index = 0;
 
+    if args.get(index) == Some(&"--") {
+        index += 1;
+    }
+
     if args.get(index) == Some(&"-v") {
         let Some(name) = args.get(index + 1) else {
             writeln!(stderr, "rubash: printf: -v: option requires an argument")?;
@@ -58,6 +62,9 @@ where
 
         output_var = Some(*name);
         index += 2;
+        if args.get(index) == Some(&"--") {
+            index += 1;
+        }
     }
 
     let Some(format) = args.get(index) else {
