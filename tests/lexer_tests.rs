@@ -120,7 +120,7 @@ mod quotes {
         let input = "echo 'hello world'";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "'hello world'");
+        assert_eq!(tokens[1].value, "hello world");
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod quotes {
         let input = "echo \"hello world\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "\"hello world\"");
+        assert_eq!(tokens[1].value, "hello world");
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod quotes {
         let input = "''";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].value, "''");
+        assert_eq!(tokens[0].value, "");
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod quotes {
         let input = "\"\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].value, "\"\"");
+        assert_eq!(tokens[0].value, "");
     }
 
     #[test]
@@ -152,7 +152,16 @@ mod quotes {
         let input = "echo \"it's a 'test'\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "\"it's a 'test'\"");
+        assert_eq!(tokens[1].value, "it's a 'test'");
+    }
+
+    #[test]
+    fn test_assignment_word_with_quoted_value() {
+        let input = "alias foo='echo '";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].kind, TokenKind::Assignment);
+        assert_eq!(tokens[1].value, "foo=echo ");
     }
 }
 

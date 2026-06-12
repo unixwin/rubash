@@ -79,14 +79,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
         let token = &tokens[i];
 
         match token.kind {
-            TokenKind::Word => {
+            TokenKind::Word | TokenKind::Variable => {
                 current_cmd.words.push(token.value.clone());
             }
             TokenKind::Assignment => {
                 if let Some(pos) = token.value.find('=') {
-                    let var_name = token.value[..pos].to_string();
-                    let var_value = token.value[pos+1..].to_string();
-                    current_cmd.assignments.insert(var_name, var_value);
+                    if current_cmd.words.is_empty() {
+                        let var_name = token.value[..pos].to_string();
+                        let var_value = token.value[pos+1..].to_string();
+                        current_cmd.assignments.insert(var_name, var_value);
+                    } else {
+                        current_cmd.words.push(token.value.clone());
+                    }
                 }
             }
             TokenKind::Pipe => {

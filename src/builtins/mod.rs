@@ -4,6 +4,7 @@ pub mod alias;
 pub mod cd;
 pub mod colon;
 pub mod command;
+pub mod declare;
 pub mod echo;
 pub mod eval;
 pub mod exit;

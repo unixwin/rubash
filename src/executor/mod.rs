@@ -67,24 +67,40 @@ impl Executor {
 
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if cmd.words.is_empty() {
+            for (name, value) in &cmd.assignments {
+                self.env_vars.insert(name.clone(), value.clone());
+                env::set_var(name, value);
+            }
+            self.exit_code = 0;
+            return Ok(());
+        }
+
+        let mut variable_expanded = cmd.clone();
+        variable_expanded.words = cmd
+            .words
+            .iter()
+            .map(|word| self.expand_word(word))
+            .collect();
+
         let expanded;
-        let cmd = if let Some(word) = cmd.words.first() {
+        let cmd = if let Some(word) = variable_expanded.words.first() {
             if let Some(value) = self.aliases.get(word) {
                 let mut words: Vec<String> = value
                     .split_whitespace()
                     .map(str::to_string)
                     .collect();
-                words.extend(cmd.words.iter().skip(1).cloned());
+                words.extend(variable_expanded.words.iter().skip(1).cloned());
                 expanded = CommandNode {
                     words,
-                    ..cmd.clone()
+                    ..variable_expanded.clone()
                 };
                 &expanded
             } else {
-                cmd
+                &variable_expanded
             }
         } else {
-            cmd
+            &variable_expanded
         };
 
         if let Some(word) = cmd.words.first() {
@@ -147,6 +163,11 @@ impl Executor {
                         crate::builtins::alias::alias(&cmd.words[1..], &mut self.aliases)?;
                     Ok(())
                 }
+                "declare" => {
+                    self.exit_code =
+                        crate::builtins::declare::execute(&cmd.words[1..], &self.env_vars)?;
+                    Ok(())
+                }
                 "unalias" => {
                     self.exit_code =
                         crate::builtins::alias::unalias(&cmd.words[1..], &mut self.aliases)?;
@@ -207,6 +228,22 @@ impl Executor {
             println!("{}={}", key, value);
         }
         self.exit_code = 0;
+    }
+
+    fn expand_word(&self, word: &str) -> String {
+        if word == "$?" {
+            return self.exit_code.to_string();
+        }
+
+        if let Some(name) = word.strip_prefix("${").and_then(|rest| rest.strip_suffix('}')) {
+            return self.env_vars.get(name).cloned().unwrap_or_default();
+        }
+
+        if let Some(name) = word.strip_prefix('$') {
+            return self.env_vars.get(name).cloned().unwrap_or_default();
+        }
+
+        word.to_string()
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
