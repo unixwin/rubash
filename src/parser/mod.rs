@@ -135,7 +135,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
         }
 
         match token.kind {
-            TokenKind::Word | TokenKind::Variable => {
+            TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
                 current_cmd.words.push(token.value.clone());
             }
             TokenKind::Assignment => {
