@@ -65,6 +65,8 @@ pub struct CommandNode {
     pub background: bool,
     /// Connector to the next command: Some(true) for &&, Some(false) for ||.
     pub and_or: Option<bool>,
+    /// Return status is inverted by the reserved word `!`.
+    pub inverted: bool,
     /// Command is executed inside a subshell grouping `( ... )`.
     pub subshell: bool,
     /// This command closes the current subshell grouping.
@@ -93,6 +95,7 @@ impl CommandNode {
             pipe: None,
             background: false,
             and_or: None,
+            inverted: false,
             subshell: false,
             subshell_end: false,
             for_command: None,
@@ -301,6 +304,16 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd = CommandNode::new();
             }
             TokenKind::Keyword => {
+                if token.value == "!" && command_is_empty(&current_cmd) {
+                    // TODO(parse.y/execute_cmd.c): Bash represents `!` as a
+                    // pipeline/list inversion flag. Keep it on the next simple
+                    // command until the parser has a real pipeline AST.
+                    current_cmd.inverted = true;
+                    note_command_line(&mut current_cmd, token);
+                    i += 1;
+                    continue;
+                }
+
                 if token.value == "(" && command_is_empty(&current_cmd) {
                     in_subshell = true;
                     i += 1;

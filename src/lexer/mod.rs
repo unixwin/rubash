@@ -323,6 +323,14 @@ impl<'a> Lexer<'a> {
                 }
             }
             '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
+            '!' => {
+                if self.peek() == Some('=') {
+                    self.skip_word();
+                    Some(Token::new(TokenKind::Word, self.slice(start), start))
+                } else {
+                    Some(Token::new(TokenKind::Keyword, "!", start))
+                }
+            }
             ';' => {
                 if self.peek() == Some(';') {
                     self.advance();
