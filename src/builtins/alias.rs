@@ -1,7 +1,9 @@
 //! alias module.
 //!
 //! GNU Bash source ownership:
-// - builtins/alias.def
+//! - alias.c (`add_alias`, `remove_alias`, `all_aliases`)
+//! - alias.h (`alias_t`, `AL_EXPANDNEXT`, `AL_BEINGEXPANDED`)
+//! - builtins/alias.def (`alias_builtin`, `unalias_builtin`)
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -9,20 +11,35 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 
-pub fn alias(args: &[String], aliases: &mut HashMap<String, String>) -> io::Result<i32> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alias {
+    pub value: String,
+    pub expand_next: bool,
+}
+
+impl Alias {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+            expand_next: value.ends_with(' ') || value.ends_with('\t'),
+        }
+    }
+}
+
+pub fn alias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
     alias_with_io(args, aliases, &mut stdout, &mut stderr)
 }
 
-pub fn unalias(args: &[String], aliases: &mut HashMap<String, String>) -> io::Result<i32> {
+pub fn unalias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
     let mut stderr = io::stderr();
     unalias_with_io(args, aliases, &mut stderr)
 }
 
 fn alias_with_io<W, E>(
     args: &[String],
-    aliases: &mut HashMap<String, String>,
+    aliases: &mut HashMap<String, Alias>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -30,22 +47,30 @@ where
     W: Write,
     E: Write,
 {
-    if args.is_empty() {
+    let mut args = args;
+    let pflag = args.first().is_some_and(|arg| arg == "-p");
+    if pflag {
+        args = &args[1..];
+    }
+
+    if args.is_empty() || pflag {
         print_aliases(aliases, stdout)?;
-        return Ok(EXECUTION_SUCCESS);
+        if args.is_empty() {
+            return Ok(EXECUTION_SUCCESS);
+        }
     }
 
     let mut status = EXECUTION_SUCCESS;
     for arg in args {
         if let Some((name, value)) = arg.split_once('=') {
-            if name.is_empty() {
-                writeln!(stderr, "rubash: alias: `{arg}': invalid alias name")?;
+            if !valid_alias_name(name) {
+                writeln!(stderr, "rubash: alias: `{name}': invalid alias name")?;
                 status = EXECUTION_FAILURE;
                 continue;
             }
-            aliases.insert(name.to_string(), value.to_string());
-        } else if let Some(value) = aliases.get(arg) {
-            writeln!(stdout, "alias {}='{}'", arg, quote_single(value))?;
+            aliases.insert(name.to_string(), Alias::new(value));
+        } else if let Some(alias) = aliases.get(arg) {
+            print_alias(arg, alias, stdout)?;
         } else {
             writeln!(stderr, "rubash: alias: {}: not found", arg)?;
             status = EXECUTION_FAILURE;
@@ -57,7 +82,7 @@ where
 
 fn unalias_with_io<E>(
     args: &[String],
-    aliases: &mut HashMap<String, String>,
+    aliases: &mut HashMap<String, Alias>,
     stderr: &mut E,
 ) -> io::Result<i32>
 where
@@ -84,18 +109,37 @@ where
     Ok(status)
 }
 
-fn print_aliases<W>(aliases: &HashMap<String, String>, stdout: &mut W) -> io::Result<()>
+fn print_aliases<W>(aliases: &HashMap<String, Alias>, stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
     let mut names: Vec<_> = aliases.keys().collect();
     names.sort();
     for name in names {
-        if let Some(value) = aliases.get(name) {
-            writeln!(stdout, "alias {}='{}'", name, quote_single(value))?;
+        if let Some(alias) = aliases.get(name) {
+            print_alias(name, alias, stdout)?;
         }
     }
     Ok(())
+}
+
+fn print_alias<W>(name: &str, alias: &Alias, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    let prefix = if name.starts_with('-') { "-- " } else { "" };
+    writeln!(stdout, "alias {prefix}{}='{}'", name, quote_single(&alias.value))
+}
+
+fn valid_alias_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.chars().any(|ch| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '/' | '$' | '`' | '"' | '\'' | '\\' | '(' | ')' | '<' | '>' | '&' | '|'
+                )
+        })
 }
 
 fn quote_single(value: &str) -> String {
