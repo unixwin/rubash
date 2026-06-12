@@ -70,14 +70,11 @@ fn remove_residual_shell_quotes(arg: &str) -> String {
     // TODO(subst.c/parse.y): Quote removal belongs in the expansion pipeline,
     // not inside echo. This narrow cleanup covers alias replacement text that
     // Rubash has not yet re-read through a complete parser input stack.
-    if arg.len() >= 2
-        && ((arg.starts_with('"') && arg.ends_with('"'))
-            || (arg.starts_with('\'') && arg.ends_with('\'')))
-    {
+    if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
         return arg[1..arg.len() - 1].to_string();
     }
 
-    if arg.starts_with('"') || arg.starts_with('\'') {
+    if arg.starts_with('"') {
         return arg[1..].to_string();
     }
 
