@@ -18,7 +18,7 @@ where
 {
     let args: Vec<&str> = args.into_iter().collect();
     let mut display_newline = true;
-    let mut interpret_escapes = false;
+    let mut interpret_escapes = crate::builtins::shopt::xpg_echo_enabled();
     let mut index = 0;
 
     while index < args.len() {

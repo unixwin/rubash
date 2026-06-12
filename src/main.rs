@@ -39,6 +39,9 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
             }
             "-c" => {
                 if let Some(command) = args.get(index + 1) {
+                    if let Some(command_name) = args.get(index + 2) {
+                        executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+                    }
                     return run_command_string(executor, command);
                 }
                 eprintln!("rubash: -c: option requires an argument");

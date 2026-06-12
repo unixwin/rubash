@@ -249,7 +249,14 @@ EOF
   status=$?
   set -e
 
-  if [[ "$status" -eq 0 && ! -s "$log" ]]; then
+  unexpected_log="$OUT_DIR/logs/$runner.unexpected.log"
+  grep -v -x \
+    -e 'warning: some of these tests may fail if process substitution has not' \
+    -e 'warning: been compiled into the shell or if the OS does not provide' \
+    -e 'warning: /dev/fd.' \
+    "$log" > "$unexpected_log" || true
+
+  if [[ "$status" -eq 0 && ! -s "$unexpected_log" ]]; then
     PASS=$((PASS + 1))
     printf "%s\tPASS\t%s\t%s\n" "$runner" "$status" "$log" >> "$RESULTS_TSV"
     printf "PASS %s\n" "$runner"

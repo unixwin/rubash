@@ -137,6 +137,7 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
             let mut body = String::new();
             for body_line in lines.by_ref() {
                 position += body_line.len() + 1;
+                line_number += 1;
                 if body_line == delimiter {
                     break;
                 }

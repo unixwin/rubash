@@ -31,6 +31,7 @@ pub fn find_shell(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     ["sh", "bash"]
         .into_iter()
         .find_map(|name| find_user_command(name, env_vars))
+        .or_else(find_windows_git_bash)
 }
 
 pub fn should_run_with_shell(path: &Path) -> bool {
@@ -73,6 +74,20 @@ fn executable_extensions() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_else(|| vec!["exe".into(), "com".into(), "bat".into(), "cmd".into()])
+}
+
+fn find_windows_git_bash() -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+
+    [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
 }
 
 fn split_path(path: &str) -> Vec<String> {
