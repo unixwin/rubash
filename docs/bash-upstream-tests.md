@@ -52,6 +52,34 @@ Use the project runner instead of invoking upstream scripts directly:
 scripts/run-bash-upstream-tests.sh
 ```
 
+## Safety Model
+
+Do not run upstream Bash `tests/run-*` scripts directly from a user directory.
+Some upstream tests intentionally create and remove files in their current
+working directory, including broad glob deletes. Always use
+`scripts/run-bash-upstream-tests.sh`.
+
+The project runner is intentionally defensive:
+
+- it derives the repository root from the runner script location and refuses to
+  run if that root is `/`, `$HOME`, `$HOME/Desktop`, `$HOME/Downloads`, or
+  `$HOME/Documents`;
+- it verifies the root looks like this repository by requiring `Cargo.toml`,
+  this runner, and `third_party/bash/tests`;
+- it creates one isolated work directory per upstream runner under
+  `target/bash-upstream-tests/work/`;
+- its own cleanup path uses a guarded recursive delete that refuses to delete
+  anything outside `target/bash-upstream-tests/work/`;
+- it runs the shell under test with isolated `HOME` and `TMPDIR` directories
+  inside the per-runner work directory;
+- it shadows `rm`, `touch`, `mkdir`, `cp`, `mv`, and `ln` with wrappers that
+  refuse to operate from or on paths outside the per-runner work directory.
+
+These checks are part of the test harness contract. Changes to the runner must
+preserve the property that a bad working directory, a bad `HOME`, or an upstream
+test containing destructive commands cannot modify the developer's real home
+directory.
+
 The runner copies `third_party/bash/tests` into a temporary per-test worktree
 under `target/bash-upstream-tests/work/` before running each upstream `run-*`
 script. This is required because the upstream tests create and delete files in

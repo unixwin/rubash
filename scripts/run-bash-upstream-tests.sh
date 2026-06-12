@@ -17,19 +17,47 @@ real_path() {
   fi
 }
 
+die() {
+  echo "$*" >&2
+  exit 2
+}
+
+is_under_dir() {
+  local child="$1"
+  local parent="$2"
+
+  child="${child%/}"
+  parent="${parent%/}"
+  [[ "$child" == "$parent"/* ]]
+}
+
+assert_under_dir() {
+  local child="$1"
+  local parent="$2"
+  local label="$3"
+
+  if ! is_under_dir "$child" "$parent"; then
+    die "Refusing unsafe $label outside $parent: $child"
+  fi
+}
+
 ROOT_REAL="$(real_path "$ROOT_DIR")"
 ROOT_REAL="${ROOT_REAL%/}"
-EXPECTED_ROOT_REAL="/c/Users/caomengxuan/repo/rubash"
-if [[ "$ROOT_REAL" != "$EXPECTED_ROOT_REAL" ]]; then
-  echo "Refusing to run Bash upstream tests outside fixed repo root: $ROOT_REAL" >&2
-  echo "Expected: $EXPECTED_ROOT_REAL" >&2
-  exit 2
-fi
+HOME_REAL="$(real_path "${HOME:-}")"
+
+case "$ROOT_REAL" in
+  ""|"/"|"$HOME_REAL"|"$HOME_REAL/Desktop"|"$HOME_REAL/Downloads"|"$HOME_REAL/Documents")
+    die "Refusing unsafe repository root for Bash upstream tests: $ROOT_REAL"
+    ;;
+esac
+
+[[ -f "$ROOT_REAL/Cargo.toml" ]] || die "Refusing to run outside rubash repo: missing Cargo.toml at $ROOT_REAL"
+[[ -f "$ROOT_REAL/scripts/run-bash-upstream-tests.sh" ]] || die "Refusing to run outside rubash repo: missing runner script at $ROOT_REAL"
+[[ -d "$ROOT_REAL/third_party/bash/tests" ]] || die "Refusing to run outside rubash repo: missing Bash tests at $ROOT_REAL/third_party/bash/tests"
 
 OUT_REAL="$(real_path "$OUT_DIR")"
 WORK_ROOT="$OUT_DIR/work"
 WORK_ROOT_REAL="$(real_path "$WORK_ROOT")"
-HOME_REAL="$(real_path "${HOME:-}")"
 
 mkdir -p "$OUT_DIR/logs"
 
@@ -38,20 +66,29 @@ refuse_unsafe_dir() {
   local real
   real="$(real_path "$dir")"
 
-  case "$real" in
-    "$WORK_ROOT_REAL"/*) ;;
-    *)
-      echo "Refusing to run Bash upstream tests outside isolated work dir: $real" >&2
-      exit 2
-      ;;
-  esac
+  assert_under_dir "$real" "$WORK_ROOT_REAL" "Bash upstream test directory"
 
   case "$real" in
     ""|"/"|"$HOME_REAL"|"$ROOT_REAL"|"$OUT_REAL")
-      echo "Refusing unsafe Bash upstream test directory: $real" >&2
-      exit 2
+      die "Refusing unsafe Bash upstream test directory: $real"
       ;;
   esac
+}
+
+safe_rm_rf() {
+  local target="$1"
+  local real
+  real="$(real_path "$target")"
+
+  assert_under_dir "$real" "$WORK_ROOT_REAL" "delete target"
+
+  case "$real" in
+    ""|"/"|"$HOME_REAL"|"$ROOT_REAL"|"$OUT_REAL"|"$WORK_ROOT_REAL")
+      die "Refusing unsafe recursive delete target: $real"
+      ;;
+  esac
+
+  rm -rf -- "$target"
 }
 
 if [[ ! -d "$BASH_TEST_DIR" ]]; then
@@ -112,7 +149,7 @@ for runner in "${RUNNERS[@]}"; do
   guard_bin="$workdir/guard-bin"
   shell_wrapper="$workdir/rubash-wrapper"
   refuse_unsafe_dir "$workdir"
-  rm -rf "$workdir"
+  safe_rm_rf "$workdir"
   mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
   cp -R "$BASH_TEST_DIR" "$test_workdir"
   cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
@@ -139,6 +176,30 @@ case "\$cwd" in
     exit 126
     ;;
 esac
+after_dashdash=0
+for arg in "\$@"; do
+  if [[ "\$after_dashdash" -eq 0 && "\$arg" == "--" ]]; then
+    after_dashdash=1
+    continue
+  fi
+  if [[ "\$after_dashdash" -eq 0 && "\$arg" == -* ]]; then
+    continue
+  fi
+
+  case "\$arg" in
+    "") continue ;;
+  esac
+
+  candidate="\$(realpath -m -- "\$arg")"
+  case "\$candidate" in
+    "\$allowed"|"\$allowed"/*) ;;
+    *)
+      echo "Refusing $guarded_cmd path outside Bash upstream work dir: \$arg -> \$candidate" >&2
+      echo "Allowed: \$allowed" >&2
+      exit 126
+      ;;
+  esac
+done
 exec "$guarded_path" "\$@"
 EOF
     chmod +x "$guard_bin/$guarded_cmd"

@@ -97,6 +97,12 @@ git submodule update --init --depth 1 third_party/bash
 scripts/run-bash-upstream-tests.sh
 ```
 
+必须通过这个 runner 运行上游测试，不要直接在 `third_party/bash/tests` 或用户目录
+里执行 `run-*`。Runner 会拒绝以 `/`、`$HOME`、桌面、下载、文档等位置作为仓库
+根目录；每个上游测试都会被复制到 `target/bash-upstream-tests/work/<runner>/`
+下面运行，并使用隔离的 `HOME`/`TMPDIR`。测试中的 `rm`、`touch`、`mkdir`、
+`cp`、`mv`、`ln` 会被 wrapper 拦截，路径不在当前测试 workdir 内就直接失败。
+
 当前基线:
 
 | 环境 | 总数 | 通过 | 失败 | 通过率 |
