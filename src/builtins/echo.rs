@@ -45,7 +45,8 @@ where
         }
 
         if interpret_escapes {
-            let expanded = expand_escapes(arg);
+            let normalized = remove_residual_shell_quotes(arg);
+            let expanded = expand_escapes(&normalized);
             writer.write_all(expanded.output.as_bytes())?;
             if expanded.stop {
                 suppress_remaining = true;
@@ -53,7 +54,8 @@ where
                 break;
             }
         } else {
-            writer.write_all(arg.as_bytes())?;
+            let normalized = remove_residual_shell_quotes(arg);
+            writer.write_all(normalized.as_bytes())?;
         }
     }
 
@@ -62,6 +64,24 @@ where
     }
 
     Ok(())
+}
+
+fn remove_residual_shell_quotes(arg: &str) -> String {
+    // TODO(subst.c/parse.y): Quote removal belongs in the expansion pipeline,
+    // not inside echo. This narrow cleanup covers alias replacement text that
+    // Rubash has not yet re-read through a complete parser input stack.
+    if arg.len() >= 2
+        && ((arg.starts_with('"') && arg.ends_with('"'))
+            || (arg.starts_with('\'') && arg.ends_with('\'')))
+    {
+        return arg[1..arg.len() - 1].to_string();
+    }
+
+    if arg.starts_with('"') || arg.starts_with('\'') {
+        return arg[1..].to_string();
+    }
+
+    arg.to_string()
 }
 
 fn is_echo_option(arg: &str) -> bool {
