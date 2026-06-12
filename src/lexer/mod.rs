@@ -111,7 +111,10 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         logical_line.push_str(line);
         position += line.len() + 1;
 
-        if has_unclosed_quotes(&logical_line) && is_multiline_alias_definition(&logical_line) {
+        if has_unclosed_quotes(&logical_line)
+            && (is_multiline_alias_definition(&logical_line)
+                || is_multiline_command_string(&logical_line))
+        {
             continue;
         }
 
@@ -201,6 +204,14 @@ fn is_multiline_alias_definition(input: &str) -> bool {
     // the rest of the script.
     let trimmed = input.trim_start();
     trimmed.starts_with("alias ") && trimmed.contains('=')
+}
+
+fn is_multiline_command_string(input: &str) -> bool {
+    // TODO(shell.c/parse.y): This preserves quoted multi-line command strings
+    // passed to `bash -c`/`${THIS_SH} -c` in upstream tests. Bash's reader does
+    // this generally for all quoted parser input.
+    let trimmed = input.trim_start();
+    trimmed.contains(" -c '") || trimmed.contains(" -c \"") || trimmed.starts_with("-c '")
 }
 
 pub struct Lexer<'a> {

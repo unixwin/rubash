@@ -241,6 +241,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
+            TokenKind::Keyword => {
+                // TODO(parse.y): Reserved words are only reserved in specific
+                // parser states. If an ordinary command has already started,
+                // keep the token text so alias expansion can reparse it later.
+                if !matches!(token.value.as_str(), "(" | ")" | "{" | "}") {
+                    current_cmd.words.push(token.value.clone());
+                }
+            }
             TokenKind::Eof => {
                 break;
             }
