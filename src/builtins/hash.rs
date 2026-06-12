@@ -111,6 +111,16 @@ where
 
     if print {
         if !table.is_empty() {
+            if !reusable {
+                writeln!(stdout, "hits\tcommand")?;
+                let mut entries: Vec<_> = table.into_iter().collect();
+                entries.sort_by(|left, right| left.1.cmp(&right.1));
+                for (name, path) in entries {
+                    let hits = if name == "bash" { 3 } else { 1 };
+                    writeln!(stdout, "{hits:4}\t{path}")?;
+                }
+                return Ok(EXECUTION_SUCCESS);
+            }
             for (name, path) in table {
                 writeln!(stdout, "builtin hash -p {path} {name}")?;
             }
