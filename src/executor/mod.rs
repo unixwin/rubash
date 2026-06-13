@@ -653,6 +653,11 @@ impl Executor {
                         crate::builtins::setattr::export(&cmd.words[1..], &mut self.env_vars)?;
                     Ok(())
                 }
+                "readonly" => {
+                    self.exit_code =
+                        crate::builtins::setattr::readonly(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
                 ":" => {
                     self.exit_code = crate::builtins::colon::colon();
                     Ok(())
@@ -825,8 +830,24 @@ impl Executor {
         let Some(body) = self.functions.get(name).cloned() else {
             return Ok(());
         };
+        let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
+        self.env_vars
+            .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
+        env::set_var("__RUBASH_CURRENT_FUNCTION", name);
         let ast = Ast { commands: body };
-        self.execute_ast(&ast)
+        let result = self.execute_ast(&ast);
+        match old_function {
+            Some(value) => {
+                self.env_vars
+                    .insert("__RUBASH_CURRENT_FUNCTION".to_string(), value.clone());
+                env::set_var("__RUBASH_CURRENT_FUNCTION", value);
+            }
+            None => {
+                self.env_vars.remove("__RUBASH_CURRENT_FUNCTION");
+                env::remove_var("__RUBASH_CURRENT_FUNCTION");
+            }
+        }
+        result
     }
 
     fn execute_declare_functions(&self, args: &[String]) -> i32 {

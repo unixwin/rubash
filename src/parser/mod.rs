@@ -192,7 +192,17 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         }
                         current_cmd.assignments.insert(var_name, var_value);
                     } else {
-                        current_cmd.words.push(token.value.clone());
+                        let mut word = token.value.clone();
+                        if word.ends_with('=') {
+                            if let Some((compound_value, next_i)) =
+                                collect_compound_assignment(tokens, i)
+                            {
+                                word.push('\x1e');
+                                word.push_str(&compound_value);
+                                i = next_i;
+                            }
+                        }
+                        current_cmd.words.push(word);
                     }
                 }
             }
@@ -459,7 +469,10 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
             .trim_end_matches('}')
             .trim();
         let body_tokens = crate::lexer::tokenize(inner);
-        let body = parse(&body_tokens).commands;
+        let mut body = parse(&body_tokens).commands;
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
         let mut next_i = i + 1;
         while tokens
             .get(next_i)
@@ -498,7 +511,10 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         return None;
     }
 
-    let body = parse(&tokens[body_start..i]).commands;
+    let mut body = parse(&tokens[body_start..i]).commands;
+    if let Some(line) = tokens.get(start).map(|token| token.position) {
+        set_body_line(&mut body, line);
+    }
     let mut next_i = i + 1;
     while tokens
         .get(next_i)
@@ -511,6 +527,15 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
     command.line = tokens.get(start).map(|token| token.position);
     command.function_command = Some(FunctionCommand { name, body });
     Some((command, next_i))
+}
+
+fn set_body_line(body: &mut [CommandNode], line: usize) {
+    // TODO(parse.y): Bash preserves source locations through compound command
+    // parsing. Rubash reparses inline function bodies from text today, so
+    // recover the definition line for diagnostics such as readonly errors.
+    for command in body {
+        command.line = Some(line);
+    }
 }
 
 fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String, usize)> {

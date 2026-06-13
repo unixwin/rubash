@@ -10,8 +10,10 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout();
@@ -97,6 +99,7 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     let exported = exported_vars(variables);
+    let readonly = marked_vars(variables, READONLY_VARS);
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
     for name in names {
@@ -106,6 +109,7 @@ where
                 name,
                 value,
                 exported.contains(name),
+                readonly.contains(name),
                 arrays.contains(name),
                 assocs.contains(name),
                 stdout,
@@ -124,7 +128,9 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>)
         let Some((var_name, value)) = name.split_once('=') else {
             continue;
         };
-        let value = if value.is_empty() && var_name == "assoc" {
+        let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
+            compound
+        } else if value.is_empty() && var_name == "assoc" {
             // TODO(parse.y/array.c): The current parser can split compound
             // assignment words after `declare -A`. Preserve builtins5.sub's
             // declaration shape until compound assignments remain atomic.
@@ -144,6 +150,7 @@ fn print_declaration<W>(
     name: &str,
     value: &str,
     exported: bool,
+    readonly: bool,
     array: bool,
     assoc: bool,
     stdout: &mut W,
@@ -158,22 +165,38 @@ where
             writeln!(stdout, "declare -A {name}={}", format_assoc_value(value))
         }
     } else if array {
+        let attrs = declaration_array_attrs(readonly, exported);
         if value.is_empty() {
-            writeln!(stdout, "declare -a {name}")
+            writeln!(stdout, "declare {attrs} {name}")
         } else {
-            writeln!(stdout, "declare -a {name}={}", format_array_value(value))
+            writeln!(stdout, "declare {attrs} {name}={}", format_array_value(value))
         }
     } else if let Some(array_value) = parse_single_element_array(value) {
+        let attrs = declaration_array_attrs(readonly, exported);
         writeln!(
             stdout,
-            "declare -a {}=([0]=\"{}\")",
+            "declare {} {}=([0]=\"{}\")",
+            attrs,
             name,
             quote_double(array_value)
         )
+    } else if readonly && exported {
+        writeln!(stdout, "declare -rx {}=\"{}\"", name, quote_double(value))
+    } else if readonly {
+        writeln!(stdout, "declare -r {}=\"{}\"", name, quote_double(value))
     } else if exported {
         writeln!(stdout, "declare -x {}=\"{}\"", name, quote_double(value))
     } else {
         writeln!(stdout, "declare -- {}=\"{}\"", name, quote_double(value))
+    }
+}
+
+fn declaration_array_attrs(readonly: bool, exported: bool) -> &'static str {
+    match (readonly, exported) {
+        (true, true) => "-arx",
+        (true, false) => "-ar",
+        (false, true) => "-ax",
+        (false, false) => "-a",
     }
 }
 
