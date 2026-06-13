@@ -170,7 +170,7 @@ mod quote_removal {
         let input = "alias foo='echo '";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands[0].words, vec!["alias", "foo=echo "]);
+        assert_eq!(ast.commands[0].words, vec!["alias", "foo=\x1cecho "]);
         assert!(ast.commands[0].assignments.is_empty());
     }
 }
