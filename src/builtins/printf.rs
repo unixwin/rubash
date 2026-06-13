@@ -309,6 +309,10 @@ fn shell_quote(value: &str) -> String {
         return "''".to_string();
     }
 
+    if value == "~" {
+        return "\\~".to_string();
+    }
+
     if value
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | ':'))

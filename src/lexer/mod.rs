@@ -461,7 +461,18 @@ impl<'a> Lexer<'a> {
         } else {
             TokenKind::Word
         };
-        let value = if raw.starts_with('"') && raw.ends_with('"') && raw.contains("${") {
+        let value = if quoted_literal_tilde(raw, &value) {
+            // TODO(parse.y/subst.c): Preserve quote state as WORD_DESC flags.
+            // This prevents quoted literal `~` from undergoing tilde
+            // expansion before builtins like `printf %q` see it.
+            format!("\x1b{value}")
+        } else if kind == TokenKind::Assignment && assignment_value_is_quoted(raw) {
+            // TODO(parse.y/subst.c): Replace this narrow quoted-RHS marker
+            // with WORD_DESC quote flags. It lets assignment tilde expansion
+            // distinguish `a=~/x` from `a="~/x"` without leaking syntax to
+            // builtins.
+            mark_quoted_assignment_value(&value)
+        } else if raw.starts_with('"') && raw.ends_with('"') && raw.contains("${") {
             // TODO(parse.y/subst.c): Preserve full quote state on WORD_DESC
             // instead of a sentinel. This narrow marker lets expansion
             // distinguish "${v:-~}" from ${v:-~} for upstream tilde2.tests.
@@ -575,6 +586,51 @@ impl<'a> Lexer<'a> {
             }
         }
     }
+}
+
+fn assignment_value_is_quoted(raw: &str) -> bool {
+    let Some((_, value)) = raw.split_once('=') else {
+        return false;
+    };
+
+    let mut in_backtick = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if ch == '`' {
+            in_backtick = !in_backtick;
+            continue;
+        }
+
+        if !in_backtick && matches!(ch, '"' | '\'') {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn mark_quoted_assignment_value(value: &str) -> String {
+    let Some((name, rhs)) = value.split_once('=') else {
+        return value.to_string();
+    };
+
+    format!("{name}=\x1c{rhs}")
+}
+
+fn quoted_literal_tilde(raw: &str, value: &str) -> bool {
+    value == "~"
+        && ((raw.starts_with('\'') && raw.ends_with('\''))
+            || (raw.starts_with('"') && raw.ends_with('"')))
 }
 
 impl<'a> Iterator for Lexer<'a> {

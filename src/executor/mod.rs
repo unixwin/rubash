@@ -5,6 +5,7 @@
 pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
+use crate::expand::tilde::tilde as tilde_expand;
 use crate::parser::{Ast, CaseClause, CaseCommand, CommandNode, ForCommand, FunctionCommand};
 use std::collections::HashMap;
 use std::env;
@@ -1005,7 +1006,7 @@ impl Executor {
         // TODO(parse.y/execute_cmd.c/pathexp.c): Bash case execution uses the
         // full pattern matcher, fall-through operators, expansion flags, and
         // compound-list control flow. This handles exact patterns and `*`.
-        let word = self.expand_word(&case_command.word);
+        let word = self.expand_case_word(&case_command.word);
         for clause in &case_command.clauses {
             if clause
                 .patterns
@@ -2005,12 +2006,19 @@ impl Executor {
             return array_value;
         }
 
+        let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
+        let value = tilde_expand::strip_assignment_quote_marker(value);
+
         if let Some(expanded) = self.expand_backtick_substitution(value) {
             return expanded;
         }
 
         let expanded = self.expand_embedded_parameters(value);
         if value.contains('=') {
+            return expanded;
+        }
+
+        if quoted {
             return expanded;
         }
 
@@ -2029,6 +2037,10 @@ impl Executor {
     }
 
     pub(crate) fn expand_word(&self, word: &str) -> String {
+        if let Some(word) = word.strip_prefix('\x1b') {
+            return self.expand_embedded_parameters(word);
+        }
+
         if let Some(word) = word.strip_prefix('\x1d') {
             return self.expand_quoted_parameter_word(word);
         }
@@ -2045,24 +2057,23 @@ impl Executor {
             return self.positional_params.join(" ");
         }
 
-        if word == "~" && self.env_vars.get("HOME").map(String::as_str) != Some("/usr/xyz") {
-            return self.home_value();
-        }
-
-        if word.starts_with("~/") {
-            return format!("{}{}", self.home_value(), &word[1..]);
+        if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
+            return value;
         }
 
         if let Some((name, value)) = split_assignment_word(word) {
-            if !value.contains('=')
+            let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
+            let value = tilde_expand::strip_assignment_quote_marker(value);
+            let expanded = self.expand_embedded_parameters(value);
+            if !quoted
+                && !expanded.contains('=')
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
-                    || value.starts_with("~/"))
+                    || expanded.starts_with("~/"))
             {
-                return format!(
-                    "{name}={}",
-                    self.expand_assignment_tilde(&self.expand_embedded_parameters(value))
-                );
+                return format!("{name}={}", self.expand_assignment_tilde(&expanded));
             }
+
+            return format!("{name}={expanded}");
         }
 
         if let Some(expanded) = self.expand_backtick_substitution(word) {
@@ -2255,15 +2266,19 @@ impl Executor {
 
     fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
         // TODO(builtins/declare.def/subst.c): `declare` and `typeset` perform
-        // assignment-word RHS expansion for name=value operands. Keep the
-        // bridge at the executor/builtin boundary so declare.rs still mirrors
-        // declare.def's attribute bookkeeping.
+        // assignment-word RHS expansion before the builtin applies attributes.
+        // General word expansion has already handled parameters and unquoted
+        // tilde prefixes, so this bridge only removes Rubash's temporary quote
+        // marker before declare.rs mirrors declare.def's bookkeeping.
         args.iter()
             .map(|arg| {
                 let Some((name, value)) = split_assignment_word(arg) else {
                     return arg.clone();
                 };
-                format!("{name}={}", self.expand_assignment_value(value))
+                format!(
+                    "{name}={}",
+                    tilde_expand::strip_assignment_quote_marker(value)
+                )
             })
             .collect()
     }
@@ -2273,7 +2288,7 @@ impl Executor {
         // ${parameter:=word}, and ${parameter+word} has quote-aware expansion
         // flags. This covers tilde2.tests while the lexer still discards most
         // quote state.
-        expand_assignment_tilde_value(
+        tilde_expand::expand_assignment_tilde_value(
             &self.expand_embedded_parameters(word),
             &self.home_value(),
             false,
@@ -2347,15 +2362,19 @@ impl Executor {
         if value.contains('=') {
             return value.to_string();
         }
-        expand_assignment_tilde_value(value, &self.home_value(), true)
+        tilde_expand::expand_assignment_value(value, &self.env_vars)
     }
 
     fn home_value(&self) -> String {
-        self.env_vars
-            .get("HOME")
-            .cloned()
-            .or_else(|| std::env::var("HOME").ok())
-            .unwrap_or_default()
+        tilde_expand::home_value(&self.env_vars)
+    }
+
+    fn expand_case_word(&self, word: &str) -> String {
+        if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
+            return value;
+        }
+
+        self.expand_word(word)
     }
 
     fn array_length(&self, name: &str) -> usize {
@@ -3333,45 +3352,6 @@ fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
-}
-
-fn expand_assignment_tilde_value(value: &str, home: &str, expand_after_colon: bool) -> String {
-    if home.is_empty() {
-        return value.to_string();
-    }
-
-    if !expand_after_colon {
-        return expand_tilde_segment(value, home);
-    }
-
-    let mut output = String::new();
-    let mut start = 0;
-    for (index, ch) in value.char_indices() {
-        if index == 0 || ch != ':' {
-            continue;
-        }
-        output.push_str(&expand_tilde_segment(&value[start..index], home));
-        output.push(':');
-        start = index + ch.len_utf8();
-    }
-    output.push_str(&expand_tilde_segment(&value[start..], home));
-    output
-}
-
-fn expand_tilde_segment(segment: &str, home: &str) -> String {
-    let Some(rest) = segment.strip_prefix('~') else {
-        return segment.to_string();
-    };
-
-    if rest.is_empty() {
-        return home.to_string();
-    }
-
-    if rest.starts_with('/') {
-        return format!("{home}{rest}");
-    }
-
-    segment.to_string()
 }
 
 fn is_shell_keyword(word: &str) -> bool {
