@@ -97,7 +97,10 @@ pub fn tokenize(input: &str) -> Vec<Token> {
     }
 
     let mut tokens = tokenize_with_heredocs(input);
-    if tokens.last().is_some_and(|token| token.kind == TokenKind::Semicolon) {
+    if tokens
+        .last()
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
         tokens.pop();
     }
     tokens
@@ -439,7 +442,11 @@ impl<'a> Lexer<'a> {
     fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
         self.skip_word();
         let raw = self.slice(start);
-        let value = if raw.contains('=') && raw.contains('`') {
+        let value = if raw.contains('=') && raw.contains("$(") {
+            // TODO(parse.y/subst.c): Preserve quotes inside `$()` while
+            // assignment-word quote removal is still token-local.
+            raw.to_string()
+        } else if raw.contains('=') && raw.contains('`') {
             // TODO(parse.y/subst.c): Assignment-word quote removal must not
             // consume quotes inside command substitutions. Preserve the
             // backquote body for the substitution stage.
@@ -453,6 +460,14 @@ impl<'a> Lexer<'a> {
             TokenKind::Assignment
         } else {
             TokenKind::Word
+        };
+        let value = if raw.starts_with('"') && raw.ends_with('"') && raw.contains("${") {
+            // TODO(parse.y/subst.c): Preserve full quote state on WORD_DESC
+            // instead of a sentinel. This narrow marker lets expansion
+            // distinguish "${v:-~}" from ${v:-~} for upstream tilde2.tests.
+            format!("\x1d{value}")
+        } else {
+            value
         };
         Token::new(kind, &value, start)
     }

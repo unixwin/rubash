@@ -70,7 +70,11 @@ where
     for arg in args {
         if let Some((name, value)) = arg.split_once('=') {
             if !valid_alias_name(name) {
-                writeln!(stderr, "{}alias: `{name}': invalid alias name", diagnostic_prefix())?;
+                writeln!(
+                    stderr,
+                    "{}alias: `{name}': invalid alias name",
+                    diagnostic_prefix()
+                )?;
                 status = EXECUTION_FAILURE;
                 continue;
             }

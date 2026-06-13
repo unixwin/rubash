@@ -453,7 +453,10 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
     }
 
     let mut i = start + 3;
-    while tokens.get(i).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
         i += 1;
     }
     if let Some(group) = tokens
@@ -464,10 +467,7 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         // TODO(parse.y): The lexer can currently preserve a full brace group
         // as one token. Recognize it as a function body for `name() { ...; }`
         // until the parser owns brace groups structurally.
-        let inner = group
-            .trim_start_matches('{')
-            .trim_end_matches('}')
-            .trim();
+        let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
         let body_tokens = crate::lexer::tokenize(inner);
         let mut body = parse(&body_tokens).commands;
         if let Some(line) = tokens.get(start).map(|token| token.position) {
@@ -490,7 +490,10 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         return None;
     }
     i += 1;
-    while tokens.get(i).is_some_and(|token| token.kind == TokenKind::Semicolon) {
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
         i += 1;
     }
 

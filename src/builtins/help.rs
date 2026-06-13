@@ -26,7 +26,10 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     let short = args.iter().any(|arg| *arg == "-s");
     let desc = args.iter().any(|arg| *arg == "-d");
     let manpage = args.iter().any(|arg| *arg == "-m");
-    let patterns: Vec<&str> = args.into_iter().filter(|arg| !arg.starts_with('-')).collect();
+    let patterns: Vec<&str> = args
+        .into_iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
 
     if patterns.is_empty() {
         print_help_list();

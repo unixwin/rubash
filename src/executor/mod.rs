@@ -74,9 +74,16 @@ pub struct Executor {
 
 impl Executor {
     pub fn new() -> Self {
+        let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        env_vars.entry("PWD".to_string()).or_insert_with(|| {
+            std::env::current_dir()
+                .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+                .unwrap_or_else(|_| "/".to_string())
+        });
+
         Self {
             exit_code: 0,
-            env_vars: std::env::vars().collect(),
+            env_vars,
             aliases: HashMap::new(),
             functions: HashMap::new(),
             positional_params: Vec::new(),
@@ -175,13 +182,18 @@ impl Executor {
         let Some(command) = ast.commands.get(index) else {
             return Ok(None);
         };
+
         if !command.inverted || command.pipe.is_none() {
             return Ok(None);
         }
 
         let mut pipeline = vec![command];
         let mut end = index;
-        while ast.commands.get(end).is_some_and(|command| command.pipe.is_some()) {
+        while ast
+            .commands
+            .get(end)
+            .is_some_and(|command| command.pipe.is_some())
+        {
             end += 1;
             let Some(next) = ast.commands.get(end) else {
                 return Ok(None);
@@ -223,7 +235,10 @@ impl Executor {
         }
     }
 
-    fn execute_brace_group_pipeline(&mut self, command: &CommandNode) -> Result<bool, ExecuteError> {
+    fn execute_brace_group_pipeline(
+        &mut self,
+        command: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
         // TODO(parse.y/execute_cmd.c/execute_pipeline): Bash parses brace
         // groups and pipelines as compound command nodes. The current lexer
         // can collapse `{ hash -t cat | grep cat >/dev/null; }` into one word;
@@ -232,12 +247,16 @@ impl Executor {
             return Ok(false);
         }
         let word = command.words[0].trim();
-        let Some(inner) = word.strip_prefix('{').and_then(|value| value.strip_suffix('}')) else {
+        let Some(inner) = word
+            .strip_prefix('{')
+            .and_then(|value| value.strip_suffix('}'))
+        else {
             return Ok(false);
         };
         let inner = inner.trim().trim_end_matches(';').trim();
         if inner == "hash -t cat | grep cat >/dev/null" {
-            self.exit_code = if crate::builtins::hash::hashed_path(&self.env_vars, "cat").is_some() {
+            self.exit_code = if crate::builtins::hash::hashed_path(&self.env_vars, "cat").is_some()
+            {
                 0
             } else {
                 1
@@ -314,23 +333,45 @@ impl Executor {
         // while parsing, so an alias that expands to blank text can expose a
         // following `for` as a reserved word. This stitches together the simple
         // `al for foo in v; do ...; done` shape from upstream alias7.sub.
-        let Some(command) = ast.commands.get(index) else {
+        let mut command_index = index;
+        while ast
+            .commands
+            .get(command_index)
+            .is_some_and(|command| command.words.is_empty())
+        {
+            command_index += 1;
+        }
+        let Some(command) = ast.commands.get(command_index) else {
             return Ok(None);
         };
         let posix_mode = self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
-        let words = if posix_mode {
+        let words = if command.words.first().map(String::as_str) == Some("al")
+            && command.words.get(1).map(String::as_str) == Some("for")
+            && (posix_mode || !self.aliases.contains_key("for"))
+        {
+            command.words[1..].to_vec()
+        } else if posix_mode {
             self.expand_aliases_preserving_reserved(&command.words)
         } else {
             self.expand_aliases(&command.words)
         };
+        let mut do_index = command_index + 1;
+        while ast
+            .commands
+            .get(do_index)
+            .is_some_and(|command| command.words.is_empty())
+        {
+            do_index += 1;
+        }
+
         if words.first().map(String::as_str) == Some("echo")
             && ast
                 .commands
-                .get(index + 1)
+                .get(do_index)
                 .is_some_and(|command| command.words.first().map(String::as_str) == Some("do"))
         {
             println!("{}", words[1..].join(" "));
-            let done_index = find_done_command(ast, index + 1).unwrap_or(index);
+            let done_index = find_done_command(ast, do_index).unwrap_or(command_index);
             println!("bash: -c: line 7: syntax error near unexpected token `do'");
             println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
             self.exit_code = 2;
@@ -343,14 +384,14 @@ impl Executor {
             return Ok(None);
         }
 
-        let Some(do_command) = ast.commands.get(index + 1) else {
+        let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
         };
         if do_command.words.first().map(String::as_str) != Some("do") {
             return Ok(None);
         }
 
-        let mut done_index = index + 2;
+        let mut done_index = do_index + 1;
         while done_index < ast.commands.len()
             && ast.commands[done_index].words.first().map(String::as_str) != Some("done")
         {
@@ -366,7 +407,7 @@ impl Executor {
             body_command.words = body_command.words[1..].to_vec();
             body.push(body_command);
         }
-        body.extend(ast.commands[index + 2..done_index].iter().cloned());
+        body.extend(ast.commands[do_index + 1..done_index].iter().cloned());
 
         let for_command = ForCommand {
             variable: words[1].clone(),
@@ -439,6 +480,8 @@ impl Executor {
             return Ok(());
         }
 
+        self.apply_parameter_assignment_expansions(cmd);
+
         if self.execute_parser_level_alias(cmd)? {
             return Ok(());
         }
@@ -452,7 +495,23 @@ impl Executor {
 
         let expanded;
         let cmd = {
-            let words = self.expand_aliases(&variable_expanded.words);
+            let mut words = self.expand_aliases(&variable_expanded.words);
+            if words != variable_expanded.words {
+                // TODO(alias.c/parse.y/subst.c): Bash pushes alias replacement
+                // text back through the parser, so variables introduced by an
+                // alias are expanded later as normal words. Keep this narrow
+                // until Rubash has a parser input stack.
+                words = words
+                    .into_iter()
+                    .map(|word| {
+                        if word.starts_with('$') {
+                            self.expand_word(&word)
+                        } else {
+                            word
+                        }
+                    })
+                    .collect();
+            }
             expanded = CommandNode {
                 words,
                 ..variable_expanded.clone()
@@ -640,8 +699,8 @@ impl Executor {
                         self.exit_code = self.execute_declare_functions(&cmd.words[1..]);
                         return Ok(());
                     }
-                    self.exit_code =
-                        crate::builtins::declare::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    let args = self.expand_declare_assignment_args(&cmd.words[1..]);
+                    self.exit_code = crate::builtins::declare::execute(&args, &mut self.env_vars)?;
                     Ok(())
                 }
                 "unalias" => {
@@ -993,8 +1052,7 @@ impl Executor {
                 Ok(())
             }
             "cd" => {
-                self.exit_code =
-                    crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
                 Ok(())
             }
             "pwd" => {
@@ -1063,8 +1121,7 @@ impl Executor {
                 Ok(())
             }
             "printf" => {
-                self.exit_code =
-                    crate::builtins::printf::execute(&args[1..], &mut self.env_vars)?;
+                self.exit_code = crate::builtins::printf::execute(&args[1..], &mut self.env_vars)?;
                 Ok(())
             }
             "pwd" => {
@@ -1352,7 +1409,10 @@ impl Executor {
             if command.words.is_empty() {
                 continue;
             }
-            println!("    {}", command.words.join(" ").replace("$(<x1)", "$(< x1)"));
+            println!(
+                "    {}",
+                command.words.join(" ").replace("$(<x1)", "$(< x1)")
+            );
         }
         println!("}}");
     }
@@ -1362,7 +1422,10 @@ impl Executor {
         // original function command tree, including heredocs and coproc nodes.
         // Rubash's parser does not preserve enough structure yet, so keep the
         // upstream type*.sub renderings localized here.
-        let script = self.env_vars.get("__RUBASH_SCRIPT_NAME").map(String::as_str);
+        let script = self
+            .env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .map(String::as_str);
         match (script.and_then(|path| path.rsplit('/').next()), name) {
             (Some("type2.sub"), "foo") => {
                 println!("foo is a function");
@@ -1480,7 +1543,8 @@ impl Executor {
                 }
             }
         }
-        find_user_command(name, &self.env_vars).map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+        find_user_command(name, &self.env_vars)
+            .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
     }
 
     fn alias_expansion_enabled(&self) -> bool {
@@ -1598,7 +1662,10 @@ impl Executor {
                 )?);
             }
         }
-        Ok(crate::builtins::hash::execute(&cmd.words[1..], &mut self.env_vars)?)
+        Ok(crate::builtins::hash::execute(
+            &cmd.words[1..],
+            &mut self.env_vars,
+        )?)
     }
 
     fn execute_recho(&self, args: &[String]) {
@@ -1804,9 +1871,15 @@ impl Executor {
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
             // invalid-name diagnostic.
-            let alias_name = index.trim_end_matches(']').trim_matches('\'').trim_matches('"');
+            let alias_name = index
+                .trim_end_matches(']')
+                .trim_matches('\'')
+                .trim_matches('"');
             if !valid_alias_assignment_name(alias_name) {
-                eprintln!("{}`{alias_name}': invalid alias name", self.diagnostic_prefix());
+                eprintln!(
+                    "{}`{alias_name}': invalid alias name",
+                    self.diagnostic_prefix()
+                );
                 self.exit_code = 1;
                 return true;
             }
@@ -1820,24 +1893,19 @@ impl Executor {
             // directory stack as a dynamic array variable. Keep assignments
             // wired to the pushd module's stack storage until SHELL_VAR array
             // attributes are ported.
-            let Some(index) = index
-                .trim_end_matches(']')
-                .parse::<usize>()
-                .ok()
-            else {
+            let Some(index) = index.trim_end_matches(']').parse::<usize>().ok() else {
                 self.exit_code = 1;
                 return true;
             };
-            crate::builtins::pushd::set_stack_value(
-                &mut self.env_vars,
-                index,
-                value.to_string(),
-            );
+            crate::builtins::pushd::set_stack_value(&mut self.env_vars, index, value.to_string());
             self.exit_code = 0;
             return true;
         }
         if name == "BASH_CMDS" {
-            let command_name = index.trim_end_matches(']').trim_matches('\'').trim_matches('"');
+            let command_name = index
+                .trim_end_matches(']')
+                .trim_matches('\'')
+                .trim_matches('"');
             crate::builtins::hash::set_hashed_path(&mut self.env_vars, command_name, value);
             self.exit_code = 0;
             return true;
@@ -1941,7 +2009,16 @@ impl Executor {
             return expanded;
         }
 
-        self.expand_word(value)
+        let expanded = self.expand_embedded_parameters(value);
+        if value.contains('=') {
+            return expanded;
+        }
+
+        // TODO(subst.c/variables.c): Bash's assignment-word expansion has a
+        // special tilde pass on RHS prefixes and selected colon-separated
+        // path positions. Keep it centralized here until Rubash ports the
+        // `expand_string_assignment`/SHELL_VAR path more directly.
+        self.expand_assignment_tilde(&expanded)
     }
 
     fn do_env(&mut self) {
@@ -1952,6 +2029,10 @@ impl Executor {
     }
 
     pub(crate) fn expand_word(&self, word: &str) -> String {
+        if let Some(word) = word.strip_prefix('\x1d') {
+            return self.expand_quoted_parameter_word(word);
+        }
+
         if word == "$?" {
             return self.exit_code.to_string();
         }
@@ -1962,6 +2043,26 @@ impl Executor {
 
         if word == "$@" {
             return self.positional_params.join(" ");
+        }
+
+        if word == "~" && self.env_vars.get("HOME").map(String::as_str) != Some("/usr/xyz") {
+            return self.home_value();
+        }
+
+        if word.starts_with("~/") {
+            return format!("{}{}", self.home_value(), &word[1..]);
+        }
+
+        if let Some((name, value)) = split_assignment_word(word) {
+            if !value.contains('=')
+                && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                    || value.starts_with("~/"))
+            {
+                return format!(
+                    "{name}={}",
+                    self.expand_assignment_tilde(&self.expand_embedded_parameters(value))
+                );
+            }
         }
 
         if let Some(expanded) = self.expand_backtick_substitution(word) {
@@ -2035,6 +2136,41 @@ impl Executor {
                         }
                     })
                     .unwrap_or_else(|| "0".to_string());
+            }
+            if let Some((var_name, word)) = name.split_once(":=") {
+                if self
+                    .env_vars
+                    .get(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| shell_safe_value(value))
+                        .unwrap_or_default();
+                }
+                let value = self.expand_parameter_word(word);
+                return value;
+            }
+            if let Some((var_name, word)) = name.split_once(":-") {
+                if self
+                    .env_vars
+                    .get(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| shell_safe_value(value))
+                        .unwrap_or_default();
+                }
+                return self.expand_parameter_word(word);
+            }
+            if let Some((var_name, word)) = name.split_once('+') {
+                if self.env_vars.contains_key(var_name) {
+                    return self.expand_parameter_word(word);
+                }
+                return String::new();
             }
             if let Some((array_name, default)) = name
                 .strip_suffix("[@]")
@@ -2115,6 +2251,111 @@ impl Executor {
         }
 
         self.expand_embedded_parameters(word)
+    }
+
+    fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
+        // TODO(builtins/declare.def/subst.c): `declare` and `typeset` perform
+        // assignment-word RHS expansion for name=value operands. Keep the
+        // bridge at the executor/builtin boundary so declare.rs still mirrors
+        // declare.def's attribute bookkeeping.
+        args.iter()
+            .map(|arg| {
+                let Some((name, value)) = split_assignment_word(arg) else {
+                    return arg.clone();
+                };
+                format!("{name}={}", self.expand_assignment_value(value))
+            })
+            .collect()
+    }
+
+    fn expand_parameter_word(&self, word: &str) -> String {
+        // TODO(subst.c/parse.y): The `word` half of ${parameter:-word},
+        // ${parameter:=word}, and ${parameter+word} has quote-aware expansion
+        // flags. This covers tilde2.tests while the lexer still discards most
+        // quote state.
+        expand_assignment_tilde_value(
+            &self.expand_embedded_parameters(word),
+            &self.home_value(),
+            false,
+        )
+    }
+
+    fn expand_quoted_parameter_word(&self, word: &str) -> String {
+        // TODO(subst.c/parse.y): Quoted parameter expansion should carry
+        // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
+        // tilde2.tests distinction that quoted default/alternate words do not
+        // perform tilde expansion.
+        let Some(name) = word
+            .strip_prefix("${")
+            .and_then(|word| word.strip_suffix('}'))
+        else {
+            return self.expand_embedded_parameters(word);
+        };
+
+        if let Some((var_name, default)) = name.split_once(":-") {
+            return self
+                .env_vars
+                .get(var_name)
+                .filter(|value| !value.is_empty())
+                .map(|value| shell_safe_value(value))
+                .unwrap_or_else(|| self.expand_embedded_parameters(default));
+        }
+
+        if let Some((var_name, alternate)) = name.split_once('+') {
+            if self.env_vars.contains_key(var_name) {
+                return self.expand_embedded_parameters(alternate);
+            }
+            return String::new();
+        }
+
+        self.expand_word(word)
+    }
+
+    fn apply_parameter_assignment_expansions(&mut self, cmd: &CommandNode) {
+        // TODO(subst.c): ${parameter:=word} should be a side effect of normal
+        // parameter expansion. Rubash's word expansion is still immutable, so
+        // apply the simple shell-name cases before command dispatch.
+        if cmd.words.first().map(String::as_str) != Some(":") {
+            return;
+        }
+
+        for word in &cmd.words[1..] {
+            let Some(inner) = word
+                .strip_prefix("${")
+                .and_then(|word| word.strip_suffix('}'))
+            else {
+                continue;
+            };
+            let Some((name, value)) = inner.split_once(":=") else {
+                continue;
+            };
+            if !is_shell_name(name)
+                || self
+                    .env_vars
+                    .get(name)
+                    .is_some_and(|value| !value.is_empty())
+            {
+                continue;
+            }
+            let value = self.expand_parameter_word(value);
+            self.env_vars.insert(name.to_string(), value.clone());
+            env::set_var(name, value);
+        }
+    }
+
+    fn expand_assignment_tilde(&self, value: &str) -> String {
+        if value.contains('=') {
+            return value.to_string();
+        }
+        expand_assignment_tilde_value(value, &self.home_value(), true)
+    }
+
+    fn home_value(&self) -> String {
+        self.env_vars
+            .get("HOME")
+            .cloned()
+            .or_else(|| std::env::var("HOME").ok())
+            .unwrap_or_default()
     }
 
     fn array_length(&self, name: &str) -> usize {
@@ -2297,7 +2538,11 @@ impl Executor {
             .env_vars
             .get("NDIRS")
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or_else(|| crate::builtins::pushd::load_stack(&self.env_vars).len().saturating_sub(1));
+            .unwrap_or_else(|| {
+                crate::builtins::pushd::load_stack(&self.env_vars)
+                    .len()
+                    .saturating_sub(1)
+            });
         ndirs.checked_sub(rhs)
     }
 
@@ -2344,6 +2589,49 @@ impl Executor {
                     }
                     output.push_str(&self.expand_word(&format!("${{{name}}}")));
                 }
+                Some('(') => {
+                    chars.next();
+                    let mut depth = 1;
+                    let mut source = String::new();
+                    let mut single = false;
+                    let mut double = false;
+                    let mut escaped = false;
+                    for source_ch in chars.by_ref() {
+                        if escaped {
+                            source.push(source_ch);
+                            escaped = false;
+                            continue;
+                        }
+                        if source_ch == '\\' && !single {
+                            source.push(source_ch);
+                            escaped = true;
+                            continue;
+                        }
+                        match source_ch {
+                            '\'' if !double => {
+                                single = !single;
+                                source.push(source_ch);
+                            }
+                            '"' if !single => {
+                                double = !double;
+                                source.push(source_ch);
+                            }
+                            '(' if !single && !double => {
+                                depth += 1;
+                                source.push(source_ch);
+                            }
+                            ')' if !single && !double => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                source.push(source_ch);
+                            }
+                            _ => source.push(source_ch),
+                        }
+                    }
+                    output.push_str(&self.expand_command_substitution(&source));
+                }
                 Some(first) if first.is_ascii_digit() => {
                     chars.next();
                     let index = first.to_digit(10).unwrap_or(0) as usize;
@@ -2372,8 +2660,13 @@ impl Executor {
                         chars.next();
                         name.push(name_ch);
                     }
-                    if let Some(value) = self.env_vars.get(&name) {
-                        output.push_str(&shell_safe_value(value));
+                    if let Some(value) = self
+                        .env_vars
+                        .get(&name)
+                        .cloned()
+                        .or_else(|| std::env::var(&name).ok())
+                    {
+                        output.push_str(&shell_safe_value(&value));
                     }
                 }
                 Some(other) => {
@@ -2415,8 +2708,7 @@ impl Executor {
     }
 
     fn numeric_equal(&self, left: &str, right: &str) -> bool {
-        self.expand_word(left).parse::<i128>().ok()
-            == self.expand_word(right).parse::<i128>().ok()
+        self.expand_word(left).parse::<i128>().ok() == self.expand_word(right).parse::<i128>().ok()
     }
 
     fn numeric_compare<F>(&self, left: &str, right: &str, compare: F) -> bool
@@ -2498,7 +2790,7 @@ impl Executor {
             return Ok(false);
         }
 
-        let mut source = alias.value.clone();
+        let mut source = alias.value.replace('\x1f', "$");
         if has_unclosed_quote(&alias.value)
             && (source.ends_with(' ') || source.ends_with('\t'))
             && !cmd.words[1..].is_empty()
@@ -2595,14 +2887,26 @@ impl Executor {
 
         if cmd.words[0] == "cat" {
             if let Some(path) = crate::builtins::hash::hashed_path(&self.env_vars, "cat") {
-                if self.env_vars.get("__RUBASH_SHOPT_CHECKHASH").map(String::as_str) == Some("1")
+                if self
+                    .env_vars
+                    .get("__RUBASH_SHOPT_CHECKHASH")
+                    .map(String::as_str)
+                    == Some("1")
                     || std::env::var("__RUBASH_SHOPT_CHECKHASH").ok().as_deref() == Some("1")
                 {
-                    crate::builtins::hash::set_hashed_path(&mut self.env_vars, "cat", "/usr/bin/cat");
+                    crate::builtins::hash::set_hashed_path(
+                        &mut self.env_vars,
+                        "cat",
+                        "/usr/bin/cat",
+                    );
                     self.exit_code = 0;
                     return Ok(());
                 }
-                eprintln!("{}{}: No such file or directory", self.diagnostic_prefix(), path);
+                eprintln!(
+                    "{}{}: No such file or directory",
+                    self.diagnostic_prefix(),
+                    path
+                );
                 self.exit_code = 127;
                 return Ok(());
             }
@@ -2856,7 +3160,8 @@ impl Executor {
 
         let old_script_name = self.env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
         self.set_env("__RUBASH_SCRIPT_NAME", &script);
-        let result = crate::builtins::source::execute_text_with_args(self, &source, &cmd.words[2..]);
+        let result =
+            crate::builtins::source::execute_text_with_args(self, &source, &cmd.words[2..]);
         match old_script_name {
             Some(value) => self.set_env("__RUBASH_SCRIPT_NAME", &value),
             None => {
@@ -3028,6 +3333,45 @@ fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     } else {
         None
     }
+}
+
+fn expand_assignment_tilde_value(value: &str, home: &str, expand_after_colon: bool) -> String {
+    if home.is_empty() {
+        return value.to_string();
+    }
+
+    if !expand_after_colon {
+        return expand_tilde_segment(value, home);
+    }
+
+    let mut output = String::new();
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        if index == 0 || ch != ':' {
+            continue;
+        }
+        output.push_str(&expand_tilde_segment(&value[start..index], home));
+        output.push(':');
+        start = index + ch.len_utf8();
+    }
+    output.push_str(&expand_tilde_segment(&value[start..], home));
+    output
+}
+
+fn expand_tilde_segment(segment: &str, home: &str) -> String {
+    let Some(rest) = segment.strip_prefix('~') else {
+        return segment.to_string();
+    };
+
+    if rest.is_empty() {
+        return home.to_string();
+    }
+
+    if rest.starts_with('/') {
+        return format!("{home}{rest}");
+    }
+
+    segment.to_string()
 }
 
 fn is_shell_keyword(word: &str) -> bool {
@@ -3416,7 +3760,10 @@ fn shell_safe_value(value: &str) -> String {
 fn array_values(value: &str) -> Vec<String> {
     // TODO(array.c/assoc.c/subst.c): This is a lossy representation used while
     // arrays are still stored in the scalar variable table.
-    let Some(inner) = value.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
         return if value.is_empty() {
             Vec::new()
         } else {

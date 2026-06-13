@@ -79,7 +79,10 @@ mod assignment_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].assignments.contains_key("VAR"));
-        assert_eq!(ast.commands[0].assignments.get("VAR"), Some(&"value".to_string()));
+        assert_eq!(
+            ast.commands[0].assignments.get("VAR"),
+            Some(&"value".to_string())
+        );
     }
 
     #[test]

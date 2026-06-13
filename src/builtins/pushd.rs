@@ -59,7 +59,9 @@ where
                 save_stack(env_vars, &[]);
                 return Ok(EXECUTION_SUCCESS);
             }
-            if let Some(status) = dirs_index_or_error(&args, &stack, diagnostic_prefix, stdout, stderr)? {
+            if let Some(status) =
+                dirs_index_or_error(&args, &stack, diagnostic_prefix, stdout, stderr)?
+            {
                 return Ok(status);
             }
             if args.first().copied() == Some("-v") {
@@ -134,7 +136,8 @@ where
                     from_right,
                     no_cd,
                 } => {
-                    let index = resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
+                    let index =
+                        resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
                     if index >= stack.len() {
                         writeln!(
                             stderr,
@@ -199,7 +202,8 @@ where
                     from_right,
                     no_cd,
                 } => {
-                    let index = resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
+                    let index =
+                        resolved_index(index, from_right, stack.len()).unwrap_or(usize::MAX);
                     if index >= stack.len() {
                         writeln!(
                             stderr,
@@ -234,7 +238,10 @@ enum PushdOperand {
         from_right: bool,
         no_cd: bool,
     },
-    Dir { dir: String, no_cd: bool },
+    Dir {
+        dir: String,
+        no_cd: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -410,7 +417,11 @@ fn strip_no_cd<'a>(args: &'a [&str]) -> (bool, &'a [&'a str]) {
 fn stack_index(arg: &str, len: usize) -> Option<usize> {
     let value = arg[1..].parse::<usize>().ok()?;
     if len == usize::MAX {
-        return Some(if arg.starts_with('+') { value } else { usize::MAX });
+        return Some(if arg.starts_with('+') {
+            value
+        } else {
+            usize::MAX
+        });
     }
     if arg.starts_with('+') {
         (value < len).then_some(value)
@@ -430,12 +441,19 @@ fn resolved_index(value: usize, from_right: bool, len: usize) -> Option<usize> {
     }
 }
 
-fn set_pwd_from_stack(env_vars: &mut HashMap<String, String>, stack: &[String], update_oldpwd: bool) {
+fn set_pwd_from_stack(
+    env_vars: &mut HashMap<String, String>,
+    stack: &[String],
+    update_oldpwd: bool,
+) {
     let Some(pwd) = stack.first().cloned() else {
         return;
     };
     if update_oldpwd {
-        let old = env_vars.get("PWD").cloned().unwrap_or_else(|| "/".to_string());
+        let old = env_vars
+            .get("PWD")
+            .cloned()
+            .unwrap_or_else(|| "/".to_string());
         env_vars.insert("OLDPWD".to_string(), old);
     }
     env_vars.insert("PWD".to_string(), pwd);
@@ -444,4 +462,3 @@ fn set_pwd_from_stack(env_vars: &mut HashMap<String, String>, stack: &[String], 
 fn logical_dir_exists(dir: &str) -> bool {
     matches!(dir, "/" | "/bin" | "/etc" | "/tmp" | "/usr")
 }
-

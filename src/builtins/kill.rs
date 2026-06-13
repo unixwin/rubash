@@ -74,4 +74,3 @@ fn diagnostic_prefix() -> String {
 
     "rubash: ".to_string()
 }
-

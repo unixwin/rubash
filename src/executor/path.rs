@@ -121,7 +121,9 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         && normalized.as_bytes()[1].is_ascii_alphabetic()
     {
         let drive = normalized.as_bytes()[1] as char;
-        return PathBuf::from(format!("{}:\\{}", drive.to_ascii_uppercase(), &normalized[3..]).replace('/', "\\"));
+        return PathBuf::from(
+            format!("{}:\\{}", drive.to_ascii_uppercase(), &normalized[3..]).replace('/', "\\"),
+        );
     }
 
     if let Some(rest) = normalized.strip_prefix("/usr/bin/") {
@@ -156,4 +158,3 @@ fn git_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     let bin = Path::new(exepath);
     bin.parent().map(Path::to_path_buf)
 }
-

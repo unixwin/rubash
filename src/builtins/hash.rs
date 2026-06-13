@@ -72,7 +72,11 @@ where
             return Ok(EXECUTION_FAILURE);
         };
         if pathname == "/" {
-            writeln!(stderr, "{}hash: {pathname}: Is a directory", script_prefix())?;
+            writeln!(
+                stderr,
+                "{}hash: {pathname}: Is a directory",
+                script_prefix()
+            )?;
             return Ok(EXECUTION_FAILURE);
         }
         table.insert(name.to_string(), pathname.to_string());

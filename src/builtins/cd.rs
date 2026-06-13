@@ -81,7 +81,7 @@ where
         // TODO(builtins/cd.def): This is a Windows-host bridge for the GNU
         // Bash upstream tests that use POSIX system directories. A complete
         // shell should keep logical and physical directory state separately.
-        set_shell_env(env_vars, "OLDPWD", old_pwd.to_string_lossy().into_owned());
+        set_shell_env(env_vars, "OLDPWD", shell_display_path(&old_pwd));
         set_shell_env(env_vars, "PWD", logical_dir.to_string());
         match target.print {
             PrintPath::Always | PrintPath::CdPath => writeln!(stdout, "{logical_dir}")?,
@@ -101,9 +101,14 @@ where
         }
         Mode::Physical => env::current_dir().unwrap_or_else(|_| target.path.clone()),
     };
-    let new_pwd_display = shell_display_path(&new_pwd);
+    let new_pwd_display = match mode {
+        Mode::Logical => {
+            logical_destination_display(&old_pwd, target.display.as_deref().unwrap_or(&target.path))
+        }
+        Mode::Physical => shell_display_path(&new_pwd),
+    };
 
-    set_shell_env(env_vars, "OLDPWD", old_pwd.to_string_lossy().into_owned());
+    set_shell_env(env_vars, "OLDPWD", shell_display_path(&old_pwd));
     set_shell_env(env_vars, "PWD", new_pwd_display.clone());
 
     match target.print {
@@ -270,6 +275,20 @@ fn logical_destination(old_pwd: &Path, target: &Path) -> PathBuf {
     normalize_logical_path(&combined)
 }
 
+fn logical_destination_display(old_pwd: &Path, target: &Path) -> String {
+    if !cfg!(windows) {
+        return shell_display_path(&logical_destination(old_pwd, target));
+    }
+
+    let target_display = path_display_text(target);
+    if target_display.starts_with('/') {
+        return normalize_logical_display(&target_display);
+    }
+
+    let old_display = path_display_text(old_pwd);
+    normalize_logical_display(&format!("{old_display}/{target_display}"))
+}
+
 fn normalize_logical_path(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
 
@@ -290,6 +309,34 @@ fn normalize_logical_path(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+fn normalize_logical_display(path: &str) -> String {
+    let mut parts = Vec::new();
+    let absolute = path.starts_with('/');
+
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+
+    let normalized = parts.join("/");
+    if absolute {
+        format!("/{normalized}")
+    } else if normalized.is_empty() {
+        ".".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn path_display_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn shell_var(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
@@ -340,7 +387,8 @@ fn shell_display_path(path: &Path) -> String {
     let mut value = path.to_string_lossy().replace('\\', "/");
     if cfg!(windows) {
         if value.len() >= 3 && value.as_bytes()[1] == b':' && value.as_bytes()[2] == b'/' {
-            value = value[2..].to_string();
+            let drive = value.as_bytes()[0] as char;
+            value = format!("/{}{}", drive.to_ascii_lowercase(), &value[2..]);
         }
     }
     if value.is_empty() {
