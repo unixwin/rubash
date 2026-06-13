@@ -72,7 +72,7 @@ fn is_assignment(word: &str) -> bool {
     let Some(pos) = word.find('=') else {
         return false;
     };
-    let var_name = &word[..pos];
+    let var_name = word[..pos].strip_suffix('+').unwrap_or(&word[..pos]);
     !var_name.is_empty()
         && var_name
             .chars()

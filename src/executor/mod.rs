@@ -16,6 +16,9 @@ use std::process::{Command, Stdio};
 use self::path::{find_shell, find_user_command, shell_path_to_windows, should_run_with_shell};
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeDescribeMode {
@@ -474,8 +477,7 @@ impl Executor {
         if cmd.words.is_empty() {
             for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_assignment_value(value);
-                self.env_vars.insert(name.clone(), expanded_value.clone());
-                env::set_var(name, expanded_value);
+                self.apply_shell_assignment(name, expanded_value);
             }
             self.exit_code = 0;
             return Ok(());
@@ -1844,8 +1846,7 @@ impl Executor {
         }
 
         for (name, value) in assignments {
-            self.env_vars.insert(name.clone(), value.clone());
-            env::set_var(name, value);
+            self.apply_shell_assignment(&name, value);
         }
         self.exit_code = 0;
         true
@@ -1860,6 +1861,11 @@ impl Executor {
         }
         let Some((left, value)) = cmd.words[0].split_once('=') else {
             return false;
+        };
+        let (left, append) = if let Some(left) = left.strip_suffix('+') {
+            (left, true)
+        } else {
+            (left, false)
         };
         let Some((name, index)) = left.split_once('[') else {
             return false;
@@ -1912,18 +1918,71 @@ impl Executor {
             return true;
         }
 
-        let current = self.env_vars.get(name).cloned().unwrap_or_default();
-        let element = value.to_string();
-        let new_value = if current.starts_with('(') && current.ends_with(')') {
-            let inner = current.trim_start_matches('(').trim_end_matches(')');
-            if inner.is_empty() {
-                format!("({element})")
+        let index = index.trim_end_matches(']');
+        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            // TODO(assoc.c/arrayfunc.c): Bash parses associative subscripts
+            // with quote removal and expansion. This stores the simple
+            // `A[key]=value` form exercised by upstream builtins5.sub.
+            let key = index.trim_matches('\'').trim_matches('"');
+            let current = self.env_vars.get(name).cloned().unwrap_or_default();
+            let mut entries = assoc_entries(&current);
+            let value = if append {
+                let current = entries
+                    .iter()
+                    .rev()
+                    .find_map(|(entry_key, entry_value)| {
+                        (entry_key == key).then_some(entry_value.as_str())
+                    })
+                    .unwrap_or_default();
+                append_scalar_value(current, value)
             } else {
-                format!("({inner} {element})")
+                value.to_string()
+            };
+            if let Some((_, entry_value)) = entries
+                .iter_mut()
+                .rev()
+                .find(|(entry_key, _)| entry_key == key)
+            {
+                *entry_value = value;
+            } else {
+                entries.push((key.to_string(), value));
+            }
+            let new_value = format!(
+                "({})",
+                entries
+                    .into_iter()
+                    .map(|(key, value)| format!("[{key}]={value}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            self.env_vars.insert(name.to_string(), new_value);
+            self.exit_code = 0;
+            return true;
+        }
+
+        let Some(index) = index.parse::<usize>().ok() else {
+            return false;
+        };
+        let current = self.env_vars.get(name).cloned().unwrap_or_default();
+        let mut elements = array_values(&current);
+        while elements.len() <= index {
+            elements.push(String::new());
+        }
+        let element = if append {
+            if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+                (eval_arith_value(&elements[index]) + eval_arith_value(value)).to_string()
+            } else {
+                append_scalar_value(&elements[index], value)
             }
         } else {
-            format!("({element})")
+            value.to_string()
         };
+        elements[index] = if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+            eval_arith_value(&element).to_string()
+        } else {
+            element
+        };
+        let new_value = format!("({})", elements.join(" "));
         self.env_vars.insert(name.to_string(), new_value);
         self.exit_code = 0;
         true
@@ -1947,12 +2006,54 @@ impl Executor {
         }
         for (name, value) in assignments {
             let expanded_value = self.expand_assignment_value(value);
-            previous.push((name.clone(), self.env_vars.get(name).cloned()));
-            self.env_vars.insert(name.clone(), expanded_value.clone());
-            env::set_var(name, expanded_value);
-            self.mark_exported(name);
+            let (base_name, _) = assignment_name_and_append(name);
+            previous.push((base_name.to_string(), self.env_vars.get(base_name).cloned()));
+            self.apply_shell_assignment(name, expanded_value);
+            self.mark_exported(base_name);
         }
         previous
+    }
+
+    fn apply_shell_assignment(&mut self, name: &str, value: String) {
+        // TODO(variables.c/arrayfunc.c): Bash stores append assignment state
+        // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
+        // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
+        let (base_name, append) = assignment_name_and_append(name);
+        if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", base_name) {
+            eprintln!(
+                "{}{}: readonly variable",
+                self.diagnostic_prefix(),
+                base_name
+            );
+            self.exit_code = 1;
+            return;
+        }
+        let value = if append {
+            let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
+            if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+                append_assoc_value(&current, &value)
+            } else if current.starts_with('(') && current.ends_with(')') {
+                append_array_value(
+                    &current,
+                    &value,
+                    is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
+                )
+            } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
+                (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
+            } else {
+                append_scalar_value(&current, &value)
+            }
+        } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
+            if value.starts_with('(') && value.ends_with(')') {
+                append_array_value("()", &value, true)
+            } else {
+                eval_arith_value(&value).to_string()
+            }
+        } else {
+            value
+        };
+        self.env_vars.insert(base_name.to_string(), value.clone());
+        env::set_var(base_name, value);
     }
 
     fn mark_exported(&mut self, name: &str) {
@@ -1984,6 +2085,7 @@ impl Executor {
         };
 
         command == "export"
+            || (command == "eval" && cmd.assignments.keys().any(|name| name.ends_with('+')))
             || (command == "declare" && cmd.words.iter().any(|word| word == "-x"))
             || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
                 && matches!(command, "." | "source" | "eval" | ":"))
@@ -2008,12 +2110,18 @@ impl Executor {
 
         let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
         let value = tilde_expand::strip_assignment_quote_marker(value);
+        let value = value
+            .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+            .unwrap_or(value);
 
         if let Some(expanded) = self.expand_backtick_substitution(value) {
             return expanded;
         }
 
         let expanded = self.expand_embedded_parameters(value);
+        if value.starts_with('(') && value.ends_with(')') {
+            return expanded;
+        }
         if value.contains('=') {
             return expanded;
         }
@@ -3347,11 +3455,138 @@ fn read_stdin_line() -> std::io::Result<(usize, String)> {
 
 fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     let (name, value) = word.split_once('=')?;
-    if is_shell_name(name) {
+    let (base_name, _) = assignment_name_and_append(name);
+    if is_shell_name(base_name) {
         Some((name, value))
     } else {
         None
     }
+}
+
+fn assignment_name_and_append(name: &str) -> (&str, bool) {
+    name.strip_suffix('+')
+        .map(|base| (base, true))
+        .unwrap_or((name, false))
+}
+
+fn append_scalar_value(current: &str, value: &str) -> String {
+    let mut output = current.to_string();
+    output.push_str(value);
+    output
+}
+
+fn append_array_value(current: &str, value: &str, integer: bool) -> String {
+    let mut elements = array_values(current);
+    let scalar_append = integer && !value.starts_with('(');
+    for token in array_assignment_tokens(value) {
+        if let Some((left, rhs)) = token.split_once("+=") {
+            if let Some(index) = array_assignment_index(left) {
+                while elements.len() <= index {
+                    elements.push(String::new());
+                }
+                elements[index] =
+                    (eval_arith_value(&elements[index]) + eval_arith_value(rhs)).to_string();
+                continue;
+            }
+        }
+
+        if let Some((left, rhs)) = token.split_once('=') {
+            if let Some(index) = array_assignment_index(left) {
+                while elements.len() <= index {
+                    elements.push(String::new());
+                }
+                elements[index] = rhs.to_string();
+                continue;
+            }
+        }
+
+        if scalar_append && !elements.is_empty() {
+            elements[0] = (eval_arith_value(&elements[0]) + eval_arith_value(&token)).to_string();
+        } else {
+            elements.push(token);
+        }
+    }
+
+    if integer {
+        for element in &mut elements {
+            *element = eval_arith_value(element).to_string();
+        }
+    }
+
+    format!("({})", elements.join(" "))
+}
+
+fn append_assoc_value(current: &str, value: &str) -> String {
+    let mut entries = assoc_entries(current);
+    for token in array_assignment_tokens(value) {
+        if let Some((left, rhs)) = token.split_once('=') {
+            if let Some(key) = left
+                .strip_prefix('[')
+                .and_then(|left| left.strip_suffix(']'))
+            {
+                entries.push((key.to_string(), rhs.to_string()));
+                continue;
+            }
+        }
+        entries.push(("0".to_string(), token));
+    }
+
+    format!(
+        "({})",
+        entries
+            .into_iter()
+            .map(|(key, value)| format!("[{key}]={value}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+}
+
+fn assoc_entries(value: &str) -> Vec<(String, String)> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+
+    inner
+        .split_whitespace()
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((
+                key.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string(),
+                value.to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn array_assignment_index(left: &str) -> Option<usize> {
+    left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+fn array_assignment_tokens(value: &str) -> Vec<String> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return if value.is_empty() {
+            Vec::new()
+        } else {
+            vec![value.to_string()]
+        };
+    };
+
+    inner.split_whitespace().map(str::to_string).collect()
+}
+
+fn eval_arith_value(value: &str) -> i128 {
+    value
+        .split('+')
+        .map(|part| part.trim().parse::<i128>().unwrap_or(0))
+        .sum()
 }
 
 fn is_shell_keyword(word: &str) -> bool {
@@ -3780,6 +4015,13 @@ fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
             .map(|value| value.split('\x1f').any(|marked| marked == name))
             .unwrap_or(false)
     })
+}
+
+fn is_marked_var(env_vars: &HashMap<String, String>, key: &str, name: &str) -> bool {
+    env_vars
+        .get(key)
+        .map(|value| value.split('\x1f').any(|marked| marked == name))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

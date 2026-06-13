@@ -13,6 +13,7 @@ const EX_USAGE: i32 = 2;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
+const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +126,7 @@ fn apply_export_arg<W>(
 where
     W: Write,
 {
-    let (name, value) = split_assignment(arg);
+    let (name, append, value) = split_assignment(arg);
     if !valid_identifier(name) {
         writeln!(stderr, "rubash: export: `{}`: not a valid identifier", arg)?;
         return Ok(EXECUTION_FAILURE);
@@ -138,6 +139,17 @@ where
                 .or_else(|| env_vars.get(name).cloned())
                 .or_else(|| env::var(name).ok())
                 .unwrap_or_default();
+            let value = if append {
+                let mut current = env_vars.get(name).cloned().unwrap_or_default();
+                if marked_vars(env_vars, INTEGER_VARS).contains(name) {
+                    (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
+                } else {
+                    current.push_str(&value);
+                    current
+                }
+            } else {
+                value
+            };
             env_vars.insert(name.to_string(), value.clone());
             env::set_var(name, value);
             mark_exported(env_vars, name);
@@ -227,7 +239,7 @@ fn apply_readonly_arg<W>(
 where
     W: Write,
 {
-    let (name, value) = split_assignment(arg);
+    let (name, append, value) = split_assignment(arg);
     if !valid_identifier(name) {
         writeln!(
             stderr,
@@ -259,6 +271,17 @@ where
         .or_else(|| env_vars.get(name).cloned())
         .or_else(|| env::var(name).ok())
         .unwrap_or_default();
+    let value = if append {
+        let mut current = env_vars.get(name).cloned().unwrap_or_default();
+        if marked_vars(env_vars, INTEGER_VARS).contains(name) {
+            (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
+        } else {
+            current.push_str(&value);
+            current
+        }
+    } else {
+        value
+    };
     env_vars.insert(name.to_string(), value.clone());
     env::set_var(name, value);
     mark_readonly(env_vars, name);
@@ -421,10 +444,16 @@ fn diagnostic_prefix() -> String {
     "rubash: ".to_string()
 }
 
-fn split_assignment(arg: &str) -> (&str, Option<&str>) {
+fn split_assignment(arg: &str) -> (&str, bool, Option<&str>) {
     match arg.find('=') {
-        Some(index) => (&arg[..index], Some(&arg[index + 1..])),
-        None => (arg, None),
+        Some(index) => {
+            let name = &arg[..index];
+            let Some(base_name) = name.strip_suffix('+') else {
+                return (name, false, Some(&arg[index + 1..]));
+            };
+            (base_name, true, Some(&arg[index + 1..]))
+        }
+        None => (arg, false, None),
     }
 }
 
@@ -436,6 +465,13 @@ fn valid_identifier(name: &str) -> bool {
 
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn eval_arith_value(value: &str) -> i128 {
+    value
+        .split('+')
+        .map(|part| part.trim().parse::<i128>().unwrap_or(0))
+        .sum()
 }
 
 fn quote_export_value(value: &str) -> String {

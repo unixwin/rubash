@@ -466,7 +466,26 @@ where
 
     env_vars.remove(name);
     env::remove_var(name);
+    unmark_variable(env_vars, "__RUBASH_ARRAY_VARS", name);
+    unmark_variable(env_vars, "__RUBASH_ASSOC_VARS", name);
+    unmark_variable(env_vars, "__RUBASH_INTEGER_VARS", name);
     Ok(EXECUTION_SUCCESS)
+}
+
+fn unmark_variable(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
+    let Some(value) = env_vars.get(key).cloned() else {
+        return;
+    };
+    let marked = value
+        .split('\x1f')
+        .filter(|marked| !marked.is_empty() && *marked != name)
+        .collect::<Vec<_>>()
+        .join("\x1f");
+    if marked.is_empty() {
+        env_vars.remove(key);
+    } else {
+        env_vars.insert(key.to_string(), marked);
+    }
 }
 
 fn valid_identifier(name: &str) -> bool {
