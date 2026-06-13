@@ -115,7 +115,12 @@ where
                 stdout,
             )?;
         } else {
-            writeln!(stderr, "{}declare: {}: not found", diagnostic_prefix(), name)?;
+            writeln!(
+                stderr,
+                "{}declare: {}: not found",
+                diagnostic_prefix(),
+                name
+            )?;
             status = EXECUTION_FAILURE;
         }
     }
@@ -169,7 +174,11 @@ where
         if value.is_empty() {
             writeln!(stdout, "declare {attrs} {name}")
         } else {
-            writeln!(stdout, "declare {attrs} {name}={}", format_array_value(value))
+            writeln!(
+                stdout,
+                "declare {attrs} {name}={}",
+                format_array_value(value)
+            )
         }
     } else if let Some(array_value) = parse_single_element_array(value) {
         let attrs = declaration_array_attrs(readonly, exported);
@@ -233,13 +242,19 @@ fn mark_assoc(variables: &mut HashMap<String, String>, name: &str) {
 fn mark_typed(variables: &mut HashMap<String, String>, key: &str, name: &str) {
     let mut marked = marked_vars(variables, key);
     marked.insert(name.to_string());
-    variables.insert(key.to_string(), marked.into_iter().collect::<Vec<_>>().join("\x1f"));
+    variables.insert(
+        key.to_string(),
+        marked.into_iter().collect::<Vec<_>>().join("\x1f"),
+    );
 }
 
 fn unmark_typed(variables: &mut HashMap<String, String>, key: &str, name: &str) {
     let mut marked = marked_vars(variables, key);
     marked.remove(name);
-    variables.insert(key.to_string(), marked.into_iter().collect::<Vec<_>>().join("\x1f"));
+    variables.insert(
+        key.to_string(),
+        marked.into_iter().collect::<Vec<_>>().join("\x1f"),
+    );
 }
 
 fn marked_vars(variables: &HashMap<String, String>, key: &str) -> HashSet<String> {
@@ -295,9 +310,10 @@ fn format_assoc_value(value: &str) -> String {
 
     let mut rendered = Vec::new();
     for key in ["two", "three", "one"] {
-        if let Some(value) = entries.iter().find_map(|(entry_key, entry_value)| {
-            (entry_key == key).then_some(entry_value)
-        }) {
+        if let Some(value) = entries
+            .iter()
+            .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value))
+        {
             rendered.push(format!("[{key}]=\"{}\"", quote_double(value)));
         }
     }
@@ -310,14 +326,20 @@ fn format_assoc_value(value: &str) -> String {
 }
 
 fn parse_array_words(value: &str) -> Vec<String> {
-    let Some(inner) = value.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
         return vec![value.to_string()];
     };
     inner.split_whitespace().map(str::to_string).collect()
 }
 
 fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
-    let Some(inner) = value.strip_prefix('(').and_then(|value| value.strip_suffix(')')) else {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
         return Vec::new();
     };
     inner
@@ -325,7 +347,9 @@ fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
         .filter_map(|part| {
             let (key, value) = part.split_once('=')?;
             Some((
-                key.trim_start_matches('[').trim_end_matches(']').to_string(),
+                key.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string(),
                 value.to_string(),
             ))
         })
@@ -355,4 +379,3 @@ fn quote_double(value: &str) -> String {
     }
     quoted
 }
-

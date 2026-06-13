@@ -63,7 +63,12 @@ where
                     'p' => print = true,
                     'o' => use_set_options = true,
                     other => {
-                        writeln!(stderr, "{}shopt: -{}: invalid option", diagnostic_prefix(), other)?;
+                        writeln!(
+                            stderr,
+                            "{}shopt: -{}: invalid option",
+                            diagnostic_prefix(),
+                            other
+                        )?;
                         writeln!(stderr, "shopt: usage: shopt [-pqsu] [-o] [optname ...]")?;
                         return Ok(EX_USAGE);
                     }

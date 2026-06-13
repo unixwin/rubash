@@ -134,8 +134,7 @@ where
 fn is_shell_builtin(name: &str) -> bool {
     matches!(
         name,
-        ":"
-            | "["
+        ":" | "["
             | "cd"
             | "command"
             | "echo"

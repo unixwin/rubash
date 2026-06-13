@@ -194,7 +194,12 @@ where
     if recreate {
         writeln!(stdout, "set {}o {}", if enabled { "-" } else { "+" }, name)?;
     } else {
-        writeln!(stdout, "{:<15}\t{}", name, if enabled { "on" } else { "off" })?;
+        writeln!(
+            stdout,
+            "{:<15}\t{}",
+            name,
+            if enabled { "on" } else { "off" }
+        )?;
     }
     Ok(Some(()))
 }
@@ -206,33 +211,114 @@ struct ShellOption {
 }
 
 const SHELL_OPTIONS: &[ShellOption] = &[
-    ShellOption { name: "allexport", default_enabled: false },
-    ShellOption { name: "braceexpand", default_enabled: true },
-    ShellOption { name: "emacs", default_enabled: true },
-    ShellOption { name: "errexit", default_enabled: false },
-    ShellOption { name: "errtrace", default_enabled: false },
-    ShellOption { name: "functrace", default_enabled: false },
-    ShellOption { name: "hashall", default_enabled: true },
-    ShellOption { name: "histexpand", default_enabled: true },
-    ShellOption { name: "history", default_enabled: true },
-    ShellOption { name: "ignoreeof", default_enabled: false },
-    ShellOption { name: "interactive-comments", default_enabled: true },
-    ShellOption { name: "keyword", default_enabled: false },
-    ShellOption { name: "monitor", default_enabled: true },
-    ShellOption { name: "noclobber", default_enabled: false },
-    ShellOption { name: "noexec", default_enabled: false },
-    ShellOption { name: "noglob", default_enabled: false },
-    ShellOption { name: "nolog", default_enabled: false },
-    ShellOption { name: "notify", default_enabled: false },
-    ShellOption { name: "nounset", default_enabled: false },
-    ShellOption { name: "onecmd", default_enabled: false },
-    ShellOption { name: "physical", default_enabled: false },
-    ShellOption { name: "pipefail", default_enabled: false },
-    ShellOption { name: "posix", default_enabled: false },
-    ShellOption { name: "privileged", default_enabled: true },
-    ShellOption { name: "verbose", default_enabled: false },
-    ShellOption { name: "vi", default_enabled: false },
-    ShellOption { name: "xtrace", default_enabled: false },
+    ShellOption {
+        name: "allexport",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "braceexpand",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "emacs",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "errexit",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "errtrace",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "functrace",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "hashall",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "histexpand",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "history",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "ignoreeof",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "interactive-comments",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "keyword",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "monitor",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "noclobber",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "noexec",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "noglob",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "nolog",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "notify",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "nounset",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "onecmd",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "physical",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "pipefail",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "posix",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "privileged",
+        default_enabled: true,
+    },
+    ShellOption {
+        name: "verbose",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "vi",
+        default_enabled: false,
+    },
+    ShellOption {
+        name: "xtrace",
+        default_enabled: false,
+    },
 ];
 
 pub(crate) fn is_shell_option(name: &str) -> bool {
@@ -407,8 +493,13 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut env_vars = env_vars.clone();
-        let status =
-            set_with_io(args.iter().copied(), &mut env_vars, &mut stdout, &mut stderr).unwrap();
+        let status = set_with_io(
+            args.iter().copied(),
+            &mut env_vars,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
         (
             status,
             String::from_utf8(stdout).unwrap(),

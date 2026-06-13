@@ -66,9 +66,17 @@ where
         let mut status = EXECUTION_SUCCESS;
         for name in operands {
             if !is_builtin(name) {
-                writeln!(stderr, "{}enable: {name}: not a shell builtin", diagnostic_prefix(env_vars))?;
+                writeln!(
+                    stderr,
+                    "{}enable: {name}: not a shell builtin",
+                    diagnostic_prefix(env_vars)
+                )?;
             } else {
-                writeln!(stderr, "{}enable: {name}: not dynamically loaded", diagnostic_prefix(env_vars))?;
+                writeln!(
+                    stderr,
+                    "{}enable: {name}: not dynamically loaded",
+                    diagnostic_prefix(env_vars)
+                )?;
             }
             status = EXECUTION_FAILURE;
         }
@@ -99,7 +107,11 @@ where
     let mut status = EXECUTION_SUCCESS;
     for name in operands {
         if !is_builtin(name) {
-            writeln!(stderr, "{}enable: {name}: not a shell builtin", diagnostic_prefix(env_vars))?;
+            writeln!(
+                stderr,
+                "{}enable: {name}: not a shell builtin",
+                diagnostic_prefix(env_vars)
+            )?;
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -117,7 +129,9 @@ where
 }
 
 pub fn is_disabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
-    disabled_builtins(env_vars).iter().any(|disabled| disabled == name)
+    disabled_builtins(env_vars)
+        .iter()
+        .any(|disabled| disabled == name)
 }
 
 fn disabled_builtins(env_vars: &HashMap<String, String>) -> Vec<String> {
@@ -145,8 +159,7 @@ fn is_builtin(name: &str) -> bool {
     SPECIAL_BUILTINS.contains(&name)
         || matches!(
             name,
-            "["
-                | "alias"
+            "[" | "alias"
                 | "builtin"
                 | "cd"
                 | "command"
@@ -173,4 +186,3 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
 
     "rubash: ".to_string()
 }
-

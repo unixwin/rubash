@@ -107,7 +107,7 @@ scripts/run-bash-upstream-tests.sh
 
 | 环境 | 总数 | 通过 | 失败 | 通过率 |
 |------|------|------|------|--------|
-| Windows + Git Bash 本地完整 upstream run | 86 | 0 | 86 | 0.00% |
+| Windows + Git Bash 本地 upstream run（分批执行） | 86 | 10 | 76 | 11.63% |
 
 `Bash upstream test progress` CI job 默认不阻塞 PR，用来追踪兼容性曲线。需要把
 上游失败作为硬门禁时，可设置:

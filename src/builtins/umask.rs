@@ -47,11 +47,17 @@ where
 
     if let Some(mode) = mode {
         if let Some(symbolic_mask) = parse_symbolic_mask(mode) {
-            env_vars.insert("__RUBASH_UMASK_SYMBOLIC".to_string(), symbolic_mask.to_string());
+            env_vars.insert(
+                "__RUBASH_UMASK_SYMBOLIC".to_string(),
+                symbolic_mask.to_string(),
+            );
             return Ok(EXECUTION_SUCCESS);
         }
         let Some(mask) = parse_mask(mode) else {
-            writeln!(stderr, "rubash: umask: `{mode}': invalid symbolic mode operator")?;
+            writeln!(
+                stderr,
+                "rubash: umask: `{mode}': invalid symbolic mode operator"
+            )?;
             return Ok(EXECUTION_FAILURE);
         };
         env_vars.insert("__RUBASH_UMASK".to_string(), format!("{mask:04o}"));

@@ -41,7 +41,10 @@ pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteEr
 
     let Some(source_path) = invocation.resolve_path(executor) else {
         if invocation.path.is_some() || posix_plain_name_lookup(executor, filename) {
-            eprintln!("{}.: {filename}: file not found", executor.diagnostic_prefix());
+            eprintln!(
+                "{}.: {filename}: file not found",
+                executor.diagnostic_prefix()
+            );
         } else {
             eprintln!(
                 "{}{filename}: No such file or directory",
@@ -200,7 +203,9 @@ fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> 
     (start..end).find(|index| ast.commands[*index].words.first().map(String::as_str) == Some(word))
 }
 
-fn command_tail(command: Option<&crate::parser::CommandNode>) -> Option<crate::parser::CommandNode> {
+fn command_tail(
+    command: Option<&crate::parser::CommandNode>,
+) -> Option<crate::parser::CommandNode> {
     let command = command?;
     if command.words.len() <= 1 {
         return None;
@@ -226,10 +231,10 @@ fn arithmetic_if_condition_true(words: &[String]) -> bool {
     // so accept a non-empty arithmetic-looking condition with at least one
     // non-zero digit as true. Replace this with a real arith_command node.
     words.first().map(String::as_str) == Some("if")
-        && words
-            .iter()
-            .skip(1)
-            .all(|word| word.chars().all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch)))
+        && words.iter().skip(1).all(|word| {
+            word.chars()
+                .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
+        })
         && words
             .iter()
             .skip(1)

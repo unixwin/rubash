@@ -185,7 +185,12 @@ where
                 'a' => array = true,
                 'f' => {}
                 other => {
-                    writeln!(stderr, "{}readonly: -{}: invalid option", diagnostic_prefix(), other)?;
+                    writeln!(
+                        stderr,
+                        "{}readonly: -{}: invalid option",
+                        diagnostic_prefix(),
+                        other
+                    )?;
                     writeln!(
                         stderr,
                         "readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p"
@@ -224,7 +229,12 @@ where
 {
     let (name, value) = split_assignment(arg);
     if !valid_identifier(name) {
-        writeln!(stderr, "{}readonly: `{}`: not a valid identifier", diagnostic_prefix(), arg)?;
+        writeln!(
+            stderr,
+            "{}readonly: `{}`: not a valid identifier",
+            diagnostic_prefix(),
+            arg
+        )?;
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -271,7 +281,11 @@ where
             if arrays.contains(&name) || is_array_value(value) {
                 writeln!(stdout, "declare -ar {name}={}", format_array_value(value))?;
             } else {
-                writeln!(stdout, "declare -r {name}=\"{}\"", quote_export_value(value))?;
+                writeln!(
+                    stdout,
+                    "declare -r {name}=\"{}\"",
+                    quote_export_value(value)
+                )?;
             }
         }
     }
@@ -365,7 +379,9 @@ fn array_attribute_assignment_value(
     // quote state by this point, so preserve attr.tests' existing-array shape.
     if !explicit_array
         && is_array_value(value)
-        && env_vars.get(name).is_some_and(|current| is_array_value(current))
+        && env_vars
+            .get(name)
+            .is_some_and(|current| is_array_value(current))
     {
         return format!("({value})");
     }
@@ -467,7 +483,9 @@ mod tests {
         let status = export_with_io(["1BAD=value"], &mut vars, &mut stdout, &mut stderr).unwrap();
 
         assert_eq!(status, EXECUTION_FAILURE);
-        assert!(String::from_utf8(stderr).unwrap().contains("not a valid identifier"));
+        assert!(String::from_utf8(stderr)
+            .unwrap()
+            .contains("not a valid identifier"));
     }
 
     #[test]
