@@ -30,7 +30,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
     )
 }
 
-fn execute_with_io<'a, I, W, E>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
@@ -45,6 +45,10 @@ where
     let mut output_var = None;
     let mut index = 0;
 
+    if args.get(index) == Some(&"--") {
+        index += 1;
+    }
+
     if args.get(index) == Some(&"-v") {
         let Some(name) = args.get(index + 1) else {
             writeln!(stderr, "rubash: printf: -v: option requires an argument")?;
@@ -58,6 +62,9 @@ where
 
         output_var = Some(*name);
         index += 2;
+        if args.get(index) == Some(&"--") {
+            index += 1;
+        }
     }
 
     let Some(format) = args.get(index) else {
@@ -300,6 +307,10 @@ fn expand_percent_b(value: &str) -> String {
 fn shell_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
+    }
+
+    if value == "~" {
+        return "\\~".to_string();
     }
 
     if value

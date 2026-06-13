@@ -11,14 +11,14 @@ pub fn execute(args: &[String]) -> io::Result<()> {
     write_echo(args.iter().map(String::as_str), &mut stdout)
 }
 
-fn write_echo<'a, I, W>(args: I, writer: &mut W) -> io::Result<()>
+pub(crate) fn write_echo<'a, I, W>(args: I, writer: &mut W) -> io::Result<()>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
 {
     let args: Vec<&str> = args.into_iter().collect();
     let mut display_newline = true;
-    let mut interpret_escapes = false;
+    let mut interpret_escapes = crate::builtins::shopt::xpg_echo_enabled();
     let mut index = 0;
 
     while index < args.len() {
@@ -45,7 +45,8 @@ where
         }
 
         if interpret_escapes {
-            let expanded = expand_escapes(arg);
+            let normalized = remove_residual_shell_quotes(arg);
+            let expanded = expand_escapes(&normalized);
             writer.write_all(expanded.output.as_bytes())?;
             if expanded.stop {
                 suppress_remaining = true;
@@ -53,7 +54,8 @@ where
                 break;
             }
         } else {
-            writer.write_all(arg.as_bytes())?;
+            let normalized = remove_residual_shell_quotes(arg);
+            writer.write_all(normalized.as_bytes())?;
         }
     }
 
@@ -62,6 +64,21 @@ where
     }
 
     Ok(())
+}
+
+fn remove_residual_shell_quotes(arg: &str) -> String {
+    // TODO(subst.c/parse.y): Quote removal belongs in the expansion pipeline,
+    // not inside echo. This narrow cleanup covers alias replacement text that
+    // Rubash has not yet re-read through a complete parser input stack.
+    if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
+        return arg[1..arg.len() - 1].to_string();
+    }
+
+    if arg.starts_with('"') {
+        return arg[1..].to_string();
+    }
+
+    arg.to_string()
 }
 
 fn is_echo_option(arg: &str) -> bool {

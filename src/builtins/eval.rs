@@ -64,7 +64,10 @@ mod tests {
 
     #[test]
     fn empty_eval_succeeds() {
-        assert_eq!(run(&[]), (EvalAction::Complete(EXECUTION_SUCCESS), String::new()));
+        assert_eq!(
+            run(&[]),
+            (EvalAction::Complete(EXECUTION_SUCCESS), String::new())
+        );
     }
 
     #[test]

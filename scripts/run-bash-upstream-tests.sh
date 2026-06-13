@@ -1,13 +1,95 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
+
+PATH="/c/Users/caomengxuan/.cargo/bin:/usr/bin:/bin:$PATH"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BASH_UPSTREAM_DIR="${BASH_UPSTREAM_DIR:-"$ROOT_DIR/third_party/bash"}"
+BASH_UPSTREAM_DIR="$ROOT_DIR/third_party/bash"
 BASH_TEST_DIR="$BASH_UPSTREAM_DIR/tests"
-OUT_DIR="${BASH_UPSTREAM_OUT_DIR:-"$ROOT_DIR/target/bash-upstream-tests"}"
+OUT_DIR="$ROOT_DIR/target/bash-upstream-tests"
 STRICT="${BASH_UPSTREAM_STRICT:-0}"
 
+real_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m "$1"
+  else
+    (cd "$(dirname "$1")" && printf '%s/%s\n' "$PWD" "$(basename "$1")")
+  fi
+}
+
+die() {
+  echo "$*" >&2
+  exit 2
+}
+
+is_under_dir() {
+  local child="$1"
+  local parent="$2"
+
+  child="${child%/}"
+  parent="${parent%/}"
+  [[ "$child" == "$parent"/* ]]
+}
+
+assert_under_dir() {
+  local child="$1"
+  local parent="$2"
+  local label="$3"
+
+  if ! is_under_dir "$child" "$parent"; then
+    die "Refusing unsafe $label outside $parent: $child"
+  fi
+}
+
+ROOT_REAL="$(real_path "$ROOT_DIR")"
+ROOT_REAL="${ROOT_REAL%/}"
+HOME_REAL="$(real_path "${HOME:-}")"
+
+case "$ROOT_REAL" in
+  ""|"/"|"$HOME_REAL"|"$HOME_REAL/Desktop"|"$HOME_REAL/Downloads"|"$HOME_REAL/Documents")
+    die "Refusing unsafe repository root for Bash upstream tests: $ROOT_REAL"
+    ;;
+esac
+
+[[ -f "$ROOT_REAL/Cargo.toml" ]] || die "Refusing to run outside rubash repo: missing Cargo.toml at $ROOT_REAL"
+[[ -f "$ROOT_REAL/scripts/run-bash-upstream-tests.sh" ]] || die "Refusing to run outside rubash repo: missing runner script at $ROOT_REAL"
+[[ -d "$ROOT_REAL/third_party/bash/tests" ]] || die "Refusing to run outside rubash repo: missing Bash tests at $ROOT_REAL/third_party/bash/tests"
+
+OUT_REAL="$(real_path "$OUT_DIR")"
+WORK_ROOT="$OUT_DIR/work"
+WORK_ROOT_REAL="$(real_path "$WORK_ROOT")"
+
 mkdir -p "$OUT_DIR/logs"
+
+refuse_unsafe_dir() {
+  local dir="$1"
+  local real
+  real="$(real_path "$dir")"
+
+  assert_under_dir "$real" "$WORK_ROOT_REAL" "Bash upstream test directory"
+
+  case "$real" in
+    ""|"/"|"$HOME_REAL"|"$ROOT_REAL"|"$OUT_REAL")
+      die "Refusing unsafe Bash upstream test directory: $real"
+      ;;
+  esac
+}
+
+safe_rm_rf() {
+  local target="$1"
+  local real
+  real="$(real_path "$target")"
+
+  assert_under_dir "$real" "$WORK_ROOT_REAL" "delete target"
+
+  case "$real" in
+    ""|"/"|"$HOME_REAL"|"$ROOT_REAL"|"$OUT_REAL"|"$WORK_ROOT_REAL")
+      die "Refusing unsafe recursive delete target: $real"
+      ;;
+  esac
+
+  rm -rf -- "$target"
+}
 
 if [[ ! -d "$BASH_TEST_DIR" ]]; then
   echo "Bash upstream tests not found at $BASH_TEST_DIR" >&2
@@ -52,28 +134,129 @@ SUMMARY_MD="$OUT_DIR/summary.md"
 printf "test\tstatus\texit_code\tlog\n" > "$RESULTS_TSV"
 
 for runner in "${RUNNERS[@]}"; do
+  if [[ "$runner" == */* || "$runner" == *\\* ]]; then
+    echo "Refusing runner name with path separators: $runner" >&2
+    exit 2
+  fi
+
   TOTAL=$((TOTAL + 1))
   log="$OUT_DIR/logs/$runner.log"
   workdir="$OUT_DIR/work/$runner"
   test_workdir="$workdir/tests"
+  expected_dir="$workdir/expected"
   tmpdir="$workdir/tmp"
-  rm -rf "$workdir"
-  mkdir -p "$tmpdir"
+  test_home="$workdir/home"
+  guard_bin="$workdir/guard-bin"
+  shell_wrapper="$workdir/rubash-wrapper"
+  refuse_unsafe_dir "$workdir"
+  safe_rm_rf "$workdir"
+  mkdir -p "$tmpdir" "$test_home" "$guard_bin" "$expected_dir"
   cp -R "$BASH_TEST_DIR" "$test_workdir"
+  cp "$BASH_TEST_DIR"/*.right "$expected_dir"/
+  # Normalize expected output line endings for Windows worktrees. The upstream
+  # Bash tests compare byte-for-byte, while Rubash writes LF on all platforms.
+  # TODO(tests/redir.c): replace this harness normalization once the test
+  # workspace checkout is forced to LF independent of host git attributes.
+  sed -i 's/\r$//' "$expected_dir"/*.right
+  refuse_unsafe_dir "$test_workdir"
+  workdir_real="$(real_path "$workdir")"
+  expected_dir_real="$(real_path "$expected_dir")"
 
+  find "$test_workdir" -maxdepth 1 -type f -name 'run-*' -exec \
+    sed -i -E "s@([[:alnum:]_.+-]+\\.right)@$expected_dir_real/\\1@g" {} +
+
+  for guarded_cmd in rm touch mkdir cp mv ln; do
+    guarded_path="$(command -v "$guarded_cmd")"
+    cat >"$guard_bin/$guarded_cmd" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+PATH="/usr/bin:/bin:\$PATH"
+allowed="$workdir_real"
+cwd="\$(realpath -m "\$PWD")"
+case "\$cwd" in
+  "\$allowed"|"\$allowed"/*) ;;
+  *)
+    echo "Refusing $guarded_cmd outside Bash upstream work dir: \$cwd" >&2
+    echo "Allowed: \$allowed" >&2
+    exit 126
+    ;;
+esac
+after_dashdash=0
+for arg in "\$@"; do
+  if [[ "\$after_dashdash" -eq 0 && "\$arg" == "--" ]]; then
+    after_dashdash=1
+    continue
+  fi
+  if [[ "\$after_dashdash" -eq 0 && "\$arg" == -* ]]; then
+    continue
+  fi
+
+  case "\$arg" in
+    "") continue ;;
+  esac
+
+  candidate="\$(realpath -m -- "\$arg")"
+  if [[ "$guarded_cmd" == "cp" && "\$candidate" == "/dev/null" ]]; then
+    continue
+  fi
+  case "\$candidate" in
+    "\$allowed"|"\$allowed"/*) ;;
+    *)
+      echo "Refusing $guarded_cmd path outside Bash upstream work dir: \$arg -> \$candidate" >&2
+      echo "Allowed: \$allowed" >&2
+      exit 126
+      ;;
+  esac
+done
+exec "$guarded_path" "\$@"
+EOF
+    chmod +x "$guard_bin/$guarded_cmd"
+  done
+
+  cat >"$shell_wrapper" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+PATH="$guard_bin:/usr/bin:/bin:\$PATH"
+allowed="$workdir_real"
+cwd="\$(realpath -m "\$PWD")"
+case "\$cwd" in
+  "\$allowed"|"\$allowed"/*) ;;
+  *)
+    echo "Refusing to start rubash outside Bash upstream work dir: \$cwd" >&2
+    echo "Allowed: \$allowed" >&2
+    exit 126
+    ;;
+esac
+export HOME="$test_home"
+export TMPDIR="$tmpdir"
+exec "$SHELL_BIN" "\$@"
+EOF
+  chmod +x "$shell_wrapper"
+
+  set +e
   (
     cd "$test_workdir"
+    refuse_unsafe_dir "$PWD"
     env \
-      THIS_SH="$SHELL_BIN" \
+      HOME="$test_home" \
+      THIS_SH="$shell_wrapper" \
       BUILD_DIR="$BASH_UPSTREAM_DIR" \
       BASH_TSTOUT="$tmpdir/bashtst.out" \
       TMPDIR="$tmpdir" \
-      PATH="$BASH_TEST_DIR:$PATH" \
+      PATH="$guard_bin:$BASH_TEST_DIR:$PATH" \
       sh "./$runner"
   ) >"$log" 2>&1
   status=$?
+  set -e
 
-  if [[ "$status" -eq 0 && ! -s "$log" ]]; then
+  unexpected_log="$OUT_DIR/logs/$runner.unexpected.log"
+  grep -v -x \
+    -e 'warning: some of these tests may fail if process substitution has not' \
+    -e 'warning: been compiled into the shell or if the OS does not provide' \
+    -e 'warning: /dev/fd.' \
+    "$log" > "$unexpected_log" || true
+
+  if [[ "$status" -eq 0 && ! -s "$unexpected_log" ]]; then
     PASS=$((PASS + 1))
     printf "%s\tPASS\t%s\t%s\n" "$runner" "$status" "$log" >> "$RESULTS_TSV"
     printf "PASS %s\n" "$runner"
