@@ -120,7 +120,7 @@ mod quotes {
         let input = "echo 'hello world'";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "'hello world'");
+        assert_eq!(tokens[1].value, "hello world");
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod quotes {
         let input = "echo \"hello world\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "\"hello world\"");
+        assert_eq!(tokens[1].value, "hello world");
     }
 
     #[test]
@@ -136,7 +136,7 @@ mod quotes {
         let input = "''";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].value, "''");
+        assert_eq!(tokens[0].value, "");
     }
 
     #[test]
@@ -144,7 +144,7 @@ mod quotes {
         let input = "\"\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 1);
-        assert_eq!(tokens[0].value, "\"\"");
+        assert_eq!(tokens[0].value, "");
     }
 
     #[test]
@@ -152,7 +152,16 @@ mod quotes {
         let input = "echo \"it's a 'test'\"";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[1].value, "\"it's a 'test'\"");
+        assert_eq!(tokens[1].value, "it's a 'test'");
+    }
+
+    #[test]
+    fn test_assignment_word_with_quoted_value() {
+        let input = "alias foo='echo '";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].kind, TokenKind::Assignment);
+        assert_eq!(tokens[1].value, "foo=\x1cecho ");
     }
 }
 
@@ -192,8 +201,16 @@ mod control_structures {
         let tokens = tokenize(input);
         // if, true, ;, then, echo, yes, ;, fi = 8 tokens
         // Keywords: if, then, fi = 3
-        let keywords: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Keyword).collect();
-        assert_eq!(keywords.len(), 3, "Expected 3 keywords, got {}", keywords.len());
+        let keywords: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Keyword)
+            .collect();
+        assert_eq!(
+            keywords.len(),
+            3,
+            "Expected 3 keywords, got {}",
+            keywords.len()
+        );
         assert_eq!(tokens[0].kind, TokenKind::Keyword);
         assert_eq!(tokens[0].value, "if");
     }
@@ -204,8 +221,16 @@ mod control_structures {
         let tokens = tokenize(input);
         // while, true, ;, do, echo, loop, ;, done = 8 tokens
         // Keywords: while, do, done = 3
-        let keywords: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Keyword).collect();
-        assert_eq!(keywords.len(), 3, "Expected 3 keywords, got {}", keywords.len());
+        let keywords: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Keyword)
+            .collect();
+        assert_eq!(
+            keywords.len(),
+            3,
+            "Expected 3 keywords, got {}",
+            keywords.len()
+        );
     }
 
     #[test]
@@ -213,8 +238,15 @@ mod control_structures {
         let input = "for i in 1 2 3; do echo $i; done";
         let tokens = tokenize(input);
         // for, i, in, 1, 2, 3, ;, do, echo, $i, ;, done = 12 tokens
-        let keywords: Vec<_> = tokens.iter().filter(|t| t.kind == TokenKind::Keyword).collect();
-        assert!(keywords.len() >= 4, "Expected at least 4 keywords, got {}", keywords.len());
+        let keywords: Vec<_> = tokens
+            .iter()
+            .filter(|t| t.kind == TokenKind::Keyword)
+            .collect();
+        assert!(
+            keywords.len() >= 4,
+            "Expected at least 4 keywords, got {}",
+            keywords.len()
+        );
     }
 }
 
@@ -239,7 +271,11 @@ mod assignments {
         let input = "PATH=/usr/bin:$PATH";
         let tokens = tokenize(input);
         // PATH=/usr/bin: and $PATH are separate tokens because $ starts a new word
-        assert!(tokens.len() >= 1, "Expected at least 1 token, got {}", tokens.len());
+        assert!(
+            tokens.len() >= 1,
+            "Expected at least 1 token, got {}",
+            tokens.len()
+        );
         assert_eq!(tokens[0].kind, TokenKind::Assignment);
     }
 
@@ -310,7 +346,11 @@ mod variables {
         let tokens = tokenize(input);
         // Each $X becomes a separate token
         // Note: input may have trailing space in source, so accept 6-7
-        assert!(tokens.len() >= 6, "Expected at least 6 tokens, got {}", tokens.len());
+        assert!(
+            tokens.len() >= 6,
+            "Expected at least 6 tokens, got {}",
+            tokens.len()
+        );
         for token in tokens {
             assert_eq!(token.kind, TokenKind::Variable);
         }

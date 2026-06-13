@@ -58,11 +58,11 @@ where
         return Ok(EXECUTION_FAILURE);
     };
 
-    writeln!(stdout, "{}", directory.display())?;
+    writeln!(stdout, "{directory}")?;
     Ok(EXECUTION_SUCCESS)
 }
 
-fn current_directory(mode: Mode) -> io::Result<Option<PathBuf>> {
+fn current_directory(mode: Mode) -> io::Result<Option<String>> {
     let physical = env::current_dir()?;
 
     if mode == Mode::Logical {
@@ -71,24 +71,67 @@ fn current_directory(mode: Mode) -> io::Result<Option<PathBuf>> {
         }
     }
 
-    Ok(Some(physical))
+    Ok(Some(shell_display_path(&physical)))
 }
 
-fn logical_pwd_if_current(physical: &Path) -> Option<PathBuf> {
-    let logical = env::var_os("PWD").map(PathBuf::from)?;
+fn logical_pwd_if_current(physical: &Path) -> Option<String> {
+    let logical = env::var("PWD").ok()?;
 
-    if !logical.is_absolute() {
+    if !(logical.starts_with('/') || Path::new(&logical).is_absolute()) {
         return None;
     }
 
-    let logical_physical = logical.canonicalize().ok()?;
+    let logical_physical = logical_to_physical(&logical).canonicalize().ok()?;
     let current_physical = physical.canonicalize().ok()?;
 
     if logical_physical == current_physical {
-        Some(logical)
+        Some(logical.replace('\\', "/"))
     } else {
         None
     }
+}
+
+fn logical_to_physical(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(rest) = path.strip_prefix("/tmp/") {
+            if let Some(tmpdir) = env::var_os("TMPDIR") {
+                return PathBuf::from(tmpdir).join(rest);
+            }
+        }
+
+        if path == "/tmp" {
+            if let Some(tmpdir) = env::var_os("TMPDIR") {
+                return PathBuf::from(tmpdir);
+            }
+        }
+
+        let bytes = path.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == b'/'
+            && bytes[2] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+        {
+            let drive = bytes[1] as char;
+            return PathBuf::from(
+                format!("{}:\\{}", drive.to_ascii_uppercase(), &path[3..]).replace('/', "\\"),
+            );
+        }
+    }
+
+    PathBuf::from(path)
+}
+
+fn shell_display_path(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows)
+        && value.len() >= 3
+        && value.as_bytes()[1] == b':'
+        && value.as_bytes()[2] == b'/'
+    {
+        let drive = value.as_bytes()[0] as char;
+        return format!("/{}{}", drive.to_ascii_lowercase(), &value[2..]);
+    }
+    value
 }
 
 #[cfg(test)]

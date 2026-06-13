@@ -155,8 +155,7 @@ where
 fn is_shell_builtin(name: &str) -> bool {
     matches!(
         name,
-        ":"
-            | "["
+        ":" | "["
             | "cd"
             | "command"
             | "echo"
@@ -179,7 +178,11 @@ fn is_shell_builtin(name: &str) -> bool {
 fn find_all_in_path(name: &str) -> Vec<PathBuf> {
     let candidate = Path::new(name);
     if candidate.components().count() > 1 {
-        return candidate.is_file().then(|| candidate.to_path_buf()).into_iter().collect();
+        return candidate
+            .is_file()
+            .then(|| candidate.to_path_buf())
+            .into_iter()
+            .collect();
     }
 
     let mut matches = Vec::new();
