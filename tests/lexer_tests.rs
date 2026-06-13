@@ -161,7 +161,7 @@ mod quotes {
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[1].kind, TokenKind::Assignment);
-        assert_eq!(tokens[1].value, "foo=echo ");
+        assert_eq!(tokens[1].value, "foo=\x1cecho ");
     }
 }
 
