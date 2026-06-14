@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+const MAX_EXPR_RECURSION_LEVEL: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArithmeticError {
     message: String,
@@ -28,7 +30,7 @@ pub fn eval(expr: &str, vars: &mut HashMap<String, String>) -> Result<i128, Arit
     // rules. This parser covers the operator core needed by early arith.tests
     // while keeping ownership in the expr.c migration module.
     let mut parser = Parser::new(expr, vars);
-    let value = parser.parse_assignment()?;
+    let value = parser.parse_comma()?;
     parser.skip_ws();
     if !parser.eof() {
         return Err(ArithmeticError::new(
@@ -43,6 +45,7 @@ struct Parser<'a> {
     pos: usize,
     vars: &'a mut HashMap<String, String>,
     noeval: bool,
+    depth: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -58,6 +61,28 @@ impl<'a> Parser<'a> {
             pos: 0,
             vars,
             noeval: false,
+            depth: 0,
+        }
+    }
+
+    fn nested(input: &'a str, vars: &'a mut HashMap<String, String>, depth: usize) -> Self {
+        Self {
+            input,
+            pos: 0,
+            vars,
+            noeval: false,
+            depth,
+        }
+    }
+
+    fn parse_comma(&mut self) -> Result<i128, ArithmeticError> {
+        let mut value = self.parse_assignment()?;
+        loop {
+            self.skip_ws();
+            if !self.consume(",") {
+                return Ok(value);
+            }
+            value = self.parse_assignment()?;
         }
     }
 
@@ -76,17 +101,17 @@ impl<'a> Parser<'a> {
                     let rhs = self.parse_assignment()?;
                     let current = self.lvalue_value(&lvalue)?;
                     let value = match op {
-                        "=" => rhs,
-                        "+=" => current + rhs,
-                        "-=" => current - rhs,
-                        "*=" => current * rhs,
+                        "=" => wrap_intmax(rhs),
+                        "+=" => add_intmax(current, rhs),
+                        "-=" => sub_intmax(current, rhs),
+                        "*=" => mul_intmax(current, rhs),
                         "/=" => checked_div(current, rhs)?,
                         "%=" => checked_rem(current, rhs)?,
-                        "<<=" => current << shift_amount(rhs),
-                        ">>=" => current >> shift_amount(rhs),
-                        "&=" => current & rhs,
-                        "^=" => current ^ rhs,
-                        "|=" => current | rhs,
+                        "<<=" => shl_intmax(current, rhs),
+                        ">>=" => shr_intmax(current, rhs),
+                        "&=" => bitand_intmax(current, rhs),
+                        "^=" => bitxor_intmax(current, rhs),
+                        "|=" => bitor_intmax(current, rhs),
                         _ => unreachable!(),
                     };
                     self.set_lvalue(&lvalue, value);
@@ -172,7 +197,7 @@ impl<'a> Parser<'a> {
             if self.starts_with("||") || !self.consume("|") {
                 return Ok(value);
             }
-            value |= self.parse_bit_xor()?;
+            value = bitor_intmax(value, self.parse_bit_xor()?);
         }
     }
 
@@ -183,7 +208,7 @@ impl<'a> Parser<'a> {
             if !self.consume("^") {
                 return Ok(value);
             }
-            value ^= self.parse_bit_and()?;
+            value = bitxor_intmax(value, self.parse_bit_and()?);
         }
     }
 
@@ -194,7 +219,7 @@ impl<'a> Parser<'a> {
             if self.starts_with("&&") || !self.consume("&") {
                 return Ok(value);
             }
-            value &= self.parse_equality()?;
+            value = bitand_intmax(value, self.parse_equality()?);
         }
     }
 
@@ -235,9 +260,9 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.consume("<<") {
-                value <<= shift_amount(self.parse_additive()?);
+                value = shl_intmax(value, self.parse_additive()?);
             } else if self.consume(">>") {
-                value >>= shift_amount(self.parse_additive()?);
+                value = shr_intmax(value, self.parse_additive()?);
             } else {
                 return Ok(value);
             }
@@ -249,9 +274,9 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.consume("+") {
-                value += self.parse_multiplicative()?;
+                value = add_intmax(value, self.parse_multiplicative()?);
             } else if self.consume("-") {
-                value -= self.parse_multiplicative()?;
+                value = sub_intmax(value, self.parse_multiplicative()?);
             } else {
                 return Ok(value);
             }
@@ -263,7 +288,7 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_ws();
             if self.consume("*") {
-                value *= self.parse_power()?;
+                value = mul_intmax(value, self.parse_power()?);
             } else if self.consume("/") {
                 value = checked_div(value, self.parse_power()?)?;
             } else if self.consume("%") {
@@ -282,18 +307,26 @@ impl<'a> Parser<'a> {
             if rhs < 0 {
                 return Err(ArithmeticError::new("exponent less than 0"));
             }
-            return Ok(value.pow(rhs.min(u32::MAX as i128) as u32));
+            return Ok(pow_intmax(value, rhs));
         }
         Ok(value)
     }
 
     fn parse_unary(&mut self) -> Result<i128, ArithmeticError> {
         self.skip_ws();
+        if self.starts_with_number_after("++") {
+            self.consume("++");
+            return self.parse_unary();
+        }
+        if self.starts_with_number_after("--") {
+            self.consume("--");
+            return Ok(neg_intmax(neg_intmax(self.parse_unary()?)));
+        }
         if self.consume("++") {
             let lvalue = self
                 .parse_lvalue()
                 .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = self.lvalue_value(&lvalue)? + 1;
+            let value = add_intmax(self.lvalue_value(&lvalue)?, 1);
             self.set_lvalue(&lvalue, value);
             return Ok(value);
         }
@@ -301,7 +334,7 @@ impl<'a> Parser<'a> {
             let lvalue = self
                 .parse_lvalue()
                 .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = self.lvalue_value(&lvalue)? - 1;
+            let value = sub_intmax(self.lvalue_value(&lvalue)?, 1);
             self.set_lvalue(&lvalue, value);
             return Ok(value);
         }
@@ -309,13 +342,13 @@ impl<'a> Parser<'a> {
             return self.parse_unary();
         }
         if self.consume("-") {
-            return Ok(-self.parse_unary()?);
+            return Ok(neg_intmax(self.parse_unary()?));
         }
         if self.consume("!") {
             return Ok(i128::from(self.parse_unary()? == 0));
         }
         if self.consume("~") {
-            return Ok(!self.parse_unary()?);
+            return Ok(not_intmax(self.parse_unary()?));
         }
         self.parse_primary()
     }
@@ -323,7 +356,7 @@ impl<'a> Parser<'a> {
     fn parse_primary(&mut self) -> Result<i128, ArithmeticError> {
         self.skip_ws();
         if self.consume("(") {
-            let value = self.parse_assignment()?;
+            let value = self.parse_comma()?;
             self.skip_ws();
             if !self.consume(")") {
                 return Err(ArithmeticError::new("missing `)'"));
@@ -339,9 +372,9 @@ impl<'a> Parser<'a> {
             let value = self.lvalue_value(&lvalue)?;
             self.skip_ws();
             if self.consume("++") {
-                self.set_lvalue(&lvalue, value + 1);
+                self.set_lvalue(&lvalue, add_intmax(value, 1));
             } else if self.consume("--") {
-                self.set_lvalue(&lvalue, value - 1);
+                self.set_lvalue(&lvalue, sub_intmax(value, 1));
             }
             return Ok(value);
         }
@@ -389,7 +422,7 @@ impl<'a> Parser<'a> {
                 if digit >= base {
                     return Err(ArithmeticError::new("value too great for base"));
                 }
-                value = value * base as i128 + digit as i128;
+                value = add_intmax(mul_intmax(value, base as i128), digit as i128);
             }
             return Ok(Some(value));
         }
@@ -399,18 +432,21 @@ impl<'a> Parser<'a> {
             .or_else(|| token.strip_prefix("0X"))
         {
             return i128::from_str_radix(hex, 16)
+                .map(wrap_intmax)
                 .map(Some)
                 .map_err(|_| ArithmeticError::new("invalid number"));
         }
 
         if token.len() > 1 && token.starts_with('0') {
             return i128::from_str_radix(token, 8)
+                .map(wrap_intmax)
                 .map(Some)
                 .map_err(|_| ArithmeticError::new("value too great for base"));
         }
 
         token
             .parse::<i128>()
+            .map(wrap_intmax)
             .map(Some)
             .map_err(|_| ArithmeticError::new("invalid number"))
     }
@@ -477,14 +513,15 @@ impl<'a> Parser<'a> {
         }
         match lvalue {
             LValue::Variable(name) => {
-                self.vars.insert(name.clone(), value.to_string());
+                self.vars
+                    .insert(name.clone(), wrap_intmax(value).to_string());
             }
             LValue::Indexed { name, index } => {
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
                 let storage = crate::shell::arrays::indexed::set_value_at(
                     &storage,
                     *index,
-                    value.to_string(),
+                    wrap_intmax(value).to_string(),
                 );
                 self.vars.insert(name.clone(), storage);
             }
@@ -503,10 +540,13 @@ impl<'a> Parser<'a> {
             .all(|ch| ch.is_ascii_digit() || matches!(ch, '-' | '+'))
             && value.matches(['-', '+']).count() <= 1
         {
-            return value.trim().parse().or(Ok(0));
+            return value.trim().parse().map(wrap_intmax).or(Ok(0));
         }
-        let mut nested = Parser::new(&value, self.vars);
-        nested.parse_assignment()
+        if self.depth >= MAX_EXPR_RECURSION_LEVEL {
+            return Err(ArithmeticError::new("expression recursion level exceeded"));
+        }
+        let mut nested = Parser::nested(&value, self.vars, self.depth + 1);
+        nested.parse_comma()
     }
 
     fn skip_to_conditional_colon(&mut self) {
@@ -574,6 +614,13 @@ impl<'a> Parser<'a> {
         self.input[self.pos..].starts_with(s)
     }
 
+    fn starts_with_number_after(&self, s: &str) -> bool {
+        self.input[self.pos..]
+            .strip_prefix(s)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(|ch| ch.is_ascii_digit())
+    }
+
     fn peek_char(&self) -> Option<char> {
         self.input[self.pos..].chars().next()
     }
@@ -587,18 +634,92 @@ fn checked_div(left: i128, right: i128) -> Result<i128, ArithmeticError> {
     if right == 0 {
         return Err(ArithmeticError::new("division by 0"));
     }
-    Ok(left / right)
+    let left = to_intmax(left);
+    let right = to_intmax(right);
+    if left == i64::MIN && right == -1 {
+        return Ok(i64::MIN as i128);
+    }
+    Ok((left / right) as i128)
 }
 
 fn checked_rem(left: i128, right: i128) -> Result<i128, ArithmeticError> {
     if right == 0 {
         return Err(ArithmeticError::new("division by 0"));
     }
-    Ok(left % right)
+    let left = to_intmax(left);
+    let right = to_intmax(right);
+    if left == i64::MIN && right == -1 {
+        return Ok(0);
+    }
+    Ok((left % right) as i128)
 }
 
 fn shift_amount(value: i128) -> u32 {
-    value.clamp(0, 127) as u32
+    value.clamp(0, 63) as u32
+}
+
+fn wrap_intmax(value: i128) -> i128 {
+    to_intmax(value) as i128
+}
+
+fn to_intmax(value: i128) -> i64 {
+    value as i64
+}
+
+fn add_intmax(left: i128, right: i128) -> i128 {
+    to_intmax(left).wrapping_add(to_intmax(right)) as i128
+}
+
+fn sub_intmax(left: i128, right: i128) -> i128 {
+    to_intmax(left).wrapping_sub(to_intmax(right)) as i128
+}
+
+fn mul_intmax(left: i128, right: i128) -> i128 {
+    to_intmax(left).wrapping_mul(to_intmax(right)) as i128
+}
+
+fn neg_intmax(value: i128) -> i128 {
+    to_intmax(value).wrapping_neg() as i128
+}
+
+fn not_intmax(value: i128) -> i128 {
+    !to_intmax(value) as i128
+}
+
+fn bitand_intmax(left: i128, right: i128) -> i128 {
+    (to_intmax(left) & to_intmax(right)) as i128
+}
+
+fn bitor_intmax(left: i128, right: i128) -> i128 {
+    (to_intmax(left) | to_intmax(right)) as i128
+}
+
+fn bitxor_intmax(left: i128, right: i128) -> i128 {
+    (to_intmax(left) ^ to_intmax(right)) as i128
+}
+
+fn shl_intmax(left: i128, right: i128) -> i128 {
+    to_intmax(left).wrapping_shl(shift_amount(right)) as i128
+}
+
+fn shr_intmax(left: i128, right: i128) -> i128 {
+    to_intmax(left).wrapping_shr(shift_amount(right)) as i128
+}
+
+fn pow_intmax(left: i128, right: i128) -> i128 {
+    let mut result = 1_i64;
+    let mut base = to_intmax(left);
+    let mut exp = right.min(u32::MAX as i128) as u32;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = result.wrapping_mul(base);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            base = base.wrapping_mul(base);
+        }
+    }
+    result as i128
 }
 
 fn digit_value(ch: char, base: u32) -> Option<u32> {
