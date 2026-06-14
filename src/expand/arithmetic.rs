@@ -137,7 +137,10 @@ impl<'a> Parser<'a> {
                     "`:' expected for conditional expression",
                 ));
             }
-            self.skip_unevaluated_conditional_tail();
+            let tail = self.skip_unevaluated_conditional_tail();
+            if tail_has_top_level_assignment(&tail) {
+                return Err(ArithmeticError::new("attempted assignment to non-variable"));
+            }
             Ok(value)
         } else {
             self.skip_to_conditional_colon();
@@ -615,7 +618,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn skip_unevaluated_conditional_tail(&mut self) {
+    fn skip_unevaluated_conditional_tail(&mut self) -> String {
+        let start = self.pos;
         let mut paren = 0_i32;
         while let Some(ch) = self.peek_char() {
             match ch {
@@ -631,6 +635,7 @@ impl<'a> Parser<'a> {
                 _ => self.pos += ch.len_utf8(),
             }
         }
+        self.input[start..self.pos].to_string()
     }
 
     fn skip_ws(&mut self) {
@@ -788,4 +793,36 @@ fn quoted_whitespace_index(value: &str) -> Option<usize> {
                 .and_then(|value| value.strip_suffix('\''))
         })?;
     (!inner.is_empty() && inner.trim().is_empty()).then_some(0)
+}
+
+fn tail_has_top_level_assignment(value: &str) -> bool {
+    // TODO(expr.c): Bash diagnoses assignment operators in unevaluated
+    // conditional arms when precedence leaves the assignment outside the
+    // conditional expression. This preserves that behavior for arith.tests'
+    // `1 ? 20 : x+=2` without evaluating parenthesized short-circuit arms.
+    let bytes = value.as_bytes();
+    let mut paren = 0_i32;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => paren += 1,
+            b')' if paren > 0 => paren -= 1,
+            b'=' if paren == 0 => {
+                if index > 0
+                    && matches!(
+                        bytes[index - 1],
+                        b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'^' | b'|' | b'<' | b'>'
+                    )
+                {
+                    return true;
+                }
+                if bytes.get(index + 1) != Some(&b'=') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
