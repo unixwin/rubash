@@ -457,50 +457,7 @@ fn append_assoc_value(current: &str, value: &str) -> String {
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
-    let mut elements = parse_array_words(current);
-    if current == "()" {
-        elements.clear();
-    }
-    let scalar_append = integer && !value.starts_with('(');
-
-    for token in parse_array_tokens(value) {
-        if let Some((left, rhs)) = token.split_once("+=") {
-            if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] =
-                    (eval_arith_value(&elements[index]) + eval_arith_value(rhs)).to_string();
-                continue;
-            }
-        }
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] = rhs.to_string();
-                continue;
-            }
-        }
-        if scalar_append && !elements.is_empty() {
-            elements[0] = (eval_arith_value(&elements[0]) + eval_arith_value(&token)).to_string();
-        } else {
-            elements.push(token);
-        }
-    }
-
-    if integer {
-        for element in &mut elements {
-            *element = eval_arith_value(element).to_string();
-        }
-    }
-
-    format!("({})", elements.join(" "))
-}
-
-fn array_assignment_index(left: &str) -> Option<usize> {
-    left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+    crate::shell::arrays::functions::append_indexed_value(current, value, integer)
 }
 
 fn assign_array_element(
