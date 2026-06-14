@@ -606,6 +606,7 @@ impl Executor {
                         Ok(())
                     }
                     crate::builtins::eval::EvalAction::Execute(source) => {
+                        let source = expand_numeric_brace_ranges(&source);
                         let tokens = crate::lexer::tokenize(&source);
                         let ast = crate::parser::parse(&tokens);
                         self.execute_ast(&ast)
@@ -1233,6 +1234,7 @@ impl Executor {
                     Ok(())
                 }
                 crate::builtins::eval::EvalAction::Execute(source) => {
+                    let source = expand_numeric_brace_ranges(&source);
                     let tokens = crate::lexer::tokenize(&source);
                     let ast = crate::parser::parse(&tokens);
                     self.execute_ast(&ast)
@@ -2612,6 +2614,20 @@ impl Executor {
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
         }
 
+        if let Some((array_name, offset)) = array_slice_parameter(name) {
+            return self
+                .env_vars
+                .get(array_name)
+                .map(|value| {
+                    array_values(value)
+                        .into_iter()
+                        .skip(offset)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+        }
+
         if let Some((var_name, alternate)) = name.split_once('+') {
             if self.env_vars.contains_key(var_name) {
                 return self.expand_embedded_parameters(alternate);
@@ -3919,6 +3935,48 @@ fn shell_display_path(path: &str) -> String {
     path.to_string()
 }
 
+fn expand_numeric_brace_ranges(source: &str) -> String {
+    // TODO(bracecomp.c/subst.c): Bash performs brace expansion before normal
+    // word expansion with many forms. This maps the simple integer range that
+    // arith5.sub feeds through `eval echo {start..end}`.
+    let Some(open) = source.find('{') else {
+        return source.to_string();
+    };
+    let Some(close_rel) = source[open + 1..].find('}') else {
+        return source.to_string();
+    };
+    let close = open + 1 + close_rel;
+    let inner = &source[open + 1..close];
+    let Some((start, end)) = inner.split_once("..") else {
+        return source.to_string();
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<i128>(), end.parse::<i128>()) else {
+        return source.to_string();
+    };
+    let span = (end - start).abs();
+    if span > 1024 {
+        return source.to_string();
+    }
+
+    let mut values = Vec::new();
+    if start <= end {
+        for value in start..=end {
+            values.push(value.to_string());
+        }
+    } else {
+        for value in (end..=start).rev() {
+            values.push(value.to_string());
+        }
+    }
+
+    format!(
+        "{}{}{}",
+        &source[..open],
+        values.join(" "),
+        &source[close + 1..]
+    )
+}
+
 fn strip_shebang(source: &str) -> &str {
     source
         .strip_prefix("#!")
@@ -4149,6 +4207,18 @@ fn array_values(value: &str) -> Vec<String> {
 
 fn is_array_storage(value: &str) -> bool {
     crate::shell::arrays::indexed::is_storage(value)
+}
+
+fn array_slice_parameter(name: &str) -> Option<(&str, usize)> {
+    // TODO(subst.c/arrayfunc.c): Bash supports full substring expansion for
+    // arrays, negative offsets, lengths, quoting, and sparse indices. This
+    // maps the positive `${array[@]:N}` shape used by arith6.sub.
+    let (array_expr, offset) = name.split_once(':')?;
+    let array_name = array_expr
+        .strip_suffix("[@]")
+        .or_else(|| array_expr.strip_suffix("[*]"))?;
+    let offset = offset.parse::<usize>().ok()?;
+    Some((array_name, offset))
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
