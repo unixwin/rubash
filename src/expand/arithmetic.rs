@@ -51,7 +51,7 @@ struct Parser<'a> {
 #[derive(Clone, Debug)]
 enum LValue {
     Variable(String),
-    Indexed { name: String, index: usize },
+    Indexed { name: String, index_expr: String },
 }
 
 impl<'a> Parser<'a> {
@@ -475,19 +475,38 @@ impl<'a> Parser<'a> {
         if !self.consume("[") {
             return Some(LValue::Variable(name));
         }
-        let index = match self.parse_assignment() {
-            Ok(value) if value >= 0 => value as usize,
-            _ => {
-                self.pos = checkpoint;
-                return None;
+
+        let index_start = self.pos;
+        let mut bracket_depth = 0_i32;
+        let mut paren_depth = 0_i32;
+        while let Some(ch) = self.peek_char() {
+            match ch {
+                '[' => {
+                    bracket_depth += 1;
+                    self.pos += ch.len_utf8();
+                }
+                ']' if bracket_depth > 0 => {
+                    bracket_depth -= 1;
+                    self.pos += ch.len_utf8();
+                }
+                ']' if paren_depth == 0 => break,
+                '(' => {
+                    paren_depth += 1;
+                    self.pos += ch.len_utf8();
+                }
+                ')' if paren_depth > 0 => {
+                    paren_depth -= 1;
+                    self.pos += ch.len_utf8();
+                }
+                _ => self.pos += ch.len_utf8(),
             }
-        };
-        self.skip_ws();
-        if !self.consume("]") {
+        }
+        let index_expr = self.input[index_start..self.pos].trim().to_string();
+        if index_expr.is_empty() || !self.consume("]") {
             self.pos = checkpoint;
             return None;
         }
-        Some(LValue::Indexed { name, index })
+        Some(LValue::Indexed { name, index_expr })
     }
 
     fn var_value(&mut self, name: &str) -> Result<i128, ArithmeticError> {
@@ -501,9 +520,10 @@ impl<'a> Parser<'a> {
     fn lvalue_value(&mut self, lvalue: &LValue) -> Result<i128, ArithmeticError> {
         match lvalue {
             LValue::Variable(name) => self.var_value(name),
-            LValue::Indexed { name, index } => {
+            LValue::Indexed { name, index_expr } => {
+                let index = self.lvalue_index(index_expr)?;
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
-                let value = crate::shell::arrays::indexed::value_at(&storage, *index);
+                let value = crate::shell::arrays::indexed::value_at(&storage, index);
                 self.value_to_arith(&value)
             }
         }
@@ -518,16 +538,26 @@ impl<'a> Parser<'a> {
                 self.vars
                     .insert(name.clone(), wrap_intmax(value).to_string());
             }
-            LValue::Indexed { name, index } => {
+            LValue::Indexed { name, index_expr } => {
+                let index = match self.lvalue_index(index_expr) {
+                    Ok(index) => index,
+                    Err(_) => return,
+                };
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
                 let storage = crate::shell::arrays::indexed::set_value_at(
                     &storage,
-                    *index,
+                    index,
                     wrap_intmax(value).to_string(),
                 );
                 self.vars.insert(name.clone(), storage);
             }
         }
+    }
+
+    fn lvalue_index(&mut self, index_expr: &str) -> Result<usize, ArithmeticError> {
+        let mut nested = Parser::nested(index_expr, self.vars, self.depth + 1);
+        let value = nested.parse_comma()?;
+        Ok(value.max(0) as usize)
     }
 
     fn value_to_arith(&mut self, value: &str) -> Result<i128, ArithmeticError> {
