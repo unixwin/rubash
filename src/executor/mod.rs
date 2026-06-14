@@ -132,6 +132,24 @@ impl Executor {
             }
 
             let command = &ast.commands[index];
+            if self
+                .env_vars
+                .get("__RUBASH_SUBSHELL_ABORT")
+                .map(String::as_str)
+                == Some("1")
+            {
+                if command.subshell {
+                    if command.subshell_end {
+                        self.env_vars.remove("__RUBASH_SUBSHELL_ABORT");
+                        if let Some(saved_env) = subshell_env.take() {
+                            self.restore_shell_env(saved_env);
+                        }
+                    }
+                    index += 1;
+                    continue;
+                }
+                self.env_vars.remove("__RUBASH_SUBSHELL_ABORT");
+            }
             if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
                 index = next_index;
                 continue;
@@ -506,8 +524,17 @@ impl Executor {
 
         let mut variable_expanded = cmd.clone();
         variable_expanded.words = Vec::with_capacity(cmd.words.len());
+        self.env_vars.remove("__RUBASH_EXPANSION_ERROR");
         for word in &cmd.words {
             variable_expanded.words.push(self.expand_command_word(word));
+        }
+        if self.env_vars.remove("__RUBASH_EXPANSION_ERROR").is_some() {
+            self.exit_code = 1;
+            if cmd.subshell {
+                self.env_vars
+                    .insert("__RUBASH_SUBSHELL_ABORT".to_string(), "1".to_string());
+            }
+            return Ok(());
         }
 
         let expanded;
@@ -2289,9 +2316,18 @@ impl Executor {
             .and_then(|rest| rest.strip_suffix("))"))
         {
             let expr = self.expand_embedded_parameters(expr);
-            return crate::expand::arithmetic::eval(&expr, &mut self.env_vars)
-                .map(|value| value.to_string())
-                .unwrap_or_default();
+            if expr.trim().is_empty() {
+                return "0".to_string();
+            }
+            return match crate::expand::arithmetic::eval(&expr, &mut self.env_vars) {
+                Ok(value) => value.to_string(),
+                Err(error) => {
+                    eprintln!("{}{}", self.diagnostic_prefix(), error.message());
+                    self.env_vars
+                        .insert("__RUBASH_EXPANSION_ERROR".to_string(), "1".to_string());
+                    String::new()
+                }
+            };
         }
 
         self.expand_word(word)

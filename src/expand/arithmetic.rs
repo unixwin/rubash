@@ -370,6 +370,10 @@ impl<'a> Parser<'a> {
             return Ok(value);
         }
 
+        if let Some(value) = self.parse_quoted_empty()? {
+            return Ok(value);
+        }
+
         if let Some(lvalue) = self.parse_lvalue() {
             let value = self.lvalue_value(&lvalue)?;
             self.skip_ws();
@@ -381,6 +385,27 @@ impl<'a> Parser<'a> {
             return Ok(value);
         }
 
+        Err(ArithmeticError::new("operand expected"))
+    }
+
+    fn parse_quoted_empty(&mut self) -> Result<Option<i128>, ArithmeticError> {
+        self.skip_ws();
+        let Some(quote @ ('"' | '\'')) = self.peek_char() else {
+            return Ok(None);
+        };
+        self.pos += quote.len_utf8();
+        let start = self.pos;
+        while let Some(ch) = self.peek_char() {
+            if ch == quote {
+                let inner = &self.input[start..self.pos];
+                self.pos += ch.len_utf8();
+                if inner.trim().is_empty() {
+                    return Ok(Some(0));
+                }
+                return Err(ArithmeticError::new("operand expected"));
+            }
+            self.pos += ch.len_utf8();
+        }
         Err(ArithmeticError::new("operand expected"))
     }
 
