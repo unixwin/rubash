@@ -6,7 +6,9 @@ pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
-use crate::parser::{Ast, CaseClause, CaseCommand, CommandNode, ForCommand, FunctionCommand};
+use crate::parser::{
+    Ast, CaseClause, CaseCommand, CommandNode, ForCommand, FunctionCommand, LoopCommand,
+};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -136,6 +138,16 @@ impl Executor {
             }
 
             if self.execute_brace_group_pipeline(command)? {
+                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
+            if let Some(loop_command) = &command.loop_command {
+                self.execute_loop_command(loop_command)?;
                 if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
                     index = next_index;
                 } else {
@@ -993,6 +1005,49 @@ impl Executor {
 
             let body = Ast {
                 commands: for_command.body.clone(),
+            };
+            self.loop_depth += 1;
+            let result = self.execute_ast(&body);
+            self.loop_depth -= 1;
+            match result {
+                Ok(()) => {}
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {
+        // TODO(parse.y/execute_cmd.c): Bash's execute_while_or_until handles
+        // full compound-list status, traps, redirections, async execution, and
+        // loop-control levels. This keeps the same status polarity for simple
+        // `while`/`until` loops used by upstream arithmetic tests.
+        loop {
+            let condition = Ast {
+                commands: loop_command.condition.clone(),
+            };
+            self.execute_ast(&condition)?;
+            let condition_success = self.exit_code == 0;
+            if condition_success == loop_command.until {
+                break;
+            }
+
+            let body = Ast {
+                commands: loop_command.body.clone(),
             };
             self.loop_depth += 1;
             let result = self.execute_ast(&body);
@@ -2299,6 +2354,9 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            if name == "$" {
+                return std::process::id().to_string();
+            }
             if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
                 return crate::builtins::pushd::stack_words(&self.env_vars);
             }
