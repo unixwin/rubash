@@ -2619,7 +2619,7 @@ impl Executor {
                 .env_vars
                 .get(array_name)
                 .map(|value| {
-                    array_values(value)
+                    array_values_for_slice(value)
                         .into_iter()
                         .skip(offset)
                         .collect::<Vec<_>>()
@@ -2918,7 +2918,23 @@ impl Executor {
                         }
                         name.push(name_ch);
                     }
-                    output.push_str(&self.expand_word(&format!("${{{name}}}")));
+                    if let Some((array_name, offset)) = array_slice_parameter(&name) {
+                        output.push_str(
+                            &self
+                                .env_vars
+                                .get(array_name)
+                                .map(|value| {
+                                    array_values_for_slice(value)
+                                        .into_iter()
+                                        .skip(offset)
+                                        .collect::<Vec<_>>()
+                                        .join(" ")
+                                })
+                                .unwrap_or_default(),
+                        );
+                    } else {
+                        output.push_str(&self.expand_word(&format!("${{{name}}}")));
+                    }
                 }
                 Some('(') => {
                     chars.next();
@@ -4219,6 +4235,26 @@ fn array_slice_parameter(name: &str) -> Option<(&str, usize)> {
         .or_else(|| array_expr.strip_suffix("[*]"))?;
     let offset = offset.parse::<usize>().ok()?;
     Some((array_name, offset))
+}
+
+fn array_values_for_slice(value: &str) -> Vec<String> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return array_values(value);
+    };
+
+    inner
+        .split(' ')
+        .map(|part| {
+            part.split_once('=')
+                .map(|(_, value)| value)
+                .unwrap_or(part)
+                .trim_matches('"')
+                .to_string()
+        })
+        .collect()
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
