@@ -596,10 +596,7 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         return None;
     }
 
-    let mut body = parse(&tokens[body_start..i]).commands;
-    if let Some(line) = tokens.get(start).map(|token| token.position) {
-        set_body_line(&mut body, line);
-    }
+    let body = parse(&tokens[body_start..i]).commands;
     let mut next_i = i + 1;
     while tokens
         .get(next_i)
@@ -696,10 +693,7 @@ fn parse_function_body(
         return None;
     }
 
-    let mut body = parse(&tokens[body_start..i]).commands;
-    if let Some(line) = tokens.get(start).map(|token| token.position) {
-        set_body_line(&mut body, line);
-    }
+    let body = parse(&tokens[body_start..i]).commands;
     let mut next_i = i + 1;
     while tokens
         .get(next_i)
