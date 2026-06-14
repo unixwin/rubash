@@ -2,6 +2,7 @@
 //!
 //! Executes parsed AST commands.
 
+pub(crate) mod command;
 pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
@@ -176,7 +177,7 @@ impl Executor {
 
             let arithmetic_command = command.subshell
                 && command.subshell_end
-                && arithmetic_command_words(&command.words);
+                && self::command::arithmetic_command_words(&command.words);
             if command.subshell && !arithmetic_command && subshell_env.is_none() {
                 subshell_env = Some(self.env_vars.clone());
             }
@@ -1484,7 +1485,7 @@ impl Executor {
                 return true;
             }
 
-            if is_shell_builtin_name(name) {
+            if self::command::is_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
                         if name == "break"
@@ -2149,9 +2150,12 @@ impl Executor {
         // ARITH_COM node and execute_arith_command evaluates it through
         // evalexp. The current parser flattens double-parens into a subshell
         // command, so recognize the arithmetic-looking shape here.
-        let expr = if let Some(expr) = arithmetic_command_expr(&cmd.words) {
+        let expr = if let Some(expr) = self::command::arithmetic_command_expr(&cmd.words) {
             expr
-        } else if cmd.subshell && cmd.subshell_end && arithmetic_command_words(&cmd.words) {
+        } else if cmd.subshell
+            && cmd.subshell_end
+            && self::command::arithmetic_command_words(&cmd.words)
+        {
             cmd.words.join(" ")
         } else {
             return false;
@@ -3194,7 +3198,7 @@ impl Executor {
         let mut expand_next = true;
 
         for word in words {
-            if expand_next && !is_reserved_word(word) {
+            if expand_next && !self::command::is_reserved_word(word) {
                 let mut seen = Vec::new();
                 let (mut alias_words, alias_expand_next) = self.expand_alias_word(word, &mut seen);
                 expanded.append(&mut alias_words);
@@ -3701,28 +3705,6 @@ fn is_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn is_reserved_word(word: &str) -> bool {
-    matches!(
-        word,
-        "if" | "then"
-            | "else"
-            | "elif"
-            | "fi"
-            | "while"
-            | "do"
-            | "done"
-            | "until"
-            | "for"
-            | "case"
-            | "esac"
-            | "in"
-            | "function"
-            | "select"
-            | "time"
-            | "coproc"
-    )
-}
-
 fn loop_control_level(args: &[String]) -> usize {
     // TODO(builtins/break.def): Bash validates numeric arguments and reports
     // diagnostics for invalid levels. For upstream builtins tests, parsing the
@@ -3782,52 +3764,6 @@ fn assignment_name_and_append(name: &str) -> (&str, bool) {
         .unwrap_or((name, false))
 }
 
-fn arithmetic_command_words(words: &[String]) -> bool {
-    if words.is_empty() {
-        return true;
-    }
-    if words
-        .first()
-        .is_some_and(|word| is_shell_builtin_name(word) || is_reserved_word(word))
-    {
-        return false;
-    }
-    words.len() > 1
-        || words.iter().any(|word| {
-            word.bytes().any(|byte| {
-                matches!(
-                    byte,
-                    b'[' | b']'
-                        | b'+'
-                        | b'-'
-                        | b'*'
-                        | b'/'
-                        | b'%'
-                        | b'<'
-                        | b'>'
-                        | b'='
-                        | b'!'
-                        | b'&'
-                        | b'|'
-                        | b'^'
-                        | b'~'
-                        | b'?'
-                )
-            })
-        })
-}
-
-fn arithmetic_command_expr(words: &[String]) -> Option<String> {
-    let word = words.first()?;
-    if words.len() != 1 {
-        return None;
-    }
-    word.trim()
-        .strip_prefix("((")
-        .and_then(|expr| expr.strip_suffix("))"))
-        .map(|expr| expr.trim().to_string())
-}
-
 fn append_scalar_value(current: &str, value: &str) -> String {
     let mut output = current.to_string();
     output.push_str(value);
@@ -3874,72 +3810,6 @@ fn is_shell_keyword(word: &str) -> bool {
             | "{"
             | "}"
             | "!"
-    )
-}
-
-fn is_shell_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "." | ":"
-            | "["
-            | "alias"
-            | "bg"
-            | "bind"
-            | "break"
-            | "builtin"
-            | "caller"
-            | "cd"
-            | "command"
-            | "compgen"
-            | "complete"
-            | "compopt"
-            | "continue"
-            | "declare"
-            | "dirs"
-            | "disown"
-            | "echo"
-            | "enable"
-            | "eval"
-            | "exec"
-            | "exit"
-            | "export"
-            | "false"
-            | "fc"
-            | "fg"
-            | "getopts"
-            | "hash"
-            | "help"
-            | "history"
-            | "jobs"
-            | "kill"
-            | "let"
-            | "local"
-            | "logout"
-            | "mapfile"
-            | "popd"
-            | "printf"
-            | "pushd"
-            | "pwd"
-            | "read"
-            | "readarray"
-            | "readonly"
-            | "return"
-            | "set"
-            | "shift"
-            | "shopt"
-            | "source"
-            | "suspend"
-            | "test"
-            | "times"
-            | "trap"
-            | "true"
-            | "type"
-            | "typeset"
-            | "ulimit"
-            | "umask"
-            | "unalias"
-            | "unset"
-            | "wait"
     )
 }
 
