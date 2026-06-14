@@ -325,7 +325,22 @@ impl<'a> Lexer<'a> {
                     Some(Token::new(TokenKind::Background, "&", start))
                 }
             }
-            '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
+            '(' => {
+                if self.peek() == Some('(') {
+                    let checkpoint = self.position;
+                    self.advance();
+                    self.skip_arithmetic_command();
+                    if self.slice(start).contains(';') {
+                        self.position = checkpoint;
+                        Some(Token::new(TokenKind::Keyword, "(", start))
+                    } else {
+                        Some(Token::new(TokenKind::Word, self.slice(start), start))
+                    }
+                } else {
+                    Some(Token::new(TokenKind::Keyword, "(", start))
+                }
+            }
+            ')' => Some(Token::new(TokenKind::Keyword, ")", start)),
             '!' => {
                 if self.peek() == Some('=') {
                     self.skip_word();
@@ -539,6 +554,26 @@ impl<'a> Lexer<'a> {
                     if depth == 0 {
                         break;
                     }
+                }
+                '\'' => self.skip_single(),
+                '"' => self.skip_double(),
+                _ => {}
+            }
+        }
+    }
+
+    fn skip_arithmetic_command(&mut self) {
+        // TODO(parse.y): Bash tokenizes `((...))` as an ARITH_CMD in parser
+        // state. Preserve it as one word for the executor bridge so shell
+        // metacharacters inside the expression are not parsed as list syntax.
+        let mut depth = 1;
+        while let Some(c) = self.advance() {
+            match c {
+                '(' => depth += 1,
+                ')' if depth > 1 => depth -= 1,
+                ')' if self.peek() == Some(')') => {
+                    self.advance();
+                    break;
                 }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),

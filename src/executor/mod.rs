@@ -2072,11 +2072,19 @@ impl Executor {
         // ARITH_COM node and execute_arith_command evaluates it through
         // evalexp. The current parser flattens double-parens into a subshell
         // command, so recognize the arithmetic-looking shape here.
-        if !(cmd.subshell && cmd.subshell_end && arithmetic_command_words(&cmd.words)) {
+        let expr = if let Some(expr) = arithmetic_command_expr(&cmd.words) {
+            expr
+        } else if cmd.subshell && cmd.subshell_end && arithmetic_command_words(&cmd.words) {
+            cmd.words.join(" ")
+        } else {
             return false;
+        };
+
+        if expr.trim().is_empty() {
+            self.exit_code = 1;
+            return true;
         }
 
-        let expr = cmd.words.join(" ");
         match crate::expand::arithmetic::eval(&expr, &mut self.env_vars) {
             Ok(value) => self.exit_code = i32::from(value == 0),
             Err(error) => {
@@ -2255,6 +2263,14 @@ impl Executor {
     }
 
     fn expand_command_word(&mut self, word: &str) -> String {
+        if let Some(expr) = word
+            .strip_prefix("((")
+            .and_then(|rest| rest.strip_suffix("))"))
+        {
+            let expr = self.expand_embedded_parameters(expr);
+            return format!("(({expr}))");
+        }
+
         if let Some(expr) = word
             .strip_prefix("$((")
             .and_then(|rest| rest.strip_suffix("))"))
@@ -2993,7 +3009,11 @@ impl Executor {
                         .cloned()
                         .or_else(|| std::env::var(&name).ok())
                     {
-                        output.push_str(&shell_safe_value(&value));
+                        if is_array_storage(&value) {
+                            output.push_str(&crate::shell::arrays::indexed::value_at(&value, 0));
+                        } else {
+                            output.push_str(&shell_safe_value(&value));
+                        }
                     }
                 }
                 Some(other) => {
@@ -3702,6 +3722,17 @@ fn arithmetic_command_words(words: &[String]) -> bool {
                 )
             })
         })
+}
+
+fn arithmetic_command_expr(words: &[String]) -> Option<String> {
+    let word = words.first()?;
+    if words.len() != 1 {
+        return None;
+    }
+    word.trim()
+        .strip_prefix("((")
+        .and_then(|expr| expr.strip_suffix("))"))
+        .map(|expr| expr.trim().to_string())
 }
 
 fn append_scalar_value(current: &str, value: &str) -> String {

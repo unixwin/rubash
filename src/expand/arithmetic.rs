@@ -99,19 +99,18 @@ impl<'a> Parser<'a> {
                 }
                 if self.consume(op) {
                     let rhs = self.parse_assignment()?;
-                    let current = self.lvalue_value(&lvalue)?;
                     let value = match op {
                         "=" => wrap_intmax(rhs),
-                        "+=" => add_intmax(current, rhs),
-                        "-=" => sub_intmax(current, rhs),
-                        "*=" => mul_intmax(current, rhs),
-                        "/=" => checked_div(current, rhs)?,
-                        "%=" => checked_rem(current, rhs)?,
-                        "<<=" => shl_intmax(current, rhs),
-                        ">>=" => shr_intmax(current, rhs),
-                        "&=" => bitand_intmax(current, rhs),
-                        "^=" => bitxor_intmax(current, rhs),
-                        "|=" => bitor_intmax(current, rhs),
+                        "+=" => add_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "-=" => sub_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "*=" => mul_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "/=" => checked_div(self.lvalue_value(&lvalue)?, rhs)?,
+                        "%=" => checked_rem(self.lvalue_value(&lvalue)?, rhs)?,
+                        "<<=" => shl_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        ">>=" => shr_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "&=" => bitand_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "^=" => bitxor_intmax(self.lvalue_value(&lvalue)?, rhs),
+                        "|=" => bitor_intmax(self.lvalue_value(&lvalue)?, rhs),
                         _ => unreachable!(),
                     };
                     self.set_lvalue(&lvalue, value);
@@ -493,6 +492,9 @@ impl<'a> Parser<'a> {
 
     fn var_value(&mut self, name: &str) -> Result<i128, ArithmeticError> {
         let value = self.vars.get(name).cloned().unwrap_or_default();
+        if crate::shell::arrays::indexed::is_storage(&value) {
+            return self.value_to_arith(&crate::shell::arrays::indexed::value_at(&value, 0));
+        }
         self.value_to_arith(&value)
     }
 
