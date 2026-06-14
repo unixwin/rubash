@@ -490,11 +490,10 @@ impl Executor {
         }
 
         let mut variable_expanded = cmd.clone();
-        variable_expanded.words = cmd
-            .words
-            .iter()
-            .map(|word| self.expand_word(word))
-            .collect();
+        variable_expanded.words = Vec::with_capacity(cmd.words.len());
+        for word in &cmd.words {
+            variable_expanded.words.push(self.expand_command_word(word));
+        }
 
         let expanded;
         let cmd = {
@@ -508,7 +507,7 @@ impl Executor {
                     .into_iter()
                     .map(|word| {
                         if word.starts_with('$') {
-                            self.expand_word(&word)
+                            self.expand_command_word(&word)
                         } else {
                             word
                         }
@@ -718,6 +717,10 @@ impl Executor {
                 "readonly" => {
                     self.exit_code =
                         crate::builtins::setattr::readonly(&cmd.words[1..], &mut self.env_vars)?;
+                    Ok(())
+                }
+                "let" => {
+                    self.exit_code = self.execute_let(&cmd.words[1..]);
                     Ok(())
                 }
                 ":" => {
@@ -966,6 +969,39 @@ impl Executor {
         crate::builtins::set::unset(&names, &mut self.env_vars).map_err(ExecuteError::from)
     }
 
+    fn execute_let(&mut self, args: &[String]) -> i32 {
+        // TODO(builtins/let.def/expr.c): let_builtin delegates each word to
+        // evalexp and returns failure when the last expression evaluates to 0.
+        // Diagnostics are still normalized later as expr.c coverage grows.
+        let args = if args.first().map(String::as_str) == Some("--") {
+            &args[1..]
+        } else {
+            args
+        };
+        if args.is_empty() {
+            eprintln!("{}let: expression expected", self.diagnostic_prefix());
+            return 1;
+        }
+
+        let mut last = 0;
+        for expr in args {
+            match crate::expand::arithmetic::eval(expr, &mut self.env_vars) {
+                Ok(value) => last = value,
+                Err(error) => {
+                    eprintln!(
+                        "{}let: {}: {}",
+                        self.diagnostic_prefix(),
+                        expr,
+                        error.message()
+                    );
+                    return 1;
+                }
+            }
+        }
+
+        i32::from(last == 0)
+    }
+
     fn execute_for_command(&mut self, for_command: &ForCommand) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c): Bash `execute_for_command` applies the
         // full expansion pipeline, loop-control state, traps, and redirections.
@@ -1174,6 +1210,10 @@ impl Executor {
             }
             "help" => {
                 self.exit_code = crate::builtins::help::execute(&args[1..])?;
+                Ok(())
+            }
+            "let" => {
+                self.exit_code = self.execute_let(&args[1..]);
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),
@@ -2039,7 +2079,11 @@ impl Executor {
                     is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                 )
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-                (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
+                let rhs = crate::expand::arithmetic::eval(&value, &mut self.env_vars)
+                    .unwrap_or_else(|_| eval_arith_value(&value));
+                let current = crate::expand::arithmetic::eval(&current, &mut self.env_vars)
+                    .unwrap_or_else(|_| eval_arith_value(&current));
+                (current + rhs).to_string()
             } else {
                 append_scalar_value(&current, &value)
             }
@@ -2047,7 +2091,9 @@ impl Executor {
             if value.starts_with('(') && value.ends_with(')') {
                 append_array_value("()", &value, true)
             } else {
-                eval_arith_value(&value).to_string()
+                crate::expand::arithmetic::eval(&value, &mut self.env_vars)
+                    .unwrap_or_else(|_| eval_arith_value(&value))
+                    .to_string()
             }
         } else {
             value
@@ -2144,6 +2190,20 @@ impl Executor {
         self.exit_code = 0;
     }
 
+    fn expand_command_word(&mut self, word: &str) -> String {
+        if let Some(expr) = word
+            .strip_prefix("$((")
+            .and_then(|rest| rest.strip_suffix("))"))
+        {
+            let expr = self.expand_embedded_parameters(expr);
+            return crate::expand::arithmetic::eval(&expr, &mut self.env_vars)
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+        }
+
+        self.expand_word(word)
+    }
+
     pub(crate) fn expand_word(&self, word: &str) -> String {
         if let Some(word) = word.strip_prefix('\x1b') {
             return self.expand_embedded_parameters(word);
@@ -2192,14 +2252,31 @@ impl Executor {
             return value;
         }
 
+        if let Some(expr) = word
+            .strip_prefix("$(")
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|rest| rest.strip_suffix("))"))
+        {
+            let expr = self.expand_embedded_parameters(expr);
+            let mut vars = self.env_vars.clone();
+            return crate::expand::arithmetic::eval(&expr, &mut vars)
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+        }
+
         if word.contains("kill -l") && word.contains("128") && word.contains('+') {
             return "HUP".to_string();
         }
 
-        if word.starts_with("$((") && word.ends_with("))") {
-            if word.contains("128") && word.contains('+') && word.contains('1') {
-                return "129".to_string();
-            }
+        if let Some(expr) = word
+            .strip_prefix("$((")
+            .and_then(|rest| rest.strip_suffix("))"))
+        {
+            let expr = self.expand_embedded_parameters(expr);
+            let mut vars = self.env_vars.clone();
+            return crate::expand::arithmetic::eval(&expr, &mut vars)
+                .map(|value| value.to_string())
+                .unwrap_or_default();
         }
 
         if let Some(source) = word
@@ -2718,6 +2795,34 @@ impl Executor {
                 }
                 Some('(') => {
                     chars.next();
+                    if chars.peek().copied() == Some('(') {
+                        chars.next();
+                        let mut depth = 1;
+                        let mut expr = String::new();
+                        while let Some(source_ch) = chars.next() {
+                            match source_ch {
+                                '(' => {
+                                    depth += 1;
+                                    expr.push(source_ch);
+                                }
+                                ')' if depth > 1 => {
+                                    depth -= 1;
+                                    expr.push(source_ch);
+                                }
+                                ')' if chars.peek().copied() == Some(')') => {
+                                    chars.next();
+                                    break;
+                                }
+                                _ => expr.push(source_ch),
+                            }
+                        }
+                        let expr = self.expand_embedded_parameters(&expr);
+                        let mut vars = self.env_vars.clone();
+                        if let Ok(value) = crate::expand::arithmetic::eval(&expr, &mut vars) {
+                            output.push_str(&value.to_string());
+                        }
+                        continue;
+                    }
                     let mut depth = 1;
                     let mut source = String::new();
                     let mut single = false;
