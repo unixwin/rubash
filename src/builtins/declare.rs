@@ -98,7 +98,7 @@ where
                             .join(" ")
                     )
                 } else {
-                    eval_arith_value(&value).to_string()
+                    eval_integer_attribute_value(&value)
                 };
                 variables.insert(name.to_string(), value.clone());
                 env::set_var(name, value);
@@ -576,6 +576,16 @@ fn eval_arith_value(value: &str) -> i128 {
         .split('+')
         .map(|part| part.trim().parse::<i128>().unwrap_or(0))
         .sum()
+}
+
+fn eval_integer_attribute_value(value: &str) -> String {
+    // TODO(declare.def/variables.c/expr.c): Bash marks the variable integer
+    // but preserves invalid existing arithmetic text until a later assignment
+    // attempts to evaluate it.
+    let mut vars = HashMap::new();
+    crate::expand::arithmetic::eval(value, &mut vars)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| value.to_string())
 }
 
 trait Parenthesized {

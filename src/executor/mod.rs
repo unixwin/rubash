@@ -509,6 +509,10 @@ impl Executor {
 
         if cmd.words.is_empty() {
             for (name, value) in &cmd.assignments {
+                if self.integer_append_assignment_would_fail(name) {
+                    self.exit_code = 1;
+                    return Ok(());
+                }
                 let expanded_value = self.expand_assignment_value(value);
                 self.apply_shell_assignment(name, expanded_value);
             }
@@ -1965,10 +1969,46 @@ impl Executor {
         }
 
         for (name, value) in assignments {
+            if self.integer_append_assignment_would_fail(&name) {
+                self.exit_code = 1;
+                return true;
+            }
             self.apply_shell_assignment(&name, value);
         }
         self.exit_code = 0;
         true
+    }
+
+    fn integer_append_assignment_would_fail(&self, name: &str) -> bool {
+        // TODO(variables.c/expr.c): Bash evaluates the existing integer value
+        // before append assignment. If that expression is invalid, the whole
+        // assignment command fails and later assignment words are not applied.
+        let Some(base_name) = name.strip_suffix('+') else {
+            return false;
+        };
+        if !is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
+            return false;
+        }
+        let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
+        if current.trim().is_empty() {
+            return false;
+        }
+        if is_array_storage(&current) {
+            return false;
+        }
+        let mut vars = self.env_vars.clone();
+        match crate::expand::arithmetic::eval(&current, &mut vars) {
+            Ok(_) => false,
+            Err(error) => {
+                eprintln!(
+                    "{}{}: {}",
+                    self.diagnostic_prefix(),
+                    current,
+                    error.message()
+                );
+                true
+            }
+        }
     }
 
     fn execute_array_element_assignment(&mut self, cmd: &CommandNode) -> bool {
