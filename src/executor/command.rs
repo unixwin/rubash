@@ -72,6 +72,65 @@ pub(crate) fn arithmetic_command_expr(words: &[String]) -> Option<String> {
         .map(|expr| expr.trim().to_string())
 }
 
+pub(crate) fn empty_quoted_index_lvalue(expr: &str) -> bool {
+    // TODO(execute_cmd.c/expr.c/arrayfunc.c): Bash diagnoses empty quoted
+    // indexed-array lvalues in arithmetic commands/expansions before binding
+    // the element, while `let 'a[""]=1'` still reaches evalexp. Keep this
+    // context-specific until the parser has ARITH_COM/ARITH_FOR_EXPRS nodes.
+    let bytes = expr.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_name_start(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && is_name_char(bytes[index]) {
+            index += 1;
+        }
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b'[') {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        let Some(quote @ (b'"' | b'\'')) = bytes.get(index).copied() else {
+            continue;
+        };
+        index += 1;
+        if bytes.get(index) != Some(&quote) {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) != Some(&b']') {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'=') {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_name_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_name_char(byte: u8) -> bool {
+    is_name_start(byte) || byte.is_ascii_digit()
+}
+
 pub(crate) fn is_shell_builtin_name(name: &str) -> bool {
     matches!(
         name,

@@ -2166,6 +2166,15 @@ impl Executor {
             return true;
         }
 
+        if self::command::empty_quoted_index_lvalue(&expr) {
+            eprintln!(
+                "{}((: `a[]': not a valid identifier",
+                self.diagnostic_prefix()
+            );
+            self.exit_code = 1;
+            return true;
+        }
+
         match crate::expand::arithmetic::eval(&expr, &mut self.env_vars) {
             Ok(value) => self.exit_code = i32::from(value == 0),
             Err(error) => {
@@ -2359,6 +2368,14 @@ impl Executor {
             let expr = self.expand_embedded_parameters(expr);
             if expr.trim().is_empty() {
                 return "0".to_string();
+            }
+            if self::command::empty_quoted_index_lvalue(&expr) {
+                eprintln!(
+                    "{}{}': not a valid identifier",
+                    self.diagnostic_prefix(),
+                    "`a[]"
+                );
+                return String::new();
             }
             return match crate::expand::arithmetic::eval(&expr, &mut self.env_vars) {
                 Ok(value) => value.to_string(),
