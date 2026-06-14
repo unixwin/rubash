@@ -4,6 +4,36 @@
 // - execute_cmd.c
 // - execute_cmd.h
 
+use std::collections::HashMap;
+
+pub(crate) fn xtrace_words(assignments: &HashMap<String, String>, words: &[String]) -> Vec<String> {
+    // TODO(print_cmd.c/execute_cmd.c): Bash xtrace prints the expanded command
+    // using the original WORD_LIST order and shell quoting rules. Rubash's
+    // parser currently stores leading assignment words in a HashMap, so keep
+    // this deterministic bridge until assignment WORD_DESC ordering is ported.
+    let mut output = Vec::new();
+    let mut assignments: Vec<_> = assignments.iter().collect();
+    assignments.sort_by(|left, right| left.0.cmp(right.0));
+    output.extend(
+        assignments
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    output.extend(words.iter().cloned());
+    output
+}
+
+pub(crate) fn print_xtrace(assignments: &HashMap<String, String>, words: &[String]) {
+    let words = xtrace_words(assignments, words);
+    if !words.is_empty() {
+        println!("+ {}", words.join(" "));
+    }
+}
+
+pub(crate) fn print_arithmetic_xtrace(expr: &str) {
+    println!("+ ((  {expr}  ))");
+}
+
 pub(crate) fn is_reserved_word(word: &str) -> bool {
     matches!(
         word,

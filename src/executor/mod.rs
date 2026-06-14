@@ -509,6 +509,9 @@ impl Executor {
         }
 
         if cmd.words.is_empty() {
+            if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
+                self::command::print_xtrace(&cmd.assignments, &cmd.words);
+            }
             for (name, value) in &cmd.assignments {
                 if self.integer_append_assignment_would_fail(name) {
                     self.exit_code = 1;
@@ -595,7 +598,7 @@ impl Executor {
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
         let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
         if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
-            println!("+ {}", cmd.words.join(" "));
+            self::command::print_xtrace(&cmd.assignments, &cmd.words);
         }
         let result = if let Some(word) = cmd.words.first() {
             match word.as_str() {
@@ -1969,6 +1972,9 @@ impl Executor {
             assignments.push((name.to_string(), self.expand_assignment_value(value)));
         }
 
+        if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
+            self::command::print_xtrace(&cmd.assignments, &cmd.words);
+        }
         for (name, value) in assignments {
             if self.integer_append_assignment_would_fail(&name) {
                 self.exit_code = 1;
@@ -2160,6 +2166,10 @@ impl Executor {
         } else {
             return false;
         };
+
+        if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
+            self::command::print_arithmetic_xtrace(&expr);
+        }
 
         if expr.trim().is_empty() {
             self.exit_code = 1;
