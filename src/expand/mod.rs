@@ -5,3 +5,4 @@
 
 pub mod arithmetic;
 pub mod tilde;
+pub mod word;
