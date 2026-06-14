@@ -1,6 +1,21 @@
 # Bash Implementation Inventory
 
-This appendix assigns each implementation-shaped GNU Bash source file to a Rubash target module. It is an ownership map, not a claim that the C file has already been ported.
+This appendix assigns each implementation-shaped GNU Bash source file to a
+Rubash target module. It is an ownership map, not a claim that the C file has
+already been ported.
+
+Migration rule:
+
+- Migrate behavior by upstream file owner. For example, `expr.c` behavior belongs
+  in `src/expand/arithmetic.rs`, `arrayfunc.c` behavior belongs in
+  `src/shell/arrays/functions.rs`, and `builtins/declare.def` behavior belongs
+  in `src/builtins/declare.rs`.
+- Temporary bridges are allowed only to keep tests moving, but they must carry a
+  TODO naming the upstream owner and should be moved to the mapped Rust file
+  before adjacent behavior grows around them.
+- Do not add new broad behavior to `src/executor/mod.rs` when the inventory maps
+  the upstream owner to a more specific Rust file. Move existing bridges out as
+  soon as their dependencies are stable.
 
 | GNU Bash file | Rubash target |
 |---|---|
