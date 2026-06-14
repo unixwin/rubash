@@ -13,6 +13,7 @@ pub mod exit;
 pub mod hash;
 pub mod help;
 pub mod kill;
+pub mod r#let;
 pub mod printf;
 pub mod pushd;
 pub mod pwd;

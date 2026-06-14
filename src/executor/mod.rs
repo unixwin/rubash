@@ -720,7 +720,12 @@ impl Executor {
                     Ok(())
                 }
                 "let" => {
-                    self.exit_code = self.execute_let(&cmd.words[1..]);
+                    let diagnostic_prefix = self.diagnostic_prefix();
+                    self.exit_code = crate::builtins::r#let::execute(
+                        &cmd.words[1..],
+                        &mut self.env_vars,
+                        &diagnostic_prefix,
+                    );
                     Ok(())
                 }
                 ":" => {
@@ -969,39 +974,6 @@ impl Executor {
         crate::builtins::set::unset(&names, &mut self.env_vars).map_err(ExecuteError::from)
     }
 
-    fn execute_let(&mut self, args: &[String]) -> i32 {
-        // TODO(builtins/let.def/expr.c): let_builtin delegates each word to
-        // evalexp and returns failure when the last expression evaluates to 0.
-        // Diagnostics are still normalized later as expr.c coverage grows.
-        let args = if args.first().map(String::as_str) == Some("--") {
-            &args[1..]
-        } else {
-            args
-        };
-        if args.is_empty() {
-            eprintln!("{}let: expression expected", self.diagnostic_prefix());
-            return 1;
-        }
-
-        let mut last = 0;
-        for expr in args {
-            match crate::expand::arithmetic::eval(expr, &mut self.env_vars) {
-                Ok(value) => last = value,
-                Err(error) => {
-                    eprintln!(
-                        "{}let: {}: {}",
-                        self.diagnostic_prefix(),
-                        expr,
-                        error.message()
-                    );
-                    return 1;
-                }
-            }
-        }
-
-        i32::from(last == 0)
-    }
-
     fn execute_for_command(&mut self, for_command: &ForCommand) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c): Bash `execute_for_command` applies the
         // full expansion pipeline, loop-control state, traps, and redirections.
@@ -1213,7 +1185,12 @@ impl Executor {
                 Ok(())
             }
             "let" => {
-                self.exit_code = self.execute_let(&args[1..]);
+                let diagnostic_prefix = self.diagnostic_prefix();
+                self.exit_code = crate::builtins::r#let::execute(
+                    &args[1..],
+                    &mut self.env_vars,
+                    &diagnostic_prefix,
+                );
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),
@@ -3581,110 +3558,15 @@ fn append_scalar_value(current: &str, value: &str) -> String {
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
-    let mut elements = array_values(current);
-    let scalar_append = integer && !value.starts_with('(');
-    for token in array_assignment_tokens(value) {
-        if let Some((left, rhs)) = token.split_once("+=") {
-            if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] =
-                    (eval_arith_value(&elements[index]) + eval_arith_value(rhs)).to_string();
-                continue;
-            }
-        }
-
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] = rhs.to_string();
-                continue;
-            }
-        }
-
-        if scalar_append && !elements.is_empty() {
-            elements[0] = (eval_arith_value(&elements[0]) + eval_arith_value(&token)).to_string();
-        } else {
-            elements.push(token);
-        }
-    }
-
-    if integer {
-        for element in &mut elements {
-            *element = eval_arith_value(element).to_string();
-        }
-    }
-
-    format!("({})", elements.join(" "))
+    crate::shell::arrays::functions::append_indexed_value(current, value, integer)
 }
 
 fn append_assoc_value(current: &str, value: &str) -> String {
-    let mut entries = assoc_entries(current);
-    for token in array_assignment_tokens(value) {
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(key) = left
-                .strip_prefix('[')
-                .and_then(|left| left.strip_suffix(']'))
-            {
-                entries.push((key.to_string(), rhs.to_string()));
-                continue;
-            }
-        }
-        entries.push(("0".to_string(), token));
-    }
-
-    format!(
-        "({})",
-        entries
-            .into_iter()
-            .map(|(key, value)| format!("[{key}]={value}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    )
+    crate::shell::arrays::assoc::append_value(current, value)
 }
 
 fn assoc_entries(value: &str) -> Vec<(String, String)> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return Vec::new();
-    };
-
-    inner
-        .split_whitespace()
-        .filter_map(|part| {
-            let (key, value) = part.split_once('=')?;
-            Some((
-                key.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string(),
-                value.to_string(),
-            ))
-        })
-        .collect()
-}
-
-fn array_assignment_index(left: &str) -> Option<usize> {
-    left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
-}
-
-fn array_assignment_tokens(value: &str) -> Vec<String> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return if value.is_empty() {
-            Vec::new()
-        } else {
-            vec![value.to_string()]
-        };
-    };
-
-    inner.split_whitespace().map(str::to_string).collect()
+    crate::shell::arrays::assoc::entries(value)
 }
 
 fn eval_arith_value(value: &str) -> i128 {
@@ -4078,37 +3960,11 @@ fn shell_safe_value(value: &str) -> String {
 }
 
 fn array_values(value: &str) -> Vec<String> {
-    // TODO(array.c/assoc.c/subst.c): This is a lossy representation used while
-    // arrays are still stored in the scalar variable table.
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return if value.is_empty() {
-            Vec::new()
-        } else {
-            vec![value.to_string()]
-        };
-    };
-
-    if inner.is_empty() {
-        return Vec::new();
-    }
-
-    inner
-        .split_whitespace()
-        .map(|part| {
-            part.split_once('=')
-                .map(|(_, value)| value)
-                .unwrap_or(part)
-                .trim_matches('"')
-                .to_string()
-        })
-        .collect()
+    crate::shell::arrays::indexed::values(value)
 }
 
 fn is_array_storage(value: &str) -> bool {
-    value.starts_with('(') && value.ends_with(')')
+    crate::shell::arrays::indexed::is_storage(value)
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
