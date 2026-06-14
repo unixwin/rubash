@@ -42,6 +42,7 @@ struct Parser<'a> {
     input: &'a str,
     pos: usize,
     vars: &'a mut HashMap<String, String>,
+    noeval: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +57,7 @@ impl<'a> Parser<'a> {
             input,
             pos: 0,
             vars,
+            noeval: false,
         }
     }
 
@@ -130,7 +132,15 @@ impl<'a> Parser<'a> {
             if !self.consume("||") {
                 return Ok(value);
             }
-            let rhs = self.parse_logical_and()?;
+            let rhs = if value != 0 {
+                let previous = self.noeval;
+                self.noeval = true;
+                let parsed = self.parse_logical_and();
+                self.noeval = previous;
+                parsed?
+            } else {
+                self.parse_logical_and()?
+            };
             value = i128::from(value != 0 || rhs != 0);
         }
     }
@@ -142,7 +152,15 @@ impl<'a> Parser<'a> {
             if !self.consume("&&") {
                 return Ok(value);
             }
-            let rhs = self.parse_bit_or()?;
+            let rhs = if value == 0 {
+                let previous = self.noeval;
+                self.noeval = true;
+                let parsed = self.parse_bit_or();
+                self.noeval = previous;
+                parsed?
+            } else {
+                self.parse_bit_or()?
+            };
             value = i128::from(value != 0 && rhs != 0);
         }
     }
@@ -454,6 +472,9 @@ impl<'a> Parser<'a> {
     }
 
     fn set_lvalue(&mut self, lvalue: &LValue, value: i128) {
+        if self.noeval {
+            return;
+        }
         match lvalue {
             LValue::Variable(name) => {
                 self.vars.insert(name.clone(), value.to_string());
@@ -471,6 +492,9 @@ impl<'a> Parser<'a> {
     }
 
     fn value_to_arith(&mut self, value: &str) -> Result<i128, ArithmeticError> {
+        if self.noeval {
+            return Ok(0);
+        }
         if value.trim().is_empty() {
             return Ok(0);
         }

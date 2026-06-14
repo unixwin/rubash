@@ -20,6 +20,14 @@ pub struct ForCommand {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents a narrow `while/until list; do ...; done` loop.
+#[derive(Debug, Clone)]
+pub struct LoopCommand {
+    pub until: bool,
+    pub condition: Vec<CommandNode>,
+    pub body: Vec<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -73,6 +81,8 @@ pub struct CommandNode {
     pub subshell_end: bool,
     /// `for name in words; do ...; done`
     pub for_command: Option<ForCommand>,
+    /// `while/until list; do ...; done`
+    pub loop_command: Option<LoopCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `name() { compound_list; }`
@@ -99,6 +109,7 @@ impl CommandNode {
             subshell: false,
             subshell_end: false,
             for_command: None,
+            loop_command: None,
             case_command: None,
             function_command: None,
             line: None,
@@ -142,6 +153,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
         {
             if let Some((for_cmd, next_i)) = parse_for_command(tokens, i) {
                 ast.commands.push(for_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
+        if token.kind == TokenKind::Keyword
+            && (token.value == "while" || token.value == "until")
+            && command_is_empty(&current_cmd)
+        {
+            if let Some((loop_cmd, next_i)) = parse_loop_command(tokens, i) {
+                ast.commands.push(loop_cmd);
                 current_cmd = CommandNode::new();
                 i = next_i;
                 continue;
@@ -434,6 +457,53 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
     command.for_command = Some(ForCommand {
         variable,
         words,
+        body,
+    });
+    Some((command, i + 1))
+}
+
+fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    // TODO(parse.y/execute_cmd.c): GNU Bash parses `while`/`until` as compound
+    // commands with arbitrary compound lists, nested loops, redirections, and
+    // parser-state-sensitive reserved words. This maps the simple upstream
+    // arithmetic test form: `until condition; do body; done`.
+    let until = tokens.get(start)?.value == "until";
+    let mut i = start + 1;
+    let condition_start = i;
+    while i < tokens.len() && !is_keyword(tokens, i, "do") {
+        i += 1;
+    }
+    if condition_start == i || !is_keyword(tokens, i, "do") {
+        return None;
+    }
+
+    let condition = parse(&tokens[condition_start..i]).commands;
+    i += 1;
+
+    let body_start = i;
+    let mut depth = 0usize;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "while") || is_keyword(tokens, i, "until") {
+            depth += 1;
+        } else if is_keyword(tokens, i, "done") {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        i += 1;
+    }
+
+    if !is_keyword(tokens, i, "done") {
+        return None;
+    }
+
+    let body = parse(&tokens[body_start..i]).commands;
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.loop_command = Some(LoopCommand {
+        until,
+        condition,
         body,
     });
     Some((command, i + 1))
