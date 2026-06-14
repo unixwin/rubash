@@ -31,6 +31,37 @@ pub fn execute(
     )
 }
 
+pub fn execute_conditional(args: &[String]) -> i32 {
+    // TODO(parse.y/test.c): Bash parses `[[...]]` as a conditional command
+    // with its own grammar. Keep the test.c-owned comparison behavior here
+    // while the parser still presents it as simple words.
+    let args = if args.last().map(String::as_str) == Some("]]") {
+        &args[..args.len() - 1]
+    } else {
+        args
+    };
+
+    match args {
+        [left, op, right] if op == "==" => i32::from(left != right),
+        [left, op, right] if op == "-eq" => {
+            i32::from(!conditional_numeric_compare(left, right, |left, right| {
+                left == right
+            }))
+        }
+        [left, op, right] if op == "-le" => {
+            i32::from(!conditional_numeric_compare(left, right, |left, right| {
+                left <= right
+            }))
+        }
+        [left, op, right] if op == "-gt" => {
+            i32::from(!conditional_numeric_compare(left, right, |left, right| {
+                left > right
+            }))
+        }
+        _ => EXECUTION_FAILURE,
+    }
+}
+
 fn execute_with_stderr<'a, I, W>(
     args: I,
     bracket: bool,
@@ -240,6 +271,26 @@ fn parse_int(value: &str) -> Result<i64, String> {
         .map_err(|_| format!("{}: integer expression expected", value))
 }
 
+fn conditional_numeric_compare<F>(left: &str, right: &str, compare: F) -> bool
+where
+    F: FnOnce(i128, i128) -> bool,
+{
+    let Some(left) = conditional_numeric_operand(left) else {
+        return false;
+    };
+    let Some(right) = conditional_numeric_operand(right) else {
+        return false;
+    };
+    compare(left, right)
+}
+
+fn conditional_numeric_operand(value: &str) -> Option<i128> {
+    if value.trim().is_empty() {
+        return Some(0);
+    }
+    value.parse::<i128>().ok()
+}
+
 fn modified(path: &str) -> Option<std::time::SystemTime> {
     fs::metadata(path)
         .and_then(|metadata| metadata.modified())
@@ -283,6 +334,22 @@ mod tests {
     fn supports_string_and_numeric_binary_operators() {
         assert_eq!(run(&["a", "=", "a"], false).0, EXECUTION_SUCCESS);
         assert_eq!(run(&["2", "-lt", "3"], false).0, EXECUTION_SUCCESS);
+    }
+
+    #[test]
+    fn conditional_command_treats_empty_numeric_operand_as_zero() {
+        assert_eq!(
+            execute_conditional(&["".to_string(), "-gt".to_string(), "1".to_string()]),
+            EXECUTION_FAILURE
+        );
+        assert_eq!(
+            execute_conditional(&["1".to_string(), "-le".to_string(), "".to_string()]),
+            EXECUTION_FAILURE
+        );
+        assert_eq!(
+            execute_conditional(&["0".to_string(), "-eq".to_string(), "".to_string()]),
+            EXECUTION_SUCCESS
+        );
     }
 
     #[test]

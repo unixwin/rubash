@@ -928,7 +928,7 @@ impl Executor {
                     Ok(())
                 }
                 "[[" => {
-                    self.exit_code = self.execute_conditional(&cmd.words[1..]);
+                    self.exit_code = crate::builtins::test::execute_conditional(&cmd.words[1..]);
                     Ok(())
                 }
                 _ if self.functions.contains_key(word.as_str()) => self.execute_function(word),
@@ -3183,57 +3183,6 @@ impl Executor {
         }
 
         output
-    }
-
-    fn execute_conditional(&self, args: &[String]) -> i32 {
-        // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
-        // with its own parser, operators, pattern matching, and short-circuit
-        // logic. Upstream builtins.tests currently needs equality and integer
-        // equality only.
-        match args {
-            [left, op, right, end] if op == "==" && end == "]]" => {
-                i32::from(self.expand_word(left) != self.expand_word(right))
-            }
-            [left, op, right] if op == "==" => {
-                i32::from(self.expand_word(left) != self.expand_word(right))
-            }
-            [left, op, right, end] if op == "-eq" && end == "]]" => {
-                i32::from(!self.numeric_equal(left, right))
-            }
-            [left, op, right] if op == "-eq" => i32::from(!self.numeric_equal(left, right)),
-            [left, op, right, end] if op == "-gt" && end == "]]" => {
-                i32::from(!self.numeric_compare(left, right, |left, right| left > right))
-            }
-            [left, op, right] if op == "-gt" => {
-                i32::from(!self.numeric_compare(left, right, |left, right| left > right))
-            }
-            _ => 1,
-        }
-    }
-
-    fn numeric_equal(&self, left: &str, right: &str) -> bool {
-        self.numeric_operand(left) == self.numeric_operand(right)
-    }
-
-    fn numeric_compare<F>(&self, left: &str, right: &str, compare: F) -> bool
-    where
-        F: FnOnce(i128, i128) -> bool,
-    {
-        let Some(left) = self.numeric_operand(left) else {
-            return false;
-        };
-        let Some(right) = self.numeric_operand(right) else {
-            return false;
-        };
-        compare(left, right)
-    }
-
-    fn numeric_operand(&self, value: &str) -> Option<i128> {
-        let expanded = self.expand_word(value);
-        if expanded.trim().is_empty() {
-            return Some(0);
-        }
-        expanded.parse::<i128>().ok()
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
