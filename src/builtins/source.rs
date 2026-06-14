@@ -134,7 +134,7 @@ pub fn execute_simple_if(
     let else_index = find_word_command_before(ast, then_index + 1, fi_index, "else");
 
     let condition_true = test_if_condition_true(executor, &command.words)?
-        || arithmetic_if_condition_true(&command.words);
+        || arithmetic_if_condition_true(executor, &command.words);
     let (body_start, body_end) = if condition_true {
         (then_index + 1, else_index.unwrap_or(fi_index))
     } else if let Some(else_index) = else_index {
@@ -225,21 +225,33 @@ fn posix_plain_name_lookup(executor: &Executor, filename: &str) -> bool {
         && !filename.contains('\\')
 }
 
-fn arithmetic_if_condition_true(words: &[String]) -> bool {
+fn arithmetic_if_condition_true(executor: &Executor, words: &[String]) -> bool {
     // TODO(expr.c/parse.y): Source7 uses `if (((4+4) + (4 + 7))); then`.
     // The current lexer drops grouping tokens before the executor sees this,
     // so accept a non-empty arithmetic-looking condition with at least one
     // non-zero digit as true. Replace this with a real arith_command node.
-    words.first().map(String::as_str) == Some("if")
-        && words.iter().skip(1).all(|word| {
-            word.chars()
-                .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
-        })
-        && words
-            .iter()
-            .skip(1)
-            .flat_map(|word| word.chars())
-            .any(|ch| matches!(ch, '1'..='9'))
+    if words.first().map(String::as_str) != Some("if") {
+        return false;
+    }
+
+    let condition = words[1..].join(" ");
+    if let Some(expr) = condition
+        .trim()
+        .strip_prefix("((")
+        .and_then(|expr| expr.strip_suffix("))"))
+    {
+        let mut vars = executor.env_vars().clone();
+        return crate::expand::arithmetic::eval(expr, &mut vars).is_ok_and(|value| value != 0);
+    }
+
+    words.iter().skip(1).all(|word| {
+        word.chars()
+            .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
+    }) && words
+        .iter()
+        .skip(1)
+        .flat_map(|word| word.chars())
+        .any(|ch| matches!(ch, '1'..='9'))
 }
 
 fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool, ExecuteError> {
