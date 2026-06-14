@@ -2430,12 +2430,8 @@ impl Executor {
                     })
                     .unwrap_or_else(|| "0".to_string());
             }
-            if let Some((var_name, offset, length)) = substring_parameter(name) {
-                return self
-                    .env_vars
-                    .get(var_name)
-                    .map(|value| substring_value(value, offset, length))
-                    .unwrap_or_default();
+            if let Some(value) = self.expand_scalar_substring_parameter(name) {
+                return value;
             }
             if let Some((var_name, word)) = name.split_once(":=") {
                 if self
@@ -2643,6 +2639,25 @@ impl Executor {
         }
 
         self.expand_word(word)
+    }
+
+    fn expand_scalar_substring_parameter(&self, name: &str) -> Option<String> {
+        let (var_name, offset, length) = substring_parameter(name)?;
+        let value = self.env_vars.get(var_name)?;
+        let offset = self.substring_arithmetic_index(offset)?;
+        let length = length.and_then(|length| self.substring_arithmetic_index(length));
+        Some(substring_value(value, offset, length))
+    }
+
+    fn substring_arithmetic_index(&self, expr: &str) -> Option<usize> {
+        if expr.trim().is_empty() {
+            return Some(0);
+        }
+        let expr = self.expand_embedded_parameters(expr);
+        let mut vars = self.env_vars.clone();
+        crate::expand::arithmetic::eval(&expr, &mut vars)
+            .ok()
+            .and_then(|value| usize::try_from(value.max(0)).ok())
     }
 
     fn apply_parameter_assignment_expansions(&mut self, cmd: &CommandNode) {
@@ -2918,13 +2933,7 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
-                    let mut name = String::new();
-                    for name_ch in chars.by_ref() {
-                        if name_ch == '}' {
-                            break;
-                        }
-                        name.push(name_ch);
-                    }
+                    let name = read_braced_parameter_name(&mut chars);
                     if let Some((array_name, offset)) = array_slice_parameter(&name) {
                         output.push_str(
                             &self
@@ -2939,6 +2948,8 @@ impl Executor {
                                 })
                                 .unwrap_or_default(),
                         );
+                    } else if let Some(value) = self.expand_scalar_substring_parameter(&name) {
+                        output.push_str(&value);
                     } else {
                         output.push_str(&self.expand_word(&format!("${{{name}}}")));
                     }
@@ -4290,31 +4301,25 @@ fn array_values_for_slice(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn substring_parameter(name: &str) -> Option<(&str, usize, Option<usize>)> {
-    // TODO(subst.c): Bash substring expansion supports negative offsets,
-    // array operands, positional parameters, and arithmetic offsets. This maps
-    // the simple scalar `${name:offset[:length]}` forms in arith10.sub.
-    if name.contains(":-") || name.contains(":=") || name.contains(":+") || name.contains(":?") {
-        return None;
-    }
+fn substring_parameter(name: &str) -> Option<(&str, &str, Option<&str>)> {
+    // TODO(subst.c/expr.c): Bash evaluates substring offset and length as
+    // arithmetic expressions after nested parameter expansion. This still
+    // handles only scalar shell-name parameters.
     let (var_name, rest) = name.split_once(':')?;
     if !is_shell_name(var_name) {
         return None;
     }
-    let (offset, length) = if let Some((offset, length)) = rest.split_once(':') {
-        let offset = if offset.is_empty() {
-            0
-        } else {
-            offset.parse::<usize>().ok()?
-        };
-        let length = if length.is_empty() {
-            None
-        } else {
-            Some(length.parse::<usize>().ok()?)
-        };
-        (offset, length)
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '-' | '=' | '+' | '?'))
+    {
+        return None;
+    }
+    let (offset, length) = if let Some((offset, length)) = split_substring_offset_length(rest) {
+        (offset, (!length.is_empty()).then_some(length))
     } else {
-        (rest.parse::<usize>().ok()?, None)
+        (rest, None)
     };
     Some((var_name, offset, length))
 }
@@ -4328,6 +4333,59 @@ fn substring_value(value: &str, offset: usize, length: Option<usize>) -> String 
         .map(|length| offset.saturating_add(length).min(chars.len()))
         .unwrap_or(chars.len());
     chars[offset..end].iter().collect()
+}
+
+fn read_braced_parameter_name<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut name = String::new();
+    let mut nested = 0_i32;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '$' if chars.peek() == Some(&'{') => {
+                chars.next();
+                nested += 1;
+                name.push('$');
+                name.push('{');
+            }
+            '}' if nested > 0 => {
+                nested -= 1;
+                name.push('}');
+            }
+            '}' => break,
+            _ => name.push(ch),
+        }
+    }
+    name
+}
+
+fn split_substring_offset_length(value: &str) -> Option<(&str, &str)> {
+    // TODO(subst.c/expr.c): The offset and length are arithmetic expressions,
+    // so `:` can belong to `?:`. For now, keep ternary offsets intact and use
+    // the final top-level colon as length only when another top-level colon is
+    // already present.
+    let mut depth = 0_i32;
+    let mut brace_depth = 0_i32;
+    let mut colons = Vec::new();
+    let mut previous = '\0';
+    for (index, ch) in value.char_indices() {
+        match ch {
+            '(' | '[' if brace_depth == 0 => depth += 1,
+            ')' | ']' if brace_depth == 0 && depth > 0 => depth -= 1,
+            '{' if previous == '$' => brace_depth += 1,
+            '}' if brace_depth > 0 => brace_depth -= 1,
+            ':' if depth == 0 && brace_depth == 0 => colons.push(index),
+            _ => {}
+        }
+        previous = ch;
+    }
+    let split = if colons.len() > 1 || !value.contains('?') {
+        colons.last().copied()?
+    } else {
+        return None;
+    };
+    Some((&value[..split], &value[split + 1..]))
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {

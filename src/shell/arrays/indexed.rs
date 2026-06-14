@@ -29,13 +29,21 @@ pub fn values(value: &str) -> Vec<String> {
     inner
         .split_whitespace()
         .map(|part| {
-            part.split_once('=')
-                .map(|(_, value)| value)
+            indexed_assignment_value(part)
                 .unwrap_or(part)
                 .trim_matches('"')
                 .to_string()
         })
         .collect()
+}
+
+fn indexed_assignment_value(part: &str) -> Option<&str> {
+    // TODO(array.c): Real Bash ARRAY_ELEMENT storage is structured. While this
+    // scalar encoding remains, only peel `[index]=value` renderings; arithmetic
+    // expression elements like `(a[n]=++n)<7&&a[0]` must stay intact.
+    let (left, value) = part.split_once('=')?;
+    left.strip_prefix('[')?.strip_suffix(']')?;
+    Some(value)
 }
 
 pub fn value_at(value: &str, index: usize) -> String {
