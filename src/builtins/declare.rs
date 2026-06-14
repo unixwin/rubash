@@ -100,8 +100,7 @@ where
                 } else {
                     eval_integer_attribute_value(&value)
                 };
-                variables.insert(name.to_string(), value.clone());
-                env::set_var(name, value);
+                variables.insert(name.to_string(), value);
             }
         }
     }
@@ -206,8 +205,7 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
         } else {
             value.to_string()
         };
-        variables.insert(var_name.to_string(), value.clone());
-        env::set_var(var_name, value);
+        variables.insert(var_name.to_string(), value);
     }
 }
 
@@ -478,8 +476,7 @@ fn assign_array_element(
         value
     };
     let new_value = format!("({})", elements.join(" "));
-    variables.insert(array_name.to_string(), new_value.clone());
-    env::set_var(array_name, new_value);
+    variables.insert(array_name.to_string(), new_value);
     true
 }
 

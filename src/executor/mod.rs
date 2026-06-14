@@ -82,6 +82,12 @@ pub struct Executor {
 impl Executor {
     pub fn new() -> Self {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        for name in env_vars.keys() {
+            if crate::shell::variables::is_internal_attribute_table(name) {
+                env::remove_var(name);
+            }
+        }
+        env_vars.retain(|name, _| !crate::shell::variables::is_internal_attribute_table(name));
         env_vars.entry("PWD".to_string()).or_insert_with(|| {
             std::env::current_dir()
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
@@ -512,11 +518,13 @@ impl Executor {
             if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
                 self::command::print_xtrace(&cmd.assignments, &cmd.words);
             }
-            for (name, value) in &cmd.assignments {
+            for name in cmd.assignments.keys() {
                 if self.integer_append_assignment_would_fail(name) {
                     self.exit_code = 1;
                     return Ok(());
                 }
+            }
+            for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_assignment_value(value);
                 self.apply_shell_assignment(name, expanded_value);
             }
@@ -534,7 +542,11 @@ impl Executor {
         variable_expanded.words = Vec::with_capacity(cmd.words.len());
         self.env_vars.remove("__RUBASH_EXPANSION_ERROR");
         for word in &cmd.words {
-            variable_expanded.words.push(self.expand_command_word(word));
+            let expanded_word = self.expand_command_word(word);
+            if crate::expand::word::drops_empty_unquoted_parameter_field(word, &expanded_word) {
+                continue;
+            }
+            variable_expanded.words.push(expanded_word);
         }
         if self.env_vars.remove("__RUBASH_EXPANSION_ERROR").is_some() {
             self.exit_code = 1;
@@ -3670,7 +3682,9 @@ impl Executor {
         }
 
         for (name, value) in &saved_env {
-            env::set_var(name, value);
+            if !crate::shell::variables::is_internal_attribute_table(name) {
+                env::set_var(name, value);
+            }
         }
 
         self.env_vars = saved_env;
