@@ -514,6 +514,12 @@ impl<'a> Parser<'a> {
     }
 
     fn var_value(&mut self, name: &str) -> Result<i128, ArithmeticError> {
+        if self.noeval {
+            return Ok(0);
+        }
+        if self.nounset_enabled() && !self.vars.contains_key(name) {
+            return Err(ArithmeticError::new(format!("{name}: unbound variable")));
+        }
         let value = self.vars.get(name).cloned().unwrap_or_default();
         if crate::shell::arrays::indexed::is_storage(&value) {
             return self.value_to_arith(&crate::shell::arrays::indexed::value_at(&value, 0));
@@ -525,6 +531,12 @@ impl<'a> Parser<'a> {
         match lvalue {
             LValue::Variable(name) => self.var_value(name),
             LValue::Indexed { name, index_expr } => {
+                if self.noeval {
+                    return Ok(0);
+                }
+                if self.nounset_enabled() && !self.vars.contains_key(name) {
+                    return Err(ArithmeticError::new(format!("{name}: unbound variable")));
+                }
                 let index = self.lvalue_index(index_expr)?;
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
                 let value = crate::shell::arrays::indexed::value_at(&storage, index);
@@ -589,6 +601,10 @@ impl<'a> Parser<'a> {
         }
         let mut nested = Parser::nested(&value, self.vars, self.depth + 1);
         nested.parse_comma()
+    }
+
+    fn nounset_enabled(&self) -> bool {
+        self.vars.get("__RUBASH_NOUNSET").map(String::as_str) == Some("1")
     }
 
     fn skip_to_conditional_colon(&mut self) {

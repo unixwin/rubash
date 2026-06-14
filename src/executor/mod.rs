@@ -802,6 +802,17 @@ impl Executor {
                         self.exit_code = 0;
                         return Ok(());
                     }
+                    if cmd.words.get(1).map(String::as_str) == Some("-u") {
+                        self.env_vars
+                            .insert("__RUBASH_NOUNSET".to_string(), "1".to_string());
+                        self.exit_code = 0;
+                        return Ok(());
+                    }
+                    if cmd.words.get(1).map(String::as_str) == Some("+u") {
+                        self.env_vars.remove("__RUBASH_NOUNSET");
+                        self.exit_code = 0;
+                        return Ok(());
+                    }
                     if cmd.words.get(1).map(String::as_str) == Some("--") {
                         // TODO(builtins/set.def/variables.c): `set --`
                         // replaces the shell positional parameters. Full set
