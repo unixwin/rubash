@@ -2119,7 +2119,8 @@ impl Executor {
             return true;
         }
 
-        let Some(index) = indexed_assignment_subscript(index) else {
+        let Some(index) = crate::shell::arrays::functions::indexed_assignment_subscript(index)
+        else {
             return false;
         };
         let current = self.env_vars.get(name).cloned().unwrap_or_default();
@@ -2704,12 +2705,12 @@ impl Executor {
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
         }
 
-        if let Some((array_name, offset)) = array_slice_parameter(name) {
+        if let Some((array_name, offset)) = crate::expand::word::array_slice_parameter(name) {
             return self
                 .env_vars
                 .get(array_name)
                 .map(|value| {
-                    array_values_for_slice(value)
+                    crate::expand::word::array_values_for_slice(value)
                         .into_iter()
                         .skip(offset)
                         .collect::<Vec<_>>()
@@ -3021,13 +3022,15 @@ impl Executor {
                 Some('{') => {
                     chars.next();
                     let name = crate::expand::word::read_braced_parameter_name(&mut chars);
-                    if let Some((array_name, offset)) = array_slice_parameter(&name) {
+                    if let Some((array_name, offset)) =
+                        crate::expand::word::array_slice_parameter(&name)
+                    {
                         output.push_str(
                             &self
                                 .env_vars
                                 .get(array_name)
                                 .map(|value| {
-                                    array_values_for_slice(value)
+                                    crate::expand::word::array_values_for_slice(value)
                                         .into_iter()
                                         .skip(offset)
                                         .collect::<Vec<_>>()
@@ -3905,24 +3908,6 @@ fn eval_arith_value(value: &str) -> i128 {
         .sum()
 }
 
-fn indexed_assignment_subscript(value: &str) -> Option<usize> {
-    // TODO(arrayfunc.c/expr.c): Bash evaluates indexed array subscripts as
-    // arithmetic expressions after quote removal. This narrow bridge covers
-    // the empty/quoted-zero shapes used by arith10.sub without claiming full
-    // `array_expand_index` compatibility.
-    if value.trim().is_empty() {
-        return Some(0);
-    }
-    let value = value.trim_matches('"').trim_matches('\'');
-    if value.trim().is_empty() {
-        return Some(0);
-    }
-    value
-        .parse::<usize>()
-        .ok()
-        .or_else(|| usize::try_from(eval_arith_value(value)).ok())
-}
-
 fn is_shell_keyword(word: &str) -> bool {
     matches!(
         word,
@@ -4354,38 +4339,6 @@ fn array_values(value: &str) -> Vec<String> {
 
 fn is_array_storage(value: &str) -> bool {
     crate::shell::arrays::indexed::is_storage(value)
-}
-
-fn array_slice_parameter(name: &str) -> Option<(&str, usize)> {
-    // TODO(subst.c/arrayfunc.c): Bash supports full substring expansion for
-    // arrays, negative offsets, lengths, quoting, and sparse indices. This
-    // maps the positive `${array[@]:N}` shape used by arith6.sub.
-    let (array_expr, offset) = name.split_once(':')?;
-    let array_name = array_expr
-        .strip_suffix("[@]")
-        .or_else(|| array_expr.strip_suffix("[*]"))?;
-    let offset = offset.parse::<usize>().ok()?;
-    Some((array_name, offset))
-}
-
-fn array_values_for_slice(value: &str) -> Vec<String> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return array_values(value);
-    };
-
-    inner
-        .split(' ')
-        .map(|part| {
-            part.split_once('=')
-                .map(|(_, value)| value)
-                .unwrap_or(part)
-                .trim_matches('"')
-                .to_string()
-        })
-        .collect()
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {

@@ -62,6 +62,28 @@ where
     name
 }
 
+pub fn array_slice_parameter(name: &str) -> Option<(&str, usize)> {
+    // TODO(subst.c/arrayfunc.c): Bash supports full substring expansion for
+    // arrays, negative offsets, lengths, quoting, and sparse indices. This
+    // maps the positive `${array[@]:N}` shape used by arith6.sub.
+    let (array_expr, offset) = name.split_once(':')?;
+    let array_name = array_expr
+        .strip_suffix("[@]")
+        .or_else(|| array_expr.strip_suffix("[*]"))?;
+    let offset = offset.parse().ok()?;
+    Some((array_name, offset))
+}
+
+pub fn array_values_for_slice(value: &str) -> Vec<String> {
+    if !crate::shell::arrays::indexed::is_storage(value) {
+        return crate::shell::arrays::indexed::values(value);
+    }
+    crate::shell::arrays::indexed::values(value)
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 fn split_substring_offset_length(value: &str) -> Option<(&str, &str)> {
     // TODO(subst.c/expr.c): The offset and length are arithmetic expressions,
     // so `:` can belong to `?:`. For now, keep ternary offsets intact and use
