@@ -168,6 +168,9 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
             .strip_suffix('+')
             .map(|base| (base, true))
             .unwrap_or((var_name, false));
+        if assign_array_element(var_name, value, append, variables, integer) {
+            continue;
+        }
         let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
             compound
         } else if value.is_empty() && var_name == "assoc" {
@@ -498,6 +501,64 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
 
 fn array_assignment_index(left: &str) -> Option<usize> {
     left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+}
+
+fn assign_array_element(
+    name: &str,
+    value: &str,
+    append: bool,
+    variables: &mut HashMap<String, String>,
+    integer: bool,
+) -> bool {
+    // TODO(declare.def/arrayfunc.c/expr.c): Bash's declare builtin routes
+    // array element assignments through bind_array_element and evaluates
+    // indexed subscripts as arithmetic after quote removal. This covers the
+    // quoted zero-index cases in arith10.sub.
+    let Some((array_name, subscript)) = name.split_once('[') else {
+        return false;
+    };
+    if array_name.is_empty() || !subscript.ends_with(']') {
+        return false;
+    }
+    let Some(index) = declare_array_subscript(subscript.trim_end_matches(']')) else {
+        return false;
+    };
+
+    let current = variables.get(array_name).cloned().unwrap_or_default();
+    let mut elements = parse_array_words(&current);
+    while elements.len() <= index {
+        elements.push(String::new());
+    }
+    let value = if append {
+        let mut current = elements[index].clone();
+        current.push_str(value);
+        current
+    } else {
+        value.to_string()
+    };
+    elements[index] = if integer {
+        eval_arith_value(&value).to_string()
+    } else {
+        value
+    };
+    let new_value = format!("({})", elements.join(" "));
+    variables.insert(array_name.to_string(), new_value.clone());
+    env::set_var(array_name, new_value);
+    true
+}
+
+fn declare_array_subscript(value: &str) -> Option<usize> {
+    if value.trim().is_empty() {
+        return Some(0);
+    }
+    let value = value.trim_matches('"').trim_matches('\'');
+    if value.trim().is_empty() {
+        return Some(0);
+    }
+    value
+        .parse::<usize>()
+        .ok()
+        .or_else(|| usize::try_from(eval_arith_value(value)).ok())
 }
 
 fn parse_array_tokens(value: &str) -> Vec<String> {
