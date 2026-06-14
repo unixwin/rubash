@@ -501,11 +501,12 @@ impl<'a> Parser<'a> {
                 _ => self.pos += ch.len_utf8(),
             }
         }
-        let index_expr = self.input[index_start..self.pos].trim().to_string();
-        if index_expr.is_empty() || !self.consume("]") {
+        let raw_index_expr = &self.input[index_start..self.pos];
+        if raw_index_expr.is_empty() || !self.consume("]") {
             self.pos = checkpoint;
             return None;
         }
+        let index_expr = raw_index_expr.trim().to_string();
         Some(LValue::Indexed { name, index_expr })
     }
 
@@ -555,6 +556,12 @@ impl<'a> Parser<'a> {
     }
 
     fn lvalue_index(&mut self, index_expr: &str) -> Result<usize, ArithmeticError> {
+        if index_expr.trim().is_empty() {
+            return Ok(0);
+        }
+        if let Some(index) = quoted_whitespace_index(index_expr) {
+            return Ok(index);
+        }
         let mut nested = Parser::nested(index_expr, self.vars, self.depth + 1);
         let value = nested.parse_comma()?;
         Ok(value.max(0) as usize)
@@ -764,4 +771,21 @@ fn digit_value(ch: char, base: u32) -> Option<u32> {
         '_' => Some(63),
         _ => None,
     }
+}
+
+fn quoted_whitespace_index(value: &str) -> Option<usize> {
+    // TODO(expr.c/arrayfunc.c): Bash removes quotes before evaluating indexed
+    // array subscripts. Keep this narrow for arith10.sub: `" "` becomes index
+    // zero, while `""` still reports invalid empty subscript in arithmetic
+    // contexts until the full array_expand_index path is ported.
+    let value = value.trim();
+    let inner = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })?;
+    (!inner.is_empty() && inner.trim().is_empty()).then_some(0)
 }
