@@ -2430,6 +2430,13 @@ impl Executor {
                     })
                     .unwrap_or_else(|| "0".to_string());
             }
+            if let Some((var_name, offset, length)) = substring_parameter(name) {
+                return self
+                    .env_vars
+                    .get(var_name)
+                    .map(|value| substring_value(value, offset, length))
+                    .unwrap_or_default();
+            }
             if let Some((var_name, word)) = name.split_once(":=") {
                 if self
                     .env_vars
@@ -3087,20 +3094,28 @@ impl Executor {
     }
 
     fn numeric_equal(&self, left: &str, right: &str) -> bool {
-        self.expand_word(left).parse::<i128>().ok() == self.expand_word(right).parse::<i128>().ok()
+        self.numeric_operand(left) == self.numeric_operand(right)
     }
 
     fn numeric_compare<F>(&self, left: &str, right: &str, compare: F) -> bool
     where
         F: FnOnce(i128, i128) -> bool,
     {
-        let Some(left) = self.expand_word(left).parse::<i128>().ok() else {
+        let Some(left) = self.numeric_operand(left) else {
             return false;
         };
-        let Some(right) = self.expand_word(right).parse::<i128>().ok() else {
+        let Some(right) = self.numeric_operand(right) else {
             return false;
         };
         compare(left, right)
+    }
+
+    fn numeric_operand(&self, value: &str) -> Option<i128> {
+        let expanded = self.expand_word(value);
+        if expanded.trim().is_empty() {
+            return Some(0);
+        }
+        expanded.parse::<i128>().ok()
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -4255,6 +4270,46 @@ fn array_values_for_slice(value: &str) -> Vec<String> {
                 .to_string()
         })
         .collect()
+}
+
+fn substring_parameter(name: &str) -> Option<(&str, usize, Option<usize>)> {
+    // TODO(subst.c): Bash substring expansion supports negative offsets,
+    // array operands, positional parameters, and arithmetic offsets. This maps
+    // the simple scalar `${name:offset[:length]}` forms in arith10.sub.
+    if name.contains(":-") || name.contains(":=") || name.contains(":+") || name.contains(":?") {
+        return None;
+    }
+    let (var_name, rest) = name.split_once(':')?;
+    if !is_shell_name(var_name) {
+        return None;
+    }
+    let (offset, length) = if let Some((offset, length)) = rest.split_once(':') {
+        let offset = if offset.is_empty() {
+            0
+        } else {
+            offset.parse::<usize>().ok()?
+        };
+        let length = if length.is_empty() {
+            None
+        } else {
+            Some(length.parse::<usize>().ok()?)
+        };
+        (offset, length)
+    } else {
+        (rest.parse::<usize>().ok()?, None)
+    };
+    Some((var_name, offset, length))
+}
+
+fn substring_value(value: &str, offset: usize, length: Option<usize>) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if offset >= chars.len() {
+        return String::new();
+    }
+    let end = length
+        .map(|length| offset.saturating_add(length).min(chars.len()))
+        .unwrap_or(chars.len());
+    chars[offset..end].iter().collect()
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
