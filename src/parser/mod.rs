@@ -181,6 +181,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
         }
 
         if token.kind == TokenKind::Keyword
+            && token.value == "function"
+            && command_is_empty(&current_cmd)
+        {
+            if let Some((function_cmd, next_i)) = parse_function_keyword_command(tokens, i) {
+                ast.commands.push(function_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
+        if token.kind == TokenKind::Keyword
             && token.value == "case"
             && command_is_empty(&current_cmd)
         {
@@ -537,6 +549,106 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         // TODO(parse.y): The lexer can currently preserve a full brace group
         // as one token. Recognize it as a function body for `name() { ...; }`
         // until the parser owns brace groups structurally.
+        let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
+        let body_tokens = crate::lexer::tokenize(inner);
+        let mut body = parse(&body_tokens).commands;
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
+        let mut next_i = i + 1;
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
+        return Some((command, next_i));
+    }
+    if tokens.get(i)?.value != "{" {
+        return None;
+    }
+    i += 1;
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        i += 1;
+    }
+
+    let body_start = i;
+    let mut depth = 1usize;
+    while i < tokens.len() {
+        if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "{" {
+            depth += 1;
+        } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "}" {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let mut body = parse(&tokens[body_start..i]).commands;
+    if let Some(line) = tokens.get(start).map(|token| token.position) {
+        set_body_line(&mut body, line);
+    }
+    let mut next_i = i + 1;
+    while tokens
+        .get(next_i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_i += 1;
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.function_command = Some(FunctionCommand { name, body });
+    Some((command, next_i))
+}
+
+fn parse_function_keyword_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    // TODO(parse.y/execute_cmd.c): Bash accepts `function name`,
+    // `function name()`, redirections, and nested compound bodies. This maps
+    // the GNU arith6.sub `function name { ... }` form onto FunctionCommand.
+    let name = tokens.get(start + 1)?.value.clone();
+    if !is_function_name(&name) {
+        return None;
+    }
+
+    let mut i = start + 2;
+    if tokens.get(i).is_some_and(|token| token.value == "(")
+        && tokens.get(i + 1).is_some_and(|token| token.value == ")")
+    {
+        i += 2;
+    }
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        i += 1;
+    }
+    parse_function_body(tokens, start, i, name)
+}
+
+fn parse_function_body(
+    tokens: &[Token],
+    start: usize,
+    mut i: usize,
+    name: String,
+) -> Option<(CommandNode, usize)> {
+    if let Some(group) = tokens
+        .get(i)
+        .map(|token| token.value.as_str())
+        .filter(|value| value.starts_with('{') && value.ends_with('}'))
+    {
         let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
         let body_tokens = crate::lexer::tokenize(inner);
         let mut body = parse(&body_tokens).commands;
