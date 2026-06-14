@@ -141,7 +141,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
         commands: Vec::new(),
     };
     let mut current_cmd = CommandNode::new();
-    let mut in_subshell = false;
+    let mut subshell_depth = 0usize;
 
     let mut i = 0;
     while i < tokens.len() {
@@ -206,12 +206,12 @@ pub fn parse(tokens: &[Token]) -> Ast {
 
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 note_command_line(&mut current_cmd, token);
                 current_cmd.words.push(token.value.clone());
             }
             TokenKind::Assignment => {
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 note_command_line(&mut current_cmd, token);
                 if let Some(pos) = token.value.find('=') {
                     if current_cmd.words.is_empty() {
@@ -243,14 +243,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::Pipe => {
                 // Save current command with pipe flag
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 current_cmd.pipe = Some(1);
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
             TokenKind::Semicolon => {
                 // Command separator
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
             }
@@ -333,7 +333,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
                 // list connector on simple commands. Full Bash grammar needs
                 // a list AST with compound commands and proper precedence.
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 current_cmd.and_or = Some(token.kind == TokenKind::And);
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
@@ -343,7 +343,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // asynchronously and returns immediately. Until job control is
                 // represented, keep `&` as a command terminator so redirections
                 // apply to the command instead of treating `&` as an argument.
-                current_cmd.subshell |= in_subshell;
+                current_cmd.subshell |= subshell_depth > 0;
                 current_cmd.background = true;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
@@ -360,12 +360,12 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
 
                 if token.value == "(" && command_is_empty(&current_cmd) {
-                    in_subshell = true;
+                    subshell_depth += 1;
                     i += 1;
                     continue;
                 }
 
-                if token.value == ")" && in_subshell {
+                if token.value == ")" && subshell_depth > 0 {
                     if command_is_empty(&current_cmd) {
                         if let Some(command) = ast.commands.last_mut() {
                             command.subshell_end = true;
@@ -374,7 +374,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         current_cmd.subshell = true;
                         current_cmd.subshell_end = true;
                     }
-                    in_subshell = false;
+                    subshell_depth -= 1;
                     i += 1;
                     continue;
                 }
@@ -433,7 +433,7 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
         }
         if matches!(
             tokens[i].kind,
-            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
+            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment | TokenKind::BraceExpand
         ) {
             words.push(tokens[i].value.clone());
         }

@@ -353,14 +353,13 @@ fn parse_single_element_array(value: &str) -> Option<&str> {
 }
 
 fn format_array_value(value: &str) -> String {
-    let elements = parse_array_words(value);
+    let elements = crate::shell::arrays::indexed::entries(value);
     if elements.is_empty() {
         return format!("([0]=\"{}\")", quote_double(value));
     }
 
     elements
         .iter()
-        .enumerate()
         .map(|(index, value)| format!("[{index}]=\"{}\"", quote_double(value)))
         .collect::<Vec<_>>()
         .join(" ")

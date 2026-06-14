@@ -59,6 +59,9 @@ pub fn indexed_assignment_subscript(value: &str) -> Option<usize> {
     if value.trim().is_empty() {
         return Some(0);
     }
+    if value.contains('[') || value.contains(']') {
+        return None;
+    }
     value
         .parse::<usize>()
         .ok()

@@ -84,6 +84,19 @@ pub fn array_values_for_slice(value: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn array_values_from_offset(value: &str, offset: usize) -> Vec<String> {
+    if !crate::shell::arrays::indexed::is_storage(value) {
+        return crate::shell::arrays::indexed::values(value)
+            .into_iter()
+            .skip(offset)
+            .collect();
+    }
+    crate::shell::arrays::indexed::entries(value)
+        .into_iter()
+        .filter_map(|(index, value)| (index >= offset && !value.is_empty()).then_some(value))
+        .collect()
+}
+
 pub fn drops_empty_unquoted_parameter_field(word: &str, expanded: &str) -> bool {
     // TODO(subst.c): Bash field splitting removes an unquoted parameter
     // expansion that produces no fields. Keep this narrow for simple `$name`
