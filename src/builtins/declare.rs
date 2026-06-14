@@ -548,6 +548,8 @@ fn assign_array_element(
 }
 
 fn declare_array_subscript(value: &str) -> Option<usize> {
+    let value = crate::shell::arrays::functions::quote_removed_subscript(value);
+    let value = value.as_str();
     if value.trim().is_empty() {
         return Some(0);
     }

@@ -50,6 +50,8 @@ pub fn indexed_assignment_subscript(value: &str) -> Option<usize> {
     // arithmetic expressions after quote removal. This narrow bridge covers
     // the empty/quoted-zero shapes used by arith10.sub without claiming full
     // `array_expand_index` compatibility.
+    let value = quote_removed_subscript(value);
+    let value = value.as_str();
     if value.trim().is_empty() {
         return Some(0);
     }
@@ -61,6 +63,25 @@ pub fn indexed_assignment_subscript(value: &str) -> Option<usize> {
         .parse::<usize>()
         .ok()
         .or_else(|| usize::try_from(eval_arith_value(value)).ok())
+}
+
+pub fn quote_removed_subscript(value: &str) -> String {
+    let mut output = String::new();
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            output.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            output.push(ch);
+        }
+    }
+    if escaped {
+        output.push('\\');
+    }
+    output
 }
 
 fn eval_arith_value(value: &str) -> i128 {
