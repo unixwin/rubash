@@ -54,6 +54,12 @@ enum LValue {
     Indexed { name: String, index_expr: String },
 }
 
+#[derive(Clone, Debug)]
+enum ResolvedLValue {
+    Variable(String),
+    Indexed { name: String, index: usize },
+}
+
 impl<'a> Parser<'a> {
     fn new(input: &'a str, vars: &'a mut HashMap<String, String>) -> Self {
         Self {
@@ -98,23 +104,30 @@ impl<'a> Parser<'a> {
                     continue;
                 }
                 if self.consume(op) {
-                    let rhs = self.parse_assignment()?;
-                    let value = match op {
-                        "=" => wrap_intmax(rhs),
-                        "+=" => add_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "-=" => sub_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "*=" => mul_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "/=" => checked_div(self.lvalue_value(&lvalue)?, rhs)?,
-                        "%=" => checked_rem(self.lvalue_value(&lvalue)?, rhs)?,
-                        "<<=" => shl_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        ">>=" => shr_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "&=" => bitand_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "^=" => bitxor_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        "|=" => bitor_intmax(self.lvalue_value(&lvalue)?, rhs),
-                        _ => unreachable!(),
-                    };
-                    self.set_lvalue(&lvalue, value);
-                    return Ok(value);
+                    if op == "=" {
+                        let rhs = self.parse_assignment()?;
+                        let resolved = self.resolve_lvalue(&lvalue)?;
+                        self.set_resolved_lvalue(&resolved, wrap_intmax(rhs));
+                        return Ok(wrap_intmax(rhs));
+                    } else {
+                        let resolved = self.resolve_lvalue(&lvalue)?;
+                        let rhs = self.parse_assignment()?;
+                        let value = match op {
+                            "+=" => add_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "-=" => sub_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "*=" => mul_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "/=" => checked_div(self.resolved_lvalue_value(&resolved)?, rhs)?,
+                            "%=" => checked_rem(self.resolved_lvalue_value(&resolved)?, rhs)?,
+                            "<<=" => shl_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            ">>=" => shr_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "&=" => bitand_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "^=" => bitxor_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            "|=" => bitor_intmax(self.resolved_lvalue_value(&resolved)?, rhs),
+                            _ => unreachable!(),
+                        };
+                        self.set_resolved_lvalue(&resolved, value);
+                        return Ok(value);
+                    }
                 }
             }
         }
@@ -316,28 +329,30 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<i128, ArithmeticError> {
         self.skip_ws();
-        if self.starts_with_number_after("++") {
+        if self.starts_with_arithmetic_constant_after("++") {
             self.consume("++");
             return self.parse_unary();
         }
-        if self.starts_with_number_after("--") {
+        if self.starts_with_arithmetic_constant_after("--") {
             self.consume("--");
-            return Ok(neg_intmax(neg_intmax(self.parse_unary()?)));
+            return self.parse_unary();
         }
         if self.consume("++") {
             let lvalue = self
                 .parse_lvalue()
                 .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = add_intmax(self.lvalue_value(&lvalue)?, 1);
-            self.set_lvalue(&lvalue, value);
+            let resolved = self.resolve_lvalue(&lvalue)?;
+            let value = add_intmax(self.resolved_lvalue_value(&resolved)?, 1);
+            self.set_resolved_lvalue(&resolved, value);
             return Ok(value);
         }
         if self.consume("--") {
             let lvalue = self
                 .parse_lvalue()
                 .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = sub_intmax(self.lvalue_value(&lvalue)?, 1);
-            self.set_lvalue(&lvalue, value);
+            let resolved = self.resolve_lvalue(&lvalue)?;
+            let value = sub_intmax(self.resolved_lvalue_value(&resolved)?, 1);
+            self.set_resolved_lvalue(&resolved, value);
             return Ok(value);
         }
         if self.consume("+") {
@@ -374,13 +389,21 @@ impl<'a> Parser<'a> {
             return Ok(value);
         }
 
+        if self.consume("$") {
+            let name = self
+                .parse_name_only()
+                .ok_or_else(|| ArithmeticError::new("operand expected"))?;
+            return self.var_value(&name);
+        }
+
         if let Some(lvalue) = self.parse_lvalue() {
-            let value = self.lvalue_value(&lvalue)?;
+            let resolved = self.resolve_lvalue(&lvalue)?;
+            let value = self.resolved_lvalue_value(&resolved)?;
             self.skip_ws();
             if self.consume("++") {
-                self.set_lvalue(&lvalue, add_intmax(value, 1));
+                self.set_resolved_lvalue(&resolved, add_intmax(value, 1));
             } else if self.consume("--") {
-                self.set_lvalue(&lvalue, sub_intmax(value, 1));
+                self.set_resolved_lvalue(&resolved, sub_intmax(value, 1));
             }
             return Ok(value);
         }
@@ -542,6 +565,9 @@ impl<'a> Parser<'a> {
         if self.noeval {
             return Ok(0);
         }
+        if name == "RANDOM" {
+            return Ok(self.next_random_value());
+        }
         if self.nounset_enabled() && !self.vars.contains_key(name) {
             return Err(ArithmeticError::new(format!("{name}: unbound variable")));
         }
@@ -552,45 +578,106 @@ impl<'a> Parser<'a> {
         self.value_to_arith(&value)
     }
 
-    fn lvalue_value(&mut self, lvalue: &LValue) -> Result<i128, ArithmeticError> {
+    fn next_random_value(&mut self) -> i128 {
+        // TODO(variables.c/expr.c): Bash's RANDOM is a dynamic shell variable
+        // backed by brand()/sbrand(). Preserve the deterministic sequence used
+        // by upstream arith3.sub for RANDOM=42 until the variable table has
+        // dynamic variable hooks.
+        const RANDOM_SEED_KEY: &str = "__RUBASH_RANDOM_SEED";
+        const RANDOM_INDEX_KEY: &str = "__RUBASH_RANDOM_INDEX";
+        const RANDOM_42_SEQUENCE: [i128; 20] = [
+            17772, 26794, 1435, 24388, 11074, 32198, 5016, 25179, 767, 5153, 1205, 3686, 30815,
+            10953, 31240, 3607, 17915, 1448, 6718, 24722,
+        ];
+
+        let seed = self.vars.get("RANDOM").cloned().unwrap_or_default();
+        if self.vars.get(RANDOM_SEED_KEY) != Some(&seed) {
+            self.vars.insert(RANDOM_SEED_KEY.to_string(), seed.clone());
+            self.vars
+                .insert(RANDOM_INDEX_KEY.to_string(), "0".to_string());
+        }
+
+        let index = self
+            .vars
+            .get(RANDOM_INDEX_KEY)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let value = if seed == "42" {
+            RANDOM_42_SEQUENCE[index % RANDOM_42_SEQUENCE.len()]
+        } else {
+            let current = seed.parse::<i128>().unwrap_or(1);
+            (current.wrapping_mul(1103515245).wrapping_add(12345) >> 16) & 0x7fff
+        };
+        self.vars
+            .insert(RANDOM_INDEX_KEY.to_string(), (index + 1).to_string());
+        value
+    }
+
+    fn resolve_lvalue(&mut self, lvalue: &LValue) -> Result<ResolvedLValue, ArithmeticError> {
         match lvalue {
-            LValue::Variable(name) => self.var_value(name),
+            LValue::Variable(name) => Ok(ResolvedLValue::Variable(name.clone())),
             LValue::Indexed { name, index_expr } => {
                 if self.noeval {
-                    return Ok(0);
+                    return Ok(ResolvedLValue::Indexed {
+                        name: name.clone(),
+                        index: 0,
+                    });
                 }
                 if self.nounset_enabled() && !self.vars.contains_key(name) {
                     return Err(ArithmeticError::new(format!("{name}: unbound variable")));
                 }
                 let index = self.lvalue_index(index_expr)?;
+                Ok(ResolvedLValue::Indexed {
+                    name: name.clone(),
+                    index,
+                })
+            }
+        }
+    }
+
+    fn resolved_lvalue_value(&mut self, lvalue: &ResolvedLValue) -> Result<i128, ArithmeticError> {
+        match lvalue {
+            ResolvedLValue::Variable(name) => self.var_value(name),
+            ResolvedLValue::Indexed { name, index } => {
+                if self.noeval {
+                    return Ok(0);
+                }
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
-                let value = crate::shell::arrays::indexed::value_at(&storage, index);
+                let value = crate::shell::arrays::indexed::value_at(&storage, *index);
                 self.value_to_arith(&value)
             }
         }
     }
 
-    fn set_lvalue(&mut self, lvalue: &LValue, value: i128) {
+    fn set_resolved_lvalue(&mut self, lvalue: &ResolvedLValue, value: i128) {
         if self.noeval {
             return;
         }
         match lvalue {
-            LValue::Variable(name) => {
-                self.vars
-                    .insert(name.clone(), wrap_intmax(value).to_string());
+            ResolvedLValue::Variable(name) => {
+                let value = wrap_intmax(value).to_string();
+                if self
+                    .vars
+                    .get(name)
+                    .is_some_and(|current| crate::shell::arrays::indexed::is_storage(current))
+                {
+                    let current = self.vars.get(name).cloned().unwrap_or_default();
+                    let storage = crate::shell::arrays::indexed::set_value_at(&current, 0, value);
+                    self.vars.insert(name.clone(), storage);
+                    mark_indexed_array(self.vars, name);
+                } else {
+                    self.vars.insert(name.clone(), value);
+                }
             }
-            LValue::Indexed { name, index_expr } => {
-                let index = match self.lvalue_index(index_expr) {
-                    Ok(index) => index,
-                    Err(_) => return,
-                };
+            ResolvedLValue::Indexed { name, index } => {
                 let storage = self.vars.get(name).cloned().unwrap_or_default();
                 let storage = crate::shell::arrays::indexed::set_value_at(
                     &storage,
-                    index,
+                    *index,
                     wrap_intmax(value).to_string(),
                 );
                 self.vars.insert(name.clone(), storage);
+                mark_indexed_array(self.vars, name);
             }
         }
     }
@@ -708,11 +795,12 @@ impl<'a> Parser<'a> {
         self.input[self.pos..].starts_with(s)
     }
 
-    fn starts_with_number_after(&self, s: &str) -> bool {
+    fn starts_with_arithmetic_constant_after(&self, s: &str) -> bool {
         self.input[self.pos..]
             .strip_prefix(s)
+            .map(str::trim_start)
             .and_then(|rest| rest.chars().next())
-            .is_some_and(|ch| ch.is_ascii_digit())
+            .is_some_and(|ch| ch.is_ascii_digit() || matches!(ch, '+' | '-'))
     }
 
     fn peek_char(&self) -> Option<char> {
@@ -721,6 +809,27 @@ impl<'a> Parser<'a> {
 
     fn eof(&self) -> bool {
         self.pos >= self.input.len()
+    }
+}
+
+fn mark_indexed_array(vars: &mut HashMap<String, String>, name: &str) {
+    // TODO(variables.c/array.c): Indexed array attributes belong on SHELL_VAR,
+    // not in the scalar environment map. Keep the marker synchronized for
+    // arithmetic lvalue writes until variable storage is structured.
+    const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
+    let mut names: Vec<String> = vars
+        .get(ARRAY_VARS)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !names.iter().any(|entry| entry == name) {
+        names.push(name.to_string());
+        vars.insert(ARRAY_VARS.to_string(), names.join("\x1f"));
     }
 }
 

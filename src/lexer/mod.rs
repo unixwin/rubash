@@ -582,6 +582,9 @@ impl<'a> Lexer<'a> {
                 }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),
+                '\\' => {
+                    self.advance();
+                }
                 _ => {}
             }
         }
@@ -599,6 +602,9 @@ impl<'a> Lexer<'a> {
                 ')' if self.peek() == Some(')') => {
                     self.advance();
                     break;
+                }
+                '\\' => {
+                    self.advance();
                 }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),
