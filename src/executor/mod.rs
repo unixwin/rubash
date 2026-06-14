@@ -144,7 +144,10 @@ impl Executor {
                 continue;
             }
 
-            if command.subshell && subshell_env.is_none() {
+            let arithmetic_command = command.subshell
+                && command.subshell_end
+                && arithmetic_command_words(&command.words);
+            if command.subshell && !arithmetic_command && subshell_env.is_none() {
                 subshell_env = Some(self.env_vars.clone());
             }
 
@@ -159,7 +162,7 @@ impl Executor {
                 self.exit_code = invert_exit_status(self.exit_code);
             }
 
-            if command.subshell_end {
+            if command.subshell_end && !arithmetic_command {
                 if let Some(saved_env) = subshell_env.take() {
                     self.restore_shell_env(saved_env);
                 }
@@ -530,6 +533,10 @@ impl Executor {
         }
 
         if self.execute_array_element_assignment(cmd) {
+            return Ok(());
+        }
+
+        if self.execute_arithmetic_command(cmd) {
             return Ok(());
         }
 
@@ -2005,6 +2012,31 @@ impl Executor {
         true
     }
 
+    fn execute_arithmetic_command(&mut self, cmd: &CommandNode) -> bool {
+        // TODO(parse.y/execute_cmd.c/expr.c): Bash represents `((...))` as an
+        // ARITH_COM node and execute_arith_command evaluates it through
+        // evalexp. The current parser flattens double-parens into a subshell
+        // command, so recognize the arithmetic-looking shape here.
+        if !(cmd.subshell && cmd.subshell_end && arithmetic_command_words(&cmd.words)) {
+            return false;
+        }
+
+        let expr = cmd.words.join(" ");
+        match crate::expand::arithmetic::eval(&expr, &mut self.env_vars) {
+            Ok(value) => self.exit_code = i32::from(value == 0),
+            Err(error) => {
+                eprintln!(
+                    "{}((: {}: {}",
+                    self.diagnostic_prefix(),
+                    expr,
+                    error.message()
+                );
+                self.exit_code = 1;
+            }
+        }
+        true
+    }
+
     fn apply_temporary_assignments(
         &mut self,
         assignments: &HashMap<String, String>,
@@ -2278,6 +2310,18 @@ impl Executor {
                 return crate::builtins::pushd::stack_value(&self.env_vars, index)
                     .unwrap_or_default();
             }
+            if let Some((array_name, index)) = name
+                .split_once('[')
+                .and_then(|(array_name, rest)| Some((array_name, rest.strip_suffix(']')?)))
+            {
+                if let Ok(index) = index.parse::<usize>() {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| crate::shell::arrays::indexed::value_at(value, index))
+                        .unwrap_or_default();
+                }
+            }
             if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
                 name.strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
@@ -2413,13 +2457,29 @@ impl Executor {
             return self
                 .env_vars
                 .get(name)
-                .map(|value| shell_safe_value(value))
+                .map(|value| {
+                    if is_array_storage(value) {
+                        crate::shell::arrays::indexed::value_at(value, 0)
+                    } else {
+                        shell_safe_value(value)
+                    }
+                })
                 .unwrap_or_default();
         }
 
         if let Some(name) = word.strip_prefix('$') {
             if is_shell_name(name) {
-                return self.env_vars.get(name).cloned().unwrap_or_default();
+                return self
+                    .env_vars
+                    .get(name)
+                    .map(|value| {
+                        if is_array_storage(value) {
+                            crate::shell::arrays::indexed::value_at(value, 0)
+                        } else {
+                            value.clone()
+                        }
+                    })
+                    .unwrap_or_default();
             }
         }
 
@@ -3549,6 +3609,41 @@ fn assignment_name_and_append(name: &str) -> (&str, bool) {
     name.strip_suffix('+')
         .map(|base| (base, true))
         .unwrap_or((name, false))
+}
+
+fn arithmetic_command_words(words: &[String]) -> bool {
+    if words.is_empty() {
+        return true;
+    }
+    if words
+        .first()
+        .is_some_and(|word| is_shell_builtin_name(word) || is_reserved_word(word))
+    {
+        return false;
+    }
+    words.len() > 1
+        || words.iter().any(|word| {
+            word.bytes().any(|byte| {
+                matches!(
+                    byte,
+                    b'[' | b']'
+                        | b'+'
+                        | b'-'
+                        | b'*'
+                        | b'/'
+                        | b'%'
+                        | b'<'
+                        | b'>'
+                        | b'='
+                        | b'!'
+                        | b'&'
+                        | b'|'
+                        | b'^'
+                        | b'~'
+                        | b'?'
+                )
+            })
+        })
 }
 
 fn append_scalar_value(current: &str, value: &str) -> String {

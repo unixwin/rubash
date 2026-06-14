@@ -38,6 +38,19 @@ pub fn values(value: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn value_at(value: &str, index: usize) -> String {
+    values(value).get(index).cloned().unwrap_or_default()
+}
+
+pub fn set_value_at(current: &str, index: usize, value: String) -> String {
+    let mut elements = values(current);
+    while elements.len() <= index {
+        elements.push(String::new());
+    }
+    elements[index] = value;
+    format!("({})", elements.join(" "))
+}
+
 pub fn assignment_index(left: &str) -> Option<usize> {
     left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
 }

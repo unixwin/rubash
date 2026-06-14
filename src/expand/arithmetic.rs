@@ -44,6 +44,12 @@ struct Parser<'a> {
     vars: &'a mut HashMap<String, String>,
 }
 
+#[derive(Clone, Debug)]
+enum LValue {
+    Variable(String),
+    Indexed { name: String, index: usize },
+}
+
 impl<'a> Parser<'a> {
     fn new(input: &'a str, vars: &'a mut HashMap<String, String>) -> Self {
         Self {
@@ -56,7 +62,7 @@ impl<'a> Parser<'a> {
     fn parse_assignment(&mut self) -> Result<i128, ArithmeticError> {
         self.skip_ws();
         let checkpoint = self.pos;
-        if let Some(name) = self.parse_name_only() {
+        if let Some(lvalue) = self.parse_lvalue() {
             self.skip_ws();
             for op in [
                 "<<=", ">>=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
@@ -66,7 +72,7 @@ impl<'a> Parser<'a> {
                 }
                 if self.consume(op) {
                     let rhs = self.parse_assignment()?;
-                    let current = self.var_value(&name)?;
+                    let current = self.lvalue_value(&lvalue)?;
                     let value = match op {
                         "=" => rhs,
                         "+=" => current + rhs,
@@ -81,7 +87,7 @@ impl<'a> Parser<'a> {
                         "|=" => current | rhs,
                         _ => unreachable!(),
                     };
-                    self.vars.insert(name, value.to_string());
+                    self.set_lvalue(&lvalue, value);
                     return Ok(value);
                 }
             }
@@ -265,6 +271,22 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Result<i128, ArithmeticError> {
         self.skip_ws();
+        if self.consume("++") {
+            let lvalue = self
+                .parse_lvalue()
+                .ok_or_else(|| ArithmeticError::new("operand expected"))?;
+            let value = self.lvalue_value(&lvalue)? + 1;
+            self.set_lvalue(&lvalue, value);
+            return Ok(value);
+        }
+        if self.consume("--") {
+            let lvalue = self
+                .parse_lvalue()
+                .ok_or_else(|| ArithmeticError::new("operand expected"))?;
+            let value = self.lvalue_value(&lvalue)? - 1;
+            self.set_lvalue(&lvalue, value);
+            return Ok(value);
+        }
         if self.consume("+") {
             return self.parse_unary();
         }
@@ -276,22 +298,6 @@ impl<'a> Parser<'a> {
         }
         if self.consume("~") {
             return Ok(!self.parse_unary()?);
-        }
-        if self.consume("++") {
-            let name = self
-                .parse_name_only()
-                .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = self.var_value(&name)? + 1;
-            self.vars.insert(name, value.to_string());
-            return Ok(value);
-        }
-        if self.consume("--") {
-            let name = self
-                .parse_name_only()
-                .ok_or_else(|| ArithmeticError::new("operand expected"))?;
-            let value = self.var_value(&name)? - 1;
-            self.vars.insert(name, value.to_string());
-            return Ok(value);
         }
         self.parse_primary()
     }
@@ -311,13 +317,13 @@ impl<'a> Parser<'a> {
             return Ok(value);
         }
 
-        if let Some(name) = self.parse_name_only() {
-            let value = self.var_value(&name)?;
+        if let Some(lvalue) = self.parse_lvalue() {
+            let value = self.lvalue_value(&lvalue)?;
             self.skip_ws();
             if self.consume("++") {
-                self.vars.insert(name, (value + 1).to_string());
+                self.set_lvalue(&lvalue, value + 1);
             } else if self.consume("--") {
-                self.vars.insert(name, (value - 1).to_string());
+                self.set_lvalue(&lvalue, value - 1);
             }
             return Ok(value);
         }
@@ -409,8 +415,62 @@ impl<'a> Parser<'a> {
         Some(self.input[start..self.pos].to_string())
     }
 
+    fn parse_lvalue(&mut self) -> Option<LValue> {
+        let checkpoint = self.pos;
+        let name = self.parse_name_only()?;
+        self.skip_ws();
+        if !self.consume("[") {
+            return Some(LValue::Variable(name));
+        }
+        let index = match self.parse_assignment() {
+            Ok(value) if value >= 0 => value as usize,
+            _ => {
+                self.pos = checkpoint;
+                return None;
+            }
+        };
+        self.skip_ws();
+        if !self.consume("]") {
+            self.pos = checkpoint;
+            return None;
+        }
+        Some(LValue::Indexed { name, index })
+    }
+
     fn var_value(&mut self, name: &str) -> Result<i128, ArithmeticError> {
         let value = self.vars.get(name).cloned().unwrap_or_default();
+        self.value_to_arith(&value)
+    }
+
+    fn lvalue_value(&mut self, lvalue: &LValue) -> Result<i128, ArithmeticError> {
+        match lvalue {
+            LValue::Variable(name) => self.var_value(name),
+            LValue::Indexed { name, index } => {
+                let storage = self.vars.get(name).cloned().unwrap_or_default();
+                let value = crate::shell::arrays::indexed::value_at(&storage, *index);
+                self.value_to_arith(&value)
+            }
+        }
+    }
+
+    fn set_lvalue(&mut self, lvalue: &LValue, value: i128) {
+        match lvalue {
+            LValue::Variable(name) => {
+                self.vars.insert(name.clone(), value.to_string());
+            }
+            LValue::Indexed { name, index } => {
+                let storage = self.vars.get(name).cloned().unwrap_or_default();
+                let storage = crate::shell::arrays::indexed::set_value_at(
+                    &storage,
+                    *index,
+                    value.to_string(),
+                );
+                self.vars.insert(name.clone(), storage);
+            }
+        }
+    }
+
+    fn value_to_arith(&mut self, value: &str) -> Result<i128, ArithmeticError> {
         if value.trim().is_empty() {
             return Ok(0);
         }
