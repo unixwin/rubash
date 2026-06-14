@@ -625,6 +625,12 @@ impl<'a> Parser<'a> {
             return value.trim().parse().map(wrap_intmax).or(Ok(0));
         }
         if self.depth >= MAX_EXPR_RECURSION_LEVEL {
+            let token = value.trim();
+            if is_arithmetic_name(token) {
+                return Err(ArithmeticError::new(format!(
+                    "{token}: expression recursion level exceeded (error token is \"{token}\")"
+                )));
+            }
             return Err(ArithmeticError::new("expression recursion level exceeded"));
         }
         let mut nested = Parser::nested(&value, self.vars, self.depth + 1);
@@ -837,6 +843,15 @@ fn quoted_whitespace_index(value: &str) -> Option<usize> {
                 .and_then(|value| value.strip_suffix('\''))
         })?;
     (!inner.is_empty() && inner.trim().is_empty()).then_some(0)
+}
+
+fn is_arithmetic_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn escaped_quoted_index(value: &str) -> bool {
