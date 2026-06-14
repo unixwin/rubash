@@ -7,6 +7,17 @@
 use std::collections::HashMap;
 
 pub const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+pub const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+pub const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
+pub const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+pub const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
+
+pub fn is_internal_attribute_table(name: &str) -> bool {
+    matches!(
+        name,
+        INTEGER_VARS | EXPORTED_VARS | ARRAY_VARS | ASSOC_VARS | READONLY_VARS
+    )
+}
 
 pub fn integer_append_assignment_error(
     name: &str,
@@ -29,7 +40,19 @@ pub fn integer_append_assignment_error(
     let mut vars = variables.clone();
     crate::expand::arithmetic::eval(&current, &mut vars)
         .err()
-        .map(|error| (current, error.message().to_string()))
+        .map(|error| {
+            (
+                current.clone(),
+                integer_append_error_message(&current, error.message()),
+            )
+        })
+}
+
+fn integer_append_error_message(expr: &str, message: &str) -> String {
+    if expr.trim_end().ends_with('+') && message == "operand expected" {
+        return "arithmetic syntax error: operand expected (error token is \"+\")".to_string();
+    }
+    message.to_string()
 }
 
 fn marked_vars(variables: &HashMap<String, String>, key: &str) -> Vec<String> {

@@ -84,6 +84,16 @@ pub fn array_values_for_slice(value: &str) -> Vec<String> {
         .collect()
 }
 
+pub fn drops_empty_unquoted_parameter_field(word: &str, expanded: &str) -> bool {
+    // TODO(subst.c): Bash field splitting removes an unquoted parameter
+    // expansion that produces no fields. Keep this narrow for simple `$name`
+    // command words until quote flags and IFS splitting are represented.
+    expanded.is_empty()
+        && word
+            .strip_prefix('$')
+            .is_some_and(|name| !name.is_empty() && is_shell_name(name))
+}
+
 fn split_substring_offset_length(value: &str) -> Option<(&str, &str)> {
     // TODO(subst.c/expr.c): The offset and length are arithmetic expressions,
     // so `:` can belong to `?:`. For now, keep ternary offsets intact and use
