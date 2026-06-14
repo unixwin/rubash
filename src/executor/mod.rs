@@ -4364,7 +4364,7 @@ fn substring_parameter(name: &str) -> Option<(&str, &str, Option<&str>)> {
         return None;
     }
     let (offset, length) = if let Some((offset, length)) = split_substring_offset_length(rest) {
-        (offset, (!length.is_empty()).then_some(length))
+        (offset, Some(length))
     } else {
         (rest, None)
     };

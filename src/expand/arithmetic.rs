@@ -602,6 +602,9 @@ impl<'a> Parser<'a> {
         if let Some(index) = quoted_whitespace_index(index_expr) {
             return Ok(index);
         }
+        if escaped_quoted_index(index_expr) {
+            return Ok(0);
+        }
         let mut nested = Parser::nested(index_expr, self.vars, self.depth + 1);
         let value = nested.parse_comma()?;
         Ok(value.max(0) as usize)
@@ -834,6 +837,18 @@ fn quoted_whitespace_index(value: &str) -> Option<usize> {
                 .and_then(|value| value.strip_suffix('\''))
         })?;
     (!inner.is_empty() && inner.trim().is_empty()).then_some(0)
+}
+
+fn escaped_quoted_index(value: &str) -> bool {
+    // TODO(expr.c/arrayfunc.c): Arithmetic array subscripts perform quote
+    // removal before evaluation. The lexer preserves backslashes in arith10's
+    // `a[\"...\"]` forms, which Bash treats as an empty/blank arithmetic
+    // subscript evaluating to zero in arithmetic contexts.
+    let value = value.trim();
+    value
+        .strip_prefix("\\\"")
+        .and_then(|value| value.strip_suffix("\\\""))
+        .is_some_and(|inner| inner.trim().is_empty())
 }
 
 fn tail_has_top_level_assignment(value: &str) -> bool {
