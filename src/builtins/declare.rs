@@ -432,28 +432,7 @@ fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
 }
 
 fn append_assoc_value(current: &str, value: &str) -> String {
-    let mut entries = parse_assoc_words(current);
-    for token in parse_array_tokens(value) {
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(key) = left
-                .strip_prefix('[')
-                .and_then(|left| left.strip_suffix(']'))
-            {
-                entries.push((key.to_string(), rhs.to_string()));
-                continue;
-            }
-        }
-        entries.push(("0".to_string(), token));
-    }
-
-    format!(
-        "({})",
-        entries
-            .into_iter()
-            .map(|(key, value)| format!("[{key}]={value}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    )
+    crate::shell::arrays::assoc::append_value(current, value)
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
@@ -518,16 +497,6 @@ fn declare_array_subscript(value: &str) -> Option<usize> {
         .parse::<usize>()
         .ok()
         .or_else(|| usize::try_from(eval_arith_value(value)).ok())
-}
-
-fn parse_array_tokens(value: &str) -> Vec<String> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return vec![value.to_string()];
-    };
-    inner.split_whitespace().map(str::to_string).collect()
 }
 
 fn eval_arith_value(value: &str) -> i128 {
