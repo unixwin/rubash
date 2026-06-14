@@ -7,6 +7,7 @@ pub mod executor;
 pub mod expand;
 pub mod lexer;
 pub mod parser;
+pub mod shell;
 
 // Re-export commonly used types
 pub use executor::{ExecuteError, Executor};

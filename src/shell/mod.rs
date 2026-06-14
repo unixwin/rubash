@@ -1,2 +1,3 @@
-//! Module placeholder for `src/shell/mod.rs`.
+//! Shell runtime modules.
 
+pub mod arrays;
