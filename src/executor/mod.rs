@@ -2018,7 +2018,13 @@ impl Executor {
         if cmd.words.len() != 1 {
             return false;
         }
-        let Some((left, value)) = cmd.words[0].split_once('=') else {
+        let (word, escaped_quoted_subscript) = if let Some(word) = cmd.words[0].strip_prefix('\x1a')
+        {
+            (word, true)
+        } else {
+            (cmd.words[0].as_str(), false)
+        };
+        let Some((left, value)) = word.split_once('=') else {
             return false;
         };
         let (left, append) = if let Some(left) = left.strip_suffix('+') {
@@ -2078,6 +2084,17 @@ impl Executor {
         }
 
         let index = index.trim_end_matches(']');
+        if escaped_quoted_subscript {
+            let expr = crate::shell::arrays::functions::quote_removed_subscript(index);
+            eprintln!(
+                "{}{}: arithmetic syntax error: operand expected (error token is \"{}\")",
+                self.diagnostic_prefix(),
+                expr,
+                expr
+            );
+            self.exit_code = 1;
+            return true;
+        }
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
             // TODO(assoc.c/arrayfunc.c): Bash parses associative subscripts
             // with quote removal and expansion. This stores the simple

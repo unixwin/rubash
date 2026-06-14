@@ -319,7 +319,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Some(Token::new(TokenKind::And, "&&", start))
                 } else if self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                    self.skip_word();
+                    self.skip_word(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else {
                     Some(Token::new(TokenKind::Background, "&", start))
@@ -343,7 +343,7 @@ impl<'a> Lexer<'a> {
             ')' => Some(Token::new(TokenKind::Keyword, ")", start)),
             '!' => {
                 if self.peek() == Some('=') {
-                    self.skip_word();
+                    self.skip_word(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else {
                     Some(Token::new(TokenKind::Keyword, "!", start))
@@ -386,7 +386,7 @@ impl<'a> Lexer<'a> {
                         Some(Token::new(TokenKind::RedirectErr, "2>", start))
                     }
                 } else {
-                    self.skip_word();
+                    self.skip_word(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 }
             }
@@ -411,7 +411,7 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {
                     let pos = self.position;
-                    self.skip_word();
+                    self.skip_word(start);
                     Some(Token::new(
                         TokenKind::Variable,
                         &format!("${}", self.slice(pos)),
@@ -455,7 +455,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
-        self.skip_word();
+        self.skip_word(start);
         let raw = self.slice(start);
         let value = if raw.contains('=') && raw.contains("$(") {
             // TODO(parse.y/subst.c): Preserve quotes inside `$()` while
@@ -492,18 +492,43 @@ impl<'a> Lexer<'a> {
             // instead of a sentinel. This narrow marker lets expansion
             // distinguish "${v:-~}" from ${v:-~} for upstream tilde2.tests.
             format!("\x1d{value}")
+        } else if escaped_quoted_array_assignment(raw) {
+            // TODO(parse.y/arrayfunc.c): Preserve WORD_DESC assignment flags
+            // and quote state for ARRAY_ASSIGN. This marker lets the
+            // executor distinguish direct `a[\"...\"]=x` from `a["..."]=x`
+            // after quote removal, without changing arithmetic contexts.
+            format!("\x1a{value}")
         } else {
             value
         };
         Token::new(kind, &value, start)
     }
 
-    fn skip_word(&mut self) {
+    fn skip_word(&mut self, start: usize) {
+        let mut array_subscript_depth = 0_i32;
         while let Some(c) = self.peek() {
+            if (c == ' ' || c == '\t') && array_subscript_depth > 0 {
+                self.advance();
+                continue;
+            }
             if " \t\n|&;<>(){}".contains(c) {
                 break;
             }
             match c {
+                '[' if array_subscript_depth > 0
+                    || shell_name_before_subscript(self.slice(start)) =>
+                {
+                    // TODO(parse.y/arrayfunc.c): Bash recognizes array
+                    // assignment words before ordinary word splitting. Keep
+                    // bracketed subscripts containing escaped quotes/blanks as
+                    // one word until the parser owns ARRAY_ASSIGN syntax.
+                    array_subscript_depth += 1;
+                    self.advance();
+                }
+                ']' if array_subscript_depth > 0 => {
+                    array_subscript_depth -= 1;
+                    self.advance();
+                }
                 '`' => {
                     // TODO(parse.y/subst.c): Command substitution is part of
                     // the surrounding word. Keeping it atomic is required for
@@ -660,6 +685,37 @@ fn mark_quoted_assignment_value(value: &str) -> String {
     };
 
     format!("{name}=\x1c{rhs}")
+}
+
+fn escaped_quoted_array_assignment(raw: &str) -> bool {
+    if raw.starts_with("((") || raw.starts_with("$((") {
+        return false;
+    }
+    let Some((left, _)) = raw.split_once('=') else {
+        return false;
+    };
+    let Some((name, subscript)) = left.strip_suffix('+').unwrap_or(left).split_once('[') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && subscript.ends_with(']')
+        && subscript.contains("\\\"")
+}
+
+fn shell_name_before_subscript(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn quoted_literal_tilde(raw: &str, value: &str) -> bool {
