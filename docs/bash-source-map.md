@@ -1,8 +1,11 @@
 # Bash Source Map
 
-This map keeps Rubash implementation work traceable to GNU Bash 5.3 sources
-without forcing a file-for-file port. The `Status` column describes whether the
-Rubash module should exist now or later.
+This map keeps Rubash implementation work traceable to GNU Bash 5.3 sources.
+Rubash should migrate behavior file by file: every implementation-shaped GNU
+Bash file has a fixed Rust owner, and any temporary bridge in another module
+must name the upstream owner in a TODO and be moved back to that owner as early
+as practical. The `Status` column describes whether the Rubash module should
+exist now or later.
 
 ## Upstream Inventory
 
@@ -26,18 +29,18 @@ builtin definitions, and parser grammar:
 This document maps those files at subsystem granularity. The file-by-file owner
 map lives in `docs/bash-implementation-inventory.md`; it assigns every
 implementation-shaped GNU Bash file to a Rubash target module or an explicit
-skip category. When a Rubash module is added or moved, update both maps as
-needed.
+skip category. The inventory is authoritative for ownership. When a Rubash
+module is added or moved, update both maps as needed.
 
 | GNU Bash source | Rubash module | Status | Notes |
 |---|---|---:|---|
 | `parse.y`, `parser.h`, `y.tab.c`, `y.tab.h` | `src/parser/` | Now | Parser grammar reference only; do not mirror generated `y.tab.*`. |
 | `command.h`, `make_cmd.c`, `copy_cmd.c`, `dispose_cmd.c`, `print_cmd.c` | `src/parser/ast.rs` | Now | Rust AST should model command semantics, not C allocation helpers. |
-| `subst.c`, `subst.h` | `src/expand/parameter.rs`, `src/expand/command.rs` | Now | Parameter, command, arithmetic, quote removal, and word expansion logic. |
+| `subst.c`, `subst.h` | `src/expand/word.rs` | Now | Parameter, command, quote removal, and word expansion logic. Temporary bridges in `src/executor/mod.rs` must move here. |
 | `braces.c`, `bracecomp.c` | `src/expand/braces.rs` | Now | Brace expansion can be implemented independently and tested early. |
 | `pathexp.c`, `lib/glob/glob.c`, `lib/glob/strmatch.c` | `src/expand/pathname.rs` | Now | Pathname expansion and shell pattern matching. |
 | `lib/tilde/tilde.c` | `src/expand/tilde.rs` | Now | Needed by `cd`, assignments, and word expansion. |
-| `execute_cmd.c`, `execute_cmd.h`, `eval.c` | `src/executor/command.rs` | Now | Main command execution flow. Keep high-level orchestration here. |
+| `execute_cmd.c`, `execute_cmd.h`, `eval.c` | `src/executor/command.rs` | Now | Main command execution flow. Temporary bridges in `src/executor/mod.rs` must move here. |
 | `redir.c`, `redir.h` | `src/executor/redirection.rs` | Now | File descriptor and redirect semantics. |
 | `findcmd.c`, `hashcmd.c`, `hashlib.c` | `src/executor/path.rs` or `src/shell/hash.rs` | Later | Command lookup and hashing after basic execution works. |
 | `variables.c`, `variables.h` | `src/shell/variables.rs` | Now | Shell variables, exported environment, special parameters. |
@@ -45,7 +48,7 @@ needed.
 | `builtins/*.def`, `builtins/common.c` | `src/builtins/` | Now | Implement per builtin where useful, but group small builtins pragmatically. |
 | `test.c`, `builtins/test.def` | `src/builtins/test.rs` | Now | `test` and `[` behavior should share one implementation. |
 | `alias.c`, `alias.h`, `builtins/alias.def` | `src/shell/alias.rs` | Later | Needs parser/input integration before it is useful. |
-| `array.c`, `array2.c`, `arrayfunc.c`, `assoc.c` | `src/shell/arrays.rs` | Later | Add after scalar variables and parameter expansion are stable. |
+| `array.c`, `array2.c`, `arrayfunc.c`, `assoc.c` | `src/shell/arrays/` | Now | Keep indexed, associative, and array function behavior in their mapped modules. Temporary bridges in `src/executor/mod.rs` must move here. |
 | `jobs.c`, `nojobs.c`, `jobs.h` | `src/jobs/` | Later | Requires process groups, terminal control, and signal semantics. |
 | `trap.c`, `sig.c`, `siglist.c` | `src/jobs/signals.rs` or `src/shell/signals.rs` | Later | Implement with job control or script traps, not before. |
 | `input.c`, `bashline.c`, `lib/readline/*` | `src/input/` or external line editor | Later | Prefer crate-backed line editing before considering Bash readline parity. |
