@@ -254,6 +254,9 @@ EOF
     -e 'warning: some of these tests may fail if process substitution has not' \
     -e 'warning: been compiled into the shell or if the OS does not provide' \
     -e 'warning: /dev/fd.' \
+    -e 'warning: if you have exported functions defined in your environment,' \
+    -e 'warning: they may show up as diff output.' \
+    -e 'warning: if so, please do not consider this a test failure' \
     "$log" > "$unexpected_log" || true
 
   if [[ "$status" -eq 0 && ! -s "$unexpected_log" ]]; then
