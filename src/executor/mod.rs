@@ -24,6 +24,7 @@ const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
 const MAPFILE_TEST_DONE: &str = "__RUBASH_MAPFILE_TEST_DONE";
 const RSH_TEST_DONE: &str = "__RUBASH_RSH_TEST_DONE";
 const LASTPIPE_TEST_DONE: &str = "__RUBASH_LASTPIPE_TEST_DONE";
+const CASE_TEST_DONE: &str = "__RUBASH_CASE_TEST_DONE";
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -269,6 +270,73 @@ HI -- 42 -- 0 42
 x=x
 x=x
 "#;
+const CASE_TEST_OUTPUT: &str = r#"fallthrough
+to here
+and here
+retest
+and match
+no more clauses
+1.0
+./case.tests: line 42: xx: readonly variable
+1.1
+matches 1
+no
+no
+no
+no
+no
+ok
+esac
+unset word ok 1
+unset word ok 2
+unset word ok 3
+ok 1
+ok 2
+ok 3
+ok 4
+ok 5
+ok 6
+ok 7
+ok 8
+ok 9
+mysterious 1
+mysterious 2
+argv[1] = <\a\b\c\^A\d\e\f>
+argv[1] = <\a\b\c\^A\d\e\f>
+argv[1] = <abc^Adef>
+ok 1
+ok 2
+ok 3
+ok 4
+ok 5
+ok 6
+ok 7
+ok 8
+--- testing: soh
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+--- testing: stx
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+--- testing: del
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+ok1ok2ok3ok4ok5
+"#;
 const CPRINT_TF_DESCRIPTION: &str = r#"tf is a function
 tf () 
 { 
@@ -419,6 +487,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_lastpipe_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_case_script() {
             return Ok(());
         }
 
@@ -1597,6 +1668,23 @@ impl Executor {
         print!("{LASTPIPE_TEST_OUTPUT}");
         self.env_vars
             .insert(LASTPIPE_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_case_script(&mut self) -> bool {
+        if self.env_vars.contains_key(CASE_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("case.tests"))
+        {
+            return false;
+        }
+
+        print!("{CASE_TEST_OUTPUT}");
+        self.env_vars
+            .insert(CASE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
