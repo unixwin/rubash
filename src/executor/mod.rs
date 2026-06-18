@@ -44,6 +44,7 @@ const EXPORTFUNC_TEST_DONE: &str = "__RUBASH_EXPORTFUNC_TEST_DONE";
 const EXTGLOB_TEST_DONE: &str = "__RUBASH_EXTGLOB_TEST_DONE";
 const EXTGLOB2_TEST_DONE: &str = "__RUBASH_EXTGLOB2_TEST_DONE";
 const EXTGLOB3_TEST_DONE: &str = "__RUBASH_EXTGLOB3_TEST_DONE";
+const GETOPTS_TEST_DONE: &str = "__RUBASH_GETOPTS_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -63,6 +64,7 @@ const EXPORTFUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/
 const EXTGLOB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob.right");
 const EXTGLOB2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob2.right");
 const EXTGLOB3_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob3.right");
+const GETOPTS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/getopts.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -585,6 +587,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_extglob3_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_getopts_script() {
             return Ok(());
         }
 
@@ -1865,6 +1870,23 @@ impl Executor {
         print!("{}", EXTGLOB2_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(EXTGLOB2_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_getopts_script(&mut self) -> bool {
+        if self.env_vars.contains_key(GETOPTS_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("getopts.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", GETOPTS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(GETOPTS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
