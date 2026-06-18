@@ -144,6 +144,15 @@ mod redirection_tests {
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].append.is_some());
     }
+
+    #[test]
+    fn test_here_string_redirect() {
+        let input = "read x <<<\"alpha\"";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].here_string.as_deref(), Some("alpha"));
+    }
 }
 
 mod quote_removal {

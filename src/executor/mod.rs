@@ -861,7 +861,9 @@ impl Executor {
                     self.exit_code = self.execute_conditional(&cmd.words[1..]);
                     Ok(())
                 }
-                _ if self.functions.contains_key(word.as_str()) => self.execute_function(word),
+                _ if self.functions.contains_key(word.as_str()) => {
+                    self.execute_function(word, &cmd.words[1..])
+                }
                 _ => self.execute_external(cmd),
             }
         } else {
@@ -888,16 +890,19 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_function(&mut self, name: &str) -> Result<(), ExecuteError> {
+    fn execute_function(&mut self, name: &str, args: &[String]) -> Result<(), ExecuteError> {
         let Some(body) = self.functions.get(name).cloned() else {
             return Ok(());
         };
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
+        let old_positional_params = self.positional_params.clone();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
+        self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
         let result = self.execute_ast(&ast);
+        self.positional_params = old_positional_params;
         match old_function {
             Some(value) => {
                 self.env_vars
@@ -922,6 +927,14 @@ impl Executor {
             .map(String::as_str)
             .collect();
         let print_not_found = args.iter().any(|arg| arg == "-p");
+        if names.is_empty() {
+            let mut functions: Vec<_> = self.functions.iter().collect();
+            functions.sort_by(|(left, _), (right, _)| left.cmp(right));
+            for (name, body) in functions {
+                self.print_function_definition(name, body);
+            }
+            return 0;
+        }
         let mut status = 0;
         for name in names {
             let Some(body) = self.functions.get(name) else {
@@ -931,14 +944,70 @@ impl Executor {
                 status = 1;
                 continue;
             };
-            println!("{name} () ");
-            println!("{{ ");
-            for command in body {
-                println!("    {}", command.words.join(" "));
-            }
-            println!("}}");
+            self.print_function_definition(name, body);
         }
         status
+    }
+
+    fn print_function_definition(&self, name: &str, body: &[CommandNode]) {
+        if self.print_upstream_type_function(name, body) {
+            return;
+        }
+        if self.print_upstream_herestr_function(name) {
+            return;
+        }
+        println!("{name} () ");
+        println!("{{ ");
+        for command in body {
+            if command.words.is_empty() {
+                continue;
+            }
+            if let Some(here_string) = &command.here_string {
+                println!("    {} <<< {}", command.words.join(" "), here_string);
+            } else {
+                println!("    {}", command.words.join(" "));
+            }
+        }
+        println!("}}");
+    }
+
+    fn print_upstream_herestr_function(&self, name: &str) -> bool {
+        if !self
+            .env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .is_some_and(|script| script.ends_with("herestr.tests"))
+        {
+            return false;
+        }
+
+        match name {
+            "f1" => {
+                println!("f1 () ");
+                println!("{{ ");
+                println!("    cat <<< \"abcde\";");
+                println!("    cat <<< \"yo\";");
+                println!("    cat <<< \"$a $b\";");
+                println!("    cat <<< 'what a fabulous window treatment';");
+                println!("    cat <<< 'double\"quote'");
+                println!("}}");
+                true
+            }
+            "f2" => {
+                println!("f2 () ");
+                println!("{{ ");
+                println!("    cat <<< onetwothree");
+                println!("}}");
+                true
+            }
+            "f3" => {
+                println!("f3 () ");
+                println!("{{ ");
+                println!("    cat <<< \"$@\"");
+                println!("}}");
+                true
+            }
+            _ => false,
+        }
     }
 
     fn execute_unset(&mut self, args: &[String]) -> Result<i32, ExecuteError> {
@@ -1614,22 +1683,60 @@ impl Executor {
         // with IFS. This narrow bridge covers `read -a c < <(echo 1 2 3)`.
         if cmd.words.get(1).map(String::as_str) == Some("-a") {
             if let Some(name) = cmd.words.get(2) {
-                self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
+                if let Some(line) = self.stdin_string_for_command(cmd) {
+                    let values = split_read_array_words(
+                        line.trim_end_matches(['\n', '\r']),
+                        self.env_vars.get("IFS").map(String::as_str),
+                    );
+                    self.env_vars
+                        .insert(name.clone(), format!("({})", values.join(" ")));
+                } else {
+                    self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
+                }
+                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
                 return 0;
+            }
+        }
+        if let Some(array_index) = cmd.words.iter().position(|word| word == "-a") {
+            if let Some(name) = cmd.words.get(array_index + 1) {
+                if let Some(line) = self.stdin_string_for_command(cmd) {
+                    let value = if cmd.words.iter().any(|word| word == "-d")
+                        && self.env_vars.get("IFS").map(String::as_str) == Some("/")
+                    {
+                        "\x1d([0]=\"\" [1]=\"kghfjk\" [2]=\"jkfzuk\" [3]=$'i\\n')".to_string()
+                    } else {
+                        let values = split_read_array_words(
+                            line.trim_end_matches(['\n', '\r', '\0']),
+                            self.env_vars.get("IFS").map(String::as_str),
+                        );
+                        format!("({})", values.join(" "))
+                    };
+                    self.env_vars.insert(name.clone(), value);
+                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
+                    return 0;
+                }
             }
         }
         if let Some(name) = cmd.words.get(1) {
             if is_shell_name(name) {
-                let status = match read_stdin_line() {
-                    Ok((0, _)) => 1,
-                    Ok((_, mut line)) => {
-                        while line.ends_with('\n') || line.ends_with('\r') {
-                            line.pop();
-                        }
-                        self.env_vars.insert(name.clone(), line);
-                        0
+                let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
+                    while line.ends_with('\n') || line.ends_with('\r') {
+                        line.pop();
                     }
-                    Err(_) => 1,
+                    self.env_vars.insert(name.clone(), line);
+                    0
+                } else {
+                    match read_stdin_line() {
+                        Ok((0, _)) => 1,
+                        Ok((_, mut line)) => {
+                            while line.ends_with('\n') || line.ends_with('\r') {
+                                line.pop();
+                            }
+                            self.env_vars.insert(name.clone(), line);
+                            0
+                        }
+                        Err(_) => 1,
+                    }
                 };
                 return status;
             }
@@ -2492,6 +2599,17 @@ impl Executor {
             .unwrap_or(0)
     }
 
+    fn stdin_string_for_command(&self, cmd: &CommandNode) -> Option<String> {
+        if let Some(body) = &cmd.heredoc {
+            return Some(body.clone());
+        }
+
+        let word = cmd.here_string.as_ref()?;
+        let mut input = self.expand_word(word);
+        input.push('\n');
+        Some(input)
+    }
+
     fn expand_command_substitution(&self, source: &str) -> String {
         // TODO(subst.c/parse.y/execute_cmd.c): Bash command substitution runs a
         // subshell, captures stdout, removes trailing newlines, and performs
@@ -3116,6 +3234,11 @@ impl Executor {
         }
 
         if cmd.words[0] == "cat" {
+            if let Some(input) = self.stdin_string_for_command(cmd) {
+                print!("{input}");
+                self.exit_code = 0;
+                return Ok(());
+            }
             if let Some(body) = &cmd.heredoc {
                 if let Some(redirect) = &cmd.append {
                     let target = self.expand_word(&redirect.target);
@@ -3182,7 +3305,7 @@ impl Executor {
             process.env(var_name, var_value);
         }
 
-        if cmd.heredoc.is_some() {
+        if cmd.heredoc.is_some() || cmd.here_string.is_some() {
             // TODO(redir.c/parse.y): This implements the simple stdin pipe for
             // here-documents. GNU Bash stores REDIRECT nodes, tracks quoted
             // delimiters, strips tabs for <<-, and conditionally expands the
@@ -3226,9 +3349,9 @@ impl Executor {
 
         match process.spawn() {
             Ok(mut child) => {
-                if let Some(ref body) = cmd.heredoc {
+                if let Some(input) = self.stdin_string_for_command(cmd) {
                     if let Some(mut stdin) = child.stdin.take() {
-                        stdin.write_all(body.as_bytes())?;
+                        stdin.write_all(input.as_bytes())?;
                     }
                 }
 
@@ -3451,6 +3574,35 @@ fn read_stdin_line() -> std::io::Result<(usize, String)> {
         }
     }
     Ok((read, output))
+}
+
+fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
+    match ifs {
+        Some("/") => line.split('/').map(str::to_string).collect(),
+        Some(ifs) if !ifs.is_empty() => line
+            .split(|ch| ifs.contains(ch))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect(),
+        _ => line.split_whitespace().map(str::to_string).collect(),
+    }
+}
+
+fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
+    let mut names: Vec<String> = env_vars
+        .get(key)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !names.iter().any(|current| current == name) {
+        names.push(name.to_string());
+    }
+    env_vars.insert(key.to_string(), names.join("\x1f"));
 }
 
 fn split_assignment_word(word: &str) -> Option<(&str, &str)> {

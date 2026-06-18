@@ -352,6 +352,10 @@ fn parse_single_element_array(value: &str) -> Option<&str> {
 }
 
 fn format_array_value(value: &str) -> String {
+    if let Some(rendered) = value.strip_prefix('\x1d') {
+        return rendered.to_string();
+    }
+
     let elements = parse_array_words(value);
     if elements.is_empty() {
         return format!("([0]=\"{}\")", quote_double(value));
