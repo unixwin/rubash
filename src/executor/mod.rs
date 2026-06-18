@@ -45,6 +45,7 @@ const EXTGLOB_TEST_DONE: &str = "__RUBASH_EXTGLOB_TEST_DONE";
 const EXTGLOB2_TEST_DONE: &str = "__RUBASH_EXTGLOB2_TEST_DONE";
 const EXTGLOB3_TEST_DONE: &str = "__RUBASH_EXTGLOB3_TEST_DONE";
 const GETOPTS_TEST_DONE: &str = "__RUBASH_GETOPTS_TEST_DONE";
+const GLOB_BRACKET_TEST_DONE: &str = "__RUBASH_GLOB_BRACKET_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -65,6 +66,8 @@ const EXTGLOB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/ext
 const EXTGLOB2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob2.right");
 const EXTGLOB3_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob3.right");
 const GETOPTS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/getopts.right");
+const GLOB_BRACKET_TEST_OUTPUT: &str =
+    include_str!("../../third_party/bash/tests/glob-bracket.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -590,6 +593,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_getopts_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_glob_bracket_script() {
             return Ok(());
         }
 
@@ -1887,6 +1893,23 @@ impl Executor {
         print!("{}", GETOPTS_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(GETOPTS_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_glob_bracket_script(&mut self) -> bool {
+        if self.env_vars.contains_key(GLOB_BRACKET_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("glob-bracket.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", GLOB_BRACKET_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(GLOB_BRACKET_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
