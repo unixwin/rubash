@@ -28,10 +28,15 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
 }
 
 pub fn find_shell(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return find_windows_git_bash_from_env(env_vars)
+            .or_else(find_windows_git_bash)
+            .or_else(|| find_native_shell_on_path(env_vars));
+    }
+
     ["sh", "bash"]
         .into_iter()
         .find_map(|name| find_user_command(name, env_vars))
-        .or_else(find_windows_git_bash)
 }
 
 pub fn should_run_with_shell(path: &Path) -> bool {
@@ -88,6 +93,42 @@ fn find_windows_git_bash() -> Option<PathBuf> {
     .into_iter()
     .map(PathBuf::from)
     .find(|path| path.is_file())
+}
+
+fn find_windows_git_bash_from_env(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    for key in ["CLAUDE_CODE_GIT_BASH_PATH", "GIT_BASH_PATH", "SHELL"] {
+        let Some(value) = env_vars.get(key) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if is_native_windows_shell(&path) {
+            return Some(path);
+        }
+    }
+
+    let Some(path) = env_vars.get("PATH") else {
+        return None;
+    };
+    split_path(path)
+        .into_iter()
+        .map(PathBuf::from)
+        .flat_map(|dir| [dir.join("bash.exe"), dir.join("sh.exe")])
+        .find(|path| is_native_windows_shell(path))
+}
+
+fn find_native_shell_on_path(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    ["sh", "bash"]
+        .into_iter()
+        .filter_map(|name| find_user_command(name, env_vars))
+        .find(|path| is_native_windows_shell(path))
+}
+
+fn is_native_windows_shell(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
 }
 
 fn split_path(path: &str) -> Vec<String> {
@@ -157,4 +198,26 @@ fn git_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     let exepath = env_vars.get("EXEPATH")?;
     let bin = Path::new(exepath);
     bin.parent().map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_shell_prefers_native_exe_from_env() {
+        let native_exe = std::env::current_exe().unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "CLAUDE_CODE_GIT_BASH_PATH".to_string(),
+            native_exe.to_string_lossy().to_string(),
+        );
+        env_vars.insert(
+            "PATH".to_string(),
+            r"D:\tmp\guard-bin;D:\Git\bin".to_string(),
+        );
+
+        assert_eq!(find_shell(&env_vars), Some(native_exe));
+    }
 }
