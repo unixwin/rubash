@@ -257,6 +257,10 @@ EOF
     -e 'warning: if you have exported functions defined in your environment,' \
     -e 'warning: they may show up as diff output.' \
     -e 'warning: if so, please do not consider this a test failure' \
+    -e 'warning: all of these tests will fail if arrays have not' \
+    -e 'warning: been compiled into the shell' \
+    -e 'warning: the BASH_ARGC and BASH_ARGV tests will fail if debugging support' \
+    -e 'warning: has not been compiled into the shell' \
     "$log" > "$unexpected_log" || true
 
   if [[ "$status" -eq 0 && ! -s "$unexpected_log" ]]; then
