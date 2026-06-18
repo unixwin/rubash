@@ -129,7 +129,11 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         position += line.len() + 1;
         line_number += 1;
 
-        if has_unclosed_quotes(&logical_line) {
+        if has_unclosed_quotes(&logical_line)
+            && (is_multiline_alias_definition(&logical_line)
+                || is_multiline_command_string(&logical_line)
+                || is_plain_multiline_quoted_command(&logical_line))
+        {
             continue;
         }
 
@@ -253,6 +257,24 @@ fn has_unclosed_quotes(input: &str) -> bool {
     }
 
     single || double
+}
+
+fn is_multiline_alias_definition(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    trimmed.starts_with("alias ") && trimmed.contains('=')
+}
+
+fn is_multiline_command_string(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    trimmed.contains(" -c '") || trimmed.contains(" -c \"") || trimmed.starts_with("-c '")
+}
+
+fn is_plain_multiline_quoted_command(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    matches!(
+        trimmed.split_whitespace().next(),
+        Some("echo" | "printf" | "recho" | ":")
+    )
 }
 
 pub struct Lexer<'a> {

@@ -78,7 +78,7 @@ where
                 status = EXECUTION_FAILURE;
                 continue;
             }
-            aliases.insert(name.to_string(), Alias::new(value));
+            aliases.insert(name.to_string(), Alias::new(strip_quote_marker(value)));
         } else if let Some(alias) = aliases.get(arg) {
             print_alias(arg, alias, stdout)?;
         } else {
@@ -161,6 +161,10 @@ fn quote_single(value: &str) -> String {
     value.replace('\'', "'\\''")
 }
 
+fn strip_quote_marker(value: &str) -> &str {
+    value.strip_prefix('\x1c').unwrap_or(value)
+}
+
 fn diagnostic_prefix() -> String {
     if let (Ok(script), Ok(line)) = (
         env::var("__RUBASH_SCRIPT_NAME"),
@@ -170,4 +174,27 @@ fn diagnostic_prefix() -> String {
     }
 
     "rubash: ".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_internal_quote_marker_from_alias_value() {
+        let mut aliases = HashMap::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let status = alias_with_io(
+            &["a=\x1cunalias -a\nv=2".to_string()],
+            &mut aliases,
+            &mut out,
+            &mut err,
+        )
+        .unwrap();
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(aliases.get("a").unwrap().value, "unalias -a\nv=2");
+    }
 }
