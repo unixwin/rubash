@@ -2540,7 +2540,7 @@ impl Executor {
         let words = self.expand_aliases(&words);
 
         if words.first().map(String::as_str) == Some("echo") {
-            return words[1..].join(" ");
+            return command_substitution_word_split(&words[1..].join(" "));
         }
 
         if words.first().map(String::as_str) == Some("umask") {
@@ -2602,7 +2602,7 @@ impl Executor {
         // parser and run a subshell. Upstream strip.tests only uses simple
         // `echo` command lists and checks trailing-newline stripping.
         let source = word.strip_prefix('`')?.strip_suffix('`')?;
-        Some(run_echo_command_substitution(source))
+        Some(command_substitution_word_split(&run_echo_command_substitution(source)))
     }
 
     fn expand_dirstack_tilde(&self, word: &str) -> Option<String> {
@@ -3795,6 +3795,10 @@ fn run_echo_command_substitution(source: &str) -> String {
     output.trim_end_matches('\n').to_string()
 }
 
+fn command_substitution_word_split(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn split_shell_list(source: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
@@ -4080,5 +4084,12 @@ mod unit_tests {
         let mut executor = Executor::new();
         executor.set_env("TEST_VAR", "hello");
         assert_eq!(executor.get_env("TEST_VAR"), Some("hello"));
+    }
+
+    #[test]
+    fn backtick_command_substitution_splits_newlines() {
+        let executor = Executor::new();
+
+        assert_eq!(executor.expand_word("`echo 'foo\nbar'`"), "foo bar");
     }
 }
