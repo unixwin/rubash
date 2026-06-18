@@ -336,7 +336,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                     // TODO(parse.y/execute_cmd.c): Bash represents `!` as a
                     // pipeline/list inversion flag. Keep it on the next simple
                     // command until the parser has a real pipeline AST.
-                    current_cmd.inverted = true;
+                    current_cmd.inverted = !current_cmd.inverted;
                     note_command_line(&mut current_cmd, token);
                     i += 1;
                     continue;
