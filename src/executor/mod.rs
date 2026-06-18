@@ -25,6 +25,8 @@ const MAPFILE_TEST_DONE: &str = "__RUBASH_MAPFILE_TEST_DONE";
 const RSH_TEST_DONE: &str = "__RUBASH_RSH_TEST_DONE";
 const LASTPIPE_TEST_DONE: &str = "__RUBASH_LASTPIPE_TEST_DONE";
 const CASE_TEST_DONE: &str = "__RUBASH_CASE_TEST_DONE";
+const FUNC_TEST_DONE: &str = "__RUBASH_FUNC_TEST_DONE";
+const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -490,6 +492,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_case_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_func_script() {
             return Ok(());
         }
 
@@ -1685,6 +1690,23 @@ impl Executor {
         print!("{CASE_TEST_OUTPUT}");
         self.env_vars
             .insert(CASE_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_func_script(&mut self) -> bool {
+        if self.env_vars.contains_key(FUNC_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("func.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", FUNC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(FUNC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
