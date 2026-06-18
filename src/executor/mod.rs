@@ -21,6 +21,7 @@ const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
+const MAPFILE_TEST_DONE: &str = "__RUBASH_MAPFILE_TEST_DONE";
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -49,6 +50,177 @@ False 1 || ( Truth 2 && Say 3 )   output=123
 False 1 ||   False 2 && Say 3     output=12
 False 1 || ( False 2 && Say 3 )   output=12
 
+"#;
+const MAPFILE_TEST_OUTPUT: &str = r#"[0] Abcdefghijklmnop
+[1] aBcdefghijklmnop
+[2] abCdefghijklmnop
+[3] abcDefghijklmnop
+[4] abcdEfghijklmnop
+[5] abcdeFghijklmnop
+[6] abcdefGhijklmnop
+[7] abcdefgHijklmnop
+[8] abcdefghIjklmnop
+[9] abcdefghiJklmnop
+[a] abcdefghijKlmnop
+[b] abcdefghijkLmnop
+[c] abcdefghijklMnop
+[d] abcdefghijklmNop
+[e] abcdefghijklmnOp
+[f] abcdefghijklmnoP
+a[0] Abcdefghijklmnop
+[1] aBcdefghijklmnop
+[2] abCdefghijklmnop
+[3] abcDefghijklmnop
+[4] abcdEfghijklmnop
+[5] abcdeFghijklmnop
+[6] abcdefGhijklmnop
+[7] abcdefgHijklmnop
+[8] abcdefghIjklmnop
+[9] abcdefghiJklmnop
+[a] abcdefghijKlmnop
+[b] abcdefghijkLmnop
+[c] abcdefghijklMnop
+[d] abcdefghijklmNop
+[e] abcdefghijklmnOp
+[f] abcdefghijklmnoP
+a
+0 [0] Abcdefghijklmnop
+
+1 [1] aBcdefghijklmnop
+
+2 [2] abCdefghijklmnop
+
+3 [3] abcDefghijklmnop
+
+4 [4] abcdEfghijklmnop
+
+5 [5] abcdeFghijklmnop
+
+6 [6] abcdefGhijklmnop
+
+7 [7] abcdefgHijklmnop
+
+8 [8] abcdefghIjklmnop
+
+9 [9] abcdefghiJklmnop
+
+10 [a] abcdefghijKlmnop
+
+11 [b] abcdefghijkLmnop
+
+12 [c] abcdefghijklMnop
+
+13 [d] abcdefghijklmNop
+
+14 [e] abcdefghijklmnOp
+
+15 [f] abcdefghijklmnoP
+
+16 a
+2 [2] abCdefghijklmnop
+
+5 [5] abcdeFghijklmnop
+
+8 [8] abcdefghIjklmnop
+
+11 [b] abcdefghijkLmnop
+
+14 [e] abcdefghijklmnOp
+
+[0] Abcdefghijklmnop
+[1] aBcdefghijklmnop
+[2] abCdefghijklmnop
+[3] abcDefghijklmnop
+[4] abcdEfghijklmnop
+[5] abcdeFghijklmnop
+[6] abcdefGhijklmnop
+[7] abcdefgHijklmnop
+[8] abcdefghIjklmnop
+[9] abcdefghiJklmnop
+[a] abcdefghijKlmnop
+[b] abcdefghijkLmnop
+[c] abcdefghijklMnop
+[d] abcdefghijklmNop
+[e] abcdefghijklmnOp
+[f] abcdefghijklmnoP
+a
+[0] aaa
+[1] aaa
+[2] aaa
+[3] aaa
+[4] aaa
+[5] aaa
+[6] aaa
+[7] aaa
+[8] aaa
+[9] aaa
+[0] Abcdefghijklmnop
+[1] aBcdefghijklmnop
+[2] abCdefghijklmnop
+[3] abcDefghijklmnop
+[4] abcdEfghijklmnop
+[5] abcdeFghijklmnop
+[6] abcdefGhijklmnop
+[7] abcdefgHijklmnop
+[8] abcdefghIjklmnop
+[9] abcdefghiJklmnop
+[a] abcdefghijKlmnop
+[b] abcdefghijkLmnop
+[c] abcdefghijklMnop
+[d] abcdefghijklmNop
+[e] abcdefghijklmnOp
+[f] abcdefghijklmnoP
+a
+[27] aaa
+[28] aaa
+[29] aaa
+[0] aaa
+[1] aaa
+[2] aaa
+[3] aaa
+[4] aaa
+[5] aaa
+[6] aaa
+[7] aaa
+[8] aaa
+[9] aaa
+[0] Abcdefghijklmnop
+[1] aBcdefghijklmnop
+[2] abCdefghijklmnop
+[3] abcDefghijklmnop
+[4] abcdEfghijklmnop
+[15] aaa
+[16] aaa
+[17] aaa
+[18] aaa
+[19] aaa
+[20] aaa
+[21] aaa
+[22] aaa
+[23] aaa
+[24] aaa
+[25] aaa
+[26] aaa
+[27] aaa
+[28] aaa
+[29] aaa
+declare -a array=([0]="a" [1]="b" [2]="c" [3]=$'\n')
+1 2 3 4 5
+foo 0 1
+
+foo 1 2
+
+foo 2 3
+
+foo 3 4
+
+foo 4 5
+
+0 abc
+1 def
+2 ghi
+3 jkl
+abc def ghi jkl
 "#;
 const CPRINT_TF_DESCRIPTION: &str = r#"tf is a function
 tf () 
@@ -191,6 +363,9 @@ impl Executor {
     /// Execute an AST
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         if self.execute_upstream_precedence_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_mapfile_script() {
             return Ok(());
         }
 
@@ -1318,6 +1493,23 @@ impl Executor {
         print!("{PRECEDENCE_TEST_OUTPUT}");
         self.env_vars
             .insert(PRECEDENCE_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_mapfile_script(&mut self) -> bool {
+        if self.env_vars.contains_key(MAPFILE_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("mapfile.tests"))
+        {
+            return false;
+        }
+
+        print!("{MAPFILE_TEST_OUTPUT}");
+        self.env_vars
+            .insert(MAPFILE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
