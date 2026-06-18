@@ -261,6 +261,10 @@ EOF
     -e 'warning: been compiled into the shell' \
     -e 'warning: the BASH_ARGC and BASH_ARGV tests will fail if debugging support' \
     -e 'warning: has not been compiled into the shell' \
+    -e 'warning: all of these tests will fail if the conditional command has not' \
+    -e 'warning: some of these tests will fail if extended pattern matching has not' \
+    -e 'warning: the text of system error messages may vary between systems and' \
+    -e 'warning: produce diff output.' \
     "$log" > "$unexpected_log" || true
 
   if [[ "$status" -eq 0 && ! -s "$unexpected_log" ]]; then
