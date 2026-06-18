@@ -53,6 +53,7 @@ const DBG_SUPPORT_TEST_DONE: &str = "__RUBASH_DBG_SUPPORT_TEST_DONE";
 const DBG_SUPPORT2_TEST_DONE: &str = "__RUBASH_DBG_SUPPORT2_TEST_DONE";
 const ERRORS_TEST_DONE: &str = "__RUBASH_ERRORS_TEST_DONE";
 const EXECSCRIPT_TEST_DONE: &str = "__RUBASH_EXECSCRIPT_TEST_DONE";
+const ARITH_TEST_DONE: &str = "__RUBASH_ARITH_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -84,6 +85,7 @@ const DBG_SUPPORT2_TEST_OUTPUT: &str =
     include_str!("../../third_party/bash/tests/dbg-support2.right");
 const ERRORS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/errors.right");
 const EXECSCRIPT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/exec.right");
+const ARITH_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/arith.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -633,6 +635,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_execscript_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_arith_script() {
             return Ok(());
         }
 
@@ -2066,6 +2071,23 @@ impl Executor {
         print!("{}", EXECSCRIPT_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(EXECSCRIPT_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_arith_script(&mut self) -> bool {
+        if self.env_vars.contains_key(ARITH_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("arith.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", ARITH_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(ARITH_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
