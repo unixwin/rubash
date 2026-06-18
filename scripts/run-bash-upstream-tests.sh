@@ -158,6 +158,8 @@ for runner in "${RUNNERS[@]}"; do
   # TODO(tests/redir.c): replace this harness normalization once the test
   # workspace checkout is forced to LF independent of host git attributes.
   sed -i 's/\r$//' "$expected_dir"/*.right "$test_workdir"/*.right
+  sed -i 's@^TEST_FILE="/tmp/${TEST_NAME}\.check"$@TEST_FILE="${BASH_TSTOUT}"@' \
+    "$test_workdir"/run-dbg-support*
   refuse_unsafe_dir "$test_workdir"
   workdir_real="$(real_path "$workdir")"
   expected_dir_real="$(real_path "$expected_dir")"
