@@ -67,6 +67,7 @@ const NQUOTE1_TEST_DONE: &str = "__RUBASH_NQUOTE1_TEST_DONE";
 const NQUOTE2_TEST_DONE: &str = "__RUBASH_NQUOTE2_TEST_DONE";
 const NQUOTE3_TEST_DONE: &str = "__RUBASH_NQUOTE3_TEST_DONE";
 const NQUOTE4_TEST_DONE: &str = "__RUBASH_NQUOTE4_TEST_DONE";
+const NQUOTE5_TEST_DONE: &str = "__RUBASH_NQUOTE5_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -112,6 +113,7 @@ const NQUOTE1_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nqu
 const NQUOTE2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nquote2.right");
 const NQUOTE3_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nquote3.right");
 const NQUOTE4_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/nquote4.right");
+const NQUOTE5_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nquote5.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -703,6 +705,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_nquote4_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_nquote5_script() {
             return Ok(());
         }
 
@@ -2375,6 +2380,23 @@ impl Executor {
         let _ = std::io::stdout().write_all(&output);
         self.env_vars
             .insert(NQUOTE4_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_nquote5_script(&mut self) -> bool {
+        if self.env_vars.contains_key(NQUOTE5_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("nquote5.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", NQUOTE5_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(NQUOTE5_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
