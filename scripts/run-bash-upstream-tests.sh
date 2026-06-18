@@ -254,6 +254,8 @@ EOF
   unexpected_log="$OUT_DIR/logs/$runner.unexpected.log"
   grep -v -x \
     -e 'warning: some of these tests may fail if process substitution has not' \
+    -e 'warning: some of these tests will fail if you do not have UTF-8' \
+    -e 'warning: locales installed on your system' \
     -e 'warning: been compiled into the shell or if the OS does not provide' \
     -e 'warning: /dev/fd.' \
     -e 'warning: if you have exported functions defined in your environment,' \
