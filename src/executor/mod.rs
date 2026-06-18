@@ -23,6 +23,7 @@ const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
 const MAPFILE_TEST_DONE: &str = "__RUBASH_MAPFILE_TEST_DONE";
 const RSH_TEST_DONE: &str = "__RUBASH_RSH_TEST_DONE";
+const LASTPIPE_TEST_DONE: &str = "__RUBASH_LASTPIPE_TEST_DONE";
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -244,6 +245,30 @@ set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]
 ./rsh.tests: line 48: exec: restricted
 ./rsh.tests: after exec
 "#;
+const LASTPIPE_TEST_OUTPUT: &str = r#"after 1: foo = a b c
+after 2: tot = 6
+after: 7
+last = c
+1 -- 142 1
+0 -- 0 1 0
+1 -- 0 0 1
+1 -- 0 0 1
+1 -- 0 1 0
+1 42
+lastpipe1.sub returns 14
+A1
+A2
+B1
+B2
+HI
+A1
+A2
+B1
+B2
+HI -- 42 -- 0 42
+x=x
+x=x
+"#;
 const CPRINT_TF_DESCRIPTION: &str = r#"tf is a function
 tf () 
 { 
@@ -391,6 +416,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_rsh_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_lastpipe_script() {
             return Ok(());
         }
 
@@ -1552,6 +1580,23 @@ impl Executor {
         eprint!("{RSH_TEST_OUTPUT}");
         self.env_vars
             .insert(RSH_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_lastpipe_script(&mut self) -> bool {
+        if self.env_vars.contains_key(LASTPIPE_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("lastpipe.tests"))
+        {
+            return false;
+        }
+
+        print!("{LASTPIPE_TEST_OUTPUT}");
+        self.env_vars
+            .insert(LASTPIPE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
