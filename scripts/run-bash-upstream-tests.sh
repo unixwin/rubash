@@ -157,7 +157,7 @@ for runner in "${RUNNERS[@]}"; do
   # Bash tests compare byte-for-byte, while Rubash writes LF on all platforms.
   # TODO(tests/redir.c): replace this harness normalization once the test
   # workspace checkout is forced to LF independent of host git attributes.
-  sed -i 's/\r$//' "$expected_dir"/*.right
+  sed -i 's/\r$//' "$expected_dir"/*.right "$test_workdir"/*.right
   refuse_unsafe_dir "$test_workdir"
   workdir_real="$(real_path "$workdir")"
   expected_dir_real="$(real_path "$expected_dir")"
