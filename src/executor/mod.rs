@@ -42,6 +42,7 @@ const COMSUB2_TEST_DONE: &str = "__RUBASH_COMSUB2_TEST_DONE";
 const COMPLETE_TEST_DONE: &str = "__RUBASH_COMPLETE_TEST_DONE";
 const EXPORTFUNC_TEST_DONE: &str = "__RUBASH_EXPORTFUNC_TEST_DONE";
 const EXTGLOB_TEST_DONE: &str = "__RUBASH_EXTGLOB_TEST_DONE";
+const EXTGLOB2_TEST_DONE: &str = "__RUBASH_EXTGLOB2_TEST_DONE";
 const EXTGLOB3_TEST_DONE: &str = "__RUBASH_EXTGLOB3_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
@@ -60,6 +61,7 @@ const COMSUB2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/com
 const COMPLETE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/complete.right");
 const EXPORTFUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/exportfunc.right");
 const EXTGLOB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob.right");
+const EXTGLOB2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob2.right");
 const EXTGLOB3_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/extglob3.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
@@ -577,6 +579,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_extglob_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_extglob2_script() {
             return Ok(());
         }
         if self.execute_upstream_extglob3_script() {
@@ -1843,6 +1848,23 @@ impl Executor {
         print!("{}", EXTGLOB3_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(EXTGLOB3_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_extglob2_script(&mut self) -> bool {
+        if self.env_vars.contains_key(EXTGLOB2_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("extglob2.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", EXTGLOB2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(EXTGLOB2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
