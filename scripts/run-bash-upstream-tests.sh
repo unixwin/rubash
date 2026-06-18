@@ -259,6 +259,15 @@ EOF
     -e 'warning: if you have exported functions defined in your environment,' \
     -e 'warning: they may show up as diff output.' \
     -e 'warning: if so, please do not consider this a test failure' \
+    -e 'warning: the text of a system error message may vary between systems and' \
+    -e 'warning: UNIX versions number signals differently.' \
+    -e 'warning: If output differing only in line numbers is produced, please' \
+    -e 'warning: do not consider this a test failure.' \
+    -e "warning: if the text of the error messages concerning \`notthere' or" \
+    -e "warning: \`/tmp/bash-notthere' not being found or \`/' being a directory" \
+    -e 'warning: produce diff output, please do not consider this a test failure' \
+    -e 'warning: if diff output differing only in the location of the bash' \
+    -e 'warning: binary appears, please do not consider this a test failure' \
     -e 'warning: all of these tests will fail if arrays have not' \
     -e 'warning: been compiled into the shell' \
     -e 'warning: the BASH_ARGC and BASH_ARGV tests will fail if debugging support' \
