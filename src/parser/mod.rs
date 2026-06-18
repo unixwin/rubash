@@ -59,6 +59,8 @@ pub struct CommandNode {
     pub redirect_err_append: Option<Redirect>,
     /// Here-document stdin body
     pub heredoc: Option<String>,
+    /// Here-string stdin word
+    pub here_string: Option<String>,
     /// Pipe to next command
     pub pipe: Option<usize>,
     /// Background execution (&)
@@ -92,6 +94,7 @@ impl CommandNode {
             redirect_err: None,
             redirect_err_append: None,
             heredoc: None,
+            here_string: None,
             pipe: None,
             background: false,
             and_or: None,
@@ -287,6 +290,21 @@ pub fn parse(tokens: &[Token]) -> Ast {
             TokenKind::HereDoc => {
                 note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
+                    i += 1;
+                }
+            }
+            TokenKind::HereString => {
+                note_command_line(&mut current_cmd, token);
+                if i + 1 < tokens.len()
+                    && matches!(
+                        tokens[i + 1].kind,
+                        TokenKind::Word
+                            | TokenKind::Variable
+                            | TokenKind::CommandSubst
+                            | TokenKind::Assignment
+                    )
+                {
+                    current_cmd.here_string = Some(tokens[i + 1].value.clone());
                     i += 1;
                 }
             }
@@ -648,6 +666,7 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()
         && cmd.heredoc.is_none()
+        && cmd.here_string.is_none()
         && cmd.redirect_in.is_none()
         && cmd.redirect_out.is_none()
         && cmd.append.is_none()

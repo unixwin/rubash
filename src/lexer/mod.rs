@@ -16,6 +16,7 @@ pub enum TokenKind {
     RedirectErr,
     RedirectErrAppend,
     HereDoc,
+    HereString,
     Background,
     And,
     Or,
@@ -383,7 +384,12 @@ impl<'a> Lexer<'a> {
             '<' => match self.peek() {
                 Some('<') => {
                     self.advance();
-                    Some(Token::new(TokenKind::HereDoc, "<<", start))
+                    if self.peek() == Some('<') {
+                        self.advance();
+                        Some(Token::new(TokenKind::HereString, "<<<", start))
+                    } else {
+                        Some(Token::new(TokenKind::HereDoc, "<<", start))
+                    }
                 }
                 Some('>') => {
                     self.advance();
