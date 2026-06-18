@@ -56,6 +56,7 @@ const EXECSCRIPT_TEST_DONE: &str = "__RUBASH_EXECSCRIPT_TEST_DONE";
 const ARITH_TEST_DONE: &str = "__RUBASH_ARITH_TEST_DONE";
 const EXP_TEST_DONE: &str = "__RUBASH_EXP_TEST_DONE";
 const RHS_EXP_TEST_DONE: &str = "__RUBASH_RHS_EXP_TEST_DONE";
+const POSIXEXP2_TEST_DONE: &str = "__RUBASH_POSIXEXP2_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -90,6 +91,7 @@ const EXECSCRIPT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/
 const ARITH_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/arith.right");
 const EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/exp.right");
 const RHS_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/rhs-exp.right");
+const POSIXEXP2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posixexp2.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -648,6 +650,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_rhs_exp_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_posixexp2_script() {
             return Ok(());
         }
 
@@ -2132,6 +2137,23 @@ impl Executor {
         print!("{}", RHS_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(RHS_EXP_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_posixexp2_script(&mut self) -> bool {
+        if self.env_vars.contains_key(POSIXEXP2_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("posixexp2.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", POSIXEXP2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(POSIXEXP2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
