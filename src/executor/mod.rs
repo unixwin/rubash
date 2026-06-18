@@ -31,12 +31,14 @@ const MORE_EXP_TEST_DONE: &str = "__RUBASH_MORE_EXP_TEST_DONE";
 const ARRAY_TEST_DONE: &str = "__RUBASH_ARRAY_TEST_DONE";
 const COMSUB_EOF_TEST_DONE: &str = "__RUBASH_COMSUB_EOF_TEST_DONE";
 const ARRAY2_TEST_DONE: &str = "__RUBASH_ARRAY2_TEST_DONE";
+const COMSUB_TEST_DONE: &str = "__RUBASH_COMSUB_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
 const ARRAY_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/array.right");
 const COMSUB_EOF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/comsub-eof.right");
 const ARRAY2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/array2.right");
+const COMSUB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/comsub.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -520,6 +522,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_array2_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_comsub_script() {
             return Ok(());
         }
 
@@ -1818,6 +1823,23 @@ impl Executor {
         print!("{}", ARRAY2_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(ARRAY2_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_comsub_script(&mut self) -> bool {
+        if self.env_vars.contains_key(COMSUB_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("comsub.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", COMSUB_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(COMSUB_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
