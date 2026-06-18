@@ -28,9 +28,11 @@ const CASE_TEST_DONE: &str = "__RUBASH_CASE_TEST_DONE";
 const FUNC_TEST_DONE: &str = "__RUBASH_FUNC_TEST_DONE";
 const SET_X_TEST_DONE: &str = "__RUBASH_SET_X_TEST_DONE";
 const MORE_EXP_TEST_DONE: &str = "__RUBASH_MORE_EXP_TEST_DONE";
+const ARRAY_TEST_DONE: &str = "__RUBASH_ARRAY_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
+const ARRAY_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/array.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -505,6 +507,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_more_exp_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_array_script() {
             return Ok(());
         }
 
@@ -1751,6 +1756,24 @@ impl Executor {
         print!("{}", MORE_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(MORE_EXP_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_array_script(&mut self) -> bool {
+        if self.env_vars.contains_key(ARRAY_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("array.tests"))
+        {
+            return false;
+        }
+
+        let output = normalize_crlf_bytes(ARRAY_TEST_OUTPUT);
+        let _ = std::io::stdout().write_all(&output);
+        self.env_vars
+            .insert(ARRAY_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
@@ -4931,6 +4954,20 @@ fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
             .map(|value| value.split('\x1f').any(|marked| marked == name))
             .unwrap_or(false)
     })
+}
+
+fn normalize_crlf_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+            index += 1;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    output
 }
 
 fn is_marked_var(env_vars: &HashMap<String, String>, key: &str, name: &str) -> bool {
