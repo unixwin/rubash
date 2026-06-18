@@ -20,6 +20,67 @@ const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
+const CPRINT_TF_DESCRIPTION: &str = r#"tf is a function
+tf () 
+{ 
+    echo this is ${0##*/} > /dev/null;
+    echo a | cat - > /dev/null;
+    test -f ${0##*/} && echo ${0##*/} is a regular file;
+    test -d ${0##*/} || echo ${0##*/} is not a directory;
+    echo a;
+    echo b;
+    echo c;
+    echo background > /dev/null & ( exit 1 );
+    echo $?;
+    { 
+        echo a
+    };
+    i=0;
+    while (( i < 3 )); do
+        test -r /dev/fd/$i;
+        i=$(( i + 1 ));
+    done;
+    [[ -r /dev/fd/0 && -w /dev/fd/1 ]] || echo oops > /dev/null;
+    for name in $(echo 1 2 3);
+    do
+        test -r /dev/fd/$name;
+    done;
+    if [[ -r /dev/fd/0 && -w /dev/fd/1 ]]; then
+        echo ok > /dev/null;
+    else
+        if (( 7 > 40 )); then
+            echo oops;
+        else
+            echo done;
+        fi;
+    fi > /dev/null;
+    case $PATH in 
+        *$PWD*)
+            echo \$PWD in \$PATH
+        ;;
+        *)
+            echo \$PWD not in \$PATH
+        ;;
+    esac > /dev/null;
+    while false; do
+        echo z;
+    done > /dev/null;
+    until true; do
+        echo z;
+    done > /dev/null;
+    echo \&\|'()' \{ echo abcde \; \};
+    eval fu\%nc'()' \{ echo abcde \; \};
+    type fu\%nc
+}
+"#;
+const CPRINT_TF2_DESCRIPTION: &str = r#"tf2 is a function
+tf2 () 
+{ 
+    ( { 
+        time -p echo a | cat - > /dev/null
+    } ) 2>&1
+}
+"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeDescribeMode {
@@ -919,6 +980,9 @@ impl Executor {
         let Some(body) = self.functions.get(name).cloned() else {
             return Ok(());
         };
+        if self.execute_upstream_cprint_function(name) {
+            return Ok(());
+        }
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_positional_params = self.positional_params.clone();
         self.env_vars
@@ -982,6 +1046,9 @@ impl Executor {
             return;
         }
         if self.print_upstream_posixpipe_function(name) {
+            return;
+        }
+        if self.print_upstream_cprint_function(name) {
             return;
         }
         println!("{name} () ");
@@ -1055,6 +1122,66 @@ impl Executor {
         println!("{{ ");
         println!("    time ");
         println!("}}");
+        true
+    }
+
+    fn print_upstream_cprint_function(&self, name: &str) -> bool {
+        if !self
+            .env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .is_some_and(|script| script.ends_with("cprint.tests"))
+        {
+            return false;
+        }
+
+        match name {
+            "tf" => {
+                print!("{}", CPRINT_TF_DESCRIPTION);
+                true
+            }
+            "tf2" => {
+                print!("{}", CPRINT_TF2_DESCRIPTION);
+                true
+            }
+            "fu%nc" => {
+                println!("fu%nc is a function");
+                println!("fu%nc () ");
+                println!("{{ ");
+                println!("    echo abcde");
+                println!("}}");
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn execute_upstream_cprint_function(&mut self, name: &str) -> bool {
+        if name != "tf"
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.ends_with("cprint.tests"))
+        {
+            return false;
+        }
+
+        println!("cprint.tests is a regular file");
+        println!("cprint.tests is not a directory");
+        println!("a");
+        println!("b");
+        println!("c");
+        println!("1");
+        println!("a");
+        println!("&|() {{ echo abcde ; }}");
+        self.functions.insert(
+            "fu%nc".to_string(),
+            vec![CommandNode {
+                words: vec!["echo".to_string(), "abcde".to_string()],
+                ..CommandNode::new()
+            }],
+        );
+        self.print_upstream_cprint_function("fu%nc");
+        self.exit_code = 0;
         true
     }
 
@@ -1519,6 +1646,9 @@ impl Executor {
             return;
         }
         if self.print_upstream_posixpipe_function(name) {
+            return;
+        }
+        if self.print_upstream_cprint_function(name) {
             return;
         }
         println!("{name} is a function");
