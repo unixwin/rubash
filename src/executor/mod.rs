@@ -2185,7 +2185,7 @@ impl Executor {
         }
 
         if let Some(expanded) = self.expand_backtick_substitution(word) {
-            return expanded;
+            return command_substitution_word_split(&expanded);
         }
 
         if let Some(value) = self.expand_dirstack_tilde(word) {
@@ -2602,7 +2602,7 @@ impl Executor {
         // parser and run a subshell. Upstream strip.tests only uses simple
         // `echo` command lists and checks trailing-newline stripping.
         let source = word.strip_prefix('`')?.strip_suffix('`')?;
-        Some(command_substitution_word_split(&run_echo_command_substitution(source)))
+        Some(run_echo_command_substitution(source))
     }
 
     fn expand_dirstack_tilde(&self, word: &str) -> Option<String> {
@@ -4091,5 +4091,12 @@ mod unit_tests {
         let executor = Executor::new();
 
         assert_eq!(executor.expand_word("`echo 'foo\nbar'`"), "foo bar");
+    }
+
+    #[test]
+    fn assignment_backtick_command_substitution_preserves_spaces() {
+        let executor = Executor::new();
+
+        assert_eq!(executor.expand_assignment_value("`echo -n \" ab \"`"), " ab ");
     }
 }
