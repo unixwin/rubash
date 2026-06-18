@@ -129,10 +129,7 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         position += line.len() + 1;
         line_number += 1;
 
-        if has_unclosed_quotes(&logical_line)
-            && (is_multiline_alias_definition(&logical_line)
-                || is_multiline_command_string(&logical_line))
-        {
+        if has_unclosed_quotes(&logical_line) {
             continue;
         }
 
@@ -199,44 +196,63 @@ fn has_unclosed_quotes(input: &str) -> bool {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    let mut comment_start = true;
+    let mut in_comment = false;
 
     for ch in input.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                comment_start = true;
+            }
+            continue;
+        }
+
         if escaped {
             escaped = false;
+            comment_start = false;
+            continue;
+        }
+
+        if ch == '\n' && !single && !double {
+            comment_start = true;
+            continue;
+        }
+
+        if ch == '#' && !single && !double && comment_start {
+            in_comment = true;
+            continue;
+        }
+
+        if ch.is_whitespace() && !single && !double {
+            comment_start = true;
             continue;
         }
 
         if ch == '\\' && !single {
             escaped = true;
+            comment_start = false;
             continue;
         }
 
         match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            _ => {}
+            '\'' if !double => {
+                single = !single;
+                comment_start = false;
+            }
+            '"' if !single => {
+                double = !double;
+                comment_start = false;
+            }
+            _ => {
+                if !single && !double {
+                    comment_start = false;
+                }
+            }
         }
     }
 
     single || double
-}
-
-fn is_multiline_alias_definition(input: &str) -> bool {
-    // TODO(parse.y/alias.def): This is a tactical input-collection rule for
-    // alias definitions whose quoted value spans physical lines. Bash can also
-    // rely on alias expansion to complete quotes in later input, so ordinary
-    // unmatched quotes must still be passed to the parser instead of swallowing
-    // the rest of the script.
-    let trimmed = input.trim_start();
-    trimmed.starts_with("alias ") && trimmed.contains('=')
-}
-
-fn is_multiline_command_string(input: &str) -> bool {
-    // TODO(shell.c/parse.y): This preserves quoted multi-line command strings
-    // passed to `bash -c`/`${THIS_SH} -c` in upstream tests. Bash's reader does
-    // this generally for all quoted parser input.
-    let trimmed = input.trim_start();
-    trimmed.contains(" -c '") || trimmed.contains(" -c \"") || trimmed.starts_with("-c '")
 }
 
 pub struct Lexer<'a> {
