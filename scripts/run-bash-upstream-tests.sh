@@ -288,6 +288,7 @@ EOF
     -e 'warning: has not been compiled into the shell' \
     -e 'warning: some of these tests may fail if job control has not been compiled' \
     -e 'warning: into the shell' \
+    -e 'warning: all of these tests will fail if history has not been compiled' \
     -e 'warning: there may be a message regarding a cat process dying due to a' \
     -e 'warning: SIGHUP.  Please disregard.' \
     -e 'warning: all of these tests will fail if the conditional command has not' \
