@@ -269,6 +269,9 @@ EOF
     -e 'warning: white space to be an error.' \
     -e "warning: if the text of the error messages concerning \`notthere' or" \
     -e "warning: \`/tmp/bash-notthere' not being found or \`/' being a directory" \
+    -e "warning: if the text of an error message concerning \`redir1.*' not being" \
+    -e 'warning: found or messages concerning bad file descriptors produce diff' \
+    -e 'warning: output, please do not consider it a test failure' \
     -e 'warning: produce diff output, please do not consider this a test failure' \
     -e 'warning: if diff output differing only in the location of the bash' \
     -e 'warning: binary appears, please do not consider this a test failure' \
