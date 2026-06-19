@@ -266,6 +266,7 @@ EOF
     -e 'warning: if so, please do not consider this a test failure' \
     -e 'warning: the text of a system error message may vary between systems and' \
     -e 'warning: UNIX versions number signals differently.' \
+    -e 'warning: UNIX versions number signals and schedule processes differently.' \
     -e 'warning: If output differing only in line numbers is produced, please' \
     -e 'warning: do not consider this a test failure.' \
     -e 'warning: please do not consider output differing only in the amount of' \
