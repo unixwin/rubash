@@ -265,6 +265,8 @@ EOF
     -e 'warning: UNIX versions number signals differently.' \
     -e 'warning: If output differing only in line numbers is produced, please' \
     -e 'warning: do not consider this a test failure.' \
+    -e 'warning: please do not consider output differing only in the amount of' \
+    -e 'warning: white space to be an error.' \
     -e "warning: if the text of the error messages concerning \`notthere' or" \
     -e "warning: \`/tmp/bash-notthere' not being found or \`/' being a directory" \
     -e 'warning: produce diff output, please do not consider this a test failure' \
