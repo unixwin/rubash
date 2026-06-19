@@ -277,6 +277,7 @@ EOF
     -e 'warning: binary appears, please do not consider this a test failure' \
     -e 'warning: all of these tests will fail if arrays have not' \
     -e 'warning: several of these tests will fail if arrays have not' \
+    -e 'warning: some of these tests will fail if arrays have not' \
     -e 'warning: been compiled into the shell' \
     -e 'warning: been compiled into the shell.' \
     -e 'warning: the BASH_ARGC and BASH_ARGV tests will fail if debugging support' \
