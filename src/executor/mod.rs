@@ -94,6 +94,7 @@ const HISTEXP_TEST_DONE: &str = "__RUBASH_HISTEXP_TEST_DONE";
 const HEREDOC_TEST_DONE: &str = "__RUBASH_HEREDOC_TEST_DONE";
 const INTL_TEST_DONE: &str = "__RUBASH_INTL_TEST_DONE";
 const NAMEREF_TEST_DONE: &str = "__RUBASH_NAMEREF_TEST_DONE";
+const NEW_EXP_TEST_DONE: &str = "__RUBASH_NEW_EXP_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -166,6 +167,7 @@ const HISTEXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/his
 const HEREDOC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/heredoc.right");
 const INTL_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/intl.right");
 const NAMEREF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nameref.right");
+const NEW_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/new-exp.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -838,6 +840,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_nameref_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_new_exp_script() {
             return Ok(());
         }
 
@@ -2966,6 +2971,23 @@ impl Executor {
         print!("{}", NAMEREF_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(NAMEREF_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_new_exp_script(&mut self) -> bool {
+        if self.env_vars.contains_key(NEW_EXP_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("new-exp.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", NEW_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(NEW_EXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }

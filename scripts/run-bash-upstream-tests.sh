@@ -255,6 +255,10 @@ EOF
   grep -v -x \
     -e 'warning: some of these tests may fail if process substitution has not' \
     -e 'warning: all of these tests will fail if process substitution has not' \
+    -e 'warning: two of these tests will fail if your OS does not support' \
+    -e 'warning: named pipes or the /dev/fd filesystem.  If the tests of the' \
+    -e 'warning: process substitution mechanism fail, please do not consider' \
+    -e 'warning: this a test failure' \
     -e 'warning: some of these tests will fail if you do not have UTF-8' \
     -e 'warning: locales installed on your system' \
     -e 'warning: been compiled into the shell or if the OS does not provide' \
@@ -263,6 +267,8 @@ EOF
     -e 'warning: /dev/fd.' \
     -e 'warning: if you have exported functions defined in your environment,' \
     -e 'warning: they may show up as diff output.' \
+    -e 'warning: if you have exported variables beginning with the string _Q,' \
+    -e 'warning: diff output may be generated.  If so, please do not consider' \
     -e 'warning: if so, please do not consider this a test failure' \
     -e 'warning: the text of a system error message may vary between systems and' \
     -e 'warning: UNIX versions number signals differently.' \
