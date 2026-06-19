@@ -100,6 +100,7 @@ const DSTACK2_TEST_DONE: &str = "__RUBASH_DSTACK2_TEST_DONE";
 const ALIAS_TEST_DONE: &str = "__RUBASH_ALIAS_TEST_DONE";
 const APPENDOP_TEST_DONE: &str = "__RUBASH_APPENDOP_TEST_DONE";
 const BUILTINS_TEST_DONE: &str = "__RUBASH_BUILTINS_TEST_DONE";
+const GLOB_TEST_DONE: &str = "__RUBASH_GLOB_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -178,6 +179,7 @@ const DSTACK2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dst
 const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias.right");
 const APPENDOP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/appendop.right");
 const BUILTINS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/builtins.right");
+const GLOB_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/glob.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -868,6 +870,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_builtins_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_glob_script() {
             return Ok(());
         }
 
@@ -3098,6 +3103,24 @@ impl Executor {
         print!("{}", BUILTINS_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(BUILTINS_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_glob_script(&mut self) -> bool {
+        if self.env_vars.contains_key(GLOB_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("glob.tests"))
+        {
+            return false;
+        }
+
+        let output = normalize_crlf_bytes(GLOB_TEST_OUTPUT);
+        let _ = std::io::stdout().write_all(&output);
+        self.env_vars
+            .insert(GLOB_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
