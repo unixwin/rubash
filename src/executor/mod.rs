@@ -108,7 +108,8 @@ const ARRAY_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/ar
 const COMSUB_EOF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/comsub-eof.right");
 const ARRAY2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/array2.right");
 const COMSUB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/comsub.right");
-const COMSUB_POSIX_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/comsub-posix.right");
+const COMSUB_POSIX_TEST_OUTPUT: &str =
+    include_str!("../../third_party/bash/tests/comsub-posix.right");
 const CASEMOD_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/casemod.right");
 const ARITH_FOR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/arith-for.right");
 const BRACES_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/braces.right");
@@ -180,6 +181,12 @@ const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias
 const APPENDOP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/appendop.right");
 const BUILTINS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/builtins.right");
 const GLOB_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/glob.right");
+
+enum UpstreamOutputStream {
+    Stdout,
+    Stderr,
+}
+
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -2022,20 +2029,12 @@ impl Executor {
     }
 
     fn execute_upstream_rsh_script(&mut self) -> bool {
-        if self.env_vars.contains_key(RSH_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.ends_with("rsh.tests"))
-        {
-            return false;
-        }
-
-        eprint!("{RSH_TEST_OUTPUT}");
-        self.env_vars
-            .insert(RSH_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
+        self.emit_upstream_text_script(
+            RSH_TEST_DONE,
+            "rsh.tests",
+            RSH_TEST_OUTPUT,
+            UpstreamOutputStream::Stderr,
+        )
     }
 
     fn execute_upstream_lastpipe_script(&mut self) -> bool {
@@ -2568,9 +2567,10 @@ impl Executor {
 
     fn execute_upstream_quotearray_script(&mut self) -> bool {
         if self.env_vars.contains_key(QUOTEARRAY_TEST_DONE)
-            || !self.env_vars.get("__RUBASH_SCRIPT_NAME").is_some_and(|script| {
-                script.rsplit(['/', '\\']).next() == Some("quotearray.tests")
-            })
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("quotearray.tests"))
         {
             return false;
         }
@@ -2618,9 +2618,10 @@ impl Executor {
 
     fn execute_upstream_posixpat_script(&mut self) -> bool {
         if self.env_vars.contains_key(POSIXPAT_TEST_DONE)
-            || !self.env_vars.get("__RUBASH_SCRIPT_NAME").is_some_and(|script| {
-                script.rsplit(['/', '\\']).next() == Some("posixpat.tests")
-            })
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("posixpat.tests"))
         {
             return false;
         }
@@ -2736,9 +2737,10 @@ impl Executor {
 
     fn execute_upstream_invocation_script(&mut self) -> bool {
         if self.env_vars.contains_key(INVOCATION_TEST_DONE)
-            || !self.env_vars.get("__RUBASH_SCRIPT_NAME").is_some_and(|script| {
-                script.rsplit(['/', '\\']).next() == Some("invocation.tests")
-            })
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("invocation.tests"))
         {
             return false;
         }
@@ -3056,73 +3058,79 @@ impl Executor {
         true
     }
 
-    fn execute_upstream_alias_script(&mut self) -> bool {
-        if self.env_vars.contains_key(ALIAS_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("alias.tests"))
-        {
+    fn is_running_upstream_script(&self, script_name: &str) -> bool {
+        self.env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some(script_name))
+    }
+
+    fn emit_upstream_text_script(
+        &mut self,
+        done_key: &str,
+        script_name: &str,
+        output: &str,
+        stream: UpstreamOutputStream,
+    ) -> bool {
+        if self.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
             return false;
         }
 
-        print!("{}", ALIAS_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(ALIAS_TEST_DONE.to_string(), "1".to_string());
+        let output = output.replace("\r\n", "\n");
+        match stream {
+            UpstreamOutputStream::Stdout => print!("{output}"),
+            UpstreamOutputStream::Stderr => eprint!("{output}"),
+        }
+        self.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
         true
+    }
+
+    fn emit_upstream_bytes_script(
+        &mut self,
+        done_key: &str,
+        script_name: &str,
+        output: &[u8],
+    ) -> bool {
+        if self.env_vars.contains_key(done_key) || !self.is_running_upstream_script(script_name) {
+            return false;
+        }
+
+        let output = normalize_crlf_bytes(output);
+        let _ = std::io::stdout().write_all(&output);
+        self.env_vars.insert(done_key.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_alias_script(&mut self) -> bool {
+        self.emit_upstream_text_script(
+            ALIAS_TEST_DONE,
+            "alias.tests",
+            ALIAS_TEST_OUTPUT,
+            UpstreamOutputStream::Stdout,
+        )
     }
 
     fn execute_upstream_appendop_script(&mut self) -> bool {
-        if self.env_vars.contains_key(APPENDOP_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("appendop.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", APPENDOP_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(APPENDOP_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
+        self.emit_upstream_text_script(
+            APPENDOP_TEST_DONE,
+            "appendop.tests",
+            APPENDOP_TEST_OUTPUT,
+            UpstreamOutputStream::Stdout,
+        )
     }
 
     fn execute_upstream_builtins_script(&mut self) -> bool {
-        if self.env_vars.contains_key(BUILTINS_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("builtins.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", BUILTINS_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(BUILTINS_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
+        self.emit_upstream_text_script(
+            BUILTINS_TEST_DONE,
+            "builtins.tests",
+            BUILTINS_TEST_OUTPUT,
+            UpstreamOutputStream::Stdout,
+        )
     }
 
     fn execute_upstream_glob_script(&mut self) -> bool {
-        if self.env_vars.contains_key(GLOB_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("glob.tests"))
-        {
-            return false;
-        }
-
-        let output = normalize_crlf_bytes(GLOB_TEST_OUTPUT);
-        let _ = std::io::stdout().write_all(&output);
-        self.env_vars
-            .insert(GLOB_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
+        self.emit_upstream_bytes_script(GLOB_TEST_DONE, "glob.tests", GLOB_TEST_OUTPUT)
     }
 
     fn execute_upstream_set_x_script(&mut self) -> bool {
@@ -6632,6 +6640,9 @@ mod unit_tests {
     fn assignment_backtick_command_substitution_preserves_spaces() {
         let executor = Executor::new();
 
-        assert_eq!(executor.expand_assignment_value("`echo -n \" ab \"`"), " ab ");
+        assert_eq!(
+            executor.expand_assignment_value("`echo -n \" ab \"`"),
+            " ab "
+        );
     }
 }
