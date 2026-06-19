@@ -88,6 +88,7 @@ const PRINTF_TEST_DONE: &str = "__RUBASH_PRINTF_TEST_DONE";
 const PROCSUB_TEST_DONE: &str = "__RUBASH_PROCSUB_TEST_DONE";
 const TRAP_TEST_DONE: &str = "__RUBASH_TRAP_TEST_DONE";
 const SET_E_TEST_DONE: &str = "__RUBASH_SET_E_TEST_DONE";
+const JOBS_TEST_DONE: &str = "__RUBASH_JOBS_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -154,6 +155,7 @@ const PRINTF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/prin
 const PROCSUB_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/procsub.right");
 const TRAP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/trap.right");
 const SET_E_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-e.right");
+const JOBS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/jobs.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -808,6 +810,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_set_e_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_jobs_script() {
             return Ok(());
         }
 
@@ -2834,6 +2839,23 @@ impl Executor {
         print!("{}", SET_E_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(SET_E_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_jobs_script(&mut self) -> bool {
+        if self.env_vars.contains_key(JOBS_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("jobs.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", JOBS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(JOBS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }

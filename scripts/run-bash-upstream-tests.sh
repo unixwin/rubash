@@ -286,6 +286,10 @@ EOF
     -e 'warning: been compiled into the shell.' \
     -e 'warning: the BASH_ARGC and BASH_ARGV tests will fail if debugging support' \
     -e 'warning: has not been compiled into the shell' \
+    -e 'warning: some of these tests may fail if job control has not been compiled' \
+    -e 'warning: into the shell' \
+    -e 'warning: there may be a message regarding a cat process dying due to a' \
+    -e 'warning: SIGHUP.  Please disregard.' \
     -e 'warning: all of these tests will fail if the conditional command has not' \
     -e 'warning: some of these tests will fail if extended pattern matching has not' \
     -e 'warning: the text of system error messages may vary between systems and' \
