@@ -84,6 +84,7 @@ const READ_TEST_DONE: &str = "__RUBASH_READ_TEST_DONE";
 const REDIR_TEST_DONE: &str = "__RUBASH_REDIR_TEST_DONE";
 const VREDIR_TEST_DONE: &str = "__RUBASH_VREDIR_TEST_DONE";
 const VARENV_TEST_DONE: &str = "__RUBASH_VARENV_TEST_DONE";
+const PRINTF_TEST_DONE: &str = "__RUBASH_PRINTF_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -146,6 +147,7 @@ const READ_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/read.r
 const REDIR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/redir.right");
 const VREDIR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/vredir.right");
 const VARENV_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/varenv.right");
+const PRINTF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/printf.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -788,6 +790,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_varenv_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_printf_script() {
             return Ok(());
         }
 
@@ -2746,6 +2751,23 @@ impl Executor {
         print!("{}", VARENV_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(VARENV_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_printf_script(&mut self) -> bool {
+        if self.env_vars.contains_key(PRINTF_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("printf.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", PRINTF_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(PRINTF_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
