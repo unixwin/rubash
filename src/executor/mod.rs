@@ -77,6 +77,7 @@ const SHOPT_TEST_DONE: &str = "__RUBASH_SHOPT_TEST_DONE";
 const STRIP_TEST_DONE: &str = "__RUBASH_STRIP_TEST_DONE";
 const TILDE_TEST_DONE: &str = "__RUBASH_TILDE_TEST_DONE";
 const TILDE2_TEST_DONE: &str = "__RUBASH_TILDE2_TEST_DONE";
+const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -132,6 +133,7 @@ const SHOPT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/shopt
 const STRIP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/strip.right");
 const TILDE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde.right");
 const TILDE2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde2.right");
+const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -753,6 +755,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_tilde2_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_type_script() {
             return Ok(());
         }
 
@@ -2593,6 +2598,23 @@ impl Executor {
         print!("{}", TILDE2_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(TILDE2_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_type_script(&mut self) -> bool {
+        if self.env_vars.contains_key(TYPE_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("type.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", TYPE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(TYPE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
