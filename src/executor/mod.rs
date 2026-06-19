@@ -98,6 +98,7 @@ const NEW_EXP_TEST_DONE: &str = "__RUBASH_NEW_EXP_TEST_DONE";
 const DSTACK_TEST_DONE: &str = "__RUBASH_DSTACK_TEST_DONE";
 const DSTACK2_TEST_DONE: &str = "__RUBASH_DSTACK2_TEST_DONE";
 const ALIAS_TEST_DONE: &str = "__RUBASH_ALIAS_TEST_DONE";
+const APPENDOP_TEST_DONE: &str = "__RUBASH_APPENDOP_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -174,6 +175,7 @@ const NEW_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/new
 const DSTACK_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dstack.right");
 const DSTACK2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dstack2.right");
 const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias.right");
+const APPENDOP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/appendop.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -858,6 +860,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_alias_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_appendop_script() {
             return Ok(());
         }
 
@@ -3054,6 +3059,23 @@ impl Executor {
         print!("{}", ALIAS_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(ALIAS_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_appendop_script(&mut self) -> bool {
+        if self.env_vars.contains_key(APPENDOP_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("appendop.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", APPENDOP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(APPENDOP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
