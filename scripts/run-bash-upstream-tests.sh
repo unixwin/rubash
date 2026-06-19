@@ -115,7 +115,6 @@ fi
 mapfile -t RUNNERS < <(
   find "$BASH_TEST_DIR" -maxdepth 1 -type f -name 'run-*' \
     ! -name 'run-all' \
-    ! -name 'run-minimal' \
     ! -name 'run-gprof' \
     -printf '%f\n' | sort
 )
@@ -253,6 +252,37 @@ EOF
 
   unexpected_log="$OUT_DIR/logs/$runner.unexpected.log"
   grep -v -x \
+    -e 'declare -r SHELLOPTS="braceexpand:hashall:interactive-comments"' \
+    -e "Testing $shell_wrapper" \
+    -e 'version: ' \
+    -e 'HOSTTYPE = ' \
+    -e 'OSTYPE = ' \
+    -e 'MACHTYPE = ' \
+    -e 'Any output from any test, unless otherwise noted, indicates a possible anomaly' \
+    -e 'run-comsub-eof' \
+    -e 'run-comsub-posix' \
+    -e 'run-dollars' \
+    -e 'run-dynvar' \
+    -e 'run-execscript' \
+    -e 'run-func' \
+    -e 'run-getopts' \
+    -e 'run-heredoc' \
+    -e 'run-ifs-posix' \
+    -e 'run-input-test' \
+    -e 'run-invert' \
+    -e 'run-iquote' \
+    -e 'run-more-exp' \
+    -e 'run-nquote' \
+    -e 'run-posix2' \
+    -e 'run-posixpat' \
+    -e 'run-posixpipe' \
+    -e 'run-precedence' \
+    -e 'run-quote' \
+    -e 'run-read' \
+    -e 'run-rhs-exp' \
+    -e 'run-strip' \
+    -e 'run-tilde' \
+    -e 'run-type' \
     -e 'warning: some of these tests may fail if process substitution has not' \
     -e 'warning: all of these tests will fail if process substitution has not' \
     -e 'warning: two of these tests will fail if your OS does not support' \
