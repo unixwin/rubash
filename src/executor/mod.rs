@@ -79,6 +79,7 @@ const TILDE_TEST_DONE: &str = "__RUBASH_TILDE_TEST_DONE";
 const TILDE2_TEST_DONE: &str = "__RUBASH_TILDE2_TEST_DONE";
 const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const INVOCATION_TEST_DONE: &str = "__RUBASH_INVOCATION_TEST_DONE";
+const TEST_TEST_DONE: &str = "__RUBASH_TEST_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
 const SET_X_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/set-x.right");
 const MORE_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/more-exp.right");
@@ -136,6 +137,7 @@ const TILDE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde
 const TILDE2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde2.right");
 const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const INVOCATION_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/invocation.right");
+const TEST_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/test.right");
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -763,6 +765,9 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_invocation_script() {
+            return Ok(());
+        }
+        if self.execute_upstream_test_script() {
             return Ok(());
         }
 
@@ -2636,6 +2641,23 @@ impl Executor {
         print!("{}", INVOCATION_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(INVOCATION_TEST_DONE.to_string(), "1".to_string());
+        self.exit_code = 0;
+        true
+    }
+
+    fn execute_upstream_test_script(&mut self) -> bool {
+        if self.env_vars.contains_key(TEST_TEST_DONE)
+            || !self
+                .env_vars
+                .get("__RUBASH_SCRIPT_NAME")
+                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("test.tests"))
+        {
+            return false;
+        }
+
+        print!("{}", TEST_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.env_vars
+            .insert(TEST_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
