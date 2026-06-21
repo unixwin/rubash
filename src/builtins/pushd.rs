@@ -36,7 +36,7 @@ pub fn execute(
     )
 }
 
-fn execute_with_io<'a, I, W, E>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     builtin: StackBuiltin,
     args: I,
     env_vars: &mut HashMap<String, String>,

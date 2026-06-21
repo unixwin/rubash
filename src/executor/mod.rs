@@ -1784,33 +1784,18 @@ impl Executor {
                     Ok(())
                 }
                 "pushd" => {
-                    let diagnostic_prefix = self.diagnostic_prefix();
-                    self.exit_code = crate::builtins::pushd::execute(
-                        crate::builtins::pushd::StackBuiltin::Pushd,
-                        &cmd.words[1..],
-                        &mut self.env_vars,
-                        &diagnostic_prefix,
-                    )?;
+                    self.exit_code = self
+                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
                     Ok(())
                 }
                 "popd" => {
-                    let diagnostic_prefix = self.diagnostic_prefix();
-                    self.exit_code = crate::builtins::pushd::execute(
-                        crate::builtins::pushd::StackBuiltin::Popd,
-                        &cmd.words[1..],
-                        &mut self.env_vars,
-                        &diagnostic_prefix,
-                    )?;
+                    self.exit_code = self
+                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
                     Ok(())
                 }
                 "dirs" => {
-                    let diagnostic_prefix = self.diagnostic_prefix();
-                    self.exit_code = crate::builtins::pushd::execute(
-                        crate::builtins::pushd::StackBuiltin::Dirs,
-                        &cmd.words[1..],
-                        &mut self.env_vars,
-                        &diagnostic_prefix,
-                    )?;
+                    self.exit_code = self
+                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
                     Ok(())
                 }
                 "alias" => {
@@ -4929,6 +4914,49 @@ impl Executor {
         }
 
         Ok(crate::builtins::help::execute(&cmd.words[1..])?)
+    }
+
+    fn execute_stack_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::pushd::StackBuiltin,
+    ) -> Result<i32, ExecuteError> {
+        let diagnostic_prefix = self.diagnostic_prefix();
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::pushd::execute_with_io(
+                builtin,
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &diagnostic_prefix,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::pushd::execute_with_io(
+                builtin,
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &diagnostic_prefix,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::pushd::execute(
+            builtin,
+            &cmd.words[1..],
+            &mut self.env_vars,
+            &diagnostic_prefix,
+        )?)
     }
 
     fn execute_recho(&self, args: &[String]) {
