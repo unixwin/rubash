@@ -1440,6 +1440,59 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_array_parameter_substring_uses_offset_and_length() {
+        let output_path = "target/rubash-array-substring-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(zero one two three); echo ${{arr[@]:1:2}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "one two\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_array_parameter_substring_supports_negative_offset() {
+        let output_path = "target/rubash-array-substring-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(zero one two three); echo ${{arr[*]: -2}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "two three\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_sparse_array_parameter_substring_slices_values() {
+        let output_path = "target/rubash-sparse-array-substring-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset arr; mapfile -O 2 -t arr <<< $'alpha\\nbeta\\ngamma'; echo ${{arr[@]:1:1}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_positional_parameter_substring_uses_offset_and_length() {
         let output_path = "target/rubash-positional-substring-output.txt";
         let _ = fs::remove_file(output_path);
