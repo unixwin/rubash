@@ -892,6 +892,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_simple_loop(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) =
                 crate::builtins::source::execute_pipe_into_source(self, ast, index)?
             {
@@ -1323,6 +1328,91 @@ impl Executor {
         let reparsed = crate::parser::parse(&tokens);
         self.execute_ast(&reparsed)?;
         Ok(Some(index + 2))
+    }
+
+    fn execute_simple_loop(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let Some(keyword) = command.words.first().map(String::as_str) else {
+            return Ok(None);
+        };
+        let until = match keyword {
+            "while" => false,
+            "until" => true,
+            _ => return Ok(None),
+        };
+        if command.words.len() < 2 {
+            return Ok(None);
+        }
+
+        let Some(do_command) = ast.commands.get(index + 1) else {
+            return Ok(None);
+        };
+        if do_command.words.first().map(String::as_str) != Some("do") {
+            return Ok(None);
+        }
+        let Some(done_index) = find_done_command(ast, index + 2) else {
+            return Ok(None);
+        };
+
+        let mut condition = command.clone();
+        condition.words = condition.words[1..].to_vec();
+        condition.pipe = None;
+        condition.and_or = None;
+
+        let mut body_commands = Vec::new();
+        if do_command.words.len() > 1 {
+            let mut body_command = do_command.clone();
+            body_command.words = body_command.words[1..].to_vec();
+            body_commands.push(body_command);
+        }
+        body_commands.extend(ast.commands[index + 2..done_index].iter().cloned());
+        let body = Ast {
+            commands: body_commands,
+        };
+
+        let mut ran_body = false;
+        loop {
+            let condition_ast = Ast {
+                commands: vec![condition.clone()],
+            };
+            self.execute_ast(&condition_ast)?;
+            let condition_matched = self.exit_code == 0;
+            if condition_matched == until {
+                break;
+            }
+
+            ran_body = true;
+            self.loop_depth += 1;
+            let result = self.execute_ast(&body);
+            self.loop_depth -= 1;
+            match result {
+                Ok(()) => {}
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if !ran_body {
+            self.exit_code = 0;
+        }
+        Ok(Some(done_index + 1))
     }
 
     fn execute_alias_introduced_for(
