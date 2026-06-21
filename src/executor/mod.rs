@@ -4330,6 +4330,11 @@ impl Executor {
             .filter(|word| is_shell_name(word))
             .cloned()
             .collect::<Vec<_>>();
+        let scalar_names = if scalar_names.is_empty() {
+            vec!["REPLY".to_string()]
+        } else {
+            scalar_names
+        };
         if !scalar_names.is_empty() {
             let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
                 while line.ends_with('\n') || line.ends_with('\r') {
