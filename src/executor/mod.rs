@@ -4286,6 +4286,7 @@ impl Executor {
         let mut array_name = None;
         let mut delimiter = '\n';
         let mut char_limit = None;
+        let mut exact_char_limit = false;
         let mut scalar_names = Vec::new();
         let mut index = 1;
         while index < cmd.words.len() {
@@ -4305,11 +4306,20 @@ impl Executor {
                         .unwrap_or('\0');
                     index += 2;
                 }
-                "-n" | "-N" => {
+                "-n" => {
                     char_limit = cmd
                         .words
                         .get(index + 1)
                         .and_then(|word| word.parse::<usize>().ok());
+                    exact_char_limit = false;
+                    index += 2;
+                }
+                "-N" => {
+                    char_limit = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.parse::<usize>().ok());
+                    exact_char_limit = true;
                     index += 2;
                 }
                 "-r" => {
@@ -4319,8 +4329,14 @@ impl Executor {
                     delimiter = word[2..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
-                word if (word.starts_with("-n") || word.starts_with("-N")) && word.len() > 2 => {
+                word if word.starts_with("-n") && word.len() > 2 => {
                     char_limit = word[2..].parse::<usize>().ok();
+                    exact_char_limit = false;
+                    index += 1;
+                }
+                word if word.starts_with("-N") && word.len() > 2 => {
+                    char_limit = word[2..].parse::<usize>().ok();
+                    exact_char_limit = true;
                     index += 1;
                 }
                 word if word.starts_with('-') => {
@@ -4337,7 +4353,8 @@ impl Executor {
         }
 
         if let Some(name) = array_name {
-            let value = if let Some(line) = self.read_input_for_command(cmd, delimiter, char_limit)
+            let value = if let Some(line) =
+                self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
                 let values =
                     split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str));
@@ -4359,12 +4376,13 @@ impl Executor {
             scalar_names
         };
         if !scalar_names.is_empty() {
-            let status = if let Some(line) = self.read_input_for_command(cmd, delimiter, char_limit)
+            let status = if let Some(line) =
+                self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
                 self.assign_read_scalar_names(&scalar_names, &line);
                 0
             } else {
-                match read_stdin_until(delimiter, char_limit) {
+                match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => 1,
                     Ok((_, line)) => {
                         self.assign_read_scalar_names(&scalar_names, &line);
@@ -4384,9 +4402,10 @@ impl Executor {
         cmd: &CommandNode,
         delimiter: char,
         char_limit: Option<usize>,
+        exact_char_limit: bool,
     ) -> Option<String> {
         self.stdin_string_for_command(cmd)
-            .map(|line| trim_read_input(line, delimiter, char_limit))
+            .map(|line| trim_read_input(line, delimiter, char_limit, exact_char_limit))
     }
 
     fn assign_read_scalar_names(&mut self, names: &[String], line: &str) {
@@ -6486,6 +6505,7 @@ fn print_posix_time() {
 fn read_stdin_until(
     delimiter: char,
     char_limit: Option<usize>,
+    exact_char_limit: bool,
 ) -> std::io::Result<(usize, String)> {
     // TODO(builtins/read.def/input.c): Avoid buffered prefetching so callers
     // that read commands from stdin can let child scripts consume the next
@@ -6500,7 +6520,7 @@ fn read_stdin_until(
             count => {
                 read += count;
                 let ch = bytes[0] as char;
-                if ch == delimiter {
+                if !exact_char_limit && ch == delimiter {
                     break;
                 }
                 output.push(ch);
@@ -6513,15 +6533,25 @@ fn read_stdin_until(
             }
         }
     }
-    Ok((read, trim_read_input(output, delimiter, char_limit)))
+    Ok((
+        read,
+        trim_read_input(output, delimiter, char_limit, exact_char_limit),
+    ))
 }
 
-fn trim_read_input(mut input: String, delimiter: char, char_limit: Option<usize>) -> String {
-    if let Some((before, _)) = input.split_once(delimiter) {
-        input = before.trim_end_matches('\r').to_string();
-    } else if delimiter == '\n' {
-        while input.ends_with('\n') || input.ends_with('\r') {
-            input.pop();
+fn trim_read_input(
+    mut input: String,
+    delimiter: char,
+    char_limit: Option<usize>,
+    exact_char_limit: bool,
+) -> String {
+    if !exact_char_limit {
+        if let Some((before, _)) = input.split_once(delimiter) {
+            input = before.trim_end_matches('\r').to_string();
+        } else if delimiter == '\n' {
+            while input.ends_with('\n') || input.ends_with('\r') {
+                input.pop();
+            }
         }
     }
 
