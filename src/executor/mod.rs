@@ -5515,6 +5515,22 @@ impl Executor {
                         .map(|value| apply_parameter_transform(value, transform))
                         .unwrap_or_default();
                 }
+                if let Some(array_name) = var_name
+                    .strip_suffix("[@]")
+                    .or_else(|| var_name.strip_suffix("[*]"))
+                {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| {
+                            array_values(value)
+                                .into_iter()
+                                .map(|value| apply_parameter_transform(&value, transform))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -8192,10 +8208,10 @@ fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
         return BTreeMap::new();
     };
 
-    inner
-        .split_whitespace()
+    rendered_array_parts(inner)
+        .into_iter()
         .filter_map(|part| {
-            let (key, value) = part.split_once('=')?;
+            let (key, value) = part.as_str().split_once('=')?;
             let index = key
                 .trim_start_matches('[')
                 .trim_end_matches(']')
@@ -8245,13 +8261,51 @@ fn rendered_array_values(value: &str) -> Vec<String> {
         return Vec::new();
     };
 
-    inner
-        .split_whitespace()
+    rendered_array_parts(inner)
+        .into_iter()
         .filter_map(|part| {
             part.split_once('=')
                 .map(|(_, value)| decode_rendered_array_value(value))
         })
         .collect()
+}
+
+fn rendered_array_parts(inner: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = inner.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(quote_ch) => {
+                current.push(ch);
+                if ch == '\\' {
+                    if let Some(next) = chars.next() {
+                        current.push(next);
+                    }
+                } else if ch == quote_ch {
+                    quote = None;
+                }
+            }
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                current.push(ch);
+            }
+            None if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    parts.push(std::mem::take(&mut current));
+                }
+            }
+            None => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    parts
 }
 
 fn decode_rendered_array_value(value: &str) -> String {
