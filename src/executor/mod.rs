@@ -5379,9 +5379,28 @@ impl Executor {
             if let Some((var_name, pattern, replacement, global)) =
                 parse_parameter_replacement(name)
             {
+                let pattern = self.expand_embedded_parameters(pattern);
+                let replacement = self.expand_embedded_parameters(replacement);
+                if matches!(var_name, "@" | "*") {
+                    return self
+                        .positional_params
+                        .iter()
+                        .map(|value| {
+                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                }
+                if let Ok(index) = var_name.parse::<usize>() {
+                    return self
+                        .positional_params
+                        .get(index.saturating_sub(1))
+                        .map(|value| {
+                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                        })
+                        .unwrap_or_default();
+                }
                 if is_shell_name(var_name) {
-                    let pattern = self.expand_embedded_parameters(pattern);
-                    let replacement = self.expand_embedded_parameters(replacement);
                     return self
                         .env_vars
                         .get(var_name)
