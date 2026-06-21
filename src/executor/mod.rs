@@ -5176,6 +5176,15 @@ impl Executor {
                 }
                 return String::new();
             }
+            if let Some((var_name, word)) = name.split_once('-') {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| shell_safe_value(value))
+                        .unwrap_or_else(|| self.expand_parameter_word(word));
+                }
+            }
             if let Some((array_name, default)) = name
                 .strip_suffix("[@]")
                 .or_else(|| name.strip_suffix("[*]"))
@@ -5325,6 +5334,16 @@ impl Executor {
                 return self.expand_embedded_parameters(alternate);
             }
             return String::new();
+        }
+
+        if let Some((var_name, default)) = name.split_once('-') {
+            if is_shell_name(var_name) {
+                return self
+                    .env_vars
+                    .get(var_name)
+                    .map(|value| shell_safe_value(value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(default));
+            }
         }
 
         self.expand_word(word)
