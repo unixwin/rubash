@@ -2028,7 +2028,13 @@ impl Executor {
                 env::remove_var("__RUBASH_CURRENT_FUNCTION");
             }
         }
-        result
+        match result {
+            Err(ExecuteError::Return(status)) => {
+                self.exit_code = status;
+                Ok(())
+            }
+            other => other,
+        }
     }
 
     fn execute_declare_functions(&self, args: &[String]) -> i32 {
