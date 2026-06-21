@@ -1126,6 +1126,57 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_parameter_case_mod_uppercases_first_and_all_chars() {
+        let output_path = "target/rubash-param-case-upper-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=hello; echo ${{v^}} ${{v^^}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "Hello HELLO\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_case_mod_lowercases_first_and_all_chars() {
+        let output_path = "target/rubash-param-case-lower-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=HELLO; echo ${{v,}} ${{v,,}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hELLO hello\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_case_mod_uses_pattern() {
+        let output_path = "target/rubash-param-case-pattern-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcde; echo ${{v^^[bd]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "aBcDe\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);

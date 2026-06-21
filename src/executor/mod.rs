@@ -5319,6 +5319,16 @@ impl Executor {
                         .unwrap_or_default();
                 }
             }
+            if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(name) {
+                if is_shell_name(var_name) {
+                    let pattern = self.expand_embedded_parameters(pattern);
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| apply_parameter_case_mod(value, operation, &pattern))
+                        .unwrap_or_default();
+                }
+            }
             if let Some((var_name, pattern, replacement, global)) =
                 parse_parameter_replacement(name)
             {
@@ -7196,6 +7206,58 @@ fn find_parameter_pattern_match(
     }
 
     None
+}
+
+#[derive(Clone, Copy)]
+enum CaseMod {
+    UpperFirst,
+    UpperAll,
+    LowerFirst,
+    LowerAll,
+}
+
+fn parse_parameter_case_mod(name: &str) -> Option<(&str, CaseMod, &str)> {
+    if let Some((var_name, pattern)) = name.split_once("^^") {
+        return Some((var_name, CaseMod::UpperAll, pattern));
+    }
+    if let Some((var_name, pattern)) = name.split_once(",,") {
+        return Some((var_name, CaseMod::LowerAll, pattern));
+    }
+    if let Some((var_name, pattern)) = name.split_once('^') {
+        return Some((var_name, CaseMod::UpperFirst, pattern));
+    }
+    if let Some((var_name, pattern)) = name.split_once(',') {
+        return Some((var_name, CaseMod::LowerFirst, pattern));
+    }
+    None
+}
+
+fn apply_parameter_case_mod(value: &str, operation: CaseMod, pattern: &str) -> String {
+    let pattern = if pattern.is_empty() { "?" } else { pattern };
+    let mut changed_first = false;
+
+    value
+        .chars()
+        .map(|ch| {
+            let char_value = ch.to_string();
+            let matches = case_pattern_matches(pattern, &char_value);
+            let should_change = matches
+                && match operation {
+                    CaseMod::UpperAll | CaseMod::LowerAll => true,
+                    CaseMod::UpperFirst | CaseMod::LowerFirst => !changed_first,
+                };
+
+            if should_change {
+                changed_first = true;
+                match operation {
+                    CaseMod::UpperFirst | CaseMod::UpperAll => ch.to_uppercase().collect(),
+                    CaseMod::LowerFirst | CaseMod::LowerAll => ch.to_lowercase().collect(),
+                }
+            } else {
+                char_value
+            }
+        })
+        .collect()
 }
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {
