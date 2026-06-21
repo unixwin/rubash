@@ -250,6 +250,58 @@ mod command_chaining {
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(script_path);
     }
+
+    #[test]
+    fn test_while_false_skips_body() {
+        let output_path = "target/rubash-while-false-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("while false; do echo bad > {output_path}; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, ["while", "false"]);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
+    fn test_while_true_runs_until_break() {
+        let output_path = "target/rubash-while-break-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("while true; do echo loop > {output_path}; break; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, ["while", "true"]);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "loop\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_until_true_skips_body() {
+        let output_path = "target/rubash-until-true-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("until true; do echo bad > {output_path}; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands[0].words, ["until", "true"]);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
 }
 
 mod builtin_commands {
