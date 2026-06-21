@@ -5175,6 +5175,10 @@ impl Executor {
                     .unwrap_or_else(|| "0".to_string());
             }
             if let Some((var_name, offset, length)) = parse_parameter_substring(name) {
+                if matches!(var_name, "@" | "*") {
+                    return positional_parameter_substring(&self.positional_params, offset, length)
+                        .join(" ");
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -7221,6 +7225,25 @@ fn parameter_substring(value: &str, offset: isize, length: Option<usize>) -> Str
         .chars()
         .skip(start)
         .take(length.unwrap_or(usize::MAX))
+        .collect()
+}
+
+fn positional_parameter_substring(
+    params: &[String],
+    offset: isize,
+    length: Option<usize>,
+) -> Vec<String> {
+    let start = if offset < 0 {
+        params.len().saturating_sub(offset.unsigned_abs())
+    } else {
+        (offset as usize).saturating_sub(1)
+    };
+
+    params
+        .iter()
+        .skip(start)
+        .take(length.unwrap_or(usize::MAX))
+        .cloned()
         .collect()
 }
 
