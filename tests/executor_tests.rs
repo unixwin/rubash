@@ -1399,6 +1399,62 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_eval_redirects_entire_output() {
+        let output_path = "target/rubash-eval-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "old\n").unwrap();
+        let input = format!("eval 'echo alpha; echo beta' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_eval_appends_entire_output() {
+        let output_path = "target/rubash-eval-append-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("eval 'echo alpha; echo beta' >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "before\nalpha\nbeta\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_eval_redirects_loop_body_without_retruncating() {
+        let output_path = "target/rubash-eval-loop-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("eval 'for x in a b; do echo $x; done' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nb\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
