@@ -63,7 +63,8 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
 }
 
 fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
-    run_source(executor, command, false)
+    let status = run_source(executor, command, false);
+    finish_shell(executor, status, false)
 }
 
 fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
@@ -77,7 +78,8 @@ fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
     };
 
     executor.set_env("__RUBASH_SCRIPT_NAME", script);
-    run_source(executor, &contents, false)
+    let status = run_source(executor, &contents, false);
+    finish_shell(executor, status, false)
 }
 
 fn run_repl(executor: &mut Executor) {
@@ -125,7 +127,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
         run_line(executor, &input, false);
     }
 
-    executor.last_exit_code()
+    let status = executor.last_exit_code();
+    finish_shell(executor, status, false)
 }
 
 fn read_unbuffered_line(output: &mut String) -> io::Result<usize> {
@@ -168,6 +171,21 @@ fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
 
     match executor.execute_ast(&ast) {
         Ok(()) => executor.last_exit_code(),
+        Err(ExecuteError::ExitCode(code)) => code,
+        Err(e) => {
+            if interactive {
+                eprintln!("Error: {}", e);
+            } else {
+                eprintln!("{}", e);
+            }
+            1
+        }
+    }
+}
+
+fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> i32 {
+    match executor.run_exit_trap_with_status(status) {
+        Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
         Err(e) => {
             if interactive {

@@ -1695,7 +1695,7 @@ impl Executor {
                     match self.execute_exit(cmd)? {
                         crate::builtins::exit::ExitAction::Exit(code) => {
                             self.exit_code = code;
-                            let code = self.run_exit_trap(code)?;
+                            let code = self.run_exit_trap_for_status(code)?;
                             Err(ExecuteError::ExitCode(code))
                         }
                         crate::builtins::exit::ExitAction::Continue(status) => {
@@ -2019,7 +2019,15 @@ impl Executor {
         }
     }
 
-    fn run_exit_trap(&mut self, exit_status: i32) -> Result<i32, ExecuteError> {
+    pub fn run_exit_trap(&mut self) -> Result<i32, ExecuteError> {
+        self.run_exit_trap_for_status(self.exit_code)
+    }
+
+    pub fn run_exit_trap_with_status(&mut self, exit_status: i32) -> Result<i32, ExecuteError> {
+        self.run_exit_trap_for_status(exit_status)
+    }
+
+    fn run_exit_trap_for_status(&mut self, exit_status: i32) -> Result<i32, ExecuteError> {
         let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.env_vars) else {
             return Ok(exit_status);
         };
