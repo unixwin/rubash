@@ -1695,6 +1695,7 @@ impl Executor {
                     match self.execute_exit(cmd)? {
                         crate::builtins::exit::ExitAction::Exit(code) => {
                             self.exit_code = code;
+                            let code = self.run_exit_trap(code)?;
                             Err(ExecuteError::ExitCode(code))
                         }
                         crate::builtins::exit::ExitAction::Continue(status) => {
@@ -2015,6 +2016,30 @@ impl Executor {
                 self.apply_eval_stdout_redirect(cmd, &mut ast)?;
                 self.execute_ast(&ast)
             }
+        }
+    }
+
+    fn run_exit_trap(&mut self, exit_status: i32) -> Result<i32, ExecuteError> {
+        let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.env_vars) else {
+            return Ok(exit_status);
+        };
+        if action.is_empty() {
+            return Ok(exit_status);
+        }
+
+        self.exit_code = exit_status;
+        let tokens = crate::lexer::tokenize(&action);
+        let ast = crate::parser::parse(&tokens);
+        match self.execute_ast(&ast) {
+            Ok(()) => {
+                self.exit_code = exit_status;
+                Ok(exit_status)
+            }
+            Err(ExecuteError::ExitCode(code)) => {
+                self.exit_code = code;
+                Ok(code)
+            }
+            Err(error) => Err(error),
         }
     }
 
