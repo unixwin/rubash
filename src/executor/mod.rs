@@ -4895,6 +4895,10 @@ impl Executor {
             return self.positional_params.join(" ");
         }
 
+        if word == "$*" {
+            return self.positional_params.join(" ");
+        }
+
         if word == "$#" {
             return self.positional_params.len().to_string();
         }
@@ -5447,6 +5451,10 @@ impl Executor {
                     output.push_str(&std::process::id().to_string());
                 }
                 Some('@') => {
+                    chars.next();
+                    output.push_str(&self.positional_params.join(" "));
+                }
+                Some('*') => {
                     chars.next();
                     output.push_str(&self.positional_params.join(" "));
                 }
