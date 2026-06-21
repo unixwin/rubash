@@ -424,6 +424,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_o_sets_origin_index() {
+        let input = "mapfile -O 2 -t arr <<< $'alpha\\nbeta'";
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            executor.get_env("arr"),
+            Some("\x1d([2]=\"alpha\" [3]=\"beta\")")
+        );
+    }
+
+    #[test]
+    fn test_readarray_compact_o_preserves_existing_elements() {
+        let input = "arr=(zero one two); readarray -O2 -n1 -t arr <<< $'new\\nmore'";
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            executor.get_env("arr"),
+            Some("\x1d([0]=\"zero\" [1]=\"one\" [2]=\"new\")")
+        );
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
