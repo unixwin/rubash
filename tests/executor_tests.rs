@@ -877,6 +877,50 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_parameter_colon_plus_requires_non_empty_value() {
+        let output_path = "target/rubash-param-colon-plus-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset v; echo unset:${{v:+alt}} > {output_path}; v=; echo empty:${{v:+alt}} >> {output_path}; v=x; echo set:${{v:+alt}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "unset:\nempty:\nset:alt\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_plus_expands_for_empty_set_value() {
+        let output_path = "target/rubash-param-plus-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset v; echo unset:${{v+alt}} > {output_path}; v=; echo empty:${{v+alt}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "unset:\nempty:alt\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);
