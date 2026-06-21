@@ -1868,6 +1868,10 @@ impl Executor {
                         self.exit_code = 0;
                         return Ok(());
                     }
+                    if self.apply_set_positional_operands(&cmd.words[1..]) {
+                        self.exit_code = 0;
+                        return Ok(());
+                    }
                     if cmd.words.get(1).map(String::as_str) == Some("--") {
                         // TODO(builtins/set.def/variables.c): `set --`
                         // replaces the shell positional parameters. Full set
@@ -5289,6 +5293,70 @@ impl Executor {
         }
 
         true
+    }
+
+    fn apply_set_positional_operands(&mut self, args: &[String]) -> bool {
+        if args.is_empty() {
+            return false;
+        }
+
+        let mut flag_updates = Vec::new();
+        for (index, arg) in args.iter().enumerate() {
+            if arg == "--" {
+                self.apply_set_flag_updates(&flag_updates);
+                self.positional_params = args[index + 1..].to_vec();
+                return true;
+            }
+
+            if arg == "-" {
+                self.apply_set_flag_updates(&flag_updates);
+                self.env_vars.remove("__RUBASH_XTRACE");
+                if index + 1 < args.len() {
+                    self.positional_params = args[index + 1..].to_vec();
+                }
+                return true;
+            }
+
+            let Some(prefix) = arg.chars().next().filter(|ch| matches!(ch, '-' | '+')) else {
+                self.apply_set_flag_updates(&flag_updates);
+                self.positional_params = args[index..].to_vec();
+                return true;
+            };
+
+            let flags = &arg[1..];
+            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x')) {
+                return false;
+            }
+
+            flag_updates.push((prefix, flags.to_string()));
+        }
+
+        false
+    }
+
+    fn apply_set_flag_updates(&mut self, flag_updates: &[(char, String)]) {
+        for (prefix, flags) in flag_updates {
+            let enabled = *prefix == '-';
+            for flag in flags.chars() {
+                match (flag, enabled) {
+                    ('e', true) => {
+                        self.env_vars
+                            .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
+                    }
+                    ('e', false) => {
+                        self.env_vars.remove("__RUBASH_ERREXIT");
+                    }
+                    ('x', true) => {
+                        self.env_vars
+                            .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
+                    }
+                    ('x', false) => {
+                        self.env_vars.remove("__RUBASH_XTRACE");
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     fn expand_case_word(&self, word: &str) -> String {
