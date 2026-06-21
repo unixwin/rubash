@@ -1236,6 +1236,57 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_parameter_replacement_supports_prefix_and_suffix_anchors() {
+        let output_path = "target/rubash-param-replace-anchor-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcabc; echo ${{v/#abc/X}} ${{v/%abc/X}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "Xabc abcX\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_replacement_keeps_value_when_anchor_does_not_match() {
+        let output_path = "target/rubash-param-replace-anchor-miss-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcabc; echo ${{v/#bc/X}} ${{v/%ab/X}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "abcabc abcabc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_replacement_anchor_uses_shell_patterns() {
+        let output_path = "target/rubash-param-replace-anchor-pattern-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcd; echo ${{v/#a?/X}} ${{v/%?d/X}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "Xcd abX\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_case_mod_uppercases_first_and_all_chars() {
         let output_path = "target/rubash-param-case-upper-output.txt";
         let _ = fs::remove_file(output_path);

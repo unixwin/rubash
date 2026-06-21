@@ -7268,6 +7268,14 @@ fn replace_parameter_pattern(
         return value.to_string();
     }
 
+    if let Some(prefix_pattern) = pattern.strip_prefix('#') {
+        return replace_parameter_prefix(value, prefix_pattern, replacement);
+    }
+
+    if let Some(suffix_pattern) = pattern.strip_prefix('%') {
+        return replace_parameter_suffix(value, suffix_pattern, replacement);
+    }
+
     if !pattern_contains_glob(pattern) {
         return if global {
             value.replace(pattern, replacement)
@@ -7304,10 +7312,49 @@ fn replace_parameter_pattern(
     output
 }
 
+fn replace_parameter_prefix(value: &str, pattern: &str, replacement: &str) -> String {
+    let Some(end) = find_parameter_prefix_match(value, pattern) else {
+        return value.to_string();
+    };
+    format!("{replacement}{}", &value[end..])
+}
+
+fn replace_parameter_suffix(value: &str, pattern: &str, replacement: &str) -> String {
+    let Some(start) = find_parameter_suffix_match(value, pattern) else {
+        return value.to_string();
+    };
+    format!("{}{replacement}", &value[..start])
+}
+
 fn pattern_contains_glob(pattern: &str) -> bool {
     pattern
         .chars()
         .any(|ch| matches!(ch, '*' | '?' | '[' | '\\'))
+}
+
+fn find_parameter_prefix_match(value: &str, pattern: &str) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+
+    value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .rev()
+        .find(|end| case_pattern_matches(pattern, &value[..*end]))
+}
+
+fn find_parameter_suffix_match(value: &str, pattern: &str) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(value.len());
+    }
+
+    value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .find(|start| case_pattern_matches(pattern, &value[*start..]))
 }
 
 fn find_parameter_pattern_match(
