@@ -225,14 +225,32 @@ mod command_chaining {
     #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = "target/rubash-pipeline-external-output.txt";
+        #[cfg(windows)]
+        let script_path = "target/rubash-pipeline-filter.cmd";
+        #[cfg(not(windows))]
         let script_path = "target/rubash-pipeline-filter.sh";
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(script_path);
+        #[cfg(windows)]
         fs::write(
             script_path,
-            "while IFS= read -r line; do\n  if [ \"$line\" = b ]; then\n    printf 'external:%s\\n' \"$line\"\n  fi\ndone\n",
+            "@echo off\r\nfor /f \"delims=\" %%L in ('findstr /r \".*\"') do if \"%%L\"==\"b\" echo external:%%L\r\n",
         )
         .unwrap();
+        #[cfg(not(windows))]
+        fs::write(
+            script_path,
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  if [ \"$line\" = b ]; then\n    printf 'external:%s\\n' \"$line\"\n  fi\ndone\n",
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(script_path, permissions).unwrap();
+        }
         let input = format!("printf 'a\\nb\\n' | {script_path} > {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -246,7 +264,12 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "external:b\n");
+        assert_eq!(
+            fs::read_to_string(output_path)
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "external:b\n"
+        );
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(script_path);
     }
