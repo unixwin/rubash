@@ -1897,8 +1897,7 @@ impl Executor {
                     Ok(())
                 }
                 "ulimit" => {
-                    self.exit_code =
-                        crate::builtins::ulimit::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code = self.execute_ulimit(cmd)?;
                     Ok(())
                 }
                 "unset" => {
@@ -4984,6 +4983,38 @@ impl Executor {
         }
 
         Ok(crate::builtins::kill::execute(&cmd.words[1..])?)
+    }
+
+    fn execute_ulimit(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::ulimit::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::ulimit::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::ulimit::execute(
+            &cmd.words[1..],
+            &mut self.env_vars,
+        )?)
     }
 
     fn execute_recho(&self, args: &[String]) {

@@ -4,30 +4,53 @@
 // - builtins/ulimit.def
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
+}
+
+pub(crate) fn execute_with_io<W, E>(
+    args: &[String],
+    env_vars: &mut HashMap<String, String>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     // TODO(builtins/ulimit.def): Replace this with real getrlimit/setrlimit
     // plumbing. This implements the resource forms exercised by builtins11.sub.
     if args.iter().any(|arg| arg == "-g") {
-        eprintln!("{}ulimit: -g: invalid option", diagnostic_prefix());
-        eprintln!("ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]");
+        writeln!(stderr, "{}ulimit: -g: invalid option", diagnostic_prefix())?;
+        writeln!(
+            stderr,
+            "ulimit: usage: ulimit [-SHabcdefiklmnpqrstuvxPRT] [limit]"
+        )?;
         return Ok(EXECUTION_FAILURE);
     }
 
     if args.iter().any(|arg| arg == "-u") {
-        eprintln!(
+        writeln!(
+            stderr,
             "{}ulimit: max user processes: cannot modify limit: Operation not permitted",
             diagnostic_prefix()
-        );
+        )?;
         return Ok(EXECUTION_FAILURE);
     }
 
     if args.iter().any(|arg| arg == "+1999") {
-        eprintln!("{}ulimit: +1999: invalid number", diagnostic_prefix());
+        writeln!(
+            stderr,
+            "{}ulimit: +1999: invalid number",
+            diagnostic_prefix()
+        )?;
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -54,13 +77,14 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
         }
         Some(_) => Ok(EXECUTION_SUCCESS),
         None => {
-            println!(
+            writeln!(
+                stdout,
                 "{}",
                 env_vars
                     .get(resource)
                     .cloned()
                     .unwrap_or_else(|| default_limit(resource).to_string())
-            );
+            )?;
             Ok(EXECUTION_SUCCESS)
         }
     }
