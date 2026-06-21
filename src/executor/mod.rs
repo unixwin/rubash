@@ -4322,37 +4322,55 @@ impl Executor {
                 }
             }
         }
-        let scalar_name = cmd
+        let scalar_names = cmd
             .words
             .iter()
             .skip(1)
-            .find(|word| word.as_str() != "-r" && !word.starts_with('-'));
-        if let Some(name) = scalar_name {
-            if is_shell_name(name) {
-                let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
-                    while line.ends_with('\n') || line.ends_with('\r') {
-                        line.pop();
-                    }
-                    self.env_vars.insert(name.clone(), line);
-                    0
-                } else {
-                    match read_stdin_line() {
-                        Ok((0, _)) => 1,
-                        Ok((_, mut line)) => {
-                            while line.ends_with('\n') || line.ends_with('\r') {
-                                line.pop();
-                            }
-                            self.env_vars.insert(name.clone(), line);
-                            0
+            .filter(|word| word.as_str() != "-r" && !word.starts_with('-'))
+            .filter(|word| is_shell_name(word))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !scalar_names.is_empty() {
+            let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                self.assign_read_scalar_names(&scalar_names, &line);
+                0
+            } else {
+                match read_stdin_line() {
+                    Ok((0, _)) => 1,
+                    Ok((_, mut line)) => {
+                        while line.ends_with('\n') || line.ends_with('\r') {
+                            line.pop();
                         }
-                        Err(_) => 1,
+                        self.assign_read_scalar_names(&scalar_names, &line);
+                        0
                     }
-                };
-                return status;
-            }
+                    Err(_) => 1,
+                }
+            };
+            return status;
         }
         eprintln!("{}read: command not found", self.diagnostic_prefix());
         127
+    }
+
+    fn assign_read_scalar_names(&mut self, names: &[String], line: &str) {
+        if names.len() == 1 {
+            self.env_vars.insert(names[0].clone(), line.to_string());
+            return;
+        }
+
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        for (index, name) in names.iter().enumerate() {
+            let value = if index + 1 == names.len() {
+                fields.get(index..).unwrap_or_default().join(" ")
+            } else {
+                fields.get(index).copied().unwrap_or_default().to_string()
+            };
+            self.env_vars.insert(name.clone(), value);
+        }
     }
 
     fn execute_mapfile(&mut self, cmd: &CommandNode) -> i32 {
