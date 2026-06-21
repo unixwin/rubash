@@ -1758,7 +1758,7 @@ impl Executor {
                         }
                     }
                 }
-                "builtin" => self.execute_builtin_direct(&cmd.words[1..]),
+                "builtin" => self.execute_builtin_direct_command(cmd),
                 "cd" => {
                     if self
                         .env_vars
@@ -3877,6 +3877,57 @@ impl Executor {
             }
             "shift" => self.execute_shift(&cmd.words[1..]),
             _ => self.execute_external(cmd),
+        }
+    }
+
+    fn execute_builtin_direct_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let args = &cmd.words[1..];
+        if cmd.redirect_out.is_none() && cmd.append.is_none() && cmd.redirect_err.is_none() {
+            return self.execute_builtin_direct(args);
+        }
+
+        let Some(name) = args.first().map(String::as_str) else {
+            self.exit_code = 0;
+            return Ok(());
+        };
+        let mut builtin_cmd = cmd.clone();
+        builtin_cmd.words = args.to_vec();
+
+        match name {
+            "echo" => {
+                self.execute_echo(&builtin_cmd)?;
+                self.exit_code = 0;
+                Ok(())
+            }
+            "printf" => {
+                self.exit_code = self.execute_printf(&builtin_cmd)?;
+                Ok(())
+            }
+            "pwd" => {
+                self.exit_code = self.execute_pwd(&builtin_cmd)?;
+                Ok(())
+            }
+            "hash" => {
+                self.exit_code = self.execute_hash(&builtin_cmd)?;
+                Ok(())
+            }
+            "help" => {
+                self.exit_code = self.execute_help(&builtin_cmd)?;
+                Ok(())
+            }
+            "set" => {
+                self.exit_code = self.execute_set(&builtin_cmd)?;
+                Ok(())
+            }
+            "shopt" => {
+                self.exit_code = self.execute_shopt(&builtin_cmd)?;
+                Ok(())
+            }
+            "enable" => {
+                self.exit_code = self.execute_enable(&builtin_cmd)?;
+                Ok(())
+            }
+            _ => self.execute_builtin_direct(args),
         }
     }
 
