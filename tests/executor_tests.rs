@@ -1490,6 +1490,41 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_return_outside_function_sets_failure_status() {
+        let output_path = "target/rubash-return-outside-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("return; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_return_invalid_number_in_function_returns_two() {
+        let output_path = "target/rubash-return-invalid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("f() {{ return nope; echo bad > {output_path}; }}; f; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_break_outside_loop_returns_success() {
         let output_path = "target/rubash-break-outside-output.txt";
         let _ = fs::remove_file(output_path);

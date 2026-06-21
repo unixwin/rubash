@@ -88,6 +88,8 @@ pub fn execute_text_with_args(
     let old_positional_params = executor.positional_params();
     let source_positional_params: Vec<String> = args.to_vec();
     let had_source_args = !source_positional_params.is_empty();
+    let old_source_marker = executor.get_env("__RUBASH_IN_SOURCE").map(str::to_string);
+    executor.set_env("__RUBASH_IN_SOURCE", "1");
     if had_source_args {
         executor.set_positional_params(source_positional_params.clone());
     }
@@ -95,6 +97,11 @@ pub fn execute_text_with_args(
     let tokens = crate::lexer::tokenize(source);
     let ast = crate::parser::parse(&tokens);
     let result = executor.execute_ast(&ast);
+
+    match old_source_marker {
+        Some(value) => executor.set_env("__RUBASH_IN_SOURCE", &value),
+        None => executor.remove_env("__RUBASH_IN_SOURCE"),
+    }
 
     if had_source_args && executor.positional_params() == source_positional_params {
         executor.set_positional_params(old_positional_params);
