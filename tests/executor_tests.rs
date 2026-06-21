@@ -639,6 +639,43 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unset_indexed_array_element() {
+        let output_path = "target/rubash-unset-array-element-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); unset 'arr[1]'; echo ${{!arr[@]}} / ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0 2 / zero two\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unset_assoc_array_element() {
+        let output_path = "target/rubash-unset-assoc-element-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("declare -A assoc; assoc[one]=alpha; assoc[two]=beta; unset 'assoc[one]'; echo ${{!assoc[@]}} > {output_path}; echo ${{assoc[one]}} >> {output_path}; echo ${{assoc[two]}} >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "two\n\nbeta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
