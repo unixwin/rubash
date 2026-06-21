@@ -151,7 +151,10 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
         }
 
-        if token.kind == TokenKind::Word && command_is_empty(&current_cmd) {
+        if ((token.kind == TokenKind::Word)
+            || (token.kind == TokenKind::Keyword && token.value == "function"))
+            && command_is_empty(&current_cmd)
+        {
             if let Some((function_cmd, next_i)) = parse_function_command(tokens, i) {
                 ast.commands.push(function_cmd);
                 current_cmd = CommandNode::new();
@@ -461,16 +464,27 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
     // TODO(parse.y/execute_cmd.c): Bash has full function_def grammar,
     // including `function name`, redirections, nested compound commands, and
     // parser-state-sensitive reserved words. This maps the upstream builtins
-    // `name() { ...; }` form onto a function command node.
-    let name = tokens.get(start)?.value.clone();
-    if !is_function_name(&name)
-        || tokens.get(start + 1)?.value != "("
-        || tokens.get(start + 2)?.value != ")"
-    {
+    // `name() { ...; }` and `function name { ...; }` forms onto a function
+    // command node.
+    let (name_index, mut i) = if is_keyword(tokens, start, "function") {
+        (start + 1, start + 2)
+    } else {
+        (start, start + 1)
+    };
+    let name = tokens.get(name_index)?.value.clone();
+    if !is_function_name(&name) {
         return None;
     }
 
-    let mut i = start + 3;
+    if tokens.get(i).is_some_and(|token| token.value == "(") {
+        if tokens.get(i + 1)?.value != ")" {
+            return None;
+        }
+        i += 2;
+    } else if !is_keyword(tokens, start, "function") {
+        return None;
+    }
+
     while tokens
         .get(i)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)

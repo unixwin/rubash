@@ -69,6 +69,33 @@ mod semicolon_tests {
     }
 }
 
+mod function_tests {
+    use super::*;
+
+    #[test]
+    fn test_function_keyword_definition() {
+        let input = "function greet { echo hi; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "greet");
+        assert_eq!(function.body.len(), 1);
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
+    }
+
+    #[test]
+    fn test_function_keyword_with_parentheses() {
+        let input = "function greet() { echo hi; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "greet");
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
+    }
+}
+
 mod assignment_tests {
     use super::*;
 
