@@ -1157,6 +1157,15 @@ impl Executor {
                 }
                 Ok(Some((output, i32::from(!matched))))
             }
+            "wc" => {
+                let option = command.words.get(1).map(String::as_str).unwrap_or("-l");
+                let value = match option {
+                    "-c" => input.as_bytes().len(),
+                    "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
+                    _ => return Ok(None),
+                };
+                Ok(Some((format!("{value}\n"), 0)))
+            }
             _ => Ok(None),
         }
     }
