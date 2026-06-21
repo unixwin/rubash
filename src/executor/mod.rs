@@ -1132,6 +1132,25 @@ impl Executor {
                 }
                 Ok(Some((output, 0)))
             }
+            "printf" => {
+                let args: Vec<String> = command.words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect();
+                let mut env_vars = self.env_vars.clone();
+                let mut output = Vec::new();
+                let mut stderr = Vec::new();
+                let status = crate::builtins::printf::execute_with_io(
+                    args.iter().map(String::as_str),
+                    &mut env_vars,
+                    &mut output,
+                    &mut stderr,
+                )?;
+                Ok(Some((
+                    String::from_utf8_lossy(&output).into_owned(),
+                    status,
+                )))
+            }
             "cat" => {
                 if let Some(input) = self.stdin_string_for_command(command) {
                     Ok(Some((input, 0)))
