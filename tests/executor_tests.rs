@@ -252,6 +252,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_t_reads_here_string_into_array() {
+        let output_path = "target/rubash-mapfile-t-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "mapfile -t arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_readarray_t_reads_here_string_into_array() {
+        let output_path = "target/rubash-readarray-t-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "readarray -t arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_while_false_skips_body() {
         let output_path = "target/rubash-while-false-output.txt";
         let _ = fs::remove_file(output_path);

@@ -1923,7 +1923,7 @@ impl Executor {
                     self.exit_code = self.execute_read(cmd);
                     Ok(())
                 }
-                "mapfile" => {
+                "mapfile" | "readarray" => {
                     self.exit_code = self.execute_mapfile(cmd);
                     Ok(())
                 }
@@ -4351,11 +4351,20 @@ impl Executor {
     }
 
     fn execute_mapfile(&mut self, cmd: &CommandNode) -> i32 {
-        // TODO(builtins/mapfile.def/subst.c/redir.c): Implement real input
-        // collection. This only maps `mapfile -t c < <(echo 1$'\n'2$'\n'3)`.
+        // TODO(builtins/mapfile.def/subst.c/redir.c): Implement the full option
+        // set, callbacks, origin/count handling, and newline-preserving storage.
         if cmd.words.get(1).map(String::as_str) == Some("-t") {
-            if let Some(name) = cmd.words.get(2) {
+            if let Some(name) = cmd.words.get(2).filter(|name| is_shell_name(name)) {
+                if let Some(input) = self.stdin_string_for_command(cmd) {
+                    let values = input.lines().map(str::to_string).collect::<Vec<_>>();
+                    self.env_vars
+                        .insert(name.clone(), format!("({})", values.join(" ")));
+                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
+                    return 0;
+                }
+
                 self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
+                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
                 return 0;
             }
         }
@@ -5403,7 +5412,7 @@ impl Executor {
         }
 
         let word = cmd.here_string.as_ref()?;
-        let mut input = self.expand_word(word);
+        let mut input = decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
         input.push('\n');
         Some(input)
     }
@@ -7078,6 +7087,39 @@ fn shell_safe_value(value: &str) -> String {
     }
 
     value.to_string()
+}
+
+fn decode_ansi_c_quoted_word(word: &str) -> Option<String> {
+    let value = word.strip_prefix("$'")?.strip_suffix('\'')?;
+    let mut output = String::new();
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('a') => output.push('\x07'),
+            Some('b') => output.push('\x08'),
+            Some('e') | Some('E') => output.push('\x1b'),
+            Some('f') => output.push('\x0c'),
+            Some('n') => output.push('\n'),
+            Some('r') => output.push('\r'),
+            Some('t') => output.push('\t'),
+            Some('v') => output.push('\x0b'),
+            Some('\\') => output.push('\\'),
+            Some('\'') => output.push('\''),
+            Some('"') => output.push('"'),
+            Some('?') => output.push('?'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    Some(output)
 }
 
 fn array_values(value: &str) -> Vec<String> {
