@@ -1177,6 +1177,63 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_indirect_parameter_expands_named_variable() {
+        let output_path = "target/rubash-param-indirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("target=value; ref=target; echo ${{!ref}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_indirect_parameter_uses_positional_parameter_name() {
+        let output_path = "target/rubash-param-indirect-positional-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("function p {{ target=value; echo ${{!1}} > {output_path}; }}; p target");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_indirect_prefix_expands_matching_variable_names() {
+        let output_path = "target/rubash-param-indirect-prefix-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "RUBASH_INDIRECT_A=1; RUBASH_INDIRECT_B=2; echo ${{!RUBASH_INDIRECT_*}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "RUBASH_INDIRECT_A RUBASH_INDIRECT_B\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);

@@ -5088,6 +5088,39 @@ impl Executor {
                     .cloned()
                     .unwrap_or_default();
             }
+            if let Some(indirect_name) = name.strip_prefix('!') {
+                if let Some(prefix) = indirect_name
+                    .strip_suffix('*')
+                    .or_else(|| indirect_name.strip_suffix('@'))
+                {
+                    let mut names: Vec<&str> = self
+                        .env_vars
+                        .keys()
+                        .map(String::as_str)
+                        .filter(|name| name.starts_with(prefix))
+                        .collect();
+                    names.sort_unstable();
+                    return names.join(" ");
+                }
+
+                if indirect_name == "#" {
+                    return self.positional_params.last().cloned().unwrap_or_default();
+                }
+
+                let target_name = if let Ok(index) = indirect_name.parse::<usize>() {
+                    self.positional_params
+                        .get(index.saturating_sub(1))
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    self.env_vars
+                        .get(indirect_name)
+                        .cloned()
+                        .unwrap_or_default()
+                };
+
+                return self.expand_parameter_named_value(&target_name);
+            }
             if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
                 return crate::builtins::pushd::stack_words(&self.env_vars);
             }
@@ -5358,6 +5391,42 @@ impl Executor {
         }
 
         self.expand_embedded_parameters(word)
+    }
+
+    fn expand_parameter_named_value(&self, name: &str) -> String {
+        match name {
+            "#" => return self.positional_params.len().to_string(),
+            "@" | "*" => return self.positional_params.join(" "),
+            "?" => return self.exit_code.to_string(),
+            "$" => return std::process::id().to_string(),
+            "-" => return self.shell_option_flags(),
+            "0" => {
+                return self
+                    .env_vars
+                    .get("__RUBASH_SCRIPT_NAME")
+                    .cloned()
+                    .unwrap_or_default();
+            }
+            _ => {}
+        }
+
+        if let Ok(index) = name.parse::<usize>() {
+            return self
+                .positional_params
+                .get(index.saturating_sub(1))
+                .cloned()
+                .unwrap_or_default();
+        }
+
+        if is_shell_name(name) {
+            return self
+                .env_vars
+                .get(name)
+                .map(|value| shell_safe_value(value))
+                .unwrap_or_default();
+        }
+
+        String::new()
     }
 
     fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
