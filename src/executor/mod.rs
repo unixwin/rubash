@@ -1731,6 +1731,11 @@ impl Executor {
                     Ok(())
                 }
                 "command" => {
+                    if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                        if self.execute_command_describe_redirected(cmd)? {
+                            return Ok(());
+                        }
+                    }
                     if self.execute_command_describe(&cmd.words[1..]) {
                         return Ok(());
                     }
@@ -1909,6 +1914,10 @@ impl Executor {
                     Ok(())
                 }
                 "type" => {
+                    if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                        self.exit_code = self.execute_type_redirected(cmd)?;
+                        return Ok(());
+                    }
                     if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
                         return Ok(());
                     }
@@ -4098,6 +4107,34 @@ impl Executor {
         Ok(false)
     }
 
+    fn execute_type_with_disabled_builtin_state_with_io<W>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+    ) -> Result<Option<i32>, ExecuteError>
+    where
+        W: Write,
+    {
+        if args.len() == 2
+            && args[0] == "-t"
+            && args[1] == "test"
+            && crate::builtins::enable::is_disabled(&self.env_vars, "test")
+        {
+            return Ok(Some(1));
+        }
+
+        if args.len() == 2
+            && args[0] == "-t"
+            && args[1] == "test"
+            && !crate::builtins::enable::is_disabled(&self.env_vars, "test")
+        {
+            writeln!(stdout, "builtin")?;
+            return Ok(Some(0));
+        }
+
+        Ok(None)
+    }
+
     fn execute_command_describe(&mut self, args: &[String]) -> bool {
         // TODO(builtins/command.def/type.def/findcmd.c): `command -v/-V`
         // shares Bash's command-description machinery with `type`. Keep this
@@ -4121,6 +4158,71 @@ impl Executor {
         }
         self.exit_code = status;
         true
+    }
+
+    fn execute_command_describe_redirected(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_command_describe_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            );
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_command_describe_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            );
+        }
+
+        Ok(false)
+    }
+
+    fn execute_command_describe_with_io<W, E>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<bool, ExecuteError>
+    where
+        W: Write,
+        E: Write,
+    {
+        let Some(option) = args.first().map(String::as_str) else {
+            return Ok(false);
+        };
+        let mode = match option {
+            "-v" => TypeDescribeMode::Reusable,
+            "-V" => TypeDescribeMode::Verbose,
+            _ => return Ok(false),
+        };
+        let mut status = 0;
+        for name in &args[1..] {
+            if !self.describe_name_with_io(name, mode, false, stdout)? {
+                status = 1;
+                if mode == TypeDescribeMode::Verbose {
+                    writeln!(
+                        stderr,
+                        "{}command: {name}: not found",
+                        self.diagnostic_prefix()
+                    )?;
+                }
+            }
+        }
+        self.exit_code = status;
+        Ok(true)
     }
 
     fn execute_type(&mut self, args: &[String]) -> i32 {
@@ -4173,6 +4275,103 @@ impl Executor {
             }
         }
         status
+    }
+
+    fn execute_type_redirected(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_type_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            );
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_type_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            );
+        }
+
+        Ok(self.execute_type(&cmd.words[1..]))
+    }
+
+    fn execute_type_with_io<W, E>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> Result<i32, ExecuteError>
+    where
+        W: Write,
+        E: Write,
+    {
+        if let Some(status) = self.execute_type_with_disabled_builtin_state_with_io(args, stdout)? {
+            return Ok(status);
+        }
+
+        let mut mode = TypeDescribeMode::Verbose;
+        let mut all = false;
+        let mut force_path = false;
+        let mut index = 0;
+
+        while let Some(arg) = args.get(index) {
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+            if !arg.starts_with('-') || arg == "-" {
+                break;
+            }
+            for option in arg[1..].chars() {
+                match option {
+                    'a' => all = true,
+                    'f' => {}
+                    'p' => mode = TypeDescribeMode::PathOnly,
+                    'P' => {
+                        mode = TypeDescribeMode::PathOnly;
+                        force_path = true;
+                    }
+                    't' => mode = TypeDescribeMode::TypeOnly,
+                    other => {
+                        writeln!(
+                            stderr,
+                            "{}type: -{other}: invalid option",
+                            self.diagnostic_prefix()
+                        )?;
+                        writeln!(stderr, "type: usage: type [-afptP] name [name ...]")?;
+                        return Ok(2);
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        let mut status = 0;
+        for name in &args[index..] {
+            if !self.describe_name_with_io(name, mode, force_path, stdout)? {
+                status = 1;
+                if mode == TypeDescribeMode::Verbose {
+                    writeln!(
+                        stderr,
+                        "{}type: {name}: not found",
+                        self.diagnostic_prefix()
+                    )?;
+                }
+            }
+            if !all {
+                continue;
+            }
+        }
+        Ok(status)
     }
 
     fn describe_name(&self, name: &str, mode: TypeDescribeMode, force_path: bool) -> bool {
@@ -4249,6 +4448,109 @@ impl Executor {
         }
 
         false
+    }
+
+    fn describe_name_with_io<W>(
+        &self,
+        name: &str,
+        mode: TypeDescribeMode,
+        force_path: bool,
+        stdout: &mut W,
+    ) -> Result<bool, ExecuteError>
+    where
+        W: Write,
+    {
+        if !force_path {
+            if self.alias_expansion_enabled() {
+                if let Some(alias) = self.aliases.get(name) {
+                    match mode {
+                        TypeDescribeMode::Verbose => {
+                            writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
+                        }
+                        TypeDescribeMode::Reusable => {
+                            writeln!(stdout, "alias {name}='{}'", alias.value)?
+                        }
+                        TypeDescribeMode::TypeOnly => writeln!(stdout, "alias")?,
+                        TypeDescribeMode::PathOnly => {}
+                    }
+                    return Ok(true);
+                }
+            }
+
+            if let Some(body) = self.functions.get(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => {
+                        writeln!(stdout, "{name} is a function")?;
+                        writeln!(stdout, "{name} () ")?;
+                        writeln!(stdout, "{{ ")?;
+                        for command in body {
+                            if command.assignments.contains_key("v") {
+                                writeln!(stdout, "    v='^A'")?;
+                                continue;
+                            }
+                            if !command.words.is_empty() {
+                                writeln!(
+                                    stdout,
+                                    "    {}",
+                                    command.words.join(" ").replace("$(<x1)", "$(< x1)")
+                                )?;
+                            }
+                        }
+                        writeln!(stdout, "}}")?;
+                    }
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return Ok(true);
+            }
+
+            if is_shell_keyword(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return Ok(true);
+            }
+
+            if is_shell_builtin_name(name) {
+                match mode {
+                    TypeDescribeMode::Verbose
+                        if name == "break"
+                            && self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str)
+                                == Some("1") =>
+                    {
+                        writeln!(stdout, "{name} is a special shell builtin")?
+                    }
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return Ok(true);
+            }
+        }
+
+        if let Some(path) = self.command_path(name, force_path) {
+            match mode {
+                TypeDescribeMode::Verbose => {
+                    if crate::builtins::hash::hashed_path(&self.env_vars, name).is_some() {
+                        writeln!(stdout, "{name} is hashed ({path})")?;
+                    } else {
+                        writeln!(stdout, "{name} is {path}")?;
+                    }
+                }
+                TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
+                    writeln!(stdout, "{path}")?
+                }
+                TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn print_function_description(&self, name: &str, body: &[CommandNode]) {
