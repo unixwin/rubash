@@ -3829,7 +3829,7 @@ impl Executor {
                 Ok(())
             }
             "echo" => {
-                crate::builtins::echo::execute(&cmd.words[1..])?;
+                self.execute_echo(cmd)?;
                 self.exit_code = 0;
                 Ok(())
             }
@@ -3862,17 +3862,15 @@ impl Executor {
                 }
             },
             "printf" => {
-                self.exit_code =
-                    crate::builtins::printf::execute(&cmd.words[1..], &mut self.env_vars)?;
+                self.exit_code = self.execute_printf(cmd)?;
                 Ok(())
             }
             "hash" => {
-                self.exit_code =
-                    crate::builtins::hash::execute(&cmd.words[1..], &mut self.env_vars)?;
+                self.exit_code = self.execute_hash(cmd)?;
                 Ok(())
             }
             "help" => {
-                self.exit_code = crate::builtins::help::execute(&cmd.words[1..])?;
+                self.exit_code = self.execute_help(cmd)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&cmd.words[1..]),
