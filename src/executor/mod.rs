@@ -1727,17 +1727,7 @@ impl Executor {
                         crate::builtins::exec::execute(&cmd.words[1..], &self.env_vars)?;
                     Ok(())
                 }
-                "return" => Err(ExecuteError::Return(
-                    cmd.words
-                        .get(1)
-                        .map(|status| {
-                            status
-                                .parse::<i128>()
-                                .map(crate::builtins::exit::normalize_status)
-                                .unwrap_or(2)
-                        })
-                        .unwrap_or(self.exit_code),
-                )),
+                "return" => self.execute_return(&cmd.words[1..]),
                 "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
                 "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
                 "pwd" => {
@@ -4484,6 +4474,36 @@ impl Executor {
                 Ok(())
             }
         }
+    }
+
+    fn execute_return(&mut self, args: &[String]) -> Result<(), ExecuteError> {
+        let status = if let Some(value) = args.first() {
+            match value.parse::<i128>() {
+                Ok(value) => crate::builtins::exit::normalize_status(value),
+                Err(_) => {
+                    eprintln!(
+                        "{}return: {value}: numeric argument required",
+                        self.diagnostic_prefix()
+                    );
+                    2
+                }
+            }
+        } else {
+            self.exit_code
+        };
+
+        let in_function = self.env_vars.contains_key("__RUBASH_CURRENT_FUNCTION");
+        let in_source = self.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
+        if in_function || in_source {
+            return Err(ExecuteError::Return(status));
+        }
+
+        eprintln!(
+            "{}return: can only `return' from a function or sourced script",
+            self.diagnostic_prefix()
+        );
+        self.exit_code = 2;
+        Ok(())
     }
 
     fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
@@ -7416,6 +7436,11 @@ impl Executor {
     pub fn set_env(&mut self, name: &str, value: &str) {
         self.env_vars.insert(name.to_string(), value.to_string());
         env::set_var(name, value);
+    }
+
+    pub(crate) fn remove_env(&mut self, name: &str) {
+        self.env_vars.remove(name);
+        env::remove_var(name);
     }
 
     pub fn get_env(&self, name: &str) -> Option<&str> {
