@@ -5131,6 +5131,15 @@ impl Executor {
                     })
                     .unwrap_or_else(|| "0".to_string());
             }
+            if let Some((var_name, offset, length)) = parse_parameter_substring(name) {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| parameter_substring(value, offset, length))
+                        .unwrap_or_default();
+                }
+            }
             if let Some((var_name, word)) = name.split_once(":=") {
                 if self
                     .env_vars
@@ -7067,6 +7076,35 @@ fn remove_matching_suffix(value: &str, pattern: &str, length: MatchLength) -> St
     }
 
     value.to_string()
+}
+
+fn parse_parameter_substring(name: &str) -> Option<(&str, usize, Option<usize>)> {
+    let (var_name, rest) = name.split_once(':')?;
+    if var_name.is_empty() || matches!(rest.chars().next(), Some('-' | '=' | '+' | '?')) {
+        return None;
+    }
+
+    let (offset, length) = rest.split_once(':').unwrap_or((rest, ""));
+    if offset.is_empty() || !offset.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    if !length.is_empty() && !length.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+
+    Some((
+        var_name,
+        offset.parse().ok()?,
+        (!length.is_empty()).then(|| length.parse().ok()).flatten(),
+    ))
+}
+
+fn parameter_substring(value: &str, offset: usize, length: Option<usize>) -> String {
+    value
+        .chars()
+        .skip(offset)
+        .take(length.unwrap_or(usize::MAX))
+        .collect()
 }
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {

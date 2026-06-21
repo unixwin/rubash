@@ -1041,6 +1041,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_parameter_substring_uses_offset_and_length() {
+        let output_path = "target/rubash-param-substring-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcdef; echo ${{v:2:3}} ${{v:3}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "cde def\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_substring_slices_characters() {
+        let output_path = "target/rubash-param-substring-utf8-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=aßcd; echo ${{v:1:2}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ßc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);
