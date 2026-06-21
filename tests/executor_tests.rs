@@ -585,6 +585,60 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_assoc_array_subscript_expands_element() {
+        let output_path = "target/rubash-assoc-subscript-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("declare -A assoc; assoc[one]=alpha; assoc[two]=beta; echo ${{assoc[one]}} ${{assoc[two]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_assoc_array_subscript_length_expands() {
+        let output_path = "target/rubash-assoc-subscript-length-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("declare -A assoc; assoc[one]=alpha; echo ${{#assoc[one]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "5\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_assoc_array_indices_expand_keys() {
+        let output_path = "target/rubash-assoc-indices-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("declare -A assoc; assoc[one]=alpha; assoc[two]=beta; echo ${{!assoc[@]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "one two\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
