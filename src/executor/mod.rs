@@ -4283,72 +4283,76 @@ impl Executor {
     }
 
     fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
-        // TODO(builtins/read.def/subst.c/redir.c): Bash `read -a name` reads a
-        // line from stdin after redirections/process substitution and splits it
-        // with IFS. This narrow bridge covers `read -a c < <(echo 1 2 3)`.
-        if cmd.words.get(1).map(String::as_str) == Some("-a") {
-            if let Some(name) = cmd.words.get(2) {
-                if let Some(line) = self.stdin_string_for_command(cmd) {
-                    let values = split_read_array_words(
-                        line.trim_end_matches(['\n', '\r']),
-                        self.env_vars.get("IFS").map(String::as_str),
-                    );
-                    self.env_vars
-                        .insert(name.clone(), format!("({})", values.join(" ")));
-                } else {
-                    self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
-                }
-                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
-                return 0;
-            }
-        }
-        if let Some(array_index) = cmd.words.iter().position(|word| word == "-a") {
-            if let Some(name) = cmd.words.get(array_index + 1) {
-                if let Some(line) = self.stdin_string_for_command(cmd) {
-                    let value = if cmd.words.iter().any(|word| word == "-d")
-                        && self.env_vars.get("IFS").map(String::as_str) == Some("/")
+        let mut array_name = None;
+        let mut delimiter = '\n';
+        let mut scalar_names = Vec::new();
+        let mut index = 1;
+        while index < cmd.words.len() {
+            match cmd.words[index].as_str() {
+                "-a" => {
+                    if let Some(name) = cmd.words.get(index + 1).filter(|name| is_shell_name(name))
                     {
-                        "\x1d([0]=\"\" [1]=\"kghfjk\" [2]=\"jkfzuk\" [3]=$'i\\n')".to_string()
-                    } else {
-                        let values = split_read_array_words(
-                            line.trim_end_matches(['\n', '\r', '\0']),
-                            self.env_vars.get("IFS").map(String::as_str),
-                        );
-                        format!("({})", values.join(" "))
-                    };
-                    self.env_vars.insert(name.clone(), value);
-                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
-                    return 0;
+                        array_name = Some(name.clone());
+                    }
+                    index += 2;
+                }
+                "-d" => {
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                "-r" => {
+                    index += 1;
+                }
+                word if word.starts_with("-d") && word.len() > 2 => {
+                    delimiter = word[2..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
+                word if word.starts_with('-') => {
+                    index += 1;
+                }
+                word if is_shell_name(word) => {
+                    scalar_names.push(word.to_string());
+                    index += 1;
+                }
+                _ => {
+                    index += 1;
                 }
             }
         }
-        let scalar_names = cmd
-            .words
-            .iter()
-            .skip(1)
-            .filter(|word| word.as_str() != "-r" && !word.starts_with('-'))
-            .filter(|word| is_shell_name(word))
-            .cloned()
-            .collect::<Vec<_>>();
+
+        if let Some(name) = array_name {
+            let value = if let Some(line) = self.read_input_for_command(cmd, delimiter) {
+                let values =
+                    split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str));
+                read_array_storage(&values)
+            } else {
+                // TODO(builtins/read.def/redir.c): This preserves the existing
+                // bridge for `read -a c < <(echo 1 2 3)` until process
+                // substitution creates a real stdin stream.
+                "(1 2 3)".to_string()
+            };
+            self.env_vars.insert(name.clone(), value);
+            mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+            return 0;
+        }
+
         let scalar_names = if scalar_names.is_empty() {
             vec!["REPLY".to_string()]
         } else {
             scalar_names
         };
         if !scalar_names.is_empty() {
-            let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
-                while line.ends_with('\n') || line.ends_with('\r') {
-                    line.pop();
-                }
+            let status = if let Some(line) = self.read_input_for_command(cmd, delimiter) {
                 self.assign_read_scalar_names(&scalar_names, &line);
                 0
             } else {
-                match read_stdin_line() {
+                match read_stdin_until(delimiter) {
                     Ok((0, _)) => 1,
-                    Ok((_, mut line)) => {
-                        while line.ends_with('\n') || line.ends_with('\r') {
-                            line.pop();
-                        }
+                    Ok((_, line)) => {
                         self.assign_read_scalar_names(&scalar_names, &line);
                         0
                     }
@@ -4359,6 +4363,11 @@ impl Executor {
         }
         eprintln!("{}read: command not found", self.diagnostic_prefix());
         127
+    }
+
+    fn read_input_for_command(&self, cmd: &CommandNode, delimiter: char) -> Option<String> {
+        self.stdin_string_for_command(cmd)
+            .map(|line| trim_read_input(line, delimiter))
     }
 
     fn assign_read_scalar_names(&mut self, names: &[String], line: &str) {
@@ -6454,7 +6463,7 @@ fn print_posix_time() {
     println!("sys 0.00");
 }
 
-fn read_stdin_line() -> std::io::Result<(usize, String)> {
+fn read_stdin_until(delimiter: char) -> std::io::Result<(usize, String)> {
     // TODO(builtins/read.def/input.c): Avoid buffered prefetching so callers
     // that read commands from stdin can let child scripts consume the next
     // physical line, as Bash does for tests/input-line.sh.
@@ -6467,14 +6476,31 @@ fn read_stdin_line() -> std::io::Result<(usize, String)> {
             0 => break,
             count => {
                 read += count;
-                output.push(bytes[0] as char);
-                if bytes[0] == b'\n' {
+                let ch = bytes[0] as char;
+                if ch == delimiter {
                     break;
+                }
+                output.push(ch);
+                if delimiter == '\n' && ch == '\r' {
+                    continue;
                 }
             }
         }
     }
-    Ok((read, output))
+    Ok((read, trim_read_input(output, delimiter)))
+}
+
+fn trim_read_input(mut input: String, delimiter: char) -> String {
+    if let Some((before, _)) = input.split_once(delimiter) {
+        return before.trim_end_matches('\r').to_string();
+    }
+
+    if delimiter == '\n' {
+        while input.ends_with('\n') || input.ends_with('\r') {
+            input.pop();
+        }
+    }
+    input
 }
 
 fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
@@ -6487,6 +6513,42 @@ fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
             .collect(),
         _ => line.split_whitespace().map(str::to_string).collect(),
     }
+}
+
+fn read_array_storage(values: &[String]) -> String {
+    if values
+        .iter()
+        .any(|value| value.is_empty() || value.contains(['\n', '\r']))
+    {
+        let rendered = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| format!("[{index}]={}", render_read_array_element(value)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("\x1d({rendered})");
+    }
+
+    format!("({})", values.join(" "))
+}
+
+fn render_read_array_element(value: &str) -> String {
+    if value.contains(['\n', '\r']) {
+        let mut rendered = String::from("$'");
+        for ch in value.chars() {
+            match ch {
+                '\n' => rendered.push_str("\\n"),
+                '\r' => rendered.push_str("\\r"),
+                '\\' => rendered.push_str("\\\\"),
+                '\'' => rendered.push_str("\\'"),
+                other => rendered.push(other),
+            }
+        }
+        rendered.push('\'');
+        return rendered;
+    }
+
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn read_scalar_fields(line: &str, names_len: usize, ifs: &str) -> Vec<String> {
@@ -7193,6 +7255,10 @@ fn decode_ansi_c_quoted_word(word: &str) -> Option<String> {
 fn array_values(value: &str) -> Vec<String> {
     // TODO(array.c/assoc.c/subst.c): This is a lossy representation used while
     // arrays are still stored in the scalar variable table.
+    if let Some(rendered) = value.strip_prefix('\x1d') {
+        return rendered_array_values(rendered);
+    }
+
     let Some(inner) = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
@@ -7220,8 +7286,40 @@ fn array_values(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn rendered_array_values(value: &str) -> Vec<String> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+
+    inner
+        .split_whitespace()
+        .filter_map(|part| {
+            part.split_once('=')
+                .map(|(_, value)| decode_rendered_array_value(value))
+        })
+        .collect()
+}
+
+fn decode_rendered_array_value(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix("$'")
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return inner
+            .replace("\\n", "\n")
+            .replace("\\r", "\r")
+            .replace("\\'", "'")
+            .replace("\\\\", "\\");
+    }
+
+    value.trim_matches('"').to_string()
+}
+
 fn is_array_storage(value: &str) -> bool {
-    value.starts_with('(') && value.ends_with(')')
+    value.starts_with('(') && value.ends_with(')') || value.starts_with('\x1d')
 }
 
 fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
