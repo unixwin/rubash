@@ -1777,6 +1777,61 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_array_parameter_case_mod_expands_elements() {
+        let output_path = "target/rubash-array-case-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(alpha beta); echo ${{arr[@]^^}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ALPHA BETA\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_array_parameter_case_mod_uses_pattern() {
+        let output_path = "target/rubash-array-case-pattern-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(ALPHA BETA); echo ${{arr[*],,[PT]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ALpHA BEtA\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_positional_parameter_case_mod_expands_elements() {
+        let output_path = "target/rubash-positional-case-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("function p {{ echo ${{@^^}} / ${{1,,}} > {output_path}; }}; p alpha BETA");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "ALPHA BETA / alpha\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_indirect_parameter_expands_named_variable() {
         let output_path = "target/rubash-param-indirect-output.txt";
         let _ = fs::remove_file(output_path);
