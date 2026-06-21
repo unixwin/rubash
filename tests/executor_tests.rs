@@ -1145,6 +1145,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_positional_parameter_substring_uses_offset_and_length() {
+        let output_path = "target/rubash-positional-substring-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function p {{ echo ${{@:2:2}} / ${{*:3}} > {output_path}; }}; p alpha beta gamma delta"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "beta gamma / gamma delta\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_positional_parameter_substring_supports_negative_offset() {
+        let output_path = "target/rubash-positional-substring-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("function p {{ echo ${{@: -2:1}} > {output_path}; }}; p alpha beta gamma");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_replacement_replaces_first_and_all_matches() {
         let output_path = "target/rubash-param-replace-output.txt";
         let _ = fs::remove_file(output_path);
