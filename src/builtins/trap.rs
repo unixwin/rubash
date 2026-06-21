@@ -72,6 +72,14 @@ pub fn list_first_signal_for_sed() -> &'static str {
     "SIGHUP"
 }
 
+pub(crate) fn take_exit_trap(env_vars: &mut HashMap<String, String>) -> Option<String> {
+    let action = env_vars.remove(&trap_key("EXIT"));
+    let mut signals = trap_list(env_vars);
+    signals.remove("EXIT");
+    store_trap_list(env_vars, signals);
+    action
+}
+
 fn normalized_signals<E>(args: &[String], stderr: &mut E) -> io::Result<Vec<String>>
 where
     E: Write,

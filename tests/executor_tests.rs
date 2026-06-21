@@ -1568,6 +1568,36 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exit_runs_exit_trap_and_preserves_status() {
+        let output_path = "target/rubash-exit-trap-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo bye > {output_path}' EXIT; exit 7");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(7))));
+        assert_eq!(executor.last_exit_code(), 7);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "bye\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_exit_trap_exit_overrides_status() {
+        let input = "trap 'exit 3' EXIT; exit 7";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(3))));
+        assert_eq!(executor.last_exit_code(), 3);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
