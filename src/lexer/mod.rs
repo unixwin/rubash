@@ -624,9 +624,34 @@ impl<'a> Lexer<'a> {
         }
     }
     fn skip_brace(&mut self) {
+        let mut depth = 1usize;
         while let Some(c) = self.advance() {
-            if c == '}' {
-                break;
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                '$' => match self.peek() {
+                    Some('{') => {
+                        self.advance();
+                        self.skip_braced();
+                    }
+                    Some('(') => {
+                        self.advance();
+                        self.skip_cmd_subst();
+                    }
+                    _ => {}
+                },
+                '`' => self.skip_backtick(),
+                '\'' => self.skip_single(),
+                '"' => self.skip_double(),
+                '\\' => {
+                    self.advance();
+                }
+                _ => {}
             }
         }
     }
