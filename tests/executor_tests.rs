@@ -487,6 +487,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_set_operands_replace_positional_params_after_expansion() {
+        let output_path = "target/rubash-set-operands-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("name=beta; set -e alpha $name; echo $# $1 $2 $- > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("2 alpha beta "));
+        assert!(output.trim_end().ends_with('e'));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_braced_positional_parameters_expand() {
         let output_path = "target/rubash-braced-positional-output.txt";
         let _ = fs::remove_file(output_path);
