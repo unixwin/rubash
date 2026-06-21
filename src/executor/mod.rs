@@ -4895,6 +4895,10 @@ impl Executor {
             return self.positional_params.join(" ");
         }
 
+        if word == "$#" {
+            return self.positional_params.len().to_string();
+        }
+
         if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
             return value;
         }
@@ -5445,6 +5449,10 @@ impl Executor {
                 Some('@') => {
                     chars.next();
                     output.push_str(&self.positional_params.join(" "));
+                }
+                Some('#') => {
+                    chars.next();
+                    output.push_str(&self.positional_params.len().to_string());
                 }
                 Some('{') => {
                     chars.next();
