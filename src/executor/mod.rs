@@ -4373,15 +4373,18 @@ impl Executor {
     }
 
     fn execute_shift(&mut self, args: &[String]) -> Result<(), ExecuteError> {
-        // TODO(builtins/shift.def): Bash validates the shift amount against
-        // `$#` and supports full diagnostic behavior. This covers builtins10
-        // help and the silent `shift 0` in builtins.tests.
+        // TODO(builtins/shift.def): Bash also prints diagnostics for invalid
+        // counts and observes `shift_verbose`. Keep the executor-side `$#`
+        // validation here while positional parameters live on Executor.
         match crate::builtins::shift::execute(args)? {
             crate::builtins::shift::ShiftAction::Complete(status) => {
                 self.exit_code = status;
             }
             crate::builtins::shift::ShiftAction::Shift(amount) => {
-                let amount = amount.min(self.positional_params.len());
+                if amount > self.positional_params.len() {
+                    self.exit_code = 1;
+                    return Ok(());
+                }
                 self.positional_params.drain(0..amount);
                 self.exit_code = 0;
             }
