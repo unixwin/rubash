@@ -877,6 +877,42 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_positional_parameter_lengths_expand() {
+        let output_path = "target/rubash-positional-length-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function p {{ echo ${{#1}} ${{#2}} ${{#@}} ${{#*}} > {output_path}; }}; p alpha beta"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "5 4 2 2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_special_parameter_length_expands() {
+        let output_path = "target/rubash-special-length-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("false; echo ${{#?}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_colon_plus_requires_non_empty_value() {
         let output_path = "target/rubash-param-colon-plus-output.txt";
         let _ = fs::remove_file(output_path);

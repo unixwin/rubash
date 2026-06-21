@@ -5152,6 +5152,16 @@ impl Executor {
                     .to_string();
             }
             if let Some(var_name) = name.strip_prefix('#') {
+                if matches!(var_name, "@" | "*") {
+                    return self.positional_params.len().to_string();
+                }
+                if is_special_parameter_name(var_name) || var_name.parse::<usize>().is_ok() {
+                    return self
+                        .expand_parameter_named_value(var_name)
+                        .chars()
+                        .count()
+                        .to_string();
+                }
                 return self
                     .env_vars
                     .get(var_name)
@@ -6661,6 +6671,10 @@ fn is_shell_name_start(ch: char) -> bool {
 
 fn is_shell_name_char(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn is_special_parameter_name(name: &str) -> bool {
+    matches!(name, "#" | "?" | "$" | "-" | "0")
 }
 
 fn is_reserved_word(word: &str) -> bool {
