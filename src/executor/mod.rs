@@ -929,6 +929,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_simple_pipeline(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if command.subshell && subshell_env.is_none() {
                 subshell_env = Some(self.env_vars.clone());
             }
@@ -1053,6 +1058,129 @@ impl Executor {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn execute_simple_pipeline(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(first) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        if first.pipe.is_none() {
+            return Ok(None);
+        }
+
+        let mut commands = vec![first];
+        let mut end = index;
+        while ast
+            .commands
+            .get(end)
+            .is_some_and(|command| command.pipe.is_some())
+        {
+            end += 1;
+            let Some(command) = ast.commands.get(end) else {
+                return Ok(None);
+            };
+            commands.push(command);
+        }
+
+        let mut input = String::new();
+        let mut status = 0;
+        for command in &commands {
+            let Some((next_input, next_status)) = self.execute_pipeline_stage(command, &input)?
+            else {
+                return Ok(None);
+            };
+            input = next_input;
+            status = next_status;
+        }
+
+        let final_command = commands.last().expect("pipeline has at least one stage");
+        self.write_pipeline_output(final_command, &input)?;
+        self.exit_code = if first.inverted {
+            invert_exit_status(status)
+        } else {
+            status
+        };
+        Ok(Some(end + 1))
+    }
+
+    fn execute_pipeline_stage(
+        &self,
+        command: &CommandNode,
+        input: &str,
+    ) -> Result<Option<(String, i32)>, ExecuteError> {
+        let Some(name) = command.words.first().map(String::as_str) else {
+            return Ok(Some((String::new(), 0)));
+        };
+
+        match name {
+            "echo" => {
+                let mut args: Vec<String> = command.words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect();
+                let newline = !args.first().is_some_and(|arg| arg == "-n");
+                if !newline {
+                    args.remove(0);
+                }
+                let mut output = args.join(" ");
+                if newline {
+                    output.push('\n');
+                }
+                Ok(Some((output, 0)))
+            }
+            "cat" => {
+                if let Some(input) = self.stdin_string_for_command(command) {
+                    Ok(Some((input, 0)))
+                } else {
+                    Ok(Some((input.to_string(), 0)))
+                }
+            }
+            "grep" => {
+                let Some(pattern) = command.words.get(1).map(|word| self.expand_word(word)) else {
+                    return Ok(Some((String::new(), 2)));
+                };
+                let mut matched = false;
+                let mut output = String::new();
+                for line in input.split_inclusive('\n') {
+                    let comparable = line.strip_suffix('\n').unwrap_or(line);
+                    if comparable.contains(&pattern) {
+                        matched = true;
+                        output.push_str(line);
+                        if !line.ends_with('\n') {
+                            output.push('\n');
+                        }
+                    }
+                }
+                Ok(Some((output, i32::from(!matched))))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn write_pipeline_output(
+        &self,
+        command: &CommandNode,
+        output: &str,
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &command.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(output.as_bytes())?;
+        } else if let Some(redirect) = &command.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(output.as_bytes())?;
+        } else {
+            print!("{output}");
+        }
+        Ok(())
     }
 
     fn skip_and_or_rhs(&self, ast: &Ast, index: usize) -> Option<usize> {
