@@ -223,6 +223,41 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_printf_percent_n_assigns_output_count() {
+        let output_path = "target/rubash-printf-percent-n-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("printf 'abc%n:%s' COUNT done > {output_path}; echo $COUNT >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "abc:done3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_printf_percent_n_with_v_assignment() {
+        let output_path = "target/rubash-printf-percent-n-v-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf -v OUT 'ab%ncd' COUNT; echo $OUT:$COUNT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "abcd:2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = "target/rubash-pipeline-external-output.txt";
         #[cfg(windows)]
