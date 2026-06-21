@@ -5186,6 +5186,17 @@ impl Executor {
                     .unwrap_or_default();
             }
             if let Some(indirect_name) = name.strip_prefix('!') {
+                if let Some(array_name) = indirect_name
+                    .strip_suffix("[@]")
+                    .or_else(|| indirect_name.strip_suffix("[*]"))
+                {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| array_indices(value).join(" "))
+                        .unwrap_or_default();
+                }
+
                 if let Some(prefix) = indirect_name
                     .strip_suffix('*')
                     .or_else(|| indirect_name.strip_suffix('@'))
@@ -8059,6 +8070,13 @@ fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
     }
 
     array_values(value).into_iter().enumerate().collect()
+}
+
+fn array_indices(value: &str) -> Vec<String> {
+    indexed_array_entries(value)
+        .keys()
+        .map(usize::to_string)
+        .collect()
 }
 
 fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
