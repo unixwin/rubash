@@ -1510,6 +1510,64 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_trap_p_redirects_saved_exit_trap() {
+        let output_path = "target/rubash-trap-p-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo bye' EXIT; trap -p EXIT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trap -- 'echo bye' EXIT\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_trap_reset_removes_saved_trap() {
+        let output_path = "target/rubash-trap-reset-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo bye' EXIT; trap - EXIT; trap -p EXIT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_trap_ignore_appends_saved_signal_trap() {
+        let output_path = "target/rubash-trap-ignore-append-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("trap '' INT; trap -p INT >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "before\ntrap -- '' SIGINT\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
