@@ -4960,6 +4960,27 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            match name {
+                "#" => return self.positional_params.len().to_string(),
+                "@" | "*" => return self.positional_params.join(" "),
+                "?" => return self.exit_code.to_string(),
+                "$" => return std::process::id().to_string(),
+                "0" => {
+                    return self
+                        .env_vars
+                        .get("__RUBASH_SCRIPT_NAME")
+                        .cloned()
+                        .unwrap_or_default();
+                }
+                _ => {}
+            }
+            if let Ok(index) = name.parse::<usize>() {
+                return self
+                    .positional_params
+                    .get(index.saturating_sub(1))
+                    .cloned()
+                    .unwrap_or_default();
+            }
             if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
                 return crate::builtins::pushd::stack_words(&self.env_vars);
             }
