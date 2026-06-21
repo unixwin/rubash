@@ -368,6 +368,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_without_name_assigns_reply() {
+        let output_path = "target/rubash-read-reply-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("unset REPLY; read <<< hello; echo $REPLY > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_while_false_skips_body() {
         let output_path = "target/rubash-while-false-output.txt";
         let _ = fs::remove_file(output_path);
