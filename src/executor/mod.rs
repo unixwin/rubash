@@ -1864,25 +1864,7 @@ impl Executor {
                         self.exit_code = 0;
                         return Ok(());
                     }
-                    if cmd.words.get(1).map(String::as_str) == Some("-e") {
-                        self.env_vars
-                            .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if cmd.words.get(1).map(String::as_str) == Some("+e") {
-                        self.env_vars.remove("__RUBASH_ERREXIT");
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if cmd.words.get(1).map(String::as_str) == Some("-x") {
-                        self.env_vars
-                            .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if cmd.words.get(1).map(String::as_str) == Some("+x") {
-                        self.env_vars.remove("__RUBASH_XTRACE");
+                    if self.apply_simple_set_flags(&cmd.words[1..]) {
                         self.exit_code = 0;
                         return Ok(());
                     }
@@ -4917,6 +4899,10 @@ impl Executor {
             return self.positional_params.len().to_string();
         }
 
+        if word == "$-" {
+            return self.shell_option_flags();
+        }
+
         if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
             return value;
         }
@@ -4970,6 +4956,7 @@ impl Executor {
                 "@" | "*" => return self.positional_params.join(" "),
                 "?" => return self.exit_code.to_string(),
                 "$" => return std::process::id().to_string(),
+                "-" => return self.shell_option_flags(),
                 "0" => {
                     return self
                         .env_vars
@@ -5248,6 +5235,60 @@ impl Executor {
 
     fn home_value(&self) -> String {
         tilde_expand::home_value(&self.env_vars)
+    }
+
+    fn shell_option_flags(&self) -> String {
+        let mut flags = String::new();
+        if self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+        {
+            flags.push('e');
+        }
+        if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.env_vars, "xtrace")
+        {
+            flags.push('x');
+        }
+        flags
+    }
+
+    fn apply_simple_set_flags(&mut self, args: &[String]) -> bool {
+        if args.is_empty() {
+            return false;
+        }
+
+        for arg in args {
+            let Some(prefix) = arg.chars().next().filter(|ch| matches!(ch, '-' | '+')) else {
+                return false;
+            };
+            let flags = &arg[1..];
+            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x')) {
+                return false;
+            }
+
+            let enabled = prefix == '-';
+            for flag in flags.chars() {
+                match (flag, enabled) {
+                    ('e', true) => {
+                        self.env_vars
+                            .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
+                    }
+                    ('e', false) => {
+                        self.env_vars.remove("__RUBASH_ERREXIT");
+                    }
+                    ('x', true) => {
+                        self.env_vars
+                            .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
+                    }
+                    ('x', false) => {
+                        self.env_vars.remove("__RUBASH_XTRACE");
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        true
     }
 
     fn expand_case_word(&self, word: &str) -> String {
