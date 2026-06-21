@@ -8,6 +8,7 @@ use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
 use crate::parser::{
     Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand, FunctionCommand,
+    Redirect,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -1707,17 +1708,7 @@ impl Executor {
                     self.exit_code = 0;
                     Ok(())
                 }
-                "eval" => match crate::builtins::eval::execute(&cmd.words[1..])? {
-                    crate::builtins::eval::EvalAction::Complete(status) => {
-                        self.exit_code = status;
-                        Ok(())
-                    }
-                    crate::builtins::eval::EvalAction::Execute(source) => {
-                        let tokens = crate::lexer::tokenize(&source);
-                        let ast = crate::parser::parse(&tokens);
-                        self.execute_ast(&ast)
-                    }
-                },
+                "eval" => self.execute_eval(cmd),
                 "enable" => {
                     self.exit_code = self.execute_enable(cmd)?;
                     Ok(())
@@ -2001,6 +1992,47 @@ impl Executor {
             }
             other => other,
         }
+    }
+
+    fn execute_eval(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        match crate::builtins::eval::execute(&cmd.words[1..])? {
+            crate::builtins::eval::EvalAction::Complete(status) => {
+                self.exit_code = status;
+                Ok(())
+            }
+            crate::builtins::eval::EvalAction::Execute(source) => {
+                let tokens = crate::lexer::tokenize(&source);
+                let mut ast = crate::parser::parse(&tokens);
+                self.apply_eval_stdout_redirect(cmd, &mut ast)?;
+                self.execute_ast(&ast)
+            }
+        }
+    }
+
+    fn apply_eval_stdout_redirect(
+        &mut self,
+        cmd: &CommandNode,
+        ast: &mut Ast,
+    ) -> Result<(), ExecuteError> {
+        let (redirect, truncate_first) = if let Some(redirect) = &cmd.redirect_out {
+            (redirect, true)
+        } else if let Some(redirect) = &cmd.append {
+            (redirect, false)
+        } else {
+            return Ok(());
+        };
+
+        let target = self.expand_word(&redirect.target);
+        if truncate_first {
+            File::create(shell_path_to_windows(&target, &self.env_vars))?;
+        }
+        let append_redirect = Redirect {
+            fd: redirect.fd,
+            target,
+            append: true,
+        };
+        apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
+        Ok(())
     }
 
     fn execute_declare_functions(&self, args: &[String]) -> i32 {
@@ -7691,6 +7723,22 @@ fn loop_control_level(args: &[String]) -> Result<usize, LoopControlError> {
 
 fn invert_exit_status(status: i32) -> i32 {
     i32::from(status == 0)
+}
+
+fn apply_stdout_append_redirect(commands: &mut [CommandNode], redirect: &Redirect) {
+    for command in commands {
+        if command.redirect_out.is_none() && command.append.is_none() {
+            command.append = Some(redirect.clone());
+        }
+        if let Some(for_command) = &mut command.for_command {
+            apply_stdout_append_redirect(&mut for_command.body, redirect);
+        }
+        if let Some(case_command) = &mut command.case_command {
+            for clause in &mut case_command.clauses {
+                apply_stdout_append_redirect(&mut clause.body, redirect);
+            }
+        }
+    }
 }
 
 fn print_posix_time() {
