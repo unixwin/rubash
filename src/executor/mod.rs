@@ -5366,6 +5366,30 @@ impl Executor {
                         .unwrap_or_default();
                 }
             }
+            if let Some((var_name, transform)) = parse_parameter_transform(name) {
+                if matches!(var_name, "@" | "*") {
+                    return self
+                        .positional_params
+                        .iter()
+                        .map(|value| apply_parameter_transform(value, transform))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                }
+                if let Ok(index) = var_name.parse::<usize>() {
+                    return self
+                        .positional_params
+                        .get(index.saturating_sub(1))
+                        .map(|value| apply_parameter_transform(value, transform))
+                        .unwrap_or_default();
+                }
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| apply_parameter_transform(value, transform))
+                        .unwrap_or_default();
+                }
+            }
             if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(name) {
                 if is_shell_name(var_name) {
                     let pattern = self.expand_embedded_parameters(pattern);
@@ -7396,6 +7420,51 @@ fn find_parameter_pattern_match(
     }
 
     None
+}
+
+#[derive(Clone, Copy)]
+enum ParameterTransform {
+    Quote,
+    Upper,
+    Lower,
+}
+
+fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
+    let (var_name, operation) = name.rsplit_once('@')?;
+    let transform = match operation {
+        "Q" => ParameterTransform::Quote,
+        "U" => ParameterTransform::Upper,
+        "L" => ParameterTransform::Lower,
+        _ => return None,
+    };
+    Some((var_name, transform))
+}
+
+fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> String {
+    match transform {
+        ParameterTransform::Quote => shell_quote_parameter_value(value),
+        ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
+        ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
+    }
+}
+
+fn shell_quote_parameter_value(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    if value == "~" {
+        return "\\~".to_string();
+    }
+
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 #[derive(Clone, Copy)]
