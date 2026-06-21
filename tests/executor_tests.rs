@@ -290,6 +290,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_r_reads_here_string_without_backslash_escape() {
+        let output_path = "target/rubash-read-r-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("read -r line <<< 'alpha\\beta'; echo $line > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\\beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_while_false_skips_body() {
         let output_path = "target/rubash-while-false-output.txt";
         let _ = fs::remove_file(output_path);
