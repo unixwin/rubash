@@ -1675,7 +1675,7 @@ impl Executor {
         let result = if let Some(word) = cmd.words.first() {
             match word.as_str() {
                 "exit" => {
-                    if let Some(status) = cmd.words.get(1) {
+                    if let Some(status) = cmd.words.get(1).filter(|status| *status != "--help") {
                         if status.parse::<i128>().is_err() {
                             // TODO(builtins/exit.def/execute_cmd.c): Bash's
                             // non-interactive exit error handling depends on
@@ -1691,7 +1691,7 @@ impl Executor {
                             return Ok(());
                         }
                     }
-                    match crate::builtins::exit::execute(&cmd.words[1..], self.exit_code)? {
+                    match self.execute_exit(cmd)? {
                         crate::builtins::exit::ExitAction::Exit(code) => {
                             self.exit_code = code;
                             Err(ExecuteError::ExitCode(code))
@@ -4433,6 +4433,41 @@ impl Executor {
         Ok(crate::builtins::printf::execute(
             &cmd.words[1..],
             &mut self.env_vars,
+        )?)
+    }
+
+    fn execute_exit(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<crate::builtins::exit::ExitAction, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::exit::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                self.exit_code,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::exit::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                self.exit_code,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::exit::execute(
+            &cmd.words[1..],
+            self.exit_code,
         )?)
     }
 
