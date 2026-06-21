@@ -5160,6 +5160,16 @@ impl Executor {
                 }
                 return self.expand_parameter_word(word);
             }
+            if let Some((var_name, word)) = name.split_once(":+") {
+                if self
+                    .env_vars
+                    .get(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self.expand_parameter_word(word);
+                }
+                return String::new();
+            }
             if let Some((var_name, word)) = name.split_once('+') {
                 if self.env_vars.contains_key(var_name) {
                     return self.expand_parameter_word(word);
@@ -5297,6 +5307,17 @@ impl Executor {
                 .filter(|value| !value.is_empty())
                 .map(|value| shell_safe_value(value))
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
+        }
+
+        if let Some((var_name, alternate)) = name.split_once(":+") {
+            if self
+                .env_vars
+                .get(var_name)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return self.expand_embedded_parameters(alternate);
+            }
+            return String::new();
         }
 
         if let Some((var_name, alternate)) = name.split_once('+') {
