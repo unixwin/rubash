@@ -46,7 +46,7 @@ pub fn readonly(args: &[String], env_vars: &mut HashMap<String, String>) -> io::
     )
 }
 
-fn export_with_io<'a, I, W, E>(
+pub(crate) fn export_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
@@ -167,7 +167,7 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn readonly_with_io<'a, I, W, E>(
+pub(crate) fn readonly_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
