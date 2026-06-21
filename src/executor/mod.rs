@@ -7177,14 +7177,25 @@ fn remove_matching_suffix(value: &str, pattern: &str, length: MatchLength) -> St
     value.to_string()
 }
 
-fn parse_parameter_substring(name: &str) -> Option<(&str, usize, Option<usize>)> {
+fn parse_parameter_substring(name: &str) -> Option<(&str, isize, Option<usize>)> {
     let (var_name, rest) = name.split_once(':')?;
-    if var_name.is_empty() || matches!(rest.chars().next(), Some('-' | '=' | '+' | '?')) {
+    if var_name.is_empty() || matches!(rest.chars().next(), Some('=' | '+' | '?')) {
+        return None;
+    }
+    if rest.starts_with('-') {
         return None;
     }
 
     let (offset, length) = rest.split_once(':').unwrap_or((rest, ""));
-    if offset.is_empty() || !offset.chars().all(|ch| ch.is_ascii_digit()) {
+    let offset = offset.trim_start();
+    if offset.is_empty() {
+        return None;
+    }
+    if let Some(negative_offset) = offset.strip_prefix('-') {
+        if negative_offset.is_empty() || !negative_offset.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+    } else if !offset.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
     if !length.is_empty() && !length.chars().all(|ch| ch.is_ascii_digit()) {
@@ -7198,10 +7209,17 @@ fn parse_parameter_substring(name: &str) -> Option<(&str, usize, Option<usize>)>
     ))
 }
 
-fn parameter_substring(value: &str, offset: usize, length: Option<usize>) -> String {
+fn parameter_substring(value: &str, offset: isize, length: Option<usize>) -> String {
+    let char_count = value.chars().count();
+    let start = if offset < 0 {
+        char_count.saturating_sub(offset.unsigned_abs())
+    } else {
+        offset as usize
+    };
+
     value
         .chars()
-        .skip(offset)
+        .skip(start)
         .take(length.unwrap_or(usize::MAX))
         .collect()
 }

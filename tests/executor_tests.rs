@@ -1111,6 +1111,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_parameter_substring_supports_negative_offset() {
+        let output_path = "target/rubash-param-substring-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcdef; echo ${{v: -2}} ${{v: -4:2}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ef cd\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_substring_does_not_shadow_colon_dash_default() {
+        let output_path = "target/rubash-param-substring-default-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("unset v; echo ${{v:-fallback}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "fallback\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_replacement_replaces_first_and_all_matches() {
         let output_path = "target/rubash-param-replace-output.txt";
         let _ = fs::remove_file(output_path);
