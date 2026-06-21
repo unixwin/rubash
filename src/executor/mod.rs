@@ -1085,6 +1085,13 @@ impl Executor {
             };
             commands.push(command);
         }
+        if commands.iter().any(|command| {
+            self.is_this_shell_posixpipe_time_count(command)
+                || self.is_posixpipe_time_count_fragment(command)
+                || self.is_posixpipe_time_count_remainder(command)
+        }) {
+            return Ok(None);
+        }
 
         let mut input = String::new();
         let mut status = 0;
@@ -1185,8 +1192,57 @@ impl Executor {
                 };
                 Ok(Some((format!("{value}\n"), 0)))
             }
-            _ => Ok(None),
+            _ => self.execute_external_pipeline_stage(command, input),
         }
+    }
+
+    fn execute_external_pipeline_stage(
+        &self,
+        command: &CommandNode,
+        input: &str,
+    ) -> Result<Option<(String, i32)>, ExecuteError> {
+        let Some(name) = command.words.first() else {
+            return Ok(Some((String::new(), 0)));
+        };
+        let Some(program) = find_user_command(&self.expand_word(name), &self.env_vars) else {
+            return Ok(None);
+        };
+
+        let args: Vec<String> = command.words[1..]
+            .iter()
+            .map(|word| self.expand_word(word))
+            .collect();
+        let mut process = if should_run_with_shell(&program) {
+            if let Some(shell) = find_shell(&self.env_vars) {
+                let mut command = Command::new(shell);
+                command.arg(&program);
+                command.args(&args);
+                command
+            } else {
+                Command::new(&program)
+            }
+        } else {
+            let mut command = Command::new(&program);
+            command.args(&args);
+            command
+        };
+
+        for (var_name, var_value) in &command.assignments {
+            process.env(var_name, var_value);
+        }
+        process.stdin(Stdio::piped()).stdout(Stdio::piped());
+
+        let mut child = process.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(input.as_bytes())?;
+        }
+        let output = child.wait_with_output()?;
+        std::io::stderr().write_all(&output.stderr)?;
+
+        Ok(Some((
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            output.status.code().unwrap_or(1),
+        )))
     }
 
     fn write_pipeline_output(

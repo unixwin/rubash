@@ -221,6 +221,35 @@ mod command_chaining {
         assert_eq!(fs::read_to_string(output_path).unwrap(), "b\n");
         let _ = fs::remove_file(output_path);
     }
+
+    #[test]
+    fn test_pipeline_feeds_external_stage_stdin() {
+        let output_path = "target/rubash-pipeline-external-output.txt";
+        let script_path = "target/rubash-pipeline-filter.sh";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(script_path);
+        fs::write(
+            script_path,
+            "while IFS= read -r line; do\n  if [ \"$line\" = b ]; then\n    printf 'external:%s\\n' \"$line\"\n  fi\ndone\n",
+        )
+        .unwrap();
+        let input = format!("printf 'a\\nb\\n' | {script_path} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].pipe.is_some());
+        assert_eq!(ast.commands[1].words, [script_path]);
+        assert!(ast.commands[1].redirect_out.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "external:b\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(script_path);
+    }
 }
 
 mod builtin_commands {
