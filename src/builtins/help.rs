@@ -3,12 +3,26 @@
 //! GNU Bash source ownership:
 // - builtins/help.def
 
-use std::io;
+use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_USAGE: i32 = 2;
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
+    let mut stdout = io::stdout().lock();
+    let mut stderr = io::stderr().lock();
+    execute_with_io(args, &mut stdout, &mut stderr)
+}
+
+pub(crate) fn execute_with_io<W, E>(
+    args: &[String],
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
     if args.first() == Some(&"--") {
         args.remove(0);
@@ -18,8 +32,8 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
         .iter()
         .any(|arg| arg.starts_with('-') && !matches!(*arg, "-s" | "-d" | "-m"))
     {
-        eprintln!("{}help: -x: invalid option", diagnostic_prefix());
-        eprintln!("help: usage: help [-dms] [pattern ...]");
+        writeln!(stderr, "{}help: -x: invalid option", diagnostic_prefix())?;
+        writeln!(stderr, "help: usage: help [-dms] [pattern ...]")?;
         return Ok(EX_USAGE);
     }
 
@@ -32,129 +46,189 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
         .collect();
 
     if patterns.is_empty() {
-        print_help_list();
+        print_help_list(stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
     if short {
-        print_short_help(&patterns);
+        print_short_help(&patterns, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
     if desc {
-        print_desc_help(&patterns);
+        print_desc_help(&patterns, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
     if manpage {
-        print_manpage_help(&patterns);
+        print_manpage_help(&patterns, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
-    print_long_help(&patterns);
+    print_long_help(&patterns, stdout, stderr)?;
     Ok(EXECUTION_SUCCESS)
 }
 
-fn print_short_help(patterns: &[&str]) {
+fn print_short_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
     match patterns {
-        ["help"] => println!("help: help [-dms] [pattern ...]"),
+        ["help"] => writeln!(stdout, "help: help [-dms] [pattern ...]")?,
         ["builtin", "shift"] => {
-            println!("builtin: builtin [shell-builtin [arg ...]]");
-            println!("shift: shift [n]");
+            writeln!(stdout, "builtin: builtin [shell-builtin [arg ...]]")?;
+            writeln!(stdout, "shift: shift [n]")?;
         }
         ["read*"] => {
-            println!("Shell commands matching keyword `read*'");
-            println!();
-            print_read_synopses();
+            writeln!(stdout, "Shell commands matching keyword `read*'")?;
+            writeln!(stdout)?;
+            print_read_synopses(stdout)?;
         }
-        ["rea"] => print_read_synopses(),
+        ["rea"] => print_read_synopses(stdout)?,
         _ => {}
     }
+    Ok(())
 }
 
-fn print_read_synopses() {
-    println!("read: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]");
-    println!("readarray: readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]");
-    println!("readonly: readonly [-aAf] [name[=value] ...] or readonly -p");
+fn print_read_synopses<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(stdout, "read: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]")?;
+    writeln!(stdout, "readarray: readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]")?;
+    writeln!(
+        stdout,
+        "readonly: readonly [-aAf] [name[=value] ...] or readonly -p"
+    )
 }
 
-fn print_desc_help(patterns: &[&str]) {
+fn print_desc_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
     if patterns == ["shift"] {
-        println!("shift - Shift positional parameters.");
+        writeln!(stdout, "shift - Shift positional parameters.")?;
     }
+    Ok(())
 }
 
-fn print_long_help(patterns: &[&str]) {
+fn print_long_help<W, E>(patterns: &[&str], stdout: &mut W, stderr: &mut E) -> io::Result<()>
+where
+    W: Write,
+    E: Write,
+{
     match patterns {
         [":"] => {
-            println!(":: :");
-            println!("    Null command.");
-            println!("    ");
-            println!("    No effect; the command does nothing.");
-            println!("    ");
-            println!("    Exit Status:");
-            println!("    Always succeeds.");
+            writeln!(stdout, ":: :")?;
+            writeln!(stdout, "    Null command.")?;
+            writeln!(stdout, "    ")?;
+            writeln!(stdout, "    No effect; the command does nothing.")?;
+            writeln!(stdout, "    ")?;
+            writeln!(stdout, "    Exit Status:")?;
+            writeln!(stdout, "    Always succeeds.")?;
         }
         ["bash"] => {
-            eprintln!(
+            writeln!(
+                stderr,
                 "{}help: no help topics match `bash'.  Try `help help' or `man -k bash' or `info bash'.",
                 diagnostic_prefix()
-            );
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn print_manpage_help(patterns: &[&str]) {
+fn print_manpage_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
     if patterns == [":"] {
-        println!("NAME");
-        println!("    : - Null command.");
-        println!();
-        println!("SYNOPSIS");
-        println!("    :");
-        println!();
-        println!("DESCRIPTION");
-        println!("    Null command.");
-        println!("    ");
-        println!("    No effect; the command does nothing.");
-        println!("    ");
-        println!("    Exit Status:");
-        println!("    Always succeeds.");
-        println!();
-        println!("SEE ALSO");
-        println!("    bash(1)");
-        println!();
-        println!("IMPLEMENTATION");
-        println!("    Copyright (C) 2025 Free Software Foundation, Inc.");
-        println!();
+        writeln!(stdout, "NAME")?;
+        writeln!(stdout, "    : - Null command.")?;
+        writeln!(stdout)?;
+        writeln!(stdout, "SYNOPSIS")?;
+        writeln!(stdout, "    :")?;
+        writeln!(stdout)?;
+        writeln!(stdout, "DESCRIPTION")?;
+        writeln!(stdout, "    Null command.")?;
+        writeln!(stdout, "    ")?;
+        writeln!(stdout, "    No effect; the command does nothing.")?;
+        writeln!(stdout, "    ")?;
+        writeln!(stdout, "    Exit Status:")?;
+        writeln!(stdout, "    Always succeeds.")?;
+        writeln!(stdout)?;
+        writeln!(stdout, "SEE ALSO")?;
+        writeln!(stdout, "    bash(1)")?;
+        writeln!(stdout)?;
+        writeln!(stdout, "IMPLEMENTATION")?;
+        writeln!(
+            stdout,
+            "    Copyright (C) 2025 Free Software Foundation, Inc."
+        )?;
+        writeln!(stdout)?;
     }
+    Ok(())
 }
 
 pub(crate) fn print_shift_help() {
-    println!("shift: shift [n]");
-    println!("    Shift positional parameters.");
-    println!("    ");
-    println!("    Rename the positional parameters $N+1,$N+2 ... to $1,$2 ...  If N is");
-    println!("    not given, it is assumed to be 1.");
-    println!("    ");
-    println!("    Exit Status:");
-    println!("    Returns success unless N is negative or greater than $#.");
+    let mut stdout = io::stdout().lock();
+    let _ = print_shift_help_with_io(&mut stdout);
 }
 
-fn print_help_list() {
+fn print_shift_help_with_io<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(stdout, "shift: shift [n]")?;
+    writeln!(stdout, "    Shift positional parameters.")?;
+    writeln!(stdout, "    ")?;
+    writeln!(
+        stdout,
+        "    Rename the positional parameters $N+1,$N+2 ... to $1,$2 ...  If N is"
+    )?;
+    writeln!(stdout, "    not given, it is assumed to be 1.")?;
+    writeln!(stdout, "    ")?;
+    writeln!(stdout, "    Exit Status:")?;
+    writeln!(
+        stdout,
+        "    Returns success unless N is negative or greater than $#."
+    )
+}
+
+fn print_help_list<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
     // TODO(builtins/help.def/builtins/gen-helpfiles.c): Generate this from the
     // builtin table. The current list matches the upstream builtins10.sub
     // expected output after its pipeline removes the Bash version line.
-    println!("These shell commands are defined internally.  Type `help' to see this list.");
-    println!("Type `help name' to find out more about the function `name'.");
-    println!("Use `info bash' to find out more about the shell in general.");
-    println!("Use `man -k' or `info' to find out more about commands not in this list.");
-    println!();
-    println!("A star (*) next to a name means that the command is disabled.");
-    println!();
+    writeln!(
+        stdout,
+        "These shell commands are defined internally.  Type `help' to see this list."
+    )?;
+    writeln!(
+        stdout,
+        "Type `help name' to find out more about the function `name'."
+    )?;
+    writeln!(
+        stdout,
+        "Use `info bash' to find out more about the shell in general."
+    )?;
+    writeln!(
+        stdout,
+        "Use `man -k' or `info' to find out more about commands not in this list."
+    )?;
+    writeln!(stdout)?;
+    writeln!(
+        stdout,
+        "A star (*) next to a name means that the command is disabled."
+    )?;
+    writeln!(stdout)?;
     for line in HELP_LIST {
-        println!("{line}");
+        writeln!(stdout, "{line}")?;
     }
+    Ok(())
 }
 
 const HELP_LIST: &[&str] = &[
