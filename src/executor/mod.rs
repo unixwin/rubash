@@ -4429,20 +4429,56 @@ impl Executor {
     fn execute_mapfile(&mut self, cmd: &CommandNode) -> i32 {
         // TODO(builtins/mapfile.def/subst.c/redir.c): Implement the full option
         // set, callbacks, origin/count handling, and newline-preserving storage.
-        if cmd.words.get(1).map(String::as_str) == Some("-t") {
-            if let Some(name) = cmd.words.get(2).filter(|name| is_shell_name(name)) {
-                if let Some(input) = self.stdin_string_for_command(cmd) {
-                    let values = input.lines().map(str::to_string).collect::<Vec<_>>();
-                    self.env_vars
-                        .insert(name.clone(), format!("({})", values.join(" ")));
-                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
-                    return 0;
+        let mut trim_newline = false;
+        let mut count = None;
+        let mut array_name = None;
+        let mut index = 1;
+        while index < cmd.words.len() {
+            match cmd.words[index].as_str() {
+                "-t" => {
+                    trim_newline = true;
+                    index += 1;
                 }
+                "-n" => {
+                    count = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.parse::<usize>().ok());
+                    index += 2;
+                }
+                word if word.starts_with("-n") && word.len() > 2 => {
+                    count = word[2..].parse::<usize>().ok();
+                    index += 1;
+                }
+                word if word.starts_with('-') => {
+                    index += 1;
+                }
+                word if is_shell_name(word) => {
+                    array_name = Some(word.to_string());
+                    index += 1;
+                }
+                _ => {
+                    index += 1;
+                }
+            }
+        }
 
-                self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
-                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", name);
+        if trim_newline {
+            let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
+            if let Some(input) = self.stdin_string_for_command(cmd) {
+                let mut values = input.lines().map(str::to_string).collect::<Vec<_>>();
+                if let Some(count) = count {
+                    values.truncate(count);
+                }
+                self.env_vars
+                    .insert(name.clone(), format!("({})", values.join(" ")));
+                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return 0;
             }
+
+            self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
+            mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+            return 0;
         }
         eprintln!("{}mapfile: command not found", self.diagnostic_prefix());
         127
