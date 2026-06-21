@@ -402,6 +402,41 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_for_without_in_iterates_positional_params() {
+        let output_path = "target/rubash-for-default-positional-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -- alpha beta; for item; do echo $item >> {output_path}; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[1].for_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_for_explicit_empty_in_does_not_iterate() {
+        let output_path = "target/rubash-for-empty-in-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -- alpha beta; for item in; do echo $item > {output_path}; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[1].for_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_function_positional_count_expands() {
         let output_path = "target/rubash-function-count-output.txt";
         let _ = fs::remove_file(output_path);

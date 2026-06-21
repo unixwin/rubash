@@ -17,6 +17,7 @@ pub struct Redirect {
 pub struct ForCommand {
     pub variable: String,
     pub words: Vec<String>,
+    pub default_positional: bool,
     pub body: Vec<CommandNode>,
 }
 
@@ -403,8 +404,8 @@ pub fn parse(tokens: &[Token]) -> Ast {
 fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports all `for_command`
     // grammar alternatives, nested compound lists, redirections on compound
-    // commands, `"$@"` default words, and reserved-word parsing state. This
-    // maps the simple upstream alias test form: `for name in words; do body; done`.
+    // commands and reserved-word parsing state. This maps common
+    // `for name [in words]; do body; done` forms.
     let variable = tokens.get(start + 1)?.value.clone();
     if !matches!(
         tokens.get(start + 1)?.kind,
@@ -414,25 +415,32 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
     }
 
     let mut i = start + 2;
-    if !is_keyword(tokens, i, "in") {
-        return None;
-    }
-    i += 1;
-
     let mut words = Vec::new();
-    while i < tokens.len() && !is_keyword(tokens, i, "do") {
-        if tokens[i].kind == TokenKind::Semicolon {
-            i += 1;
-            continue;
-        }
-        if matches!(
-            tokens[i].kind,
-            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
-        ) {
-            words.push(tokens[i].value.clone());
-        }
+    let default_positional = if is_keyword(tokens, i, "in") {
         i += 1;
-    }
+        while i < tokens.len() && !is_keyword(tokens, i, "do") {
+            if tokens[i].kind == TokenKind::Semicolon {
+                i += 1;
+                continue;
+            }
+            if matches!(
+                tokens[i].kind,
+                TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
+            ) {
+                words.push(tokens[i].value.clone());
+            }
+            i += 1;
+        }
+        false
+    } else {
+        while tokens
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            i += 1;
+        }
+        true
+    };
 
     if !is_keyword(tokens, i, "do") {
         return None;
@@ -463,6 +471,7 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
     command.for_command = Some(ForCommand {
         variable,
         words,
+        default_positional,
         body,
     });
     Some((command, i + 1))
