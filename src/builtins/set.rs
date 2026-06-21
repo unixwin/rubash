@@ -25,7 +25,7 @@ pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Resul
     )
 }
 
-fn set_with_io<'a, I, W, E>(
+pub(crate) fn set_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
