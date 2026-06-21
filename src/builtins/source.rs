@@ -121,7 +121,10 @@ pub fn execute_simple_if(
     let Some(command) = ast.commands.get(index) else {
         return Ok(None);
     };
-    if command.words.first().map(String::as_str) != Some("if") {
+    let Some(keyword) = command.words.first().map(String::as_str) else {
+        return Ok(None);
+    };
+    if !matches!(keyword, "if" | "elif") {
         return Ok(None);
     }
 
@@ -131,34 +134,55 @@ pub fn execute_simple_if(
     let Some(fi_index) = find_word_command(ast, then_index + 1, "fi") else {
         return Ok(None);
     };
+    let elif_index = find_word_command_before(ast, then_index + 1, fi_index, "elif");
     let else_index = find_word_command_before(ast, then_index + 1, fi_index, "else");
 
-    let condition_true = test_if_condition_true(executor, &command.words)?
-        || arithmetic_if_condition_true(&command.words);
-    let (body_start, body_end) = if condition_true {
-        (then_index + 1, else_index.unwrap_or(fi_index))
-    } else if let Some(else_index) = else_index {
-        (else_index + 1, fi_index)
+    let condition_words;
+    let words = if keyword == "elif" {
+        condition_words = {
+            let mut words = command.words.clone();
+            words[0] = "if".to_string();
+            words
+        };
+        &condition_words
     } else {
-        executor.set_exit_code(0);
-        return Ok(Some(fi_index + 1));
+        &command.words
     };
-
-    let mut body_commands = Vec::new();
+    let condition_true = simple_command_if_condition_true(words)
+        || test_if_condition_true(executor, words)?
+        || arithmetic_if_condition_true(words);
     if condition_true {
+        let body_end = elif_index.or(else_index).unwrap_or(fi_index);
+        let mut body_commands = Vec::new();
         if let Some(command) = command_tail(ast.commands.get(then_index)) {
             body_commands.push(command);
         }
-    } else if let Some(else_index) = else_index {
+        body_commands.extend(ast.commands[then_index + 1..body_end].iter().cloned());
+        let body = Ast {
+            commands: body_commands,
+        };
+        executor.execute_ast(&body)?;
+        return Ok(Some(fi_index + 1));
+    }
+
+    if let Some(elif_index) = elif_index {
+        return execute_simple_if(executor, ast, elif_index);
+    }
+
+    if let Some(else_index) = else_index {
+        let mut body_commands = Vec::new();
         if let Some(command) = command_tail(ast.commands.get(else_index)) {
             body_commands.push(command);
         }
+        body_commands.extend(ast.commands[else_index + 1..fi_index].iter().cloned());
+        let body = Ast {
+            commands: body_commands,
+        };
+        executor.execute_ast(&body)?;
+        return Ok(Some(fi_index + 1));
     }
-    body_commands.extend(ast.commands[body_start..body_end].iter().cloned());
-    let body = Ast {
-        commands: body_commands,
-    };
-    executor.execute_ast(&body)?;
+
+    executor.set_exit_code(0);
     Ok(Some(fi_index + 1))
 }
 
@@ -242,11 +266,18 @@ fn arithmetic_if_condition_true(words: &[String]) -> bool {
             .any(|ch| matches!(ch, '1'..='9'))
 }
 
+fn simple_command_if_condition_true(words: &[String]) -> bool {
+    match words {
+        [keyword, command] if keyword == "if" && command == "true" => true,
+        _ => false,
+    }
+}
+
 fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool, ExecuteError> {
     // TODO(parse.y/execute_cmd.c/test.def): This bridges simple `if [ ... ]`
     // commands until Rubash has IF_COM nodes and normal compound-list
     // execution. It is shared by source and builtins upstream tests.
-    if words.first().map(String::as_str) != Some("if")
+    if !matches!(words.first().map(String::as_str), Some("if" | "elif"))
         || words.get(1).map(String::as_str) != Some("[")
     {
         return Ok(false);
