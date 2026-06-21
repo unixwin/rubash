@@ -5193,7 +5193,13 @@ impl Executor {
                     return self
                         .env_vars
                         .get(array_name)
-                        .map(|value| array_indices(value).join(" "))
+                        .map(|value| {
+                            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                                assoc_keys(value).join(" ")
+                            } else {
+                                array_indices(value).join(" ")
+                            }
+                        })
                         .unwrap_or_default();
                 }
 
@@ -5277,6 +5283,16 @@ impl Executor {
                         .and_then(|value| array_value_at(value, index))
                         .map(|value| value.chars().count().to_string())
                         .unwrap_or_else(|| "0".to_string());
+                }
+                if let Some((array_name, key)) = parse_array_subscript(var_name) {
+                    if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                        return self
+                            .env_vars
+                            .get(array_name)
+                            .and_then(|value| assoc_value_at(value, key))
+                            .map(|value| value.chars().count().to_string())
+                            .unwrap_or_else(|| "0".to_string());
+                    }
                 }
                 return self
                     .env_vars
@@ -5423,6 +5439,15 @@ impl Executor {
                     .get(array_name)
                     .and_then(|value| array_value_at(value, index))
                     .unwrap_or_default();
+            }
+            if let Some((array_name, key)) = parse_array_subscript(name) {
+                if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .and_then(|value| assoc_value_at(value, key))
+                        .unwrap_or_default();
+                }
             }
             if let Some((var_name, _pattern)) = name.split_once("##*/") {
                 return self
@@ -7249,6 +7274,20 @@ fn assoc_entries(value: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn assoc_value_at(value: &str, key: &str) -> Option<String> {
+    assoc_entries(value)
+        .into_iter()
+        .rev()
+        .find_map(|(entry_key, entry_value)| (entry_key == key).then_some(entry_value))
+}
+
+fn assoc_keys(value: &str) -> Vec<String> {
+    assoc_entries(value)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
 fn array_assignment_index(left: &str) -> Option<usize> {
     left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
 }
@@ -8195,9 +8234,14 @@ fn array_value_at(value: &str, index: usize) -> Option<String> {
 }
 
 fn parse_array_numeric_subscript(name: &str) -> Option<(&str, usize)> {
-    let (array_name, subscript) = name.split_once('[')?;
-    let index = subscript.strip_suffix(']')?.parse::<usize>().ok()?;
+    let (array_name, subscript) = parse_array_subscript(name)?;
+    let index = subscript.parse::<usize>().ok()?;
     Some((array_name, index))
+}
+
+fn parse_array_subscript(name: &str) -> Option<(&str, &str)> {
+    let (array_name, subscript) = name.split_once('[')?;
+    Some((array_name, subscript.strip_suffix(']')?))
 }
 
 fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
