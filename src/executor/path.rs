@@ -106,9 +106,7 @@ fn find_windows_git_bash_from_env(env_vars: &HashMap<String, String>) -> Option<
         }
     }
 
-    let Some(path) = env_vars.get("PATH") else {
-        return None;
-    };
+    let path = env_vars.get("PATH")?;
     split_path(path)
         .into_iter()
         .map(PathBuf::from)

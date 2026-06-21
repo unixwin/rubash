@@ -23,9 +23,9 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
         return Ok(EX_USAGE);
     }
 
-    let short = args.iter().any(|arg| *arg == "-s");
-    let desc = args.iter().any(|arg| *arg == "-d");
-    let manpage = args.iter().any(|arg| *arg == "-m");
+    let short = args.contains(&"-s");
+    let desc = args.contains(&"-d");
+    let manpage = args.contains(&"-m");
     let patterns: Vec<&str> = args
         .into_iter()
         .filter(|arg| !arg.starts_with('-'))

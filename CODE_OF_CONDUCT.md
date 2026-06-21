@@ -56,7 +56,7 @@
 如有任何问题或举报，请通过以下方式联系项目团队：
 
 - GitHub Issues: https://github.com/unixwin/rubash/issues
-- 电子邮件: [项目邮箱]
+- 电子邮件: [arookieofc@gmail.com]
 
 ---
 

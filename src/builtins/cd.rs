@@ -385,11 +385,13 @@ fn set_shell_env(env_vars: &mut HashMap<String, String>, name: &str, value: Stri
 
 fn shell_display_path(path: &Path) -> String {
     let mut value = path.to_string_lossy().replace('\\', "/");
-    if cfg!(windows) {
-        if value.len() >= 3 && value.as_bytes()[1] == b':' && value.as_bytes()[2] == b'/' {
-            let drive = value.as_bytes()[0] as char;
-            value = format!("/{}{}", drive.to_ascii_lowercase(), &value[2..]);
-        }
+    if cfg!(windows)
+        && value.len() >= 3
+        && value.as_bytes()[1] == b':'
+        && value.as_bytes()[2] == b'/'
+    {
+        let drive = value.as_bytes()[0] as char;
+        value = format!("/{}{}", drive.to_ascii_lowercase(), &value[2..]);
     }
     if value.is_empty() {
         "/".to_string()

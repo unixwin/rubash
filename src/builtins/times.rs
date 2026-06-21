@@ -21,7 +21,7 @@ where
     W: Write,
     E: Write,
 {
-    for arg in args {
+    if let Some(arg) = args.into_iter().next() {
         if arg.starts_with('-') {
             let option = arg.chars().nth(1).unwrap_or('-');
             writeln!(stderr, "rubash: times: -{}: invalid option", option)?;

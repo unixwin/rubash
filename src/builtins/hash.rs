@@ -41,8 +41,8 @@ where
                 names.push(name.as_str());
             }
             break;
-        } else if arg.starts_with('-') {
-            for option in arg[1..].chars() {
+        } else if let Some(options) = arg.strip_prefix('-') {
+            for option in options.chars() {
                 match option {
                     'r' => {
                         env_vars.remove(HASH_TABLE);
