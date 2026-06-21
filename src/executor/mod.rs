@@ -4431,6 +4431,7 @@ impl Executor {
         // set, callbacks, origin/count handling, and newline-preserving storage.
         let mut trim_newline = false;
         let mut count = None;
+        let mut delimiter = None;
         let mut origin = None;
         let mut skip = 0;
         let mut array_name = None;
@@ -4440,6 +4441,13 @@ impl Executor {
                 "-t" => {
                     trim_newline = true;
                     index += 1;
+                }
+                "-d" => {
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .map(|word| word.chars().next().unwrap_or('\0'));
+                    index += 2;
                 }
                 "-n" => {
                     count = cmd
@@ -4462,6 +4470,10 @@ impl Executor {
                         .and_then(|word| word.parse::<usize>().ok())
                         .unwrap_or(0);
                     index += 2;
+                }
+                word if word.starts_with("-d") && word.len() > 2 => {
+                    delimiter = Some(word[2..].chars().next().unwrap_or('\0'));
+                    index += 1;
                 }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     count = word[2..].parse::<usize>().ok();
@@ -4488,13 +4500,12 @@ impl Executor {
             }
         }
 
-        if trim_newline {
+        if trim_newline || delimiter.is_some() {
             let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
             if let Some(input) = self.stdin_string_for_command(cmd) {
-                let mut values = input
-                    .lines()
+                let mut values = split_mapfile_input(&input, delimiter, trim_newline)
+                    .into_iter()
                     .skip(skip)
-                    .map(str::to_string)
                     .collect::<Vec<_>>();
                 if let Some(count) = count {
                     values.truncate(count);
@@ -8075,10 +8086,32 @@ fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
 fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
     let rendered = entries
         .into_iter()
-        .map(|(index, value)| format!("[{index}]=\"{}\"", quote_double_array_value(&value)))
+        .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("\x1d({rendered})")
+}
+
+fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: bool) -> Vec<String> {
+    let Some(delimiter) = delimiter else {
+        return input.lines().map(str::to_string).collect();
+    };
+
+    let mut values = Vec::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        current.push(ch);
+        if ch == delimiter {
+            if trim_delimiter {
+                current.pop();
+            }
+            values.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        values.push(current);
+    }
+    values
 }
 
 fn rendered_array_values(value: &str) -> Vec<String> {
@@ -8113,12 +8146,26 @@ fn decode_rendered_array_value(value: &str) -> String {
     value.trim_matches('"').to_string()
 }
 
-fn quote_double_array_value(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
+fn quote_array_value(value: &str) -> String {
+    if value.contains(['\n', '\r', '\'']) {
+        return format!(
+            "$'{}'",
+            value
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\'', "\\'")
+        );
+    }
+
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('$', "\\$")
+            .replace('`', "\\`")
+    )
 }
 
 fn is_array_storage(value: &str) -> bool {

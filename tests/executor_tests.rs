@@ -458,6 +458,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_d_uses_custom_delimiter() {
+        let input = "mapfile -d : -t arr <<< 'alpha:beta:gamma'";
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            executor.get_env("arr"),
+            Some("\x1d([0]=\"alpha\" [1]=\"beta\" [2]=$'gamma\\n')")
+        );
+    }
+
+    #[test]
+    fn test_readarray_compact_d_keeps_delimiter_without_t() {
+        let input = "readarray -d: arr <<< 'alpha:beta'";
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            executor.get_env("arr"),
+            Some("\x1d([0]=\"alpha:\" [1]=$'beta\\n')")
+        );
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
