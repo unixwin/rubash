@@ -1935,7 +1935,7 @@ impl Executor {
                 }
                 "shift" => self.execute_shift(&cmd.words[1..]),
                 "times" => {
-                    self.exit_code = crate::builtins::times::execute(&cmd.words[1..])?;
+                    self.exit_code = self.execute_times(cmd)?;
                     Ok(())
                 }
                 "time" => {
@@ -4875,6 +4875,33 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_times(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::times::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::times::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::times::execute(&cmd.words[1..])?)
     }
 
     fn execute_recho(&self, args: &[String]) {
