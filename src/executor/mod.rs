@@ -2232,7 +2232,48 @@ impl Executor {
             return Ok(0);
         }
 
-        crate::builtins::set::unset(&names, &mut self.env_vars).map_err(ExecuteError::from)
+        let mut variable_names = Vec::new();
+        for name in names {
+            if self.unset_array_element(&name) {
+                continue;
+            }
+            variable_names.push(name);
+        }
+
+        crate::builtins::set::unset(&variable_names, &mut self.env_vars).map_err(ExecuteError::from)
+    }
+
+    fn unset_array_element(&mut self, name: &str) -> bool {
+        let Some((array_name, subscript)) = parse_array_subscript(name) else {
+            return false;
+        };
+        let Some(current) = self.env_vars.get(array_name).cloned() else {
+            return false;
+        };
+
+        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let key = subscript.trim_matches('\'').trim_matches('"');
+            let mut entries = assoc_entries(&current);
+            entries.retain(|(entry_key, _)| entry_key != key);
+            self.env_vars
+                .insert(array_name.to_string(), format_assoc_storage(entries));
+            return true;
+        }
+
+        if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
+            let Ok(index) = subscript.parse::<usize>() else {
+                return false;
+            };
+            let mut entries = indexed_array_entries(&current);
+            entries.remove(&index);
+            self.env_vars.insert(
+                array_name.to_string(),
+                format_indexed_array_storage(entries),
+            );
+            return true;
+        }
+
+        false
     }
 
     fn execute_for_command(&mut self, for_command: &ForCommand) -> Result<(), ExecuteError> {
@@ -7242,6 +7283,10 @@ fn append_assoc_value(current: &str, value: &str) -> String {
         entries.push(("0".to_string(), token));
     }
 
+    format_assoc_storage(entries)
+}
+
+fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
     format!(
         "({})",
         entries
