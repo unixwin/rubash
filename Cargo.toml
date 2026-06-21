@@ -1,5 +1,5 @@
 # Rust-Shell - A Rust implementation of GNU Bash
-# Copyright 2024 Rust-Shell Contributors
+# Copyright 2024-2026 Rust-Shell Contributors
 # License: GPL-3.0-or-later
 
 [package]

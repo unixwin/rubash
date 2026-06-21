@@ -53,7 +53,7 @@ needed.
 | `bashhist.c`, `lib/readline/history.c` | `src/history.rs` | Later | Interactive-only feature. |
 | `locale.c`, `bashintl.h`, `po/`, `lib/intl/` | `src/locale.rs` | Defer | Not needed for early conformance. |
 | `lib/sh/*` | `src/sys/` or standard library replacements | Selective | Most files are portability helpers; use Rust std/nix equivalents instead of porting. |
-| `tests/*.tests`, `tests/*.right`, `tests/*.sub` | `scripts/run-bash-upstream-tests.sh` | Now | Keep upstream tests in the submodule; add curated allowlists as features land. |
+| `tests/*.tests`, `tests/*.right`, `tests/*.sub` | `scripts/run-bash-upstream-tests.sh` | Now | Keep upstream tests in the submodule and run the project harness for compatibility baselines. |
 
 ## Compatibility Target
 
