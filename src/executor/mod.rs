@@ -1904,7 +1904,7 @@ impl Executor {
                     self.exit_code = 0;
                     Ok(())
                 }
-                "shift" => self.execute_shift(&cmd.words[1..]),
+                "shift" => self.execute_shift_command(cmd),
                 "times" => {
                     self.exit_code = self.execute_times(cmd)?;
                     Ok(())
@@ -3873,7 +3873,7 @@ impl Executor {
                 self.exit_code = self.execute_help(cmd)?;
                 Ok(())
             }
-            "shift" => self.execute_shift(&cmd.words[1..]),
+            "shift" => self.execute_shift_command(cmd),
             _ => self.execute_external(cmd),
         }
     }
@@ -3925,6 +3925,7 @@ impl Executor {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
                 Ok(())
             }
+            "shift" => self.execute_shift_command(&builtin_cmd),
             _ => self.execute_builtin_direct(args),
         }
     }
@@ -5096,7 +5097,35 @@ impl Executor {
         // TODO(builtins/shift.def): Bash also prints diagnostics for invalid
         // counts and observes `shift_verbose`. Keep the executor-side `$#`
         // validation here while positional parameters live on Executor.
-        match crate::builtins::shift::execute(args)? {
+        self.apply_shift_action(crate::builtins::shift::execute(args)?)
+    }
+
+    fn execute_shift_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let action = crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut file)?;
+            return self.apply_shift_action(action);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            let action = crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut file)?;
+            return self.apply_shift_action(action);
+        }
+
+        self.execute_shift(&cmd.words[1..])
+    }
+
+    fn apply_shift_action(
+        &mut self,
+        action: crate::builtins::shift::ShiftAction,
+    ) -> Result<(), ExecuteError> {
+        match action {
             crate::builtins::shift::ShiftAction::Complete(status) => {
                 self.exit_code = status;
             }

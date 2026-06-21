@@ -171,12 +171,7 @@ where
     Ok(())
 }
 
-pub(crate) fn print_shift_help() {
-    let mut stdout = io::stdout().lock();
-    let _ = print_shift_help_with_io(&mut stdout);
-}
-
-fn print_shift_help_with_io<W>(stdout: &mut W) -> io::Result<()>
+pub(crate) fn print_shift_help_with_io<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {

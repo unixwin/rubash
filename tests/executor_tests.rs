@@ -1319,6 +1319,47 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_shift_help_redirects_output_and_returns_usage() {
+        let output_path = "target/rubash-shift-help-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("shift --help > {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("shift: shift [n]\n"));
+        assert!(output.contains("Shift positional parameters."));
+        assert!(output.ends_with("2\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_shift_help_appends_output_and_returns_usage() {
+        let output_path = "target/rubash-shift-help-append-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("shift --help >> {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("before\nshift: shift [n]\n"));
+        assert!(output.contains("Shift positional parameters."));
+        assert!(output.ends_with("2\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
