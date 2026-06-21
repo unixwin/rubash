@@ -43,7 +43,7 @@ pub fn unalias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Res
     unalias_with_io(args, aliases, &mut stderr)
 }
 
-fn alias_with_io<W, E>(
+pub(crate) fn alias_with_io<W, E>(
     args: &[String],
     aliases: &mut HashMap<String, Alias>,
     stdout: &mut W,
