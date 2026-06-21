@@ -1910,7 +1910,7 @@ impl Executor {
                     Ok(())
                 }
                 "trap" => {
-                    self.exit_code = crate::builtins::trap::execute(&cmd.words[1..])?;
+                    self.exit_code = self.execute_trap(cmd)?;
                     Ok(())
                 }
                 "type" => {
@@ -5322,6 +5322,40 @@ impl Executor {
         }
 
         Ok(crate::builtins::times::execute(&cmd.words[1..])?)
+    }
+
+    fn execute_trap(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::trap::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::trap::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::trap::execute_with_io(
+            &cmd.words[1..],
+            &mut self.env_vars,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+        )?)
     }
 
     fn execute_help(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
