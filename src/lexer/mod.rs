@@ -376,7 +376,15 @@ impl<'a> Lexer<'a> {
             ';' => {
                 if self.peek() == Some(';') {
                     self.advance();
-                    Some(Token::new(TokenKind::Word, ";;", start))
+                    if self.peek() == Some('&') {
+                        self.advance();
+                        Some(Token::new(TokenKind::Word, ";;&", start))
+                    } else {
+                        Some(Token::new(TokenKind::Word, ";;", start))
+                    }
+                } else if self.peek() == Some('&') {
+                    self.advance();
+                    Some(Token::new(TokenKind::Word, ";&", start))
                 } else {
                     Some(Token::new(TokenKind::Semicolon, ";", start))
                 }

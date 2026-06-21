@@ -344,6 +344,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_case_fallthrough_executes_next_clause_body() {
+        let output_path = "target/rubash-case-fallthrough-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "case beta in alpha) echo alpha > {output_path} ;; beta) echo beta > {output_path} ;& gamma) echo gamma >> {output_path} ;; *) echo star > {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].case_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\ngamma\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_case_test_next_terminator_matches_later_clause() {
+        let output_path = "target/rubash-case-test-next-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "case beta in alpha) echo alpha > {output_path} ;; beta) echo beta > {output_path} ;;& b*) echo bstar >> {output_path} ;; *) echo star > {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].case_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\nbstar\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_keyword_definition_executes_body() {
         let output_path = "target/rubash-function-keyword-output.txt";
         let _ = fs::remove_file(output_path);

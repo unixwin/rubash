@@ -6,7 +6,9 @@ pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
-use crate::parser::{Ast, CaseClause, CaseCommand, CommandNode, ForCommand, FunctionCommand};
+use crate::parser::{
+    Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand, FunctionCommand,
+};
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -2276,18 +2278,30 @@ impl Executor {
         // compound-list control flow. This handles the common shell glob
         // operators used by simple `case` clauses.
         let word = self.expand_case_word(&case_command.word);
-        for clause in &case_command.clauses {
-            if clause
-                .patterns
-                .iter()
-                .any(|pattern| case_pattern_matches(&self.expand_word(pattern), &word))
-            {
+        let mut fall_through = false;
+        let mut index = 0;
+        while let Some(clause) = case_command.clauses.get(index) {
+            let matched = fall_through
+                || clause
+                    .patterns
+                    .iter()
+                    .any(|pattern| case_pattern_matches(&self.expand_word(pattern), &word));
+            if matched {
                 let body = Ast {
                     commands: clause.body.clone(),
                 };
                 self.execute_ast(&body)?;
-                return Ok(());
+                match clause.terminator {
+                    CaseTerminator::Break => return Ok(()),
+                    CaseTerminator::FallThrough => {
+                        fall_through = true;
+                    }
+                    CaseTerminator::TestNext => {
+                        fall_through = false;
+                    }
+                }
             }
+            index += 1;
         }
 
         self.exit_code = 0;
@@ -6987,6 +7001,7 @@ fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {
         clauses.push(CaseClause {
             patterns: vec![pattern],
             body,
+            terminator: CaseTerminator::Break,
         });
 
         if index < words.len() && words[index] == ";;" {
