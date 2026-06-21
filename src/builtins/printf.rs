@@ -72,7 +72,7 @@ where
         return Ok(EX_USAGE);
     };
 
-    let rendered = render(format, &args[index + 1..]);
+    let rendered = render(format, &args[index + 1..], env_vars);
     if let Some(name) = output_var {
         env_vars.insert(name.to_string(), rendered);
     } else {
@@ -82,18 +82,18 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn render(format: &str, args: &[&str]) -> String {
+fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -> String {
     let mut output = String::new();
     let mut arg_index = 0;
 
     if args.is_empty() {
-        render_one_pass(format, args, &mut arg_index, &mut output);
+        render_one_pass(format, args, &mut arg_index, &mut output, env_vars);
         return output;
     }
 
     while arg_index < args.len() {
         let before_arg = arg_index;
-        render_one_pass(format, args, &mut arg_index, &mut output);
+        render_one_pass(format, args, &mut arg_index, &mut output, env_vars);
 
         if arg_index == before_arg {
             break;
@@ -103,7 +103,13 @@ fn render(format: &str, args: &[&str]) -> String {
     output
 }
 
-fn render_one_pass(format: &str, args: &[&str], arg_index: &mut usize, output: &mut String) {
+fn render_one_pass(
+    format: &str,
+    args: &[&str],
+    arg_index: &mut usize,
+    output: &mut String,
+    env_vars: &mut HashMap<String, String>,
+) {
     let mut chars = format.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -121,8 +127,15 @@ fn render_one_pass(format: &str, args: &[&str], arg_index: &mut usize, output: &
                     continue;
                 };
 
-                let value = next_arg(args, arg_index);
-                output.push_str(&format_value(value, &spec));
+                if spec.specifier == 'n' {
+                    let name = next_arg(args, arg_index);
+                    if valid_identifier(name) {
+                        env_vars.insert(name.to_string(), output.chars().count().to_string());
+                    }
+                } else {
+                    let value = next_arg(args, arg_index);
+                    output.push_str(&format_value(value, &spec));
+                }
             }
             other => output.push(other),
         }
@@ -381,5 +394,22 @@ mod tests {
 
         assert!(stdout.is_empty());
         assert_eq!(env_vars.get("NAME"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn percent_n_assigns_character_count_without_output() {
+        let (_status, stdout, _stderr, env_vars) = run(&["abc%n:%s", "COUNT", "done"]);
+
+        assert_eq!(stdout, "abc:done");
+        assert_eq!(env_vars.get("COUNT"), Some(&"3".to_string()));
+    }
+
+    #[test]
+    fn percent_n_works_with_v_assignment() {
+        let (_status, stdout, _stderr, env_vars) = run(&["-v", "OUT", "ab%ncd", "COUNT"]);
+
+        assert!(stdout.is_empty());
+        assert_eq!(env_vars.get("OUT"), Some(&"abcd".to_string()));
+        assert_eq!(env_vars.get("COUNT"), Some(&"2".to_string()));
     }
 }
