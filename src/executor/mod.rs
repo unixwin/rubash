@@ -5008,10 +5008,13 @@ impl Executor {
             return "HUP".to_string();
         }
 
-        if word.starts_with("$((") && word.ends_with("))") {
-            if word.contains("128") && word.contains('+') && word.contains('1') {
-                return "129".to_string();
-            }
+        if word.starts_with("$((")
+            && word.ends_with("))")
+            && word.contains("128")
+            && word.contains('+')
+            && word.contains('1')
+        {
+            return "129".to_string();
         }
 
         if let Some(source) = word
@@ -5066,9 +5069,9 @@ impl Executor {
                     .env_vars
                     .get(array_name)
                     .map(|value| {
-                        if is_marked_array_var(&self.env_vars, array_name) {
-                            self.array_length(array_name)
-                        } else if is_array_storage(value) {
+                        if is_marked_array_var(&self.env_vars, array_name)
+                            || is_array_storage(value)
+                        {
                             self.array_length(array_name)
                         } else {
                             1
@@ -5889,12 +5892,10 @@ impl Executor {
         }
 
         let mut source = alias.value.replace('\x1f', "$");
-        if has_unclosed_quote(&alias.value)
-            && (source.ends_with(' ') || source.ends_with('\t'))
-            && !cmd.words[1..].is_empty()
+        if !cmd.words[1..].is_empty()
+            && (has_unclosed_quote(&alias.value)
+                || (!source.ends_with(' ') && !source.ends_with('\t')))
         {
-            source.push(' ');
-        } else if !source.ends_with(' ') && !source.ends_with('\t') && !cmd.words[1..].is_empty() {
             source.push(' ');
         }
         source.push_str(&cmd.words[1..].join(" "));

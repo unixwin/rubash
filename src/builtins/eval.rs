@@ -28,20 +28,15 @@ where
     let args: Vec<&str> = args.into_iter().collect();
     let mut index = 0;
 
-    while let Some(arg) = args.get(index) {
+    if let Some(arg) = args.get(index) {
         if *arg == "--" {
             index += 1;
-            break;
+        } else if arg.starts_with('-') && *arg != "-" {
+            let option = arg.chars().nth(1).unwrap_or('-');
+            writeln!(stderr, "rubash: eval: -{}: invalid option", option)?;
+            writeln!(stderr, "eval: usage: eval [arg ...]")?;
+            return Ok(EvalAction::Complete(EX_USAGE));
         }
-
-        if !arg.starts_with('-') || *arg == "-" {
-            break;
-        }
-
-        let option = arg.chars().nth(1).unwrap_or('-');
-        writeln!(stderr, "rubash: eval: -{}: invalid option", option)?;
-        writeln!(stderr, "eval: usage: eval [arg ...]")?;
-        return Ok(EvalAction::Complete(EX_USAGE));
     }
 
     if index >= args.len() {

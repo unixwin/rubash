@@ -60,7 +60,7 @@ where
                 return Ok(EXECUTION_SUCCESS);
             }
             if let Some(status) =
-                dirs_index_or_error(&args, &stack, diagnostic_prefix, stdout, stderr)?
+                dirs_index_or_error(args, &stack, diagnostic_prefix, stdout, stderr)?
             {
                 return Ok(status);
             }

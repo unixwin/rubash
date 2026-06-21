@@ -135,16 +135,14 @@ where
         let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
         let name = name.strip_suffix('+').unwrap_or(name);
         if let Some(value) = variables.get(name) {
-            print_declaration(
-                name,
-                value,
-                exported.contains(name),
-                readonly.contains(name),
-                arrays.contains(name),
-                assocs.contains(name),
-                integers.contains(name),
-                stdout,
-            )?;
+            let attrs = DeclarationAttrs {
+                exported: exported.contains(name),
+                readonly: readonly.contains(name),
+                array: arrays.contains(name),
+                assoc: assocs.contains(name),
+                integer: integers.contains(name),
+            };
+            print_declaration(name, value, attrs, stdout)?;
         } else {
             writeln!(
                 stderr,
@@ -208,27 +206,32 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
     }
 }
 
-fn print_declaration<W>(
-    name: &str,
-    value: &str,
+#[derive(Clone, Copy)]
+struct DeclarationAttrs {
     exported: bool,
     readonly: bool,
     array: bool,
     assoc: bool,
     integer: bool,
+}
+
+fn print_declaration<W>(
+    name: &str,
+    value: &str,
+    attrs: DeclarationAttrs,
     stdout: &mut W,
 ) -> io::Result<()>
 where
     W: Write,
 {
-    if assoc {
+    if attrs.assoc {
         if value.is_empty() {
             writeln!(stdout, "declare -A {name}")
         } else {
             writeln!(stdout, "declare -A {name}={}", format_assoc_value(value))
         }
-    } else if array {
-        let attrs = declaration_array_attrs(readonly, exported, integer);
+    } else if attrs.array {
+        let attrs = declaration_array_attrs(attrs);
         if value.is_empty() {
             writeln!(stdout, "declare {attrs} {name}")
         } else {
@@ -239,7 +242,7 @@ where
             )
         }
     } else if let Some(array_value) = parse_single_element_array(value) {
-        let attrs = declaration_array_attrs(readonly, exported, integer);
+        let attrs = declaration_array_attrs(attrs);
         writeln!(
             stdout,
             "declare {} {}=([0]=\"{}\")",
@@ -247,21 +250,21 @@ where
             name,
             quote_double(array_value)
         )
-    } else if integer {
+    } else if attrs.integer {
         writeln!(stdout, "declare -i {}=\"{}\"", name, quote_double(value))
-    } else if readonly && exported {
+    } else if attrs.readonly && attrs.exported {
         writeln!(stdout, "declare -rx {}=\"{}\"", name, quote_double(value))
-    } else if readonly {
+    } else if attrs.readonly {
         writeln!(stdout, "declare -r {}=\"{}\"", name, quote_double(value))
-    } else if exported {
+    } else if attrs.exported {
         writeln!(stdout, "declare -x {}=\"{}\"", name, quote_double(value))
     } else {
         writeln!(stdout, "declare -- {}=\"{}\"", name, quote_double(value))
     }
 }
 
-fn declaration_array_attrs(readonly: bool, exported: bool, integer: bool) -> &'static str {
-    match (readonly, exported, integer) {
+fn declaration_array_attrs(attrs: DeclarationAttrs) -> &'static str {
+    match (attrs.readonly, attrs.exported, attrs.integer) {
         (true, true, true) => "-airx",
         (true, false, true) => "-air",
         (false, true, true) => "-aix",

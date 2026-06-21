@@ -39,7 +39,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
     let value = args
         .iter()
         .rev()
-        .find(|arg| !arg.starts_with('-') && *arg != &"--")
+        .find(|arg| !arg.starts_with('-') && *arg != "--")
         .map(String::as_str);
 
     match value {

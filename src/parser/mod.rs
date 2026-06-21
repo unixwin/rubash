@@ -236,67 +236,67 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectIn => {
                 note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len() {
-                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
-                        current_cmd.redirect_in = Some(Redirect {
-                            fd: None,
-                            target: tokens[i + 1].value.clone(),
-                            append: false,
-                        });
-                        i += 1;
-                    }
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                {
+                    current_cmd.redirect_in = Some(Redirect {
+                        fd: None,
+                        target: tokens[i + 1].value.clone(),
+                        append: false,
+                    });
+                    i += 1;
                 }
             }
             TokenKind::RedirectOut => {
                 note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len() {
-                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
-                        current_cmd.redirect_out = Some(Redirect {
-                            fd: None,
-                            target: tokens[i + 1].value.clone(),
-                            append: false,
-                        });
-                        i += 1;
-                    }
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                {
+                    current_cmd.redirect_out = Some(Redirect {
+                        fd: None,
+                        target: tokens[i + 1].value.clone(),
+                        append: false,
+                    });
+                    i += 1;
                 }
             }
             TokenKind::Append => {
                 note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len() {
-                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
-                        current_cmd.append = Some(Redirect {
-                            fd: None,
-                            target: tokens[i + 1].value.clone(),
-                            append: true,
-                        });
-                        i += 1;
-                    }
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                {
+                    current_cmd.append = Some(Redirect {
+                        fd: None,
+                        target: tokens[i + 1].value.clone(),
+                        append: true,
+                    });
+                    i += 1;
                 }
             }
             TokenKind::RedirectErr => {
                 note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len() {
-                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
-                        current_cmd.redirect_err = Some(Redirect {
-                            fd: Some(2),
-                            target: tokens[i + 1].value.clone(),
-                            append: false,
-                        });
-                        i += 1;
-                    }
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                {
+                    current_cmd.redirect_err = Some(Redirect {
+                        fd: Some(2),
+                        target: tokens[i + 1].value.clone(),
+                        append: false,
+                    });
+                    i += 1;
                 }
             }
             TokenKind::RedirectErrAppend => {
                 note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len() {
-                    if matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable) {
-                        current_cmd.redirect_err_append = Some(Redirect {
-                            fd: Some(2),
-                            target: tokens[i + 1].value.clone(),
-                            append: true,
-                        });
-                        i += 1;
-                    }
+                if i + 1 < tokens.len()
+                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                {
+                    current_cmd.redirect_err_append = Some(Redirect {
+                        fd: Some(2),
+                        target: tokens[i + 1].value.clone(),
+                        append: true,
+                    });
+                    i += 1;
                 }
             }
             TokenKind::HereDoc => {
