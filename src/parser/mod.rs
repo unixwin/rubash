@@ -31,6 +31,14 @@ pub struct CaseCommand {
 pub struct CaseClause {
     pub patterns: Vec<String>,
     pub body: Vec<CommandNode>,
+    pub terminator: CaseTerminator,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaseTerminator {
+    Break,
+    FallThrough,
+    TestNext,
 }
 
 /// Represents a narrow `name() { ...; }` shell function definition.
@@ -601,10 +609,9 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
 }
 
 fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
-    // TODO(parse.y/execute_cmd.c): GNU Bash supports `;&`, `;;&`, `|`-joined
-    // pattern lists, extglob patterns, nested compound lists, and redirections
-    // on the compound command. This covers the simple upstream alias3.sub
-    // `case word in pattern) list ;; *) list ;; esac` shape.
+    // TODO(parse.y/execute_cmd.c): GNU Bash supports extglob patterns, nested
+    // compound lists, and redirections on the compound command. This covers the
+    // common `case word in pattern) list terminator` shape.
     let word = tokens.get(start + 1)?.value.clone();
     let mut i = start + 2;
     while i < tokens.len() && !is_keyword(tokens, i, "in") {
@@ -640,16 +647,18 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
         i += 1;
 
         let body_start = i;
-        while i < tokens.len()
-            && !is_keyword(tokens, i, "esac")
-            && !(tokens[i].kind == TokenKind::Word && tokens[i].value == ";;")
-        {
+        while i < tokens.len() && !is_keyword(tokens, i, "esac") && !is_case_terminator(tokens, i) {
             i += 1;
         }
         let body = parse(&tokens[body_start..i]).commands;
-        clauses.push(CaseClause { patterns, body });
+        let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
+        clauses.push(CaseClause {
+            patterns,
+            body,
+            terminator,
+        });
 
-        if i < tokens.len() && tokens[i].kind == TokenKind::Word && tokens[i].value == ";;" {
+        if is_case_terminator(tokens, i) {
             i += 1;
         }
     }
@@ -662,6 +671,24 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
     command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(CaseCommand { word, clauses });
     Some((command, i + 1))
+}
+
+fn is_case_terminator(tokens: &[Token], index: usize) -> bool {
+    case_terminator(tokens, index).is_some()
+}
+
+fn case_terminator(tokens: &[Token], index: usize) -> Option<CaseTerminator> {
+    let token = tokens.get(index)?;
+    if token.kind != TokenKind::Word {
+        return None;
+    }
+
+    match token.value.as_str() {
+        ";;" => Some(CaseTerminator::Break),
+        ";&" => Some(CaseTerminator::FallThrough),
+        ";;&" => Some(CaseTerminator::TestNext),
+        _ => None,
+    }
 }
 
 fn note_command_line(cmd: &mut CommandNode, token: &Token) {
