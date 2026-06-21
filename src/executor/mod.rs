@@ -1713,8 +1713,12 @@ impl Executor {
                 "return" => Err(ExecuteError::Return(
                     cmd.words
                         .get(1)
-                        .and_then(|status| status.parse::<i128>().ok())
-                        .map(crate::builtins::exit::normalize_status)
+                        .map(|status| {
+                            status
+                                .parse::<i128>()
+                                .map(crate::builtins::exit::normalize_status)
+                                .unwrap_or(2)
+                        })
                         .unwrap_or(self.exit_code),
                 )),
                 "break" => Err(ExecuteError::Break(loop_control_level(&cmd.words[1..]))),

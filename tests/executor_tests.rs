@@ -449,6 +449,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_function_return_non_numeric_status_is_usage_error() {
+        let output_path = "target/rubash-function-return-bad-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function r {{ return abc; echo bad > {output_path}; }}; r; echo $? > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_braced_positional_parameters_expand() {
         let output_path = "target/rubash-braced-positional-output.txt";
         let _ = fs::remove_file(output_path);
