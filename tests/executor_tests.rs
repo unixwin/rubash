@@ -302,6 +302,24 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert!(!std::path::Path::new(output_path).exists());
     }
+
+    #[test]
+    fn test_function_keyword_definition_executes_body() {
+        let output_path = "target/rubash-function-keyword-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("function greet {{ echo hi > {output_path}; }}; greet");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].function_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+        let _ = fs::remove_file(output_path);
+    }
 }
 
 mod builtin_commands {
