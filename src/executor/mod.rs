@@ -5270,6 +5270,14 @@ impl Executor {
                         .count()
                         .to_string();
                 }
+                if let Some((array_name, index)) = parse_array_numeric_subscript(var_name) {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .and_then(|value| array_value_at(value, index))
+                        .map(|value| value.chars().count().to_string())
+                        .unwrap_or_else(|| "0".to_string());
+                }
                 return self
                     .env_vars
                     .get(var_name)
@@ -5397,6 +5405,13 @@ impl Executor {
                     .env_vars
                     .get(array_name)
                     .map(|value| array_values(value).join(" "))
+                    .unwrap_or_default();
+            }
+            if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
+                return self
+                    .env_vars
+                    .get(array_name)
+                    .and_then(|value| array_value_at(value, index))
                     .unwrap_or_default();
             }
             if let Some((var_name, _pattern)) = name.split_once("##*/") {
@@ -8077,6 +8092,17 @@ fn array_indices(value: &str) -> Vec<String> {
         .keys()
         .map(usize::to_string)
         .collect()
+}
+
+fn array_value_at(value: &str, index: usize) -> Option<String> {
+    let mut entries = indexed_array_entries(value);
+    entries.remove(&index)
+}
+
+fn parse_array_numeric_subscript(name: &str) -> Option<(&str, usize)> {
+    let (array_name, subscript) = name.split_once('[')?;
+    let index = subscript.strip_suffix(']')?.parse::<usize>().ok()?;
+    Some((array_name, index))
 }
 
 fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
