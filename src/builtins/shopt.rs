@@ -34,7 +34,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
     execute_with_io(args, env_vars, &mut stdout, &mut stderr)
 }
 
-fn execute_with_io<W, E>(
+pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
