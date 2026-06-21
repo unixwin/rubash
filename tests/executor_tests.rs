@@ -1598,6 +1598,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_normal_completion_runs_exit_trap() {
+        let output_path = "target/rubash-normal-exit-trap-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo done > {output_path}' EXIT; true");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+        let status = executor.run_exit_trap();
+
+        assert!(result.is_ok());
+        assert!(status.is_ok());
+        assert_eq!(status.unwrap(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "done\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_exit_trap_sees_last_status_on_normal_completion() {
+        let output_path = "target/rubash-normal-exit-trap-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo $? > {output_path}' EXIT; false");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+        let status = executor.run_exit_trap();
+
+        assert!(result.is_ok());
+        assert!(status.is_ok());
+        assert_eq!(status.unwrap(), 1);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
