@@ -385,6 +385,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_n_reads_limited_characters() {
+        let output_path = "target/rubash-read-n-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("read -n 3 value <<< abcdef; echo $value > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "abc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_n_compact_option_reads_limited_characters() {
+        let output_path = "target/rubash-read-n-compact-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("read -n3 value <<< abcdef; echo $value > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "abc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_a_splits_here_string_into_array() {
         let output_path = "target/rubash-read-a-output.txt";
         let _ = fs::remove_file(output_path);
