@@ -4362,13 +4362,14 @@ impl Executor {
             return;
         }
 
-        let fields = line.split_whitespace().collect::<Vec<_>>();
+        let ifs = self
+            .env_vars
+            .get("IFS")
+            .map(String::as_str)
+            .unwrap_or(" \t\n");
+        let fields = read_scalar_fields(line, names.len(), ifs);
         for (index, name) in names.iter().enumerate() {
-            let value = if index + 1 == names.len() {
-                fields.get(index..).unwrap_or_default().join(" ")
-            } else {
-                fields.get(index).copied().unwrap_or_default().to_string()
-            };
+            let value = fields.get(index).cloned().unwrap_or_default();
             self.env_vars.insert(name.clone(), value);
         }
     }
@@ -6481,6 +6482,45 @@ fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
             .collect(),
         _ => line.split_whitespace().map(str::to_string).collect(),
     }
+}
+
+fn read_scalar_fields(line: &str, names_len: usize, ifs: &str) -> Vec<String> {
+    if names_len == 0 {
+        return Vec::new();
+    }
+    if names_len == 1 {
+        return vec![line.to_string()];
+    }
+    if ifs.is_empty() {
+        let mut fields = vec![line.to_string()];
+        while fields.len() < names_len {
+            fields.push(String::new());
+        }
+        return fields;
+    }
+    if ifs.trim().is_empty() {
+        let mut fields = line
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        while fields.len() < names_len {
+            fields.push(String::new());
+        }
+        if fields.len() > names_len {
+            let rest = fields.split_off(names_len - 1).join(" ");
+            fields.push(rest);
+        }
+        return fields;
+    }
+
+    let mut fields = line
+        .splitn(names_len, |ch| ifs.contains(ch))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    while fields.len() < names_len {
+        fields.push(String::new());
+    }
+    fields
 }
 
 fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
