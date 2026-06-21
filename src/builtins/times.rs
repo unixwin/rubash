@@ -15,7 +15,11 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     execute_with_io(args.iter().map(String::as_str), &mut stdout, &mut stderr)
 }
 
-fn execute_with_io<'a, I, W, E>(args: I, stdout: &mut W, stderr: &mut E) -> io::Result<i32>
+pub(crate) fn execute_with_io<'a, I, W, E>(
+    args: I,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
