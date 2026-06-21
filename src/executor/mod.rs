@@ -1799,8 +1799,7 @@ impl Executor {
                     Ok(())
                 }
                 "alias" => {
-                    self.exit_code =
-                        crate::builtins::alias::alias(&cmd.words[1..], &mut self.aliases)?;
+                    self.exit_code = self.execute_alias(cmd)?;
                     Ok(())
                 }
                 "declare" | "typeset" => {
@@ -5177,6 +5176,38 @@ impl Executor {
         }
 
         Ok(crate::builtins::alias::unalias(
+            &cmd.words[1..],
+            &mut self.aliases,
+        )?)
+    }
+
+    fn execute_alias(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::alias::alias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::alias::alias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::alias::alias(
             &cmd.words[1..],
             &mut self.aliases,
         )?)
