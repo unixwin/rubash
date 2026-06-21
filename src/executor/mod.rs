@@ -1817,8 +1817,7 @@ impl Executor {
                         self.exit_code = self.execute_declare_functions(&cmd.words[1..]);
                         return Ok(());
                     }
-                    let args = self.expand_declare_assignment_args(&cmd.words[1..]);
-                    self.exit_code = crate::builtins::declare::execute(&args, &mut self.env_vars)?;
+                    self.exit_code = self.execute_declare(cmd)?;
                     Ok(())
                 }
                 "unalias" => {
@@ -2061,6 +2060,40 @@ impl Executor {
             self.print_function_definition(name, body);
         }
         status
+    }
+
+    fn execute_declare(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let args = self.expand_declare_assignment_args(&cmd.words[1..]);
+
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::declare::execute_with_io(
+                &args,
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::declare::execute_with_io(
+                &args,
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::declare::execute(
+            &args,
+            &mut self.env_vars,
+        )?)
     }
 
     fn print_function_definition(&self, name: &str, body: &[CommandNode]) {
