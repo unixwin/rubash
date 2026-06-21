@@ -1635,6 +1635,57 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_array_parameter_replacement_expands_elements() {
+        let output_path = "target/rubash-array-replace-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(banana gamma); echo ${{arr[@]/a/o}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "bonana gomma\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_array_parameter_replacement_expands_all_matches() {
+        let output_path = "target/rubash-array-replace-all-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(banana gamma); echo ${{arr[*]//a/o}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "bonono gommo\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_array_parameter_replacement_deletes_matches() {
+        let output_path = "target/rubash-array-replace-delete-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(banana gamma); echo ${{arr[@]//a}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "bnn gmm\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_positional_parameter_replacement_expands_numeric_parameter() {
         let output_path = "target/rubash-positional-replace-output.txt";
         let _ = fs::remove_file(output_path);

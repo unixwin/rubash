@@ -5557,6 +5557,29 @@ impl Executor {
                         })
                         .unwrap_or_default();
                 }
+                if let Some(array_name) = var_name
+                    .strip_suffix("[@]")
+                    .or_else(|| var_name.strip_suffix("[*]"))
+                {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| {
+                            array_values(value)
+                                .into_iter()
+                                .map(|value| {
+                                    replace_parameter_pattern(
+                                        &value,
+                                        &pattern,
+                                        &replacement,
+                                        global,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
