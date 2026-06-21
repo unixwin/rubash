@@ -60,7 +60,7 @@ fn parse_exit_status(arg: &str) -> Option<i32> {
     Some(normalize_status(value))
 }
 
-fn normalize_status<T>(status: T) -> i32
+pub(crate) fn normalize_status<T>(status: T) -> i32
 where
     T: Into<i128>,
 {
