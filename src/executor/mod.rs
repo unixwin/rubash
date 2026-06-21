@@ -1505,6 +1505,7 @@ impl Executor {
         let for_command = ForCommand {
             variable: words[1].clone(),
             words: words[3..].to_vec(),
+            default_positional: false,
             body,
         };
         self.execute_for_command(&for_command)?;
@@ -2237,9 +2238,17 @@ impl Executor {
     fn execute_for_command(&mut self, for_command: &ForCommand) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c): Bash `execute_for_command` applies the
         // full expansion pipeline, loop-control state, traps, and redirections.
-        // This only covers `for name in words; do compound_list; done`.
-        for word in &for_command.words {
-            let value = self.expand_word(word);
+        // This covers common `for name [in words]; do compound_list; done` forms.
+        let values = if for_command.default_positional {
+            self.positional_params.clone()
+        } else {
+            for_command
+                .words
+                .iter()
+                .map(|word| self.expand_word(word))
+                .collect()
+        };
+        for value in values {
             self.env_vars
                 .insert(for_command.variable.clone(), value.clone());
             env::set_var(&for_command.variable, value);
