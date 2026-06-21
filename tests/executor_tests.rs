@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo test --test executor_tests
 
-use rubash::executor::Executor;
+use rubash::executor::{ExecuteError, Executor};
 use rubash::lexer::tokenize;
 use rubash::parser::parse;
 
@@ -1356,6 +1356,45 @@ mod command_chaining {
         assert!(output.starts_with("before\nshift: shift [n]\n"));
         assert!(output.contains("Shift positional parameters."));
         assert!(output.ends_with("2\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_exit_help_redirects_output_and_exits_usage() {
+        let output_path = "target/rubash-exit-help-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("exit --help > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(2))));
+        assert_eq!(executor.last_exit_code(), 2);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("exit: exit [n]\n"));
+        assert!(output.contains("Exit the shell."));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_exit_help_appends_output_and_exits_usage() {
+        let output_path = "target/rubash-exit-help-append-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("exit --help >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(2))));
+        assert_eq!(executor.last_exit_code(), 2);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("before\nexit: exit [n]\n"));
+        assert!(output.contains("Exit the shell."));
         let _ = fs::remove_file(output_path);
     }
 

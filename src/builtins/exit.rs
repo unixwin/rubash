@@ -16,23 +16,36 @@ pub enum ExitAction {
 
 /// Execute `exit` with arguments after the command name.
 pub fn execute(args: &[String], last_status: i32) -> io::Result<ExitAction> {
+    let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    execute_with_stderr(args.iter().map(String::as_str), last_status, &mut stderr)
+    execute_with_io(
+        args.iter().map(String::as_str),
+        last_status,
+        &mut stdout,
+        &mut stderr,
+    )
 }
 
-fn execute_with_stderr<'a, I, W>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     last_status: i32,
-    stderr: &mut W,
+    stdout: &mut W,
+    stderr: &mut E,
 ) -> io::Result<ExitAction>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
+    E: Write,
 {
     let args: Vec<&str> = args.into_iter().collect();
 
     if args.is_empty() {
         return Ok(ExitAction::Exit(normalize_status(last_status)));
+    }
+
+    if args[0] == "--help" {
+        print_help(stdout)?;
+        return Ok(ExitAction::Exit(EX_USAGE));
     }
 
     let status = match parse_exit_status(args[0]) {
@@ -55,6 +68,20 @@ where
     Ok(ExitAction::Exit(status))
 }
 
+fn print_help<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(stdout, "exit: exit [n]")?;
+    writeln!(stdout, "    Exit the shell.")?;
+    writeln!(stdout, "    ")?;
+    writeln!(
+        stdout,
+        "    Exits the shell with a status of N.  If N is omitted, the exit status"
+    )?;
+    writeln!(stdout, "    is that of the last command executed.")
+}
+
 fn parse_exit_status(arg: &str) -> Option<i32> {
     let value = arg.parse::<i128>().ok()?;
     Some(normalize_status(value))
@@ -72,8 +99,10 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str], last_status: i32) -> (ExitAction, String) {
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action = execute_with_stderr(args.iter().copied(), last_status, &mut stderr).unwrap();
+        let action =
+            execute_with_io(args.iter().copied(), last_status, &mut stdout, &mut stderr).unwrap();
         (action, String::from_utf8(stderr).unwrap())
     }
 
