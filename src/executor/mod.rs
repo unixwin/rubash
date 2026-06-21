@@ -2276,7 +2276,8 @@ impl Executor {
     fn execute_case_command(&mut self, case_command: &CaseCommand) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c/pathexp.c): Bash case execution uses the
         // full pattern matcher, fall-through operators, expansion flags, and
-        // compound-list control flow. This handles exact patterns and `*`.
+        // compound-list control flow. This handles the common shell glob
+        // operators used by simple `case` clauses.
         let word = self.expand_case_word(&case_command.word);
         for clause in &case_command.clauses {
             if clause
@@ -6527,7 +6528,95 @@ fn strip_matching_quotes(value: &str) -> &str {
 }
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {
-    pattern == "*" || pattern == word
+    let pattern: Vec<char> = pattern.chars().collect();
+    let word: Vec<char> = word.chars().collect();
+    case_pattern_matches_at(&pattern, 0, &word, 0)
+}
+
+fn case_pattern_matches_at(
+    pattern: &[char],
+    p_index: usize,
+    word: &[char],
+    w_index: usize,
+) -> bool {
+    if p_index == pattern.len() {
+        return w_index == word.len();
+    }
+
+    match pattern[p_index] {
+        '*' => {
+            case_pattern_matches_at(pattern, p_index + 1, word, w_index)
+                || (w_index < word.len()
+                    && case_pattern_matches_at(pattern, p_index, word, w_index + 1))
+        }
+        '?' => {
+            w_index < word.len() && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+        }
+        '[' => {
+            let Some((matches_class, next_index)) =
+                case_bracket_expression_matches(pattern, p_index, word.get(w_index).copied())
+            else {
+                return w_index < word.len()
+                    && pattern[p_index] == word[w_index]
+                    && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1);
+            };
+
+            matches_class && case_pattern_matches_at(pattern, next_index, word, w_index + 1)
+        }
+        '\\' if p_index + 1 < pattern.len() => {
+            w_index < word.len()
+                && pattern[p_index + 1] == word[w_index]
+                && case_pattern_matches_at(pattern, p_index + 2, word, w_index + 1)
+        }
+        literal => {
+            w_index < word.len()
+                && literal == word[w_index]
+                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+        }
+    }
+}
+
+fn case_bracket_expression_matches(
+    pattern: &[char],
+    start: usize,
+    candidate: Option<char>,
+) -> Option<(bool, usize)> {
+    let mut index = start + 1;
+    if index >= pattern.len() {
+        return None;
+    }
+
+    let negated = matches!(pattern[index], '!' | '^');
+    if negated {
+        index += 1;
+    }
+
+    let mut matched = false;
+    let mut saw_member = false;
+    let candidate = candidate?;
+    while index < pattern.len() {
+        if pattern[index] == ']' && saw_member {
+            return Some((if negated { !matched } else { matched }, index + 1));
+        }
+
+        let current = pattern[index];
+        if index + 2 < pattern.len() && pattern[index + 1] == '-' && pattern[index + 2] != ']' {
+            let end = pattern[index + 2];
+            if current <= candidate && candidate <= end {
+                matched = true;
+            }
+            saw_member = true;
+            index += 3;
+        } else {
+            if current == candidate {
+                matched = true;
+            }
+            saw_member = true;
+            index += 1;
+        }
+    }
+
+    None
 }
 
 fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
