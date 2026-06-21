@@ -4322,7 +4322,12 @@ impl Executor {
                 }
             }
         }
-        if let Some(name) = cmd.words.get(1) {
+        let scalar_name = cmd
+            .words
+            .iter()
+            .skip(1)
+            .find(|word| word.as_str() != "-r" && !word.starts_with('-'));
+        if let Some(name) = scalar_name {
             if is_shell_name(name) {
                 let status = if let Some(mut line) = self.stdin_string_for_command(cmd) {
                     while line.ends_with('\n') || line.ends_with('\r') {
