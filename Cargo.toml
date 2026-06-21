@@ -4,7 +4,7 @@
 
 [package]
 name = "rubash"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 rust-version = "1.70"
 authors = ["unixwin team <arookieofc@gmail.com>"]
@@ -15,6 +15,14 @@ repository = "https://github.com/unixwin/rubash"
 license = "GPL-3.0-or-later"
 keywords = ["shell", "bash", "cli", "posix"]
 categories = ["command-line-utilities", "development-tools"]
+exclude = [
+    ".github/**",
+    "Cargo.toml.orig",
+    "memory/**",
+    "target/**",
+    "third_party/bash/**",
+    "!third_party/bash/tests/*.right",
+]
 
 [dependencies]
 
