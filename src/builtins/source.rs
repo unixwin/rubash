@@ -148,9 +148,13 @@ pub fn execute_simple_if(
     } else {
         &command.words
     };
-    let condition_true = simple_command_if_condition_true(words)
-        || test_if_condition_true(executor, words)?
-        || arithmetic_if_condition_true(words);
+    let condition_true = if test_if_condition_true(executor, words)? {
+        true
+    } else if let Some(value) = arithmetic_if_condition_value(words) {
+        value
+    } else {
+        execute_command_if_condition(executor, command)?
+    };
     if condition_true {
         let body_end = elif_index.or(else_index).unwrap_or(fi_index);
         let mut body_commands = Vec::new();
@@ -249,28 +253,38 @@ fn posix_plain_name_lookup(executor: &Executor, filename: &str) -> bool {
         && !filename.contains('\\')
 }
 
-fn arithmetic_if_condition_true(words: &[String]) -> bool {
+fn arithmetic_if_condition_value(words: &[String]) -> Option<bool> {
     // TODO(expr.c/parse.y): Source7 uses `if (((4+4) + (4 + 7))); then`.
     // The current lexer drops grouping tokens before the executor sees this,
     // so accept a non-empty arithmetic-looking condition with at least one
     // non-zero digit as true. Replace this with a real arith_command node.
-    words.first().map(String::as_str) == Some("if")
-        && words.iter().skip(1).all(|word| {
-            word.chars()
-                .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
-        })
-        && words
-            .iter()
-            .skip(1)
-            .flat_map(|word| word.chars())
-            .any(|ch| matches!(ch, '1'..='9'))
-}
-
-fn simple_command_if_condition_true(words: &[String]) -> bool {
-    match words {
-        [keyword, command] if keyword == "if" && command == "true" => true,
-        _ => false,
+    if words.first().map(String::as_str) != Some("if") {
+        return None;
     }
+    let terms = &words[1..];
+    if terms.is_empty() {
+        return None;
+    }
+    if terms.iter().all(|word| {
+        word.chars()
+            .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
+    }) {
+        return Some(
+            terms
+                .iter()
+                .flat_map(|word| word.chars())
+                .any(|ch| matches!(ch, '1'..='9')),
+        );
+    }
+    if terms.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
+        )
+    }) {
+        return Some(false);
+    }
+    None
 }
 
 fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool, ExecuteError> {
@@ -289,6 +303,28 @@ fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool,
     }
     let status = crate::builtins::test::execute(&args, true, executor.env_vars())?;
     Ok(status == 0)
+}
+
+fn execute_command_if_condition(
+    executor: &mut Executor,
+    command: &crate::parser::CommandNode,
+) -> Result<bool, ExecuteError> {
+    let Some(condition_words) = command.words.get(1..) else {
+        return Ok(false);
+    };
+    if condition_words.is_empty() {
+        return Ok(false);
+    }
+
+    let mut condition = command.clone();
+    condition.words = condition_words.to_vec();
+    condition.pipe = None;
+    condition.and_or = None;
+    let ast = Ast {
+        commands: vec![condition],
+    };
+    executor.execute_ast(&ast)?;
+    Ok(executor.last_exit_code() == 0)
 }
 
 struct SourceInvocation<'a> {
