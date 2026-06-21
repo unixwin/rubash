@@ -9,7 +9,7 @@ use crate::expand::tilde::tilde as tilde_expand;
 use crate::parser::{
     Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand, FunctionCommand,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -4431,6 +4431,7 @@ impl Executor {
         // set, callbacks, origin/count handling, and newline-preserving storage.
         let mut trim_newline = false;
         let mut count = None;
+        let mut origin = None;
         let mut skip = 0;
         let mut array_name = None;
         let mut index = 1;
@@ -4447,6 +4448,13 @@ impl Executor {
                         .and_then(|word| word.parse::<usize>().ok());
                     index += 2;
                 }
+                "-O" => {
+                    origin = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.parse::<usize>().ok());
+                    index += 2;
+                }
                 "-s" => {
                     skip = cmd
                         .words
@@ -4457,6 +4465,10 @@ impl Executor {
                 }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     count = word[2..].parse::<usize>().ok();
+                    index += 1;
+                }
+                word if word.starts_with("-O") && word.len() > 2 => {
+                    origin = word[2..].parse::<usize>().ok();
                     index += 1;
                 }
                 word if word.starts_with("-s") && word.len() > 2 => {
@@ -4487,13 +4499,34 @@ impl Executor {
                 if let Some(count) = count {
                     values.truncate(count);
                 }
+                let start = origin.unwrap_or(0);
+                let mut entries = if origin.is_some() {
+                    self.env_vars
+                        .get(&name)
+                        .map(|current| indexed_array_entries(current))
+                        .unwrap_or_default()
+                } else {
+                    BTreeMap::new()
+                };
+                for (offset, value) in values.into_iter().enumerate() {
+                    entries.insert(start + offset, value);
+                }
                 self.env_vars
-                    .insert(name.clone(), format!("({})", values.join(" ")));
+                    .insert(name.clone(), format_indexed_array_storage(entries));
                 mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return 0;
             }
 
-            self.env_vars.insert(name.clone(), "(1 2 3)".to_string());
+            self.env_vars.insert(
+                name.clone(),
+                format_indexed_array_storage(
+                    ["1", "2", "3"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, value)| (index, value.to_string()))
+                        .collect(),
+                ),
+            );
             mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
             return 0;
         }
@@ -8009,6 +8042,45 @@ fn array_values(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
+    if let Some(rendered) = value.strip_prefix('\x1d') {
+        return rendered_array_entries(rendered);
+    }
+
+    array_values(value).into_iter().enumerate().collect()
+}
+
+fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return BTreeMap::new();
+    };
+
+    inner
+        .split_whitespace()
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            let index = key
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<usize>()
+                .ok()?;
+            Some((index, decode_rendered_array_value(value)))
+        })
+        .collect()
+}
+
+fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
+    let rendered = entries
+        .into_iter()
+        .map(|(index, value)| format!("[{index}]=\"{}\"", quote_double_array_value(&value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("\x1d({rendered})")
+}
+
 fn rendered_array_values(value: &str) -> Vec<String> {
     let Some(inner) = value
         .strip_prefix('(')
@@ -8039,6 +8111,14 @@ fn decode_rendered_array_value(value: &str) -> String {
     }
 
     value.trim_matches('"').to_string()
+}
+
+fn quote_double_array_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
 }
 
 fn is_array_storage(value: &str) -> bool {
