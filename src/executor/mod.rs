@@ -12,7 +12,7 @@ use crate::parser::{
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
 use self::path::{find_shell, find_user_command, shell_path_to_windows, should_run_with_shell};
@@ -1727,16 +1727,7 @@ impl Executor {
                 "break" => Err(ExecuteError::Break(loop_control_level(&cmd.words[1..]))),
                 "continue" => Err(ExecuteError::Continue(loop_control_level(&cmd.words[1..]))),
                 "pwd" => {
-                    if cmd.words.len() == 1 {
-                        if let Some(pwd) = self.env_vars.get("PWD") {
-                            if pwd == "/" || pwd.starts_with("/tmp") {
-                                println!("{pwd}");
-                                self.exit_code = 0;
-                                return Ok(());
-                            }
-                        }
-                    }
-                    self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
+                    self.exit_code = self.execute_pwd(cmd)?;
                     Ok(())
                 }
                 "source" | "." => crate::builtins::source::execute(self, &cmd.words[1..]),
@@ -3863,14 +3854,7 @@ impl Executor {
                 Ok(())
             }
             "pwd" => {
-                if let Some(pwd) = self.env_vars.get("PWD") {
-                    if pwd.starts_with('/') {
-                        println!("{pwd}");
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                }
-                self.exit_code = crate::builtins::pwd::execute(&cmd.words[1..])?;
+                self.exit_code = self.execute_pwd(cmd)?;
                 Ok(())
             }
             "." | "source" => self.execute_source_from_command_builtin(cmd),
@@ -4416,6 +4400,46 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_pwd(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut file)?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut file)?);
+        }
+
+        let mut stdout = std::io::stdout().lock();
+        Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut stdout)?)
+    }
+
+    fn execute_pwd_with_writer<W>(&mut self, args: &[String], stdout: &mut W) -> io::Result<i32>
+    where
+        W: Write,
+    {
+        if args.is_empty() || args.first().map(String::as_str) == Some("-L") {
+            if let Some(pwd) = self.env_vars.get("PWD") {
+                if pwd.starts_with('/') {
+                    writeln!(stdout, "{pwd}")?;
+                    return Ok(0);
+                }
+            }
+        }
+
+        crate::builtins::pwd::execute_with_io(
+            args.iter().map(String::as_str),
+            stdout,
+            &mut std::io::stderr().lock(),
+        )
     }
 
     fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
