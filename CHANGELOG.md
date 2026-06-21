@@ -4,6 +4,18 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased] - 2026-06-21
+
+### 测试
+
+- GNU Bash upstream runner 本地基线更新为 `87/87` 通过。
+- 将 `run-minimal` 纳入默认 upstream runner 集合。
+- 收敛 upstream bridge 的重复输出逻辑，降低后续维护成本。
+
+### 文档
+
+- 更新 README 和 GNU Bash upstream 测试文档中的测试进度、运行命令和更新时间。
+
 ## [0.1.1] - 2024-06-11
 
 ### 增强执行器

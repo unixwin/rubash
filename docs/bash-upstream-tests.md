@@ -99,16 +99,9 @@ Current local baseline:
 
 | Environment | Total | Passed | Failed | Pass rate |
 |-------------|-------|--------|--------|-----------|
-| Windows + Git Bash full upstream run | 86 | 0 | 86 | 0.00% |
+| Windows + Git Bash full upstream run | 87 | 87 | 0 | 100.00% |
 
-Rubash currently does not provide enough Bash-compatible behavior to pass the
-full upstream suite. Before making these tests strict in CI, implement or adapt:
-
-- executing a script file passed as argv;
-- `-c` command execution;
-- preserving stdout, stderr, and exit status for golden-output comparison;
-- a curated allowlist of upstream `run-*` tests matching implemented features.
-
-Start with parser, quoting, redirection, and simple builtin tests. Add variable
-expansion, pipelines, control flow, and job-control tests only after those
-features are implemented.
+The runner still stays non-strict in CI so it can serve as a progress signal,
+but the current local baseline passes the full upstream runner set that ships in
+the submodule. When Bash adds new `run-*` scripts or the submodule advances,
+re-run the suite and update this table.

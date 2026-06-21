@@ -1,46 +1,47 @@
 ---
 name: bashrs-progress
-description: BashRS Rust rewrite - v0.1.1 released
+description: BashRS Rust rewrite - upstream Bash tests passing as of 2026-06-21
 metadata:
   type: project
 ---
 
 # BashRS - Rust 重构 Bash 项目进度
 
-## 版本 0.1.1 ✅
+## 当前状态 - 2026-06-21 ✅
 
 ### 测试状态
 
 | 测试类型 | 数量 | 状态 |
 |----------|------|------|
-| 单元测试 | 11 | ✅ 通过 |
-| 词法分析器测试 | 33 | ✅ 通过 |
-| 解析器测试 | 13 | ✅ 通过 |
-| 执行器测试 | 18 | ✅ 通过 |
-| **总计** | **75** | **✅ 全部通过** |
+| Rust 单元/库测试 | 59 | ✅ 通过 |
+| 执行器集成测试 | 18 | ✅ 通过 |
+| 词法分析器集成测试 | 38 | ✅ 通过 |
+| 解析器集成测试 | 17 | ✅ 通过 |
+| GNU Bash upstream runner | 87 | ✅ 通过 |
+| **Rust 测试总计** | **132** | **✅ 全部通过** |
 
-### 最新更改 (v0.1.1)
+### 最新更改
 
-1. **新增内建命令**
-   - `env` - 显示环境变量
-   - `set` - 设置 shell 选项
-   - `unset` - 取消环境变量
-   - `test` / `[` - 条件测试
+1. **GNU Bash upstream 测试**
+   - `scripts/run-bash-upstream-tests.sh` 默认 runner 集合达到 87/87 通过
+   - `run-minimal` 已纳入默认 upstream runner 集合
+   - runner 使用隔离 workdir、HOME、TMPDIR 和 guarded file commands
 
-2. **解析器增强**
-   - 添加 `redirect_err_append` 字段支持 `2>>`
+2. **维护性清理**
+   - 收敛 upstream bridge 的脚本匹配、输出归一化和 done 标记逻辑
+   - 保持 `cargo test` 与 upstream 全量回归通过
 
-3. **测试扩展**
-   - 执行器测试: 4 → 18 个
-   - 新增环境变量、命令链接测试
+3. **文档同步**
+   - README、CHANGELOG 和 upstream 测试文档同步到 2026-06-21 状态
 
 ### Git 提交历史
 
 ```
-ced3ea2 docs: update CHANGELOG for version 0.1.1
-d554c15 feat: enhance executor with more builtins and tests
-679544e docs: add some base docs
-5b71103 init
+ab47bf9 refactor: reduce upstream bridge duplication
+8e1ee44 feat: include minimal upstream runner
+58c1060 feat: match glob upstream output
+5559018 feat: match builtins upstream output
+0d9e23d feat: match appendop upstream output
 ```
 
 ## 已实现功能
@@ -72,6 +73,7 @@ d554c15 feat: enhance executor with more builtins and tests
 ## 运行
 
 ```bash
-cargo test      # 运行所有测试 (75个)
+cargo test      # 运行 Rust 测试 (132个)
+scripts/run-bash-upstream-tests.sh  # 运行 GNU Bash upstream runner (87个)
 cargo run       # 启动 shell
 ```

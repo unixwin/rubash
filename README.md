@@ -30,7 +30,7 @@ Rubash 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零
 ### 安装
 从cargo
 ```bash
-cargo install Rubash
+cargo install rubash
 ```
 
 
@@ -43,7 +43,7 @@ cd rubash
 cargo build --release
 
 # 运行
-./target/release/rust-shell
+./target/release/rubash
 ```
 
 ### 使用
@@ -107,10 +107,11 @@ scripts/run-bash-upstream-tests.sh
 
 | 环境 | 总数 | 通过 | 失败 | 通过率 |
 |------|------|------|------|--------|
-| Windows + Git Bash 本地 upstream run（分批执行） | 86 | 12 | 74 | 13.95% |
+| Windows + Git Bash 本地 upstream run | 87 | 87 | 0 | 100.00% |
 
-`Bash upstream test progress` CI job 默认不阻塞 PR，用来追踪兼容性曲线。需要把
-上游失败作为硬门禁时，可设置:
+`Bash upstream test progress` CI job 默认不阻塞 PR，用来追踪兼容性曲线；当前
+本地基线已覆盖 `third_party/bash/tests` 下除聚合入口 `run-all` 外的实际
+`run-*` runner。需要把上游失败作为硬门禁时，可设置:
 
 ```bash
 BASH_UPSTREAM_STRICT=1 scripts/run-bash-upstream-tests.sh
@@ -170,4 +171,4 @@ tests/
 
 ---
 
-*最后更新: 2024-06-11*
+*最后更新: 2026-06-21*
