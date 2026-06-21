@@ -5295,6 +5295,16 @@ impl Executor {
                     return positional_parameter_substring(&self.positional_params, offset, length)
                         .join(" ");
                 }
+                if let Some(array_name) = var_name
+                    .strip_suffix("[@]")
+                    .or_else(|| var_name.strip_suffix("[*]"))
+                {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| array_parameter_slice(value, offset, length).join(" "))
+                        .unwrap_or_default();
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -7410,6 +7420,21 @@ fn positional_parameter_substring(
         .skip(start)
         .take(length.unwrap_or(usize::MAX))
         .cloned()
+        .collect()
+}
+
+fn array_parameter_slice(value: &str, offset: isize, length: Option<usize>) -> Vec<String> {
+    let values = array_values(value);
+    let start = if offset < 0 {
+        values.len().saturating_sub(offset.unsigned_abs())
+    } else {
+        offset as usize
+    };
+
+    values
+        .into_iter()
+        .skip(start)
+        .take(length.unwrap_or(usize::MAX))
         .collect()
 }
 
