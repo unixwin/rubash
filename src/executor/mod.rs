@@ -1719,8 +1719,7 @@ impl Executor {
                     }
                 },
                 "enable" => {
-                    self.exit_code =
-                        crate::builtins::enable::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code = self.execute_enable(cmd)?;
                     Ok(())
                 }
                 "exec" => {
@@ -5239,6 +5238,38 @@ impl Executor {
         }
 
         Ok(crate::builtins::set::set(
+            &cmd.words[1..],
+            &mut self.env_vars,
+        )?)
+    }
+
+    fn execute_enable(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::enable::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::enable::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::enable::execute(
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
