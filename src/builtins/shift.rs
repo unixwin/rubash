@@ -16,9 +16,12 @@ pub fn execute(args: &[String]) -> io::Result<ShiftAction> {
         return Ok(ShiftAction::Complete(0));
     }
 
-    let amount = args
-        .first()
-        .and_then(|arg| arg.parse::<usize>().ok())
-        .unwrap_or(1);
+    let amount = match args.first() {
+        Some(arg) => match arg.parse::<isize>() {
+            Ok(amount) if amount >= 0 => amount as usize,
+            _ => return Ok(ShiftAction::Complete(1)),
+        },
+        None => 1,
+    };
     Ok(ShiftAction::Shift(amount))
 }
