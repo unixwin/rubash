@@ -1061,6 +1061,95 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_break_outside_loop_returns_success() {
+        let output_path = "target/rubash-break-outside-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("break not-a-number; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_break_zero_in_loop_returns_failure_without_breaking() {
+        let output_path = "target/rubash-break-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("while true; do break 0; echo $? > {output_path}; break; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_break_accepts_positive_signed_level() {
+        let output_path = "target/rubash-break-plus-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "while true; do break +1; echo bad > {output_path}; done; echo ok > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_continue_zero_in_loop_returns_failure_without_continuing() {
+        let output_path = "target/rubash-continue-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("while true; do continue 0; echo $? > {output_path}; break; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_break_two_exits_nested_loops() {
+        let output_path = "target/rubash-break-two-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "for outer in a b; do for inner in c d; do break 2; echo inner >> {output_path}; done; echo outer >> {output_path}; done; echo ok > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_until_true_skips_body() {
         let output_path = "target/rubash-until-true-output.txt";
         let _ = fs::remove_file(output_path);

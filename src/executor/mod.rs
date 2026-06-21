@@ -571,6 +571,21 @@ enum TypeDescribeMode {
     PathOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControlKind {
+    Break,
+    Continue,
+}
+
+impl LoopControlKind {
+    fn name(self) -> &'static str {
+        match self {
+            LoopControlKind::Break => "break",
+            LoopControlKind::Continue => "continue",
+        }
+    }
+}
+
 /// Execution error
 #[derive(Debug)]
 pub enum ExecuteError {
@@ -1724,8 +1739,8 @@ impl Executor {
                         })
                         .unwrap_or(self.exit_code),
                 )),
-                "break" => Err(ExecuteError::Break(loop_control_level(&cmd.words[1..]))),
-                "continue" => Err(ExecuteError::Continue(loop_control_level(&cmd.words[1..]))),
+                "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
+                "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
                 "pwd" => {
                     self.exit_code = self.execute_pwd(cmd)?;
                     Ok(())
@@ -4442,6 +4457,56 @@ impl Executor {
         )
     }
 
+    fn execute_loop_control(
+        &mut self,
+        cmd: &CommandNode,
+        kind: LoopControlKind,
+    ) -> Result<(), ExecuteError> {
+        if self.loop_depth == 0 {
+            eprintln!(
+                "{}{}: only meaningful in a `for', `while', or `until' loop",
+                self.diagnostic_prefix(),
+                kind.name()
+            );
+            self.exit_code = 0;
+            return Ok(());
+        }
+
+        match loop_control_level(&cmd.words[1..]) {
+            Ok(level) => match kind {
+                LoopControlKind::Break => Err(ExecuteError::Break(level)),
+                LoopControlKind::Continue => Err(ExecuteError::Continue(level)),
+            },
+            Err(LoopControlError::TooManyArguments) => {
+                eprintln!(
+                    "{}{}: too many arguments",
+                    self.diagnostic_prefix(),
+                    kind.name()
+                );
+                self.exit_code = 1;
+                Ok(())
+            }
+            Err(LoopControlError::OutOfRange(value)) => {
+                eprintln!(
+                    "{}{}: {value}: loop count out of range",
+                    self.diagnostic_prefix(),
+                    kind.name()
+                );
+                self.exit_code = 1;
+                Ok(())
+            }
+            Err(LoopControlError::NotNumeric(value)) => {
+                eprintln!(
+                    "{}{}: {value}: numeric argument required",
+                    self.diagnostic_prefix(),
+                    kind.name()
+                );
+                self.exit_code = 1;
+                Ok(())
+            }
+        }
+    }
+
     fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
         let mut array_name = None;
         let mut delimiter = '\n';
@@ -7134,20 +7199,36 @@ fn is_reserved_word(word: &str) -> bool {
     )
 }
 
-fn loop_control_level(args: &[String]) -> usize {
-    // TODO(builtins/break.def): Bash validates numeric arguments and reports
-    // diagnostics for invalid levels. For upstream builtins tests, parsing the
-    // optional level and `--` is enough to drive loop control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoopControlError {
+    TooManyArguments,
+    OutOfRange(String),
+    NotNumeric(String),
+}
+
+fn loop_control_level(args: &[String]) -> Result<usize, LoopControlError> {
     let mut args = args.iter().map(String::as_str);
     let first = match args.next() {
         Some("--") => args.next(),
         other => other,
     };
 
-    first
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|level| *level > 0)
-        .unwrap_or(1)
+    let Some(value) = first else {
+        return Ok(1);
+    };
+    if args.next().is_some() {
+        return Err(LoopControlError::TooManyArguments);
+    }
+    if value.starts_with('-') {
+        return Err(LoopControlError::OutOfRange(value.to_string()));
+    }
+
+    let number = value.strip_prefix('+').unwrap_or(value);
+    match number.parse::<usize>() {
+        Ok(level) if level > 0 => Ok(level),
+        Ok(_) => Err(LoopControlError::OutOfRange(value.to_string())),
+        Err(_) => Err(LoopControlError::NotNumeric(value.to_string())),
+    }
 }
 
 fn invert_exit_status(status: i32) -> i32 {
