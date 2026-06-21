@@ -1908,8 +1908,7 @@ impl Executor {
                     Ok(())
                 }
                 "umask" => {
-                    self.exit_code =
-                        crate::builtins::umask::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code = self.execute_umask(cmd)?;
                     Ok(())
                 }
                 "ulimit" => {
@@ -4841,6 +4840,38 @@ impl Executor {
         }
 
         Ok(crate::builtins::shopt::execute(
+            &cmd.words[1..],
+            &mut self.env_vars,
+        )?)
+    }
+
+    fn execute_umask(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::umask::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::umask::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::umask::execute(
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
