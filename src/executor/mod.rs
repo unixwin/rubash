@@ -5319,14 +5319,20 @@ impl Executor {
                         .unwrap_or_default();
                 }
             }
-            if let Some((var_name, replacement)) = name.split_once('/') {
-                let (pattern, replace_with) =
-                    replacement.split_once('/').unwrap_or((replacement, ""));
-                return self
-                    .env_vars
-                    .get(var_name)
-                    .map(|value| value.replacen(pattern, replace_with, 1))
-                    .unwrap_or_default();
+            if let Some((var_name, pattern, replacement, global)) =
+                parse_parameter_replacement(name)
+            {
+                if is_shell_name(var_name) {
+                    let pattern = self.expand_embedded_parameters(pattern);
+                    let replacement = self.expand_embedded_parameters(replacement);
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| {
+                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                        })
+                        .unwrap_or_default();
+                }
             }
             return self
                 .env_vars
@@ -7105,6 +7111,91 @@ fn parameter_substring(value: &str, offset: usize, length: Option<usize>) -> Str
         .skip(offset)
         .take(length.unwrap_or(usize::MAX))
         .collect()
+}
+
+fn parse_parameter_replacement(name: &str) -> Option<(&str, &str, &str, bool)> {
+    if let Some((var_name, rest)) = name.split_once("//") {
+        let (pattern, replacement) = rest.split_once('/').unwrap_or((rest, ""));
+        return Some((var_name, pattern, replacement, true));
+    }
+
+    let (var_name, rest) = name.split_once('/')?;
+    let (pattern, replacement) = rest.split_once('/').unwrap_or((rest, ""));
+    Some((var_name, pattern, replacement, false))
+}
+
+fn replace_parameter_pattern(
+    value: &str,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+) -> String {
+    if pattern.is_empty() {
+        return value.to_string();
+    }
+
+    if !pattern_contains_glob(pattern) {
+        return if global {
+            value.replace(pattern, replacement)
+        } else {
+            value.replacen(pattern, replacement, 1)
+        };
+    }
+
+    let indices: Vec<usize> = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let mut output = String::new();
+    let mut cursor = 0;
+
+    while cursor <= value.len() {
+        let Some((start, end)) = find_parameter_pattern_match(value, pattern, cursor, &indices)
+        else {
+            output.push_str(&value[cursor..]);
+            return output;
+        };
+
+        output.push_str(&value[cursor..start]);
+        output.push_str(replacement);
+        cursor = end;
+
+        if !global {
+            output.push_str(&value[cursor..]);
+            return output;
+        }
+    }
+
+    output
+}
+
+fn pattern_contains_glob(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | '\\'))
+}
+
+fn find_parameter_pattern_match(
+    value: &str,
+    pattern: &str,
+    cursor: usize,
+    indices: &[usize],
+) -> Option<(usize, usize)> {
+    let start_index = indices.iter().position(|index| *index >= cursor)?;
+
+    for start in &indices[start_index..] {
+        for end in indices[start_index..].iter().rev() {
+            if end <= start {
+                continue;
+            }
+            if case_pattern_matches(pattern, &value[*start..*end]) {
+                return Some((*start, *end));
+            }
+        }
+    }
+
+    None
 }
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {
