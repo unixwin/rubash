@@ -5250,6 +5250,66 @@ impl Executor {
                     .unwrap_or_default()
                     .to_string();
             }
+            if let Some((var_name, pattern)) = name.split_once("##") {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| {
+                            remove_matching_prefix(
+                                value,
+                                &self.expand_embedded_parameters(pattern),
+                                MatchLength::Longest,
+                            )
+                        })
+                        .unwrap_or_default();
+                }
+            }
+            if let Some((var_name, pattern)) = name.split_once('#') {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| {
+                            remove_matching_prefix(
+                                value,
+                                &self.expand_embedded_parameters(pattern),
+                                MatchLength::Shortest,
+                            )
+                        })
+                        .unwrap_or_default();
+                }
+            }
+            if let Some((var_name, pattern)) = name.split_once("%%") {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| {
+                            remove_matching_suffix(
+                                value,
+                                &self.expand_embedded_parameters(pattern),
+                                MatchLength::Longest,
+                            )
+                        })
+                        .unwrap_or_default();
+                }
+            }
+            if let Some((var_name, pattern)) = name.split_once('%') {
+                if is_shell_name(var_name) {
+                    return self
+                        .env_vars
+                        .get(var_name)
+                        .map(|value| {
+                            remove_matching_suffix(
+                                value,
+                                &self.expand_embedded_parameters(pattern),
+                                MatchLength::Shortest,
+                            )
+                        })
+                        .unwrap_or_default();
+                }
+            }
             if let Some((var_name, replacement)) = name.split_once('/') {
                 let (pattern, replace_with) =
                     replacement.split_once('/').unwrap_or((replacement, ""));
@@ -6961,6 +7021,52 @@ fn strip_matching_quotes(value: &str) -> &str {
     } else {
         value
     }
+}
+
+#[derive(Clone, Copy)]
+enum MatchLength {
+    Shortest,
+    Longest,
+}
+
+fn remove_matching_prefix(value: &str, pattern: &str, length: MatchLength) -> String {
+    let indices: Vec<usize> = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let iter: Box<dyn Iterator<Item = usize>> = match length {
+        MatchLength::Shortest => Box::new(indices.into_iter()),
+        MatchLength::Longest => Box::new(indices.into_iter().rev()),
+    };
+
+    for end in iter {
+        if case_pattern_matches(pattern, &value[..end]) {
+            return value[end..].to_string();
+        }
+    }
+
+    value.to_string()
+}
+
+fn remove_matching_suffix(value: &str, pattern: &str, length: MatchLength) -> String {
+    let indices: Vec<usize> = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let iter: Box<dyn Iterator<Item = usize>> = match length {
+        MatchLength::Shortest => Box::new(indices.into_iter().rev()),
+        MatchLength::Longest => Box::new(indices.into_iter()),
+    };
+
+    for start in iter {
+        if case_pattern_matches(pattern, &value[start..]) {
+            return value[..start].to_string();
+        }
+    }
+
+    value.to_string()
 }
 
 fn case_pattern_matches(pattern: &str, word: &str) -> bool {
