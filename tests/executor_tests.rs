@@ -125,6 +125,7 @@ mod environment_tests {
 
 mod command_chaining {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_semicolon_separation() {
@@ -155,6 +156,27 @@ mod command_chaining {
         let mut executor = Executor::new();
         let result = executor.execute_ast(&ast);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_pipeline_redirects_filtered_output() {
+        let output_path = "target/rubash-pipeline-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("echo hello | grep hello > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].pipe.is_some());
+        assert_eq!(ast.commands[1].words, ["grep", "hello"]);
+        assert!(ast.commands[1].redirect_out.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\n");
+        let _ = fs::remove_file(output_path);
     }
 }
 
