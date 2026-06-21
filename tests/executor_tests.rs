@@ -304,6 +304,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_case_question_mark_pattern_matches() {
+        let output_path = "target/rubash-case-question-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "case hello in h?llo) echo yes > {output_path} ;; *) echo no > {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].case_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_case_bracket_range_pattern_matches() {
+        let output_path = "target/rubash-case-bracket-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "case beta in [a-c]eta) echo yes > {output_path} ;; *) echo no > {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].case_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_keyword_definition_executes_body() {
         let output_path = "target/rubash-function-keyword-output.txt";
         let _ = fs::remove_file(output_path);
