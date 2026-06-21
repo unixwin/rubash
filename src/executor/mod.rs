@@ -4431,6 +4431,7 @@ impl Executor {
         // set, callbacks, origin/count handling, and newline-preserving storage.
         let mut trim_newline = false;
         let mut count = None;
+        let mut skip = 0;
         let mut array_name = None;
         let mut index = 1;
         while index < cmd.words.len() {
@@ -4446,8 +4447,20 @@ impl Executor {
                         .and_then(|word| word.parse::<usize>().ok());
                     index += 2;
                 }
+                "-s" => {
+                    skip = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    index += 2;
+                }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     count = word[2..].parse::<usize>().ok();
+                    index += 1;
+                }
+                word if word.starts_with("-s") && word.len() > 2 => {
+                    skip = word[2..].parse::<usize>().unwrap_or(0);
                     index += 1;
                 }
                 word if word.starts_with('-') => {
@@ -4466,7 +4479,11 @@ impl Executor {
         if trim_newline {
             let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
             if let Some(input) = self.stdin_string_for_command(cmd) {
-                let mut values = input.lines().map(str::to_string).collect::<Vec<_>>();
+                let mut values = input
+                    .lines()
+                    .skip(skip)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
                 if let Some(count) = count {
                     values.truncate(count);
                 }
