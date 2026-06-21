@@ -1889,7 +1889,7 @@ impl Executor {
                     Ok(())
                 }
                 "kill" => {
-                    self.exit_code = crate::builtins::kill::execute(&cmd.words[1..])?;
+                    self.exit_code = self.execute_kill(cmd)?;
                     Ok(())
                 }
                 "umask" => {
@@ -4957,6 +4957,33 @@ impl Executor {
             &mut self.env_vars,
             &diagnostic_prefix,
         )?)
+    }
+
+    fn execute_kill(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::kill::execute_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::kill::execute_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::kill::execute(&cmd.words[1..])?)
     }
 
     fn execute_recho(&self, args: &[String]) {
