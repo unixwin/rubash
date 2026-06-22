@@ -8250,6 +8250,12 @@ impl Executor {
             {
                 i32::from(!self.conditional_numeric_binary(left, op, right))
             }
+            [left, op, right, end] if is_conditional_file_binary(op) && end == "]]" => {
+                i32::from(!self.conditional_file_binary(left, op, right))
+            }
+            [left, op, right] if is_conditional_file_binary(op) => {
+                i32::from(!self.conditional_file_binary(left, op, right))
+            }
             _ => 1,
         }
     }
@@ -8278,6 +8284,15 @@ impl Executor {
 
     fn conditional_file_unary(&self, op: &str, operand: &str) -> bool {
         let args = vec![op.to_string(), self.expand_word(operand)];
+        crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
+    }
+
+    fn conditional_file_binary(&self, left: &str, op: &str, right: &str) -> bool {
+        let args = vec![
+            self.expand_word(left),
+            op.to_string(),
+            self.expand_word(right),
+        ];
         crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
     }
 
@@ -10521,6 +10536,10 @@ fn is_conditional_file_unary(op: &str) -> bool {
             | "-G"
             | "-N"
     )
+}
+
+fn is_conditional_file_binary(op: &str) -> bool {
+    matches!(op, "-nt" | "-ot" | "-ef")
 }
 
 fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
