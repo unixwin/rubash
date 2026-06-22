@@ -45,7 +45,7 @@ pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::R
     )
 }
 
-fn execute_with_io<'a, I, W, E>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
@@ -72,6 +72,10 @@ where
     };
 
     let target = match resolve_cdpath(&target, env_vars) {
+        Some(found) => found,
+        None => target,
+    };
+    let target = match resolve_cdable_vars(&target, env_vars) {
         Some(found) => found,
         None => target,
     };
@@ -232,6 +236,34 @@ fn resolve_cdpath(target: &Target, env_vars: &HashMap<String, String>) -> Option
     }
 
     None
+}
+
+fn resolve_cdable_vars(target: &Target, env_vars: &HashMap<String, String>) -> Option<Target> {
+    if target.path.is_dir() || !crate::builtins::shopt::cdable_vars_enabled(env_vars) {
+        return None;
+    }
+
+    let name = target.display.as_ref()?.to_str()?;
+    if name.contains('/') || name.contains('\\') || !is_shell_name(name) {
+        return None;
+    }
+
+    let value = shell_var(env_vars, name)?;
+    Some(Target {
+        path: filesystem_path_for_display(&value, env_vars),
+        display: Some(PathBuf::from(value)),
+        print: PrintPath::Always,
+    })
+}
+
+fn is_shell_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn logical_posix_test_dir(target: &Target) -> Option<&str> {

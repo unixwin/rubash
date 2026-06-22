@@ -6,6 +6,16 @@ use rubash::executor::{ExecuteError, Executor};
 use rubash::lexer::tokenize;
 use rubash::parser::parse;
 
+fn shell_test_path(path: &std::path::Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) && value.len() >= 3 && value.as_bytes()[1] == b':' {
+        let drive = value.as_bytes()[0] as char;
+        format!("/{}{}", drive.to_ascii_lowercase(), &value[2..])
+    } else {
+        value
+    }
+}
+
 mod simple_execution {
     use super::*;
 
@@ -916,6 +926,46 @@ mod command_chaining {
             "before\nshopt -s sourcepath\n"
         );
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_cdable_vars_uses_variable_as_directory() {
+        let original_dir = std::env::current_dir().unwrap();
+        let original_pwd = std::env::var("PWD").ok();
+        let original_oldpwd = std::env::var("OLDPWD").ok();
+        let root = original_dir.join("target/rubash-cdable-vars");
+        let dest_dir = root.join("dest");
+        let output_path = root.join("output.txt");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dest_dir).unwrap();
+
+        let dest_display = shell_test_path(&dest_dir);
+        let output_display = output_path.to_string_lossy().replace('\\', "/");
+        let input = format!(
+            "shopt -s cdable_vars; dest='{dest_display}'; cd dest > {output_display}; echo $PWD >> {output_display}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+        let _ = std::env::set_current_dir(&original_dir);
+        match original_pwd {
+            Some(value) => std::env::set_var("PWD", value),
+            None => std::env::remove_var("PWD"),
+        }
+        match original_oldpwd {
+            Some(value) => std::env::set_var("OLDPWD", value),
+            None => std::env::remove_var("OLDPWD"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            format!("{dest_display}\n{dest_display}\n")
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
