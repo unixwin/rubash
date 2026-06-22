@@ -680,6 +680,7 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
 
     let mut i;
     let mut parts = Vec::new();
+    let mut paren_depth = 0usize;
     if first == "((" {
         i = start + 1;
     } else if is_keyword(tokens, start, "(") && is_keyword(tokens, start + 1, "(") {
@@ -689,7 +690,7 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
     }
 
     while i + 1 < tokens.len() {
-        if tokens[i].value == "))" {
+        if paren_depth == 0 && tokens[i].value == "))" {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             command.words.push("((".to_string());
@@ -698,13 +699,27 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             return Some((command, arithmetic_command_next_index(tokens, i + 1)));
         }
 
-        if is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
+        if paren_depth == 0 && is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             command.words.push("((".to_string());
             command.words.push(parts.join(" "));
             command.words.push("))".to_string());
             return Some((command, arithmetic_command_next_index(tokens, i + 2)));
+        }
+
+        if is_keyword(tokens, i, "(") {
+            paren_depth += 1;
+            parts.push(tokens[i].value.clone());
+            i += 1;
+            continue;
+        }
+
+        if is_keyword(tokens, i, ")") && paren_depth > 0 {
+            paren_depth -= 1;
+            parts.push(tokens[i].value.clone());
+            i += 1;
+            continue;
         }
 
         if let Some(combined) = arithmetic_combined_operator(&tokens[i], tokens.get(i + 1)) {
@@ -948,6 +963,26 @@ mod unit_tests {
                 vec!["((", "n |= 1", "))"],
                 vec!["((", "n <<= 2", "))"],
                 vec!["((", "n >>= 1", "))"],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_grouped_arithmetic_command_expression() {
+        let tokens = tokenize("(( (n = 3) )); (( ((m = 0)) ))");
+        let ast = parse(&tokens);
+        let words: Vec<Vec<String>> = ast
+            .commands
+            .iter()
+            .filter(|command| !command.words.is_empty())
+            .map(|command| command.words.clone())
+            .collect();
+
+        assert_eq!(
+            words,
+            vec![
+                vec!["((", "( n = 3 )", "))"],
+                vec!["((", "( ( m = 0 ) )", "))"],
             ]
         );
     }

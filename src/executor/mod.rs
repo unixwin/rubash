@@ -8420,6 +8420,10 @@ impl Executor {
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
         let expression = expression.trim();
 
+        if let Some(inner) = strip_balanced_outer_arithmetic_parens(expression) {
+            return self.eval_arithmetic_command_value(inner);
+        }
+
         if let Some(parts) = split_top_level_arithmetic_commas(expression) {
             let mut value = 0;
             for part in parts {
@@ -9575,6 +9579,29 @@ fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
         }
     }
     None
+}
+
+fn strip_balanced_outer_arithmetic_parens(expression: &str) -> Option<&str> {
+    let bytes = expression.as_bytes();
+    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index + 1 != bytes.len() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (depth == 0).then_some(expression[1..expression.len() - 1].trim())
 }
 
 fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
