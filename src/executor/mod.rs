@@ -2125,7 +2125,10 @@ impl Executor {
     }
 
     fn execute_declare(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
-        let args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        if declare_args_request_integer(&args) {
+            args = self.evaluate_declare_integer_assignment_args(&args);
+        }
 
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
@@ -6295,7 +6298,9 @@ impl Executor {
                     is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                 )
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-                (eval_arith_value(&current) + eval_arith_value(&value)).to_string()
+                let current = self.eval_integer_assignment_value(&current);
+                let value = self.eval_integer_assignment_value(&value);
+                (current + value).to_string()
             } else {
                 append_scalar_value(&current, &value)
             }
@@ -6303,13 +6308,17 @@ impl Executor {
             if value.starts_with('(') && value.ends_with(')') {
                 append_array_value("()", &value, true)
             } else {
-                eval_arith_value(&value).to_string()
+                self.eval_integer_assignment_value(&value).to_string()
             }
         } else {
             value
         };
         self.env_vars.insert(base_name.to_string(), value.clone());
         env::set_var(base_name, value);
+    }
+
+    fn eval_integer_assignment_value(&self, value: &str) -> i128 {
+        eval_conditional_arith_value(value, &self.env_vars).unwrap_or(0)
     }
 
     fn mark_exported(&mut self, name: &str) {
@@ -7077,6 +7086,22 @@ impl Executor {
                     "{name}={}",
                     tilde_expand::strip_assignment_quote_marker(value)
                 )
+            })
+            .collect()
+    }
+
+    fn evaluate_declare_integer_assignment_args(&self, args: &[String]) -> Vec<String> {
+        args.iter()
+            .map(|arg| {
+                let Some((name, value)) = split_assignment_word(arg) else {
+                    return arg.clone();
+                };
+                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                    || value.starts_with('(') && value.ends_with(')')
+                {
+                    return arg.clone();
+                }
+                format!("{name}={}", self.eval_integer_assignment_value(value))
             })
             .collect()
     }
@@ -8999,6 +9024,15 @@ fn is_shell_name_char(ch: char) -> bool {
 
 fn is_special_parameter_name(name: &str) -> bool {
     matches!(name, "#" | "?" | "$" | "-" | "0")
+}
+
+fn declare_args_request_integer(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with('-')
+            && arg != "-"
+            && !arg.starts_with("--")
+            && arg[1..].chars().any(|option| option == 'i')
+    })
 }
 
 fn is_reserved_word(word: &str) -> bool {
