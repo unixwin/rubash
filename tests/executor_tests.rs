@@ -3510,6 +3510,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_assignments_evaluate_rhs_recursively() {
+        let output_path = "target/rubash-arithmetic-recursive-assign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "a=0; b=0; (( a = b = 3 )); echo $? $a $b > {output_path}; let 'a+=b=4'; echo $? $a $b >> {output_path}; (( z = a = b = 0 )); echo $? $a $b $z >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 3 3\n0 7 4\n1 0 0 0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_let_builtin_evaluates_arithmetic_expressions() {
         let output_path = "target/rubash-let-arithmetic-output.txt";
         let _ = fs::remove_file(output_path);
