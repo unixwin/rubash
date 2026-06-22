@@ -9458,37 +9458,97 @@ impl ConditionalArithParser<'_> {
     }
 
     fn parse_logical_and(&mut self) -> Option<i128> {
-        let mut left = self.parse_comparison()?;
+        let mut left = self.parse_bitwise_or()?;
         loop {
             self.skip_ws();
             if !self.consume("&&") {
                 return Some(left);
             }
-            let right = self.parse_comparison()?;
+            let right = self.parse_bitwise_or()?;
             left = i128::from(left != 0 && right != 0);
         }
     }
 
+    fn parse_bitwise_or(&mut self) -> Option<i128> {
+        let mut left = self.parse_bitwise_xor()?;
+        loop {
+            self.skip_ws();
+            if self.starts_with("||") {
+                return Some(left);
+            }
+            if self.consume("|") {
+                left |= self.parse_bitwise_xor()?;
+            } else {
+                return Some(left);
+            }
+        }
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Option<i128> {
+        let mut left = self.parse_bitwise_and()?;
+        loop {
+            self.skip_ws();
+            if self.consume("^") {
+                left ^= self.parse_bitwise_and()?;
+            } else {
+                return Some(left);
+            }
+        }
+    }
+
+    fn parse_bitwise_and(&mut self) -> Option<i128> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            self.skip_ws();
+            if self.starts_with("&&") {
+                return Some(left);
+            }
+            if self.consume("&") {
+                left &= self.parse_comparison()?;
+            } else {
+                return Some(left);
+            }
+        }
+    }
+
     fn parse_comparison(&mut self) -> Option<i128> {
-        let mut left = self.parse_expr()?;
+        let mut left = self.parse_shift()?;
         loop {
             self.skip_ws();
             let result = if self.consume("==") {
-                left == self.parse_expr()?
+                left == self.parse_shift()?
             } else if self.consume("!=") {
-                left != self.parse_expr()?
+                left != self.parse_shift()?
             } else if self.consume(">=") {
-                left >= self.parse_expr()?
+                left >= self.parse_shift()?
             } else if self.consume("<=") {
-                left <= self.parse_expr()?
+                left <= self.parse_shift()?
             } else if self.consume(">") {
-                left > self.parse_expr()?
+                left > self.parse_shift()?
             } else if self.consume("<") {
-                left < self.parse_expr()?
+                left < self.parse_shift()?
             } else {
                 return Some(left);
             };
             left = i128::from(result);
+        }
+    }
+
+    fn parse_shift(&mut self) -> Option<i128> {
+        let mut value = self.parse_expr()?;
+        loop {
+            self.skip_ws();
+            if self.consume("<<") {
+                let rhs = self.parse_expr()?;
+                let shift = u32::try_from(rhs).ok()?;
+                value = value.checked_shl(shift).unwrap_or(0);
+            } else if self.consume(">>") {
+                let rhs = self.parse_expr()?;
+                let shift = u32::try_from(rhs).ok()?;
+                value = value.checked_shr(shift).unwrap_or(0);
+            } else {
+                return Some(value);
+            }
         }
     }
 
@@ -9555,9 +9615,13 @@ impl ConditionalArithParser<'_> {
                 self.pos += 1;
                 self.parse_factor().map(|value| i128::from(value == 0))
             }
+            b'~' => {
+                self.pos += 1;
+                self.parse_factor().map(|value| !value)
+            }
             b'(' => {
                 self.pos += 1;
-                let value = self.parse_expr()?;
+                let value = self.parse_logical_or()?;
                 self.skip_ws();
                 (self.peek()? == b')').then(|| self.pos += 1)?;
                 Some(value)
@@ -9610,6 +9674,10 @@ impl ConditionalArithParser<'_> {
         } else {
             false
         }
+    }
+
+    fn starts_with(&self, value: &str) -> bool {
+        self.input[self.pos..].starts_with(value.as_bytes())
     }
 }
 
