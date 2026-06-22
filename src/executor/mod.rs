@@ -1590,6 +1590,11 @@ impl Executor {
         }
 
         self.apply_parameter_assignment_expansions(cmd);
+        if let Some((name, message)) = self.parameter_expansion_error(cmd) {
+            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+            self.exit_code = 1;
+            return Err(ExecuteError::ExitCode(1));
+        }
 
         if self.execute_parser_level_alias(cmd)? {
             return Ok(());
@@ -7141,6 +7146,70 @@ impl Executor {
         }
     }
 
+    fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String)> {
+        for word in &cmd.words {
+            if let Some(error) = self.parameter_expansion_error_in_word(word) {
+                return Some(error);
+            }
+        }
+        None
+    }
+
+    fn parameter_expansion_error_in_word(&self, word: &str) -> Option<(String, String)> {
+        let word = word
+            .strip_prefix('\x1b')
+            .or_else(|| word.strip_prefix('\x1d'))
+            .unwrap_or(word);
+        let mut rest = word;
+        while let Some(start) = rest.find("${") {
+            let after_start = &rest[start + 2..];
+            let Some(end) = after_start.find('}') else {
+                return None;
+            };
+            let inner = &after_start[..end];
+            if let Some((name, message, require_non_empty)) = parse_parameter_error_operator(inner)
+            {
+                let value = self.parameter_error_value(name);
+                let is_error = if require_non_empty {
+                    value.as_deref().map(str::is_empty).unwrap_or(true)
+                } else {
+                    value.is_none()
+                };
+                if is_error {
+                    let message = if message.is_empty() {
+                        if require_non_empty {
+                            "parameter null or not set".to_string()
+                        } else {
+                            "parameter not set".to_string()
+                        }
+                    } else {
+                        self.expand_parameter_word(message)
+                    };
+                    return Some((name.to_string(), message));
+                }
+            }
+            rest = &after_start[end + 1..];
+        }
+        None
+    }
+
+    fn parameter_error_value(&self, name: &str) -> Option<String> {
+        match name {
+            "#" => Some(self.positional_params.len().to_string()),
+            "@" | "*" => Some(self.positional_params.join(" ")),
+            "?" => Some(self.exit_code.to_string()),
+            "$" => Some(std::process::id().to_string()),
+            "-" => Some(self.shell_option_flags()),
+            "0" => self.env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+            _ => {
+                if let Ok(index) = name.parse::<usize>() {
+                    return self.positional_params.get(index.saturating_sub(1)).cloned();
+                }
+                self.env_vars.get(name).cloned()
+            }
+        }
+    }
+
     fn expand_assignment_tilde(&self, value: &str) -> String {
         if value.contains('=') {
             return value.to_string();
@@ -8880,6 +8949,28 @@ fn parse_parameter_substring(name: &str) -> Option<(&str, isize, Option<usize>)>
         offset.parse().ok()?,
         (!length.is_empty()).then(|| length.parse().ok()).flatten(),
     ))
+}
+
+fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
+    if let Some((name, message)) = inner.split_once(":?") {
+        if is_parameter_error_name(name) {
+            return Some((name, message, true));
+        }
+    }
+
+    if let Some((name, message)) = inner.split_once('?') {
+        if is_parameter_error_name(name) {
+            return Some((name, message, false));
+        }
+    }
+
+    None
+}
+
+fn is_parameter_error_name(name: &str) -> bool {
+    is_shell_name(name)
+        || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
+        || name.parse::<usize>().is_ok()
 }
 
 fn parameter_substring(value: &str, offset: isize, length: Option<usize>) -> String {
