@@ -3510,6 +3510,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_integer_variables_evaluate_assignments_as_arithmetic() {
+        let output_path = "target/rubash-integer-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -i n=2+3*4; echo $n > {output_path}; n=2**3; echo $n >> {output_path}; n+=2*5; echo $n >> {output_path}; declare -p n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "14\n8\n18\ndeclare -i n=\"18\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);
