@@ -3510,6 +3510,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_conditional_parentheses_group_logical_expressions() {
+        let output_path = "target/rubash-conditional-parentheses-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=abc; empty=; [[ -n $value || -n $empty && -z $value ]]; echo $? > {output_path}; [[ ( -n $value || -n $empty ) && -z $value ]]; echo $? >> {output_path}; [[ ! ( -n $empty || -z $value ) ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_conditional_file_unary_checks_paths() {
         let output_path = "target/rubash-conditional-file-unary-output.txt";
         let file_path = "target/rubash-conditional-file-unary.txt";

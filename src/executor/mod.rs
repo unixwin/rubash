@@ -8156,6 +8156,10 @@ impl Executor {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
         // logic. Keep extending this bridge with test.c-compatible primitives.
+        if let Some(inner) = conditional_outer_parentheses(args) {
+            return self.execute_conditional(inner);
+        }
+
         if let Some(index) = conditional_logical_index(args, "||") {
             let left = self.execute_conditional(&args[..index]);
             return if left == 0 {
@@ -9916,8 +9920,46 @@ fn is_conditional_file_unary(op: &str) -> bool {
 }
 
 fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
-    let index = args.iter().rposition(|arg| arg == op)?;
-    (index > 0 && index + 1 < args.len()).then_some(index)
+    let end = conditional_effective_len(args);
+    let mut depth = 0usize;
+    for index in (0..end).rev() {
+        match args[index].as_str() {
+            ")" => depth += 1,
+            "(" => depth = depth.saturating_sub(1),
+            value if value == op && depth == 0 && index > 0 && index + 1 < end => {
+                return Some(index);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn conditional_outer_parentheses(args: &[String]) -> Option<&[String]> {
+    let end = conditional_effective_len(args);
+    if end < 2 || args.first().map(String::as_str) != Some("(") {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, arg) in args[..end].iter().enumerate() {
+        match arg.as_str() {
+            "(" => depth += 1,
+            ")" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index != end - 1 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (depth == 0 && args[end - 1] == ")").then_some(&args[1..end - 1])
+}
+
+fn conditional_effective_len(args: &[String]) -> usize {
+    args.len() - usize::from(args.last().map(String::as_str) == Some("]]"))
 }
 
 fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
