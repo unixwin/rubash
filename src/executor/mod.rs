@@ -8169,28 +8169,35 @@ impl Executor {
             [op, operand] if matches!(op.as_str(), "-n" | "-z") => {
                 i32::from(!self.conditional_string_unary(op, operand))
             }
-            [left, op, right, end] if op == "==" && end == "]]" => {
-                i32::from(self.expand_word(left) != self.expand_word(right))
+            [left, op, right, end] if matches!(op.as_str(), "=" | "==" | "!=") && end == "]]" => {
+                i32::from(!self.conditional_string_binary(left, op, right))
             }
-            [left, op, right] if op == "==" => {
-                i32::from(self.expand_word(left) != self.expand_word(right))
+            [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=") => {
+                i32::from(!self.conditional_string_binary(left, op, right))
             }
-            [left, op, right, end] if op == "-eq" && end == "]]" => {
-                i32::from(!self.numeric_equal(left, right))
+            [left, op, right, end]
+                if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
+                    && end == "]]" =>
+            {
+                i32::from(!self.conditional_numeric_binary(left, op, right))
             }
-            [left, op, right] if op == "-eq" => i32::from(!self.numeric_equal(left, right)),
-            [left, op, right, end] if op == "-gt" && end == "]]" => {
-                i32::from(!self.numeric_compare(left, right, |left, right| left > right))
-            }
-            [left, op, right] if op == "-gt" => {
-                i32::from(!self.numeric_compare(left, right, |left, right| left > right))
+            [left, op, right]
+                if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge") =>
+            {
+                i32::from(!self.conditional_numeric_binary(left, op, right))
             }
             _ => 1,
         }
     }
 
-    fn numeric_equal(&self, left: &str, right: &str) -> bool {
-        self.expand_word(left).parse::<i128>().ok() == self.expand_word(right).parse::<i128>().ok()
+    fn conditional_string_binary(&self, left: &str, op: &str, right: &str) -> bool {
+        let left = self.expand_word(left);
+        let right = self.expand_word(right);
+        match op {
+            "=" | "==" => left == right,
+            "!=" => left != right,
+            _ => false,
+        }
     }
 
     fn conditional_string_unary(&self, op: &str, operand: &str) -> bool {
@@ -8202,17 +8209,22 @@ impl Executor {
         }
     }
 
-    fn numeric_compare<F>(&self, left: &str, right: &str, compare: F) -> bool
-    where
-        F: FnOnce(i128, i128) -> bool,
-    {
+    fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
         let Some(left) = self.expand_word(left).parse::<i128>().ok() else {
             return false;
         };
         let Some(right) = self.expand_word(right).parse::<i128>().ok() else {
             return false;
         };
-        compare(left, right)
+        match op {
+            "-eq" => left == right,
+            "-ne" => left != right,
+            "-lt" => left < right,
+            "-le" => left <= right,
+            "-gt" => left > right,
+            "-ge" => left >= right,
+            _ => false,
+        }
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {

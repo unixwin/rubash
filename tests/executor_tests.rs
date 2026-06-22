@@ -3406,6 +3406,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_conditional_binary_checks_expand_values() {
+        let output_path = "target/rubash-conditional-binary-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "left=abc; right=def; n=3; [[ $left = abc ]]; echo $? > {output_path}; [[ $left != $right ]]; echo $? >> {output_path}; [[ $n -ne 4 ]]; echo $? >> {output_path}; [[ $n -lt 4 ]]; echo $? >> {output_path}; [[ $n -le 3 ]]; echo $? >> {output_path}; [[ $n -ge 3 ]]; echo $? >> {output_path}; [[ $n -gt 4 ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0\n0\n0\n0\n0\n0\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);
