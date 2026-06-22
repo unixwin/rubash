@@ -6503,6 +6503,9 @@ impl Executor {
                         return value;
                     }
                 }
+                if let Some(value) = self.indirect_pattern_removal(indirect_name) {
+                    return value;
+                }
 
                 if let Some(array_name) = indirect_name
                     .strip_suffix("[@]")
@@ -7421,6 +7424,69 @@ impl Executor {
                 .unwrap_or_default()
         };
         Some(apply_parameter_transform(&value, transform))
+    }
+
+    fn indirect_pattern_removal(&self, name: &str) -> Option<String> {
+        let (ref_expr, pattern, operation) = parse_indirect_pattern_removal(name)?;
+        let ref_name = ref_expr
+            .strip_suffix("[@]")
+            .or_else(|| ref_expr.strip_suffix("[*]"))
+            .unwrap_or(ref_expr);
+        if !is_shell_name(ref_name) {
+            return None;
+        }
+
+        let target_expr = self.env_vars.get(ref_name)?;
+        let values = self.indirect_target_values(target_expr);
+        if values.is_empty() {
+            return Some(String::new());
+        }
+
+        let pattern = self.expand_embedded_parameters(pattern);
+        Some(
+            values
+                .into_iter()
+                .map(|value| match operation {
+                    PatternRemoval::ShortestPrefix => {
+                        remove_matching_prefix(&value, &pattern, MatchLength::Shortest)
+                    }
+                    PatternRemoval::LongestPrefix => {
+                        remove_matching_prefix(&value, &pattern, MatchLength::Longest)
+                    }
+                    PatternRemoval::ShortestSuffix => {
+                        remove_matching_suffix(&value, &pattern, MatchLength::Shortest)
+                    }
+                    PatternRemoval::LongestSuffix => {
+                        remove_matching_suffix(&value, &pattern, MatchLength::Longest)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        )
+    }
+
+    fn indirect_target_values(&self, target_expr: &str) -> Vec<String> {
+        if let Some(array_name) = target_expr
+            .strip_suffix("[@]")
+            .or_else(|| target_expr.strip_suffix("[*]"))
+        {
+            return self
+                .env_vars
+                .get(array_name)
+                .map(|value| array_values(value))
+                .unwrap_or_default();
+        }
+
+        self.env_vars
+            .get(target_expr)
+            .map(|value| {
+                if is_array_storage(value) || is_marked_array_var(&self.env_vars, target_expr) {
+                    array_value_at(value, 0).into_iter().collect()
+                } else {
+                    vec![value.clone()]
+                }
+            })
+            .unwrap_or_default()
     }
 
     fn decode_prompt_string(&self, value: &str) -> String {
@@ -9219,6 +9285,30 @@ fn strip_matching_quotes(value: &str) -> &str {
 enum MatchLength {
     Shortest,
     Longest,
+}
+
+#[derive(Clone, Copy)]
+enum PatternRemoval {
+    ShortestPrefix,
+    LongestPrefix,
+    ShortestSuffix,
+    LongestSuffix,
+}
+
+fn parse_indirect_pattern_removal(name: &str) -> Option<(&str, &str, PatternRemoval)> {
+    for (operator, operation) in [
+        ("##", PatternRemoval::LongestPrefix),
+        ("%%", PatternRemoval::LongestSuffix),
+        ("#", PatternRemoval::ShortestPrefix),
+        ("%", PatternRemoval::ShortestSuffix),
+    ] {
+        if let Some((left, pattern)) = name.split_once(operator) {
+            if !left.is_empty() {
+                return Some((left, pattern, operation));
+            }
+        }
+    }
+    None
 }
 
 fn remove_matching_prefix(value: &str, pattern: &str, length: MatchLength) -> String {
