@@ -1591,6 +1591,11 @@ impl Executor {
             if command_has_no_effect(cmd) {
                 return Ok(());
             }
+            if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
+                eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
+                self.exit_code = status;
+                return Err(ExecuteError::ExitCode(status));
+            }
             for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_assignment_value(value);
                 self.apply_shell_assignment(name, expanded_value);
@@ -7979,6 +7984,11 @@ impl Executor {
     fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String, i32)> {
         for word in &cmd.words {
             if let Some(error) = self.parameter_expansion_error_in_word(word) {
+                return Some(error);
+            }
+        }
+        for value in cmd.assignments.values() {
+            if let Some(error) = self.parameter_expansion_error_in_word(value) {
                 return Some(error);
             }
         }
