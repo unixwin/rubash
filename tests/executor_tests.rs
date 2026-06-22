@@ -3683,6 +3683,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_array_subscripts_read_and_update() {
+        let output_path = "target/rubash-arithmetic-array-subscript-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(4 7); i=1; echo $((arr[i]+1)) > {output_path}; (( arr[i] += 2 )); echo ${{arr[1]}} $((arr[i])) >> {output_path}; (( arr[0]++ )); echo ${{arr[0]}} >> {output_path}; echo $((arr[2])) >> {output_path}; arr[2]=5; echo $((arr[2])) >> {output_path}; i=0; echo $((arr[i++])) $i >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "8\n9 9\n5\n0\n5\n5 1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_grouped_arithmetic_assignments_have_side_effects() {
         let output_path = "target/rubash-arithmetic-grouped-assign-output.txt";
         let _ = fs::remove_file(output_path);
