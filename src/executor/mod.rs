@@ -8468,6 +8468,10 @@ impl Executor {
                 operand,
                 &self.env_vars,
             )),
+            [op, operand, end] if op == "-o" && end == "]]" => {
+                i32::from(!self.conditional_shell_option_unary(operand))
+            }
+            [op, operand] if op == "-o" => i32::from(!self.conditional_shell_option_unary(operand)),
             [op, operand, end] if matches!(op.as_str(), "-n" | "-z") && end == "]]" => {
                 i32::from(!self.conditional_string_unary(op, operand))
             }
@@ -8535,6 +8539,12 @@ impl Executor {
             "-z" => value.is_empty(),
             _ => false,
         }
+    }
+
+    fn conditional_shell_option_unary(&self, operand: &str) -> bool {
+        let name = self.expand_word(operand);
+        crate::builtins::set::is_shell_option(&name)
+            && crate::builtins::set::shell_option_enabled(&self.env_vars, &name)
     }
 
     fn conditional_file_unary(&self, op: &str, operand: &str) -> bool {
