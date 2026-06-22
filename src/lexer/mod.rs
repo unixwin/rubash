@@ -422,6 +422,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some('>') {
                         self.advance();
                         Some(Token::new(TokenKind::RedirectErrAppend, "2>>", start))
+                    } else if self.peek() == Some('|') {
+                        self.advance();
+                        Some(Token::new(TokenKind::RedirectErr, "2>|", start))
                     } else {
                         Some(Token::new(TokenKind::RedirectErr, "2>", start))
                     }

@@ -329,7 +329,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         fd: Some(2),
                         target: tokens[i + 1].value.clone(),
                         append: false,
-                        clobber: false,
+                        clobber: token.value == "2>|",
                     });
                     i += 1;
                 }

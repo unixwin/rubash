@@ -6585,8 +6585,7 @@ impl Executor {
                 )?);
             }
 
-            let path = shell_path_to_windows(&target, &self.env_vars);
-            let mut file = File::create(path)?;
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             return Ok(crate::builtins::alias::unalias_with_io(
                 &cmd.words[1..],
                 &mut self.aliases,
@@ -9815,7 +9814,7 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            let file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let file = self.create_redirect_output(&target, redirect.clobber)?;
             process.stderr(Stdio::from(file));
         }
 
