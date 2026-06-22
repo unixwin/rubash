@@ -3598,6 +3598,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_command_based_integer_constants() {
+        let output_path = "target/rubash-arithmetic-command-bases-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "(( 2#101 - 5 )); echo $? > {output_path}; [[ 16#FF -eq 255 ]]; echo $? >> {output_path}; [[ 0x10 -eq 16 ]]; echo $? >> {output_path}; [[ 010 -eq 8 ]]; echo $? >> {output_path}; [[ 64#_ -eq 63 ]]; echo $? >> {output_path}; (( 8#9 )); echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1\n0\n0\n0\n0\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_conditional_operator() {
         let output_path = "target/rubash-arithmetic-command-conditional-output.txt";
         let _ = fs::remove_file(output_path);
