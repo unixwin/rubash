@@ -6840,6 +6840,9 @@ impl Executor {
                 if transform == ParameterTransform::Assignment {
                     return self.parameter_assignment_transform(var_name);
                 }
+                if transform == ParameterTransform::Attributes {
+                    return self.parameter_attribute_transform(var_name);
+                }
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -7335,6 +7338,37 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn parameter_attribute_transform(&self, name: &str) -> String {
+        let base_name = parse_array_subscript(name)
+            .map(|(array_name, _)| array_name)
+            .unwrap_or(name);
+        if !is_shell_name(base_name) || !self.env_vars.contains_key(base_name) {
+            return String::new();
+        }
+
+        let mut attrs = String::new();
+        if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+            attrs.push('A');
+        } else if self
+            .env_vars
+            .get(base_name)
+            .is_some_and(|value| is_array_storage(value))
+            || is_marked_array_var(&self.env_vars, base_name)
+        {
+            attrs.push('a');
+        }
+        if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
+            attrs.push('i');
+        }
+        if is_marked_var(&self.env_vars, READONLY_VARS, base_name) {
+            attrs.push('r');
+        }
+        if is_marked_var(&self.env_vars, EXPORTED_VARS, base_name) {
+            attrs.push('x');
+        }
+        attrs
     }
 
     fn expand_assignment_tilde(&self, value: &str) -> String {
@@ -9286,6 +9320,7 @@ enum ParameterTransform {
     Quote,
     Escape,
     Assignment,
+    Attributes,
     Upper,
     Lower,
 }
@@ -9296,6 +9331,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
         "Q" => ParameterTransform::Quote,
         "E" => ParameterTransform::Escape,
         "A" => ParameterTransform::Assignment,
+        "a" => ParameterTransform::Attributes,
         "U" => ParameterTransform::Upper,
         "L" => ParameterTransform::Lower,
         _ => return None,
@@ -9308,6 +9344,7 @@ fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> Stri
         ParameterTransform::Quote => shell_quote_parameter_value(value),
         ParameterTransform::Escape => decode_ansi_c_escapes(value),
         ParameterTransform::Assignment => shell_single_quote_assignment_value(value),
+        ParameterTransform::Attributes => String::new(),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
     }
