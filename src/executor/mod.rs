@@ -8220,8 +8220,8 @@ impl Executor {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
         match op {
-            "=" | "==" => left == right,
-            "!=" => left != right,
+            "=" | "==" => conditional_pattern_or_string_matches(&left, &right),
+            "!=" => !conditional_pattern_or_string_matches(&left, &right),
             "<" => left < right,
             ">" => left > right,
             _ => false,
@@ -9893,6 +9893,14 @@ fn is_conditional_file_unary(op: &str) -> bool {
 fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
     let index = args.iter().rposition(|arg| arg == op)?;
     (index > 0 && index + 1 < args.len()).then_some(index)
+}
+
+fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
+    if pattern_contains_glob(right) {
+        case_pattern_matches(right, left)
+    } else {
+        left == right
+    }
 }
 
 fn case_pattern_matches_at(

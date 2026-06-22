@@ -3447,6 +3447,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_conditional_string_equality_uses_shell_patterns() {
+        let output_path = "target/rubash-conditional-pattern-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=abcdef; pattern='a*'; [[ $value == a* ]]; echo $? > {output_path}; [[ $value = a?c* ]]; echo $? >> {output_path}; [[ $value == a[b-d]cdef ]]; echo $? >> {output_path}; [[ $value != z* ]]; echo $? >> {output_path}; [[ $value != a* ]]; echo $? >> {output_path}; [[ $value == $pattern ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0\n0\n0\n0\n1\n0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_conditional_logical_operators_stay_inside_expression() {
         let output_path = "target/rubash-conditional-logical-output.txt";
         let _ = fs::remove_file(output_path);
