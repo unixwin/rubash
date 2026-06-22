@@ -3532,6 +3532,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_command_bitwise_and_shift_operators() {
+        let output_path = "target/rubash-arithmetic-command-bitwise-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=6; (( n & 2 )); echo $? > {output_path}; (( n & 1 )); echo $? >> {output_path}; (( 1 << 3 | 2 )); echo $? >> {output_path}; (( 14 >> 2 )); echo $? >> {output_path}; [[ 5^3 -eq 6 ]]; echo $? >> {output_path}; (( ~0 + 1 )); echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0\n1\n0\n0\n0\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_drives_if_conditions() {
         let output_path = "target/rubash-arithmetic-if-output.txt";
         let _ = fs::remove_file(output_path);
