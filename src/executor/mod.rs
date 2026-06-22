@@ -1297,7 +1297,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &command.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = self.create_redirect_output(&target)?;
             file.write_all(output.as_bytes())?;
         } else if let Some(redirect) = &command.append {
             let target = self.expand_word(&redirect.target);
@@ -2111,7 +2111,7 @@ impl Executor {
 
         let target = self.expand_word(&redirect.target);
         if truncate_first {
-            File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            self.create_redirect_output(&target)?;
         }
         let append_redirect = Redirect {
             fd: redirect.fd,
@@ -5265,7 +5265,7 @@ impl Executor {
                     &mut std::io::stderr().lock(),
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = self.create_redirect_output(&target)?;
             return Ok(crate::builtins::printf::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
@@ -6528,7 +6528,7 @@ impl Executor {
             if let Some(target) = cmd.words.get(redirect_index + 1) {
                 let echo_args = echo_args_without_background_marker(&cmd.words[1..redirect_index]);
                 let target = self.expand_word(target);
-                let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+                let mut file = self.create_redirect_output(&target)?;
                 crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
                 return Ok(());
             }
@@ -6551,7 +6551,7 @@ impl Executor {
                 )?;
                 return Ok(());
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let mut file = self.create_redirect_output(&target)?;
             crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
             return Ok(());
         }
@@ -8619,7 +8619,18 @@ impl Executor {
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             flags.push('u');
         }
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
+            flags.push('C');
+        }
         flags
+    }
+
+    fn create_redirect_output(&self, target: &str) -> io::Result<File> {
+        let path = shell_path_to_windows(target, &self.env_vars);
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
+            return OpenOptions::new().write(true).create_new(true).open(path);
+        }
+        File::create(path)
     }
 
     fn apply_simple_set_flags(&mut self, args: &[String]) -> bool {
@@ -8632,7 +8643,11 @@ impl Executor {
                 return false;
             };
             let flags = &arg[1..];
-            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x' | 'u')) {
+            if flags.is_empty()
+                || flags
+                    .chars()
+                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C'))
+            {
                 return false;
             }
 
@@ -8657,6 +8672,13 @@ impl Executor {
                         crate::builtins::set::set_shell_option(
                             &mut self.env_vars,
                             "nounset",
+                            enabled,
+                        );
+                    }
+                    ('C', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "noclobber",
                             enabled,
                         );
                     }
@@ -8697,7 +8719,11 @@ impl Executor {
             };
 
             let flags = &arg[1..];
-            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x' | 'u')) {
+            if flags.is_empty()
+                || flags
+                    .chars()
+                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C'))
+            {
                 return false;
             }
 
@@ -8730,6 +8756,13 @@ impl Executor {
                         crate::builtins::set::set_shell_option(
                             &mut self.env_vars,
                             "nounset",
+                            enabled,
+                        );
+                    }
+                    ('C', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "noclobber",
                             enabled,
                         );
                     }
@@ -9690,7 +9723,7 @@ impl Executor {
 
                 if let Some(redirect) = &cmd.redirect_out {
                     let target = self.expand_word(&redirect.target);
-                    let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+                    let mut file = self.create_redirect_output(&target)?;
                     file.write_all(body.as_bytes())?;
                     self.exit_code = 0;
                     return Ok(());
@@ -9766,7 +9799,7 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            let file = self.create_redirect_output(&target)?;
             process.stdout(Stdio::from(file));
         }
 
