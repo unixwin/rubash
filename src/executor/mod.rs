@@ -5243,7 +5243,11 @@ impl Executor {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut file)?);
+            return Ok(self.execute_pwd_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
         }
 
         if let Some(redirect) = &cmd.append {
@@ -5252,16 +5256,56 @@ impl Executor {
                 .create(true)
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut file)?);
+            return Ok(self.execute_pwd_with_io(
+                &cmd.words[1..],
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return Ok(self.execute_pwd_with_io(
+                    &cmd.words[1..],
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::sink(),
+                )?);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(self.execute_pwd_with_io(
+                &cmd.words[1..],
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(self.execute_pwd_with_io(
+                &cmd.words[1..],
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
         }
 
         let mut stdout = std::io::stdout().lock();
-        Ok(self.execute_pwd_with_writer(&cmd.words[1..], &mut stdout)?)
+        Ok(self.execute_pwd_with_io(&cmd.words[1..], &mut stdout, &mut std::io::stderr().lock())?)
     }
 
-    fn execute_pwd_with_writer<W>(&mut self, args: &[String], stdout: &mut W) -> io::Result<i32>
+    fn execute_pwd_with_io<W, E>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> io::Result<i32>
     where
         W: Write,
+        E: Write,
     {
         if args.is_empty() || args.first().map(String::as_str) == Some("-L") {
             if let Some(pwd) = self.env_vars.get("PWD") {
@@ -5272,11 +5316,7 @@ impl Executor {
             }
         }
 
-        crate::builtins::pwd::execute_with_io(
-            args.iter().map(String::as_str),
-            stdout,
-            &mut std::io::stderr().lock(),
-        )
+        crate::builtins::pwd::execute_with_io(args.iter().map(String::as_str), stdout, stderr)
     }
 
     fn execute_loop_control(
