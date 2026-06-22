@@ -3532,6 +3532,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_command_drives_if_conditions() {
+        let output_path = "target/rubash-arithmetic-if-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=1; if (( n )); then echo yes > {output_path}; else echo no > {output_path}; fi; if (( n - 1 )); then echo bad >> {output_path}; elif (( n + 1 )); then echo elif >> {output_path}; else echo bad >> {output_path}; fi; if (( n++ )); then echo $n >> {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\nelif\n2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_command_drives_loop_conditions() {
+        let output_path = "target/rubash-arithmetic-loop-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=0; while (( n < 3 )); do echo $n >> {output_path}; (( n++ )); done; until (( n == 5 )); do (( n++ )); done; echo $n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n2\n5\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_conditional_string_order_operators_are_not_redirects() {
         let output_path = "target/rubash-conditional-string-order-output.txt";
         let _ = fs::remove_file(output_path);

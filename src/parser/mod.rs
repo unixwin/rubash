@@ -196,6 +196,20 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
         }
 
+        if command_accepts_embedded_arithmetic_command(&current_cmd)
+            && ((token.kind == TokenKind::Keyword && token.value == "(")
+                || token.value.starts_with("(("))
+        {
+            if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
+                note_command_line(&mut current_cmd, token);
+                current_cmd.words.extend(arith_cmd.words);
+                ast.commands.push(current_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
                 current_cmd.subshell |= in_subshell;
@@ -834,6 +848,13 @@ fn command_is_open_conditional(cmd: &CommandNode) -> bool {
         && !cmd.words.iter().any(|word| word == "]]")
 }
 
+fn command_accepts_embedded_arithmetic_command(cmd: &CommandNode) -> bool {
+    matches!(
+        cmd.words.first().map(String::as_str),
+        Some("if" | "elif" | "while" | "until" | "do" | "then" | "else")
+    ) && cmd.words.len() == 1
+}
+
 fn is_function_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -868,5 +889,30 @@ mod unit_tests {
         let tokens: Vec<Token> = vec![];
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_arithmetic_loop_conditions_as_condition_words() {
+        let tokens = tokenize(
+            "while (( n < 3 )); do (( n++ )); done; until (( n == 5 )); do (( n++ )); done",
+        );
+        let ast = parse(&tokens);
+        let words: Vec<Vec<String>> = ast
+            .commands
+            .iter()
+            .map(|command| command.words.clone())
+            .collect();
+
+        assert_eq!(
+            words,
+            vec![
+                vec!["while", "((", "n < 3", "))"],
+                vec!["do", "((", "n++", "))"],
+                vec!["done"],
+                vec!["until", "((", "n == 5", "))"],
+                vec!["do", "((", "n++", "))"],
+                vec!["done"],
+            ]
+        );
     }
 }
