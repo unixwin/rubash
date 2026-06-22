@@ -8163,6 +8163,12 @@ impl Executor {
                 operand,
                 &self.env_vars,
             )),
+            [op, operand, end] if matches!(op.as_str(), "-n" | "-z") && end == "]]" => {
+                i32::from(!self.conditional_string_unary(op, operand))
+            }
+            [op, operand] if matches!(op.as_str(), "-n" | "-z") => {
+                i32::from(!self.conditional_string_unary(op, operand))
+            }
             [left, op, right, end] if op == "==" && end == "]]" => {
                 i32::from(self.expand_word(left) != self.expand_word(right))
             }
@@ -8185,6 +8191,15 @@ impl Executor {
 
     fn numeric_equal(&self, left: &str, right: &str) -> bool {
         self.expand_word(left).parse::<i128>().ok() == self.expand_word(right).parse::<i128>().ok()
+    }
+
+    fn conditional_string_unary(&self, op: &str, operand: &str) -> bool {
+        let value = self.expand_word(operand);
+        match op {
+            "-n" => !value.is_empty(),
+            "-z" => value.is_empty(),
+            _ => false,
+        }
     }
 
     fn numeric_compare<F>(&self, left: &str, right: &str, compare: F) -> bool
