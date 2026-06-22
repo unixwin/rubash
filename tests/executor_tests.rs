@@ -3671,6 +3671,58 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_nounset_errors_for_unbound_variable() {
+        let output_path = "target/rubash-nounset-unbound-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset RUBASH_NOUNSET_MISSING; set -u; echo $RUBASH_NOUNSET_MISSING > {output_path}; echo after > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
+        assert_eq!(executor.last_exit_code(), 127);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
+    fn test_nounset_errors_for_unbound_positional_parameter() {
+        let output_path = "target/rubash-nounset-positional-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -u; echo $1 > {output_path}; echo after > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
+        assert_eq!(executor.last_exit_code(), 127);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
+    fn test_nounset_allows_default_parameter_expansion() {
+        let output_path = "target/rubash-nounset-default-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("unset RUBASH_NOUNSET_DEFAULT; set -u; echo ${{RUBASH_NOUNSET_DEFAULT:-fallback}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "fallback\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_braced_positional_parameters_expand() {
         let output_path = "target/rubash-braced-positional-output.txt";
         let _ = fs::remove_file(output_path);
