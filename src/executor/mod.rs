@@ -9558,6 +9558,11 @@ impl ConditionalArithParser<'_> {
             if !self.consume("||") {
                 return Some(left);
             }
+            if left != 0 {
+                self.skip_arithmetic_rhs(&["||", ",", "?", ":", ")"]);
+                left = 1;
+                continue;
+            }
             let right = self.parse_logical_and()?;
             left = i128::from(left != 0 || right != 0);
         }
@@ -9569,6 +9574,10 @@ impl ConditionalArithParser<'_> {
             self.skip_ws();
             if !self.consume("&&") {
                 return Some(left);
+            }
+            if left == 0 {
+                self.skip_arithmetic_rhs(&["&&", "||", ",", "?", ":", ")"]);
+                continue;
             }
             let right = self.parse_bitwise_or()?;
             left = i128::from(left != 0 && right != 0);
@@ -9832,6 +9841,34 @@ impl ConditionalArithParser<'_> {
 
     fn starts_with(&self, value: &str) -> bool {
         self.input[self.pos..].starts_with(value.as_bytes())
+    }
+
+    fn skip_arithmetic_rhs(&mut self, boundaries: &[&str]) {
+        let mut depth = 0usize;
+        while self.pos < self.input.len() {
+            if depth == 0
+                && boundaries
+                    .iter()
+                    .any(|boundary| self.input[self.pos..].starts_with(boundary.as_bytes()))
+            {
+                return;
+            }
+
+            match self.input[self.pos] {
+                b'(' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b')' => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
     }
 }
 
