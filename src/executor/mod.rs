@@ -1047,12 +1047,12 @@ impl Executor {
             left.words.first().map(String::as_str),
             right.words.first().map(String::as_str),
         ) {
-            (Some("true"), Some("false")) => Some(1),
-            (Some("false"), Some("true")) => Some(0),
+            (Some("true"), Some("false")) => Some(self.pipeline_exit_status(&[0, 1])),
+            (Some("false"), Some("true")) => Some(self.pipeline_exit_status(&[1, 0])),
             (Some("echo"), Some("grep")) => {
                 let text = left.words[1..].join(" ");
                 let pattern = right.words.get(1)?;
-                Some(i32::from(!text.contains(pattern)))
+                Some(self.pipeline_exit_status(&[0, i32::from(!text.contains(pattern))]))
             }
             _ => None,
         }
@@ -1123,24 +1123,38 @@ impl Executor {
         }
 
         let mut input = String::new();
-        let mut status = 0;
+        let mut statuses = Vec::new();
         for command in &commands {
             let Some((next_input, next_status)) = self.execute_pipeline_stage(command, &input)?
             else {
                 return Ok(None);
             };
             input = next_input;
-            status = next_status;
+            statuses.push(next_status);
         }
 
         let final_command = commands.last().expect("pipeline has at least one stage");
         self.write_pipeline_output(final_command, &input)?;
+        let status = self.pipeline_exit_status(&statuses);
         self.exit_code = if first.inverted {
             invert_exit_status(status)
         } else {
             status
         };
         Ok(Some(end + 1))
+    }
+
+    fn pipeline_exit_status(&self, statuses: &[i32]) -> i32 {
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "pipefail") {
+            return statuses
+                .iter()
+                .rev()
+                .copied()
+                .find(|status| *status != 0)
+                .unwrap_or(0);
+        }
+
+        statuses.last().copied().unwrap_or(0)
     }
 
     fn execute_pipeline_stage(
@@ -1153,6 +1167,8 @@ impl Executor {
         };
 
         match name {
+            "true" | ":" => Ok(Some((String::new(), 0))),
+            "false" => Ok(Some((String::new(), 1))),
             "echo" => {
                 let mut args: Vec<String> = command.words[1..]
                     .iter()

@@ -250,6 +250,79 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_pipeline_status_uses_last_command_by_default() {
+        let output_path = "target/rubash-pipeline-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("false | true; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_pipefail_status_uses_rightmost_failing_command() {
+        let output_path = "target/rubash-pipefail-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -o pipefail; false | true; echo $? > {output_path}; \
+             true | false | true; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_pipefail_status_preserves_pipeline_output() {
+        let output_path = "target/rubash-pipefail-output-status.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -o pipefail; printf 'a\\nb\\n' | grep z | wc -l > {output_path}; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_inverted_pipeline_uses_pipefail_status() {
+        let output_path = "target/rubash-pipefail-invert-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -o pipefail; ! false | true; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_printf_percent_n_assigns_output_count() {
         let output_path = "target/rubash-printf-percent-n-output.txt";
         let _ = fs::remove_file(output_path);
