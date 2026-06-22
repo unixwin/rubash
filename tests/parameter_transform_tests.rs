@@ -125,6 +125,43 @@ fn test_parameter_transform_assignment_prints_assoc_arrays() {
 }
 
 #[test]
+fn test_parameter_transform_prints_attributes() {
+    let output_path = "target/rubash-param-transform-attrs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("v=value; export x=value; readonly r=value; declare -i n=7; arr=(alpha beta); declare -A assoc; assoc[one]=alpha; printf '<%s>\\n' \"${{v@a}}\" \"${{x@a}}\" \"${{r@a}}\" \"${{n@a}}\" \"${{arr@a}}\" \"${{arr[1]@a}}\" \"${{assoc@a}}\" \"${{assoc[one]@a}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<>\n<x>\n<r>\n<i>\n<a>\n<a>\n<A>\n<A>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_parameter_transform_prints_combined_attributes() {
+    let output_path = "target/rubash-param-transform-combined-attrs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("declare -ix xi=7; readonly -a ra=(alpha); printf '<%s>\\n' \"${{xi@a}}\" \"${{ra@a}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ix>\n<ar>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);
