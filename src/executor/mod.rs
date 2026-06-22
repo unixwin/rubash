@@ -8303,7 +8303,7 @@ impl Executor {
         }
     }
 
-    fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
+    pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
         let expression = expression.trim();
 
         if let Some(name) = expression.strip_suffix("++").map(str::trim) {

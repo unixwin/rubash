@@ -157,7 +157,7 @@ pub fn execute_simple_if(
     };
     let condition_true = if test_if_condition_true(executor, words)? {
         true
-    } else if let Some(value) = arithmetic_if_condition_value(words) {
+    } else if let Some(value) = arithmetic_if_condition_value(executor, words) {
         value
     } else {
         execute_command_if_condition(executor, command)?
@@ -260,38 +260,36 @@ fn posix_plain_name_lookup(executor: &Executor, filename: &str) -> bool {
         && !filename.contains('\\')
 }
 
-fn arithmetic_if_condition_value(words: &[String]) -> Option<bool> {
-    // TODO(expr.c/parse.y): Source7 uses `if (((4+4) + (4 + 7))); then`.
-    // The current lexer drops grouping tokens before the executor sees this,
-    // so accept a non-empty arithmetic-looking condition with at least one
-    // non-zero digit as true. Replace this with a real arith_command node.
+fn arithmetic_if_condition_value(executor: &mut Executor, words: &[String]) -> Option<bool> {
+    // TODO(parse.y/execute_cmd.c/expr.c): Replace this condition-position
+    // bridge with a real IF_COM containing an arith_command node.
     if words.first().map(String::as_str) != Some("if") {
         return None;
     }
-    let terms = &words[1..];
-    if terms.is_empty() {
-        return None;
+    let expression = arithmetic_condition_expression(&words[1..])?;
+    executor
+        .eval_arithmetic_command_value(&expression)
+        .map(|value| value != 0)
+        .or(Some(false))
+}
+
+fn arithmetic_condition_expression(words: &[String]) -> Option<String> {
+    match words {
+        [open, expression, close] if open == "((" && close == "))" => Some(expression.clone()),
+        [single] if single.starts_with("((") && single.ends_with("))") => single
+            .strip_prefix("((")
+            .and_then(|value| value.strip_suffix("))"))
+            .map(str::to_string),
+        terms
+            if terms.iter().all(|word| {
+                word.chars()
+                    .all(|ch| ch.is_ascii_digit() || "+-*/%()".contains(ch))
+            }) && !terms.is_empty() =>
+        {
+            Some(terms.join(" "))
+        }
+        _ => None,
     }
-    if terms.iter().all(|word| {
-        word.chars()
-            .all(|ch| ch.is_ascii_digit() || "+-*/%".contains(ch))
-    }) {
-        return Some(
-            terms
-                .iter()
-                .flat_map(|word| word.chars())
-                .any(|ch| matches!(ch, '1'..='9')),
-        );
-    }
-    if terms.iter().any(|word| {
-        matches!(
-            word.as_str(),
-            "==" | "!=" | "<" | ">" | "<=" | ">=" | "&&" | "||"
-        )
-    }) {
-        return Some(false);
-    }
-    None
 }
 
 fn test_if_condition_true(executor: &Executor, words: &[String]) -> Result<bool, ExecuteError> {
