@@ -693,6 +693,14 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             return Some((command, arithmetic_command_next_index(tokens, i + 2)));
         }
 
+        if matches!(tokens[i].value.as_str(), ">" | "<" | "!")
+            && tokens.get(i + 1).map(|token| token.value.as_str()) == Some("=")
+        {
+            parts.push(format!("{}=", tokens[i].value));
+            i += 2;
+            continue;
+        }
+
         parts.push(tokens[i].value.clone());
         i += 1;
     }
