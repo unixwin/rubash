@@ -235,29 +235,37 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd = CommandNode::new();
             }
             TokenKind::RedirectIn => {
-                note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len()
-                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
-                {
-                    current_cmd.redirect_in = Some(Redirect {
-                        fd: None,
-                        target: tokens[i + 1].value.clone(),
-                        append: false,
-                    });
-                    i += 1;
+                if command_is_open_conditional(&current_cmd) {
+                    current_cmd.words.push(token.value.clone());
+                } else {
+                    note_command_line(&mut current_cmd, token);
+                    if i + 1 < tokens.len()
+                        && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                    {
+                        current_cmd.redirect_in = Some(Redirect {
+                            fd: None,
+                            target: tokens[i + 1].value.clone(),
+                            append: false,
+                        });
+                        i += 1;
+                    }
                 }
             }
             TokenKind::RedirectOut => {
-                note_command_line(&mut current_cmd, token);
-                if i + 1 < tokens.len()
-                    && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
-                {
-                    current_cmd.redirect_out = Some(Redirect {
-                        fd: None,
-                        target: tokens[i + 1].value.clone(),
-                        append: false,
-                    });
-                    i += 1;
+                if command_is_open_conditional(&current_cmd) {
+                    current_cmd.words.push(token.value.clone());
+                } else {
+                    note_command_line(&mut current_cmd, token);
+                    if i + 1 < tokens.len()
+                        && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                    {
+                        current_cmd.redirect_out = Some(Redirect {
+                            fd: None,
+                            target: tokens[i + 1].value.clone(),
+                            append: false,
+                        });
+                        i += 1;
+                    }
                 }
             }
             TokenKind::Append => {
@@ -325,13 +333,17 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd.heredoc = Some(token.value.clone());
             }
             TokenKind::And | TokenKind::Or => {
-                // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
-                // list connector on simple commands. Full Bash grammar needs
-                // a list AST with compound commands and proper precedence.
-                current_cmd.subshell |= in_subshell;
-                current_cmd.and_or = Some(token.kind == TokenKind::And);
-                ast.commands.push(current_cmd);
-                current_cmd = CommandNode::new();
+                if command_is_open_conditional(&current_cmd) {
+                    current_cmd.words.push(token.value.clone());
+                } else {
+                    // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
+                    // list connector on simple commands. Full Bash grammar needs
+                    // a list AST with compound commands and proper precedence.
+                    current_cmd.subshell |= in_subshell;
+                    current_cmd.and_or = Some(token.kind == TokenKind::And);
+                    ast.commands.push(current_cmd);
+                    current_cmd = CommandNode::new();
+                }
             }
             TokenKind::Background => {
                 // TODO(parse.y/jobs.c): Bash starts the preceding pipeline
@@ -725,6 +737,11 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+}
+
+fn command_is_open_conditional(cmd: &CommandNode) -> bool {
+    cmd.words.first().map(String::as_str) == Some("[[")
+        && !cmd.words.iter().any(|word| word == "]]")
 }
 
 fn is_function_name(name: &str) -> bool {

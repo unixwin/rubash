@@ -8155,6 +8155,23 @@ impl Executor {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
         // logic. Keep extending this bridge with test.c-compatible primitives.
+        if let Some(index) = conditional_logical_index(args, "||") {
+            let left = self.execute_conditional(&args[..index]);
+            return if left == 0 {
+                0
+            } else {
+                self.execute_conditional(&args[index + 1..])
+            };
+        }
+        if let Some(index) = conditional_logical_index(args, "&&") {
+            let left = self.execute_conditional(&args[..index]);
+            return if left == 0 {
+                self.execute_conditional(&args[index + 1..])
+            } else {
+                1
+            };
+        }
+
         match args {
             [not, rest @ ..] if not == "!" => i32::from(self.execute_conditional(rest) == 0),
             [op, operand, end] if op == "-v" && end == "]]" => i32::from(
@@ -8176,10 +8193,12 @@ impl Executor {
             [op, operand] if is_conditional_file_unary(op) => {
                 i32::from(!self.conditional_file_unary(op, operand))
             }
-            [left, op, right, end] if matches!(op.as_str(), "=" | "==" | "!=") && end == "]]" => {
+            [left, op, right, end]
+                if matches!(op.as_str(), "=" | "==" | "!=" | "<" | ">") && end == "]]" =>
+            {
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
-            [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=") => {
+            [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=" | "<" | ">") => {
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
             [left, op, right, end]
@@ -8203,6 +8222,8 @@ impl Executor {
         match op {
             "=" | "==" => left == right,
             "!=" => left != right,
+            "<" => left < right,
+            ">" => left > right,
             _ => false,
         }
     }
@@ -9867,6 +9888,11 @@ fn is_conditional_file_unary(op: &str) -> bool {
             | "-G"
             | "-N"
     )
+}
+
+fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
+    let index = args.iter().rposition(|arg| arg == op)?;
+    (index > 0 && index + 1 < args.len()).then_some(index)
 }
 
 fn case_pattern_matches_at(
