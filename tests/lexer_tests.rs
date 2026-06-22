@@ -82,6 +82,15 @@ mod operators {
     }
 
     #[test]
+    fn test_clobber_redirect_output() {
+        let input = "echo hello >| file.txt";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[2].kind, TokenKind::RedirectOut);
+        assert_eq!(tokens[2].value, ">|");
+    }
+
+    #[test]
     fn test_redirect_input() {
         let input = "cat < input.txt";
         let tokens = tokenize(input);
