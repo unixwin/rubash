@@ -9668,17 +9668,22 @@ impl ConditionalArithParser<'_> {
             return Some(condition);
         }
 
+        if condition == 0 {
+            self.skip_arithmetic_conditional_branch(&[":"]);
+            self.skip_ws();
+            if !self.consume(":") {
+                return None;
+            }
+            return self.parse_conditional();
+        }
+
         let true_value = self.parse_comma()?;
         self.skip_ws();
         if !self.consume(":") {
             return None;
         }
-        let false_value = self.parse_conditional()?;
-        Some(if condition != 0 {
-            true_value
-        } else {
-            false_value
-        })
+        self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
+        Some(true_value)
     }
 
     fn parse_logical_or(&mut self) -> Option<i128> {
@@ -9994,6 +9999,44 @@ impl ConditionalArithParser<'_> {
                         return;
                     }
                     depth -= 1;
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
+    }
+
+    fn skip_arithmetic_conditional_branch(&mut self, boundaries: &[&str]) {
+        let mut depth = 0usize;
+        let mut ternary_depth = 0usize;
+        while self.pos < self.input.len() {
+            if depth == 0
+                && ternary_depth == 0
+                && boundaries
+                    .iter()
+                    .any(|boundary| self.input[self.pos..].starts_with(boundary.as_bytes()))
+            {
+                return;
+            }
+
+            match self.input[self.pos] {
+                b'(' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b')' => {
+                    if depth == 0 {
+                        return;
+                    }
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                b'?' if depth == 0 => {
+                    ternary_depth += 1;
+                    self.pos += 1;
+                }
+                b':' if depth == 0 && ternary_depth > 0 => {
+                    ternary_depth -= 1;
                     self.pos += 1;
                 }
                 _ => self.pos += 1,
