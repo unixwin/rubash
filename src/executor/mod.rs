@@ -1614,7 +1614,7 @@ impl Executor {
         variable_expanded.words = cmd
             .words
             .iter()
-            .map(|word| self.expand_word(word))
+            .map(|word| self.expand_word_mut(word))
             .collect();
 
         let expanded;
@@ -1629,7 +1629,7 @@ impl Executor {
                     .into_iter()
                     .map(|word| {
                         if word.starts_with('$') {
-                            self.expand_word(&word)
+                            self.expand_word_mut(&word)
                         } else {
                             word
                         }
@@ -6452,7 +6452,7 @@ impl Executor {
         }
     }
 
-    fn expand_assignment_value(&self, value: &str) -> String {
+    fn expand_assignment_value(&mut self, value: &str) -> String {
         if let Some(array_value) = normalize_single_element_array_assignment(value) {
             return array_value;
         }
@@ -6467,7 +6467,7 @@ impl Executor {
             return expanded;
         }
 
-        let expanded = self.expand_embedded_parameters(value);
+        let expanded = self.expand_embedded_parameters_mut(value);
         if value.starts_with('(') && value.ends_with(')') {
             return expanded;
         }
@@ -7117,6 +7117,42 @@ impl Executor {
         }
 
         self.expand_embedded_parameters(word)
+    }
+
+    fn expand_word_mut(&mut self, word: &str) -> String {
+        if let Some(word) = word.strip_prefix('\x1b') {
+            return self.expand_embedded_parameters_mut(word);
+        }
+
+        if let Some((name, value)) = split_assignment_word(word) {
+            let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
+            let value = tilde_expand::strip_assignment_quote_marker(value);
+            let expanded = self.expand_embedded_parameters_mut(value);
+            if !quoted
+                && !expanded.contains('=')
+                && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                    || expanded.starts_with("~/"))
+            {
+                return format!("{name}={}", self.expand_assignment_tilde(&expanded));
+            }
+
+            return format!("{name}={expanded}");
+        }
+
+        if let Some(expression) = word
+            .strip_prefix("$((")
+            .and_then(|rest| rest.strip_suffix("))"))
+        {
+            if let Some(value) = self.eval_arithmetic_command_value(expression) {
+                return value.to_string();
+            }
+        }
+
+        if word.contains("$((") {
+            return self.expand_embedded_parameters_mut(word);
+        }
+
+        self.expand_word(word)
     }
 
     fn expand_parameter_named_value(&self, name: &str) -> String {
@@ -8292,6 +8328,68 @@ impl Executor {
                 }
                 None => output.push('$'),
             }
+        }
+
+        output
+    }
+
+    fn expand_embedded_parameters_mut(&mut self, word: &str) -> String {
+        let word = self.expand_embedded_arithmetic_mut(word);
+        self.expand_embedded_parameters(&word)
+    }
+
+    fn expand_embedded_arithmetic_mut(&mut self, word: &str) -> String {
+        let chars: Vec<char> = word.chars().collect();
+        let mut output = String::new();
+        let mut index = 0;
+
+        while index < chars.len() {
+            if chars[index] == '$'
+                && chars.get(index + 1) == Some(&'(')
+                && chars.get(index + 2) == Some(&'(')
+            {
+                index += 3;
+                let mut expression = String::new();
+                let mut paren_depth: usize = 0;
+                let mut matched = false;
+
+                while index < chars.len() {
+                    match chars[index] {
+                        '(' => {
+                            paren_depth += 1;
+                            expression.push(chars[index]);
+                            index += 1;
+                        }
+                        ')' if paren_depth == 0 && chars.get(index + 1) == Some(&')') => {
+                            index += 2;
+                            matched = true;
+                            break;
+                        }
+                        ')' => {
+                            paren_depth = paren_depth.saturating_sub(1);
+                            expression.push(chars[index]);
+                            index += 1;
+                        }
+                        ch => {
+                            expression.push(ch);
+                            index += 1;
+                        }
+                    }
+                }
+
+                if matched {
+                    if let Some(value) = self.eval_arithmetic_command_value(&expression) {
+                        output.push_str(&value.to_string());
+                    }
+                } else {
+                    output.push_str("$((");
+                    output.push_str(&expression);
+                }
+                continue;
+            }
+
+            output.push(chars[index]);
+            index += 1;
         }
 
         output
@@ -11589,7 +11687,7 @@ mod unit_tests {
 
     #[test]
     fn assignment_backtick_command_substitution_preserves_spaces() {
-        let executor = Executor::new();
+        let mut executor = Executor::new();
 
         assert_eq!(
             executor.expand_assignment_value("`echo -n \" ab \"`"),
