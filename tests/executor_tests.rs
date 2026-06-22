@@ -139,6 +139,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_empty_command_does_not_reset_exit_status() {
+        let output_path = "target/rubash-empty-command-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("false; ; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_and_operator() {
         let input = "true && echo success";
         let tokens = tokenize(input);
@@ -2358,6 +2375,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_for_loop_exit_status_matches_body_or_zero_iterations() {
+        let output_path = "target/rubash-for-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let loop_only_tokens = tokenize("for item in one; do false; done");
+        let loop_only_ast = parse(&loop_only_tokens);
+        let mut loop_only_executor = Executor::new();
+        let loop_only_result = loop_only_executor.execute_ast(&loop_only_ast);
+        assert!(loop_only_result.is_ok());
+        assert_eq!(loop_only_executor.last_exit_code(), 1);
+
+        let input = format!(
+            "for item in one; do false; done; echo $? > {output_path}; false; for item in; do true; done; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_for_loop_executes() {
         let output_path = "target/rubash-arithmetic-for-output.txt";
         let _ = fs::remove_file(output_path);
@@ -2395,6 +2438,32 @@ mod command_chaining {
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n2\n3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_for_loop_exit_status_matches_body_or_zero_iterations() {
+        let output_path = "target/rubash-arithmetic-for-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let loop_only_tokens = tokenize("for (( i = 0; i < 1; i++ )); do false; done");
+        let loop_only_ast = parse(&loop_only_tokens);
+        let mut loop_only_executor = Executor::new();
+        let loop_only_result = loop_only_executor.execute_ast(&loop_only_ast);
+        assert!(loop_only_result.is_ok());
+        assert_eq!(loop_only_executor.last_exit_code(), 1);
+
+        let input = format!(
+            "for (( i = 0; i < 1; i++ )); do false; done; echo $? > {output_path}; false; for (( i = 0; i < 0; i++ )); do true; done; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n");
         let _ = fs::remove_file(output_path);
     }
 

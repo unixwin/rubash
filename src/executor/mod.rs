@@ -635,11 +635,14 @@ pub struct Executor {
     positional_params: Vec<String>,
     expanding_aliases: Vec<String>,
     loop_depth: usize,
+    function_depth: usize,
 }
 
 impl Executor {
     pub fn new() -> Self {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        env_vars.remove("__RUBASH_CURRENT_FUNCTION");
+        env_vars.remove("__RUBASH_IN_SOURCE");
         env_vars.entry("PWD".to_string()).or_insert_with(|| {
             std::env::current_dir()
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
@@ -654,6 +657,7 @@ impl Executor {
             positional_params: Vec::new(),
             expanding_aliases: Vec::new(),
             loop_depth: 0,
+            function_depth: 0,
         }
     }
 
@@ -1584,6 +1588,9 @@ impl Executor {
         }
 
         if cmd.words.is_empty() {
+            if command_has_no_effect(cmd) {
+                return Ok(());
+            }
             for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_assignment_value(value);
                 self.apply_shell_assignment(name, expanded_value);
@@ -1998,7 +2005,9 @@ impl Executor {
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
+        self.function_depth += 1;
         let result = self.execute_ast(&ast);
+        self.function_depth -= 1;
         self.positional_params = old_positional_params;
         match old_function {
             Some(value) => {
@@ -2456,7 +2465,9 @@ impl Executor {
                 .map(|word| self.expand_word(word))
                 .collect()
         };
+        let mut ran_body = false;
         for value in values {
+            ran_body = true;
             self.env_vars
                 .insert(for_command.variable.clone(), value.clone());
             env::set_var(&for_command.variable, value);
@@ -2485,7 +2496,9 @@ impl Executor {
             }
         }
 
-        self.exit_code = 0;
+        if !ran_body {
+            self.exit_code = 0;
+        }
         Ok(())
     }
 
@@ -2503,6 +2516,7 @@ impl Executor {
             return Ok(());
         }
 
+        let mut ran_body = false;
         loop {
             if !arithmetic.test.trim().is_empty() {
                 match self.eval_arithmetic_command_value(&arithmetic.test) {
@@ -2515,6 +2529,7 @@ impl Executor {
                 }
             }
 
+            ran_body = true;
             let ast = Ast {
                 commands: body.to_vec(),
             };
@@ -2547,6 +2562,9 @@ impl Executor {
             }
         }
 
+        if !ran_body {
+            self.exit_code = 0;
+        }
         Ok(())
     }
 
@@ -5255,7 +5273,7 @@ impl Executor {
             self.exit_code
         };
 
-        let in_function = self.env_vars.contains_key("__RUBASH_CURRENT_FUNCTION");
+        let in_function = self.function_depth > 0;
         let in_source = self.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
         if in_function || in_source {
             return Err(ExecuteError::Return(status));
@@ -10136,6 +10154,26 @@ impl ConditionalArithParser<'_> {
             }
         }
     }
+}
+
+fn command_has_no_effect(cmd: &CommandNode) -> bool {
+    cmd.assignments.is_empty()
+        && cmd.redirect_in.is_none()
+        && cmd.redirect_out.is_none()
+        && cmd.append.is_none()
+        && cmd.redirect_err.is_none()
+        && cmd.redirect_err_append.is_none()
+        && cmd.heredoc.is_none()
+        && cmd.here_string.is_none()
+        && cmd.pipe.is_none()
+        && cmd.and_or.is_none()
+        && !cmd.background
+        && !cmd.inverted
+        && !cmd.subshell
+        && !cmd.subshell_end
+        && cmd.for_command.is_none()
+        && cmd.case_command.is_none()
+        && cmd.function_command.is_none()
 }
 
 fn is_shell_keyword(word: &str) -> bool {
