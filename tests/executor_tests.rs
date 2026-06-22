@@ -3488,6 +3488,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_let_builtin_evaluates_arithmetic_expressions() {
+        let output_path = "target/rubash-let-arithmetic-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "let n=1 n+=2 n; echo $? $n > {output_path}; let n=0; echo $? $n >> {output_path}; let n=2 n**=3 n-8; echo $? $n >> {output_path}; let n/=0; echo $? $n >> {output_path}; let; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 3\n1 0\n1 8\n1 8\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);

@@ -1883,6 +1883,10 @@ impl Executor {
                     self.exit_code = self.execute_kill(cmd)?;
                     Ok(())
                 }
+                "let" => {
+                    self.exit_code = self.execute_let(&cmd.words[1..]);
+                    Ok(())
+                }
                 "umask" => {
                     self.exit_code = self.execute_umask(cmd)?;
                     Ok(())
@@ -8298,6 +8302,24 @@ impl Executor {
     fn execute_arithmetic_command(&mut self, cmd: &CommandNode) -> i32 {
         let expression = cmd.words.get(1).map(String::as_str).unwrap_or_default();
         match self.eval_arithmetic_command_value(expression) {
+            Some(0) | None => 1,
+            Some(_) => 0,
+        }
+    }
+
+    fn execute_let(&mut self, expressions: &[String]) -> i32 {
+        if expressions.is_empty() {
+            return 1;
+        }
+
+        let mut value = None;
+        for expression in expressions {
+            value = self.eval_arithmetic_command_value(expression);
+            if value.is_none() {
+                return 1;
+            }
+        }
+        match value {
             Some(0) | None => 1,
             Some(_) => 0,
         }
