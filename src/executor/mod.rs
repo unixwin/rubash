@@ -9157,6 +9157,7 @@ fn find_parameter_pattern_match(
 #[derive(Clone, Copy)]
 enum ParameterTransform {
     Quote,
+    Escape,
     Upper,
     Lower,
 }
@@ -9165,6 +9166,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
     let (var_name, operation) = name.rsplit_once('@')?;
     let transform = match operation {
         "Q" => ParameterTransform::Quote,
+        "E" => ParameterTransform::Escape,
         "U" => ParameterTransform::Upper,
         "L" => ParameterTransform::Lower,
         _ => return None,
@@ -9175,6 +9177,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
 fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> String {
     match transform {
         ParameterTransform::Quote => shell_quote_parameter_value(value),
+        ParameterTransform::Escape => decode_ansi_c_escapes(value),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
     }
@@ -9623,8 +9626,12 @@ fn shell_safe_value(value: &str) -> String {
 
 fn decode_ansi_c_quoted_word(word: &str) -> Option<String> {
     let value = word.strip_prefix("$'")?.strip_suffix('\'')?;
+    Some(decode_ansi_c_escapes(value))
+}
+
+fn decode_ansi_c_escapes(value: &str) -> String {
     let mut output = String::new();
-    let mut chars = value.chars();
+    let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '\\' {
             output.push(ch);
@@ -9644,6 +9651,23 @@ fn decode_ansi_c_quoted_word(word: &str) -> Option<String> {
             Some('\'') => output.push('\''),
             Some('"') => output.push('"'),
             Some('?') => output.push('?'),
+            Some('x') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 2)),
+            Some('u') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 4)),
+            Some('U') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 8)),
+            Some(octal @ '0'..='7') => {
+                let mut value = octal.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    let Some(next) = chars.peek().copied() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    value = value * 8 + digit;
+                    chars.next();
+                }
+                push_ansi_c_codepoint(&mut output, Some(value));
+            }
             Some(other) => {
                 output.push('\\');
                 output.push(other);
@@ -9651,7 +9675,39 @@ fn decode_ansi_c_quoted_word(word: &str) -> Option<String> {
             None => output.push('\\'),
         }
     }
-    Some(output)
+    output
+}
+
+fn read_ansi_c_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, max: usize) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = String::new();
+    while value.len() < max {
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+        if next.to_digit(radix).is_none() {
+            break;
+        }
+        value.push(next);
+        chars.next();
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        u32::from_str_radix(&value, radix).ok()
+    }
+}
+
+fn push_ansi_c_codepoint(output: &mut String, value: Option<u32>) {
+    let Some(value) = value else {
+        return;
+    };
+    if let Some(ch) = char::from_u32(value) {
+        output.push(ch);
+    }
 }
 
 fn array_values(value: &str) -> Vec<String> {

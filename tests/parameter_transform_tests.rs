@@ -21,6 +21,28 @@ fn test_parameter_transform_quotes_value() {
 }
 
 #[test]
+fn test_parameter_transform_expands_ansi_c_escapes() {
+    let output_path = "target/rubash-param-transform-escape-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v='a\\nb'; printf '<%s>' \"${{v@E}}\" > {output_path}; v='\\141\\x42'; printf '<%s>' \"${{v@E}}\" >> {output_path}; v='a\\qb'; printf '<%s>\\n' \"${{v@E}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<a\nb><aB><a\\qb>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);
