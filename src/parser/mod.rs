@@ -356,6 +356,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 current_cmd = CommandNode::new();
             }
             TokenKind::Keyword => {
+                if command_is_open_conditional(&current_cmd)
+                    && matches!(token.value.as_str(), "(" | ")")
+                {
+                    current_cmd.words.push(token.value.clone());
+                    i += 1;
+                    continue;
+                }
+
                 if token.value == "!" && command_is_empty(&current_cmd) {
                     // TODO(parse.y/execute_cmd.c): Bash represents `!` as a
                     // pipeline/list inversion flag. Keep it on the next simple
