@@ -4182,7 +4182,7 @@ impl Executor {
         };
         let mut status = 0;
         for name in &args[1..] {
-            if !self.describe_name(name, mode, false) {
+            if !self.describe_name(name, mode, false, false) {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
                     eprintln!("{}command: {name}: not found", self.diagnostic_prefix());
@@ -4243,7 +4243,7 @@ impl Executor {
         };
         let mut status = 0;
         for name in &args[1..] {
-            if !self.describe_name_with_io(name, mode, false, stdout)? {
+            if !self.describe_name_with_io(name, mode, false, false, stdout)? {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
                     writeln!(
@@ -4265,6 +4265,7 @@ impl Executor {
         let mut mode = TypeDescribeMode::Verbose;
         let mut all = false;
         let mut force_path = false;
+        let mut skip_functions = false;
         let mut index = 0;
 
         while let Some(arg) = args.get(index) {
@@ -4278,7 +4279,7 @@ impl Executor {
             for option in arg[1..].chars() {
                 match option {
                     'a' => all = true,
-                    'f' => {}
+                    'f' => skip_functions = true,
                     'p' => mode = TypeDescribeMode::PathOnly,
                     'P' => {
                         mode = TypeDescribeMode::PathOnly;
@@ -4298,7 +4299,7 @@ impl Executor {
         let mut status = 0;
         for name in &args[index..] {
             let found = if all {
-                match self.describe_name_all(name, mode, force_path) {
+                match self.describe_name_all(name, mode, force_path, skip_functions) {
                     Ok(found) => found,
                     Err(error) => {
                         eprintln!("rubash: type: {error}");
@@ -4306,7 +4307,7 @@ impl Executor {
                     }
                 }
             } else {
-                self.describe_name(name, mode, force_path)
+                self.describe_name(name, mode, force_path, skip_functions)
             };
             if !found {
                 status = 1;
@@ -4362,6 +4363,7 @@ impl Executor {
         let mut mode = TypeDescribeMode::Verbose;
         let mut all = false;
         let mut force_path = false;
+        let mut skip_functions = false;
         let mut index = 0;
 
         while let Some(arg) = args.get(index) {
@@ -4375,7 +4377,7 @@ impl Executor {
             for option in arg[1..].chars() {
                 match option {
                     'a' => all = true,
-                    'f' => {}
+                    'f' => skip_functions = true,
                     'p' => mode = TypeDescribeMode::PathOnly,
                     'P' => {
                         mode = TypeDescribeMode::PathOnly;
@@ -4399,9 +4401,9 @@ impl Executor {
         let mut status = 0;
         for name in &args[index..] {
             let found = if all {
-                self.describe_name_all_with_io(name, mode, force_path, stdout)?
+                self.describe_name_all_with_io(name, mode, force_path, skip_functions, stdout)?
             } else {
-                self.describe_name_with_io(name, mode, force_path, stdout)?
+                self.describe_name_with_io(name, mode, force_path, skip_functions, stdout)?
             };
             if !found {
                 status = 1;
@@ -4417,7 +4419,13 @@ impl Executor {
         Ok(status)
     }
 
-    fn describe_name(&self, name: &str, mode: TypeDescribeMode, force_path: bool) -> bool {
+    fn describe_name(
+        &self,
+        name: &str,
+        mode: TypeDescribeMode,
+        force_path: bool,
+        skip_functions: bool,
+    ) -> bool {
         if !force_path {
             if self.alias_expansion_enabled() {
                 if let Some(alias) = self.aliases.get(name) {
@@ -4433,17 +4441,22 @@ impl Executor {
                 }
             }
 
-            if let Some(body) = self.functions.get(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => self.print_function_description(name, body),
-                    TypeDescribeMode::Reusable => println!("{name}"),
-                    TypeDescribeMode::TypeOnly => println!("function"),
-                    TypeDescribeMode::PathOnly => {}
+            if !skip_functions {
+                if let Some(body) = self.functions.get(name) {
+                    match mode {
+                        TypeDescribeMode::Verbose => self.print_function_description(name, body),
+                        TypeDescribeMode::Reusable => println!("{name}"),
+                        TypeDescribeMode::TypeOnly => println!("function"),
+                        TypeDescribeMode::PathOnly => {}
+                    }
+                    return true;
                 }
-                return true;
             }
 
-            if mode == TypeDescribeMode::Verbose && self.print_upstream_type_function(name, &[]) {
+            if !skip_functions
+                && mode == TypeDescribeMode::Verbose
+                && self.print_upstream_type_function(name, &[])
+            {
                 return true;
             }
 
@@ -4498,6 +4511,7 @@ impl Executor {
         name: &str,
         mode: TypeDescribeMode,
         force_path: bool,
+        skip_functions: bool,
         stdout: &mut W,
     ) -> Result<bool, ExecuteError>
     where
@@ -4520,32 +4534,34 @@ impl Executor {
                 }
             }
 
-            if let Some(body) = self.functions.get(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => {
-                        writeln!(stdout, "{name} is a function")?;
-                        writeln!(stdout, "{name} () ")?;
-                        writeln!(stdout, "{{ ")?;
-                        for command in body {
-                            if command.assignments.contains_key("v") {
-                                writeln!(stdout, "    v='^A'")?;
-                                continue;
+            if !skip_functions {
+                if let Some(body) = self.functions.get(name) {
+                    match mode {
+                        TypeDescribeMode::Verbose => {
+                            writeln!(stdout, "{name} is a function")?;
+                            writeln!(stdout, "{name} () ")?;
+                            writeln!(stdout, "{{ ")?;
+                            for command in body {
+                                if command.assignments.contains_key("v") {
+                                    writeln!(stdout, "    v='^A'")?;
+                                    continue;
+                                }
+                                if !command.words.is_empty() {
+                                    writeln!(
+                                        stdout,
+                                        "    {}",
+                                        command.words.join(" ").replace("$(<x1)", "$(< x1)")
+                                    )?;
+                                }
                             }
-                            if !command.words.is_empty() {
-                                writeln!(
-                                    stdout,
-                                    "    {}",
-                                    command.words.join(" ").replace("$(<x1)", "$(< x1)")
-                                )?;
-                            }
+                            writeln!(stdout, "}}")?;
                         }
-                        writeln!(stdout, "}}")?;
+                        TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                        TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
+                        TypeDescribeMode::PathOnly => {}
                     }
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
-                    TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
-                    TypeDescribeMode::PathOnly => {}
+                    return Ok(true);
                 }
-                return Ok(true);
             }
 
             if is_shell_keyword(name) {
@@ -4601,9 +4617,10 @@ impl Executor {
         name: &str,
         mode: TypeDescribeMode,
         force_path: bool,
+        skip_functions: bool,
     ) -> Result<bool, ExecuteError> {
         let mut stdout = std::io::stdout().lock();
-        self.describe_name_all_with_io(name, mode, force_path, &mut stdout)
+        self.describe_name_all_with_io(name, mode, force_path, skip_functions, &mut stdout)
     }
 
     fn describe_name_all_with_io<W>(
@@ -4611,6 +4628,7 @@ impl Executor {
         name: &str,
         mode: TypeDescribeMode,
         force_path: bool,
+        skip_functions: bool,
         stdout: &mut W,
     ) -> Result<bool, ExecuteError>
     where
@@ -4635,16 +4653,18 @@ impl Executor {
                 }
             }
 
-            if let Some(body) = self.functions.get(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => {
-                        self.write_function_description(name, body, stdout)?
+            if !skip_functions {
+                if let Some(body) = self.functions.get(name) {
+                    match mode {
+                        TypeDescribeMode::Verbose => {
+                            self.write_function_description(name, body, stdout)?
+                        }
+                        TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                        TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
+                        TypeDescribeMode::PathOnly => {}
                     }
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
-                    TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
-                    TypeDescribeMode::PathOnly => {}
+                    found = true;
                 }
-                found = true;
             }
 
             if is_shell_keyword(name) {
