@@ -10,6 +10,7 @@ pub struct Redirect {
     pub fd: Option<u32>,
     pub target: String,
     pub append: bool,
+    pub clobber: bool,
 }
 
 /// Represents a narrow `for` compound command.
@@ -281,6 +282,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             fd: None,
                             target: tokens[i + 1].value.clone(),
                             append: false,
+                            clobber: false,
                         });
                         i += 1;
                     }
@@ -298,6 +300,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             fd: None,
                             target: tokens[i + 1].value.clone(),
                             append: false,
+                            clobber: token.value == ">|",
                         });
                         i += 1;
                     }
@@ -312,6 +315,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         fd: None,
                         target: tokens[i + 1].value.clone(),
                         append: true,
+                        clobber: false,
                     });
                     i += 1;
                 }
@@ -325,6 +329,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         fd: Some(2),
                         target: tokens[i + 1].value.clone(),
                         append: false,
+                        clobber: false,
                     });
                     i += 1;
                 }
@@ -338,6 +343,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         fd: Some(2),
                         target: tokens[i + 1].value.clone(),
                         append: true,
+                        clobber: false,
                     });
                     i += 1;
                 }

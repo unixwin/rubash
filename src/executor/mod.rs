@@ -1297,7 +1297,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &command.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let mut file = self.create_redirect_output(&target)?;
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             file.write_all(output.as_bytes())?;
         } else if let Some(redirect) = &command.append {
             let target = self.expand_word(&redirect.target);
@@ -2111,12 +2111,13 @@ impl Executor {
 
         let target = self.expand_word(&redirect.target);
         if truncate_first {
-            self.create_redirect_output(&target)?;
+            self.create_redirect_output(&target, redirect.clobber)?;
         }
         let append_redirect = Redirect {
             fd: redirect.fd,
             target,
             append: true,
+            clobber: false,
         };
         apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         Ok(())
@@ -5265,7 +5266,7 @@ impl Executor {
                     &mut std::io::stderr().lock(),
                 )?);
             }
-            let mut file = self.create_redirect_output(&target)?;
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             return Ok(crate::builtins::printf::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.env_vars,
@@ -6528,7 +6529,7 @@ impl Executor {
             if let Some(target) = cmd.words.get(redirect_index + 1) {
                 let echo_args = echo_args_without_background_marker(&cmd.words[1..redirect_index]);
                 let target = self.expand_word(target);
-                let mut file = self.create_redirect_output(&target)?;
+                let mut file = self.create_redirect_output(&target, false)?;
                 crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
                 return Ok(());
             }
@@ -6551,7 +6552,7 @@ impl Executor {
                 )?;
                 return Ok(());
             }
-            let mut file = self.create_redirect_output(&target)?;
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
             return Ok(());
         }
@@ -8625,9 +8626,9 @@ impl Executor {
         flags
     }
 
-    fn create_redirect_output(&self, target: &str) -> io::Result<File> {
+    fn create_redirect_output(&self, target: &str, clobber: bool) -> io::Result<File> {
         let path = shell_path_to_windows(target, &self.env_vars);
-        if crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
+        if !clobber && crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
             return OpenOptions::new().write(true).create_new(true).open(path);
         }
         File::create(path)
@@ -9723,7 +9724,7 @@ impl Executor {
 
                 if let Some(redirect) = &cmd.redirect_out {
                     let target = self.expand_word(&redirect.target);
-                    let mut file = self.create_redirect_output(&target)?;
+                    let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                     file.write_all(body.as_bytes())?;
                     self.exit_code = 0;
                     return Ok(());
@@ -9799,7 +9800,7 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let file = self.create_redirect_output(&target)?;
+            let file = self.create_redirect_output(&target, redirect.clobber)?;
             process.stdout(Stdio::from(file));
         }
 

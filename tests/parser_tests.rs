@@ -152,6 +152,16 @@ mod redirection_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].redirect_out.is_some());
+        assert!(!ast.commands[0].redirect_out.as_ref().unwrap().clobber);
+    }
+
+    #[test]
+    fn test_clobber_output_redirect() {
+        let input = "echo hello >| file.txt";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert!(ast.commands[0].redirect_out.as_ref().unwrap().clobber);
     }
 
     #[test]
