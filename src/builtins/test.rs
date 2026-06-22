@@ -83,7 +83,7 @@ fn eval_expr(args: &[&str], env_vars: &HashMap<String, String>) -> Result<bool, 
         ["!", rest @ ..] => Ok(!eval_expr(rest, env_vars)?),
         [single] => Ok(!single.is_empty()),
         [op, operand] if is_unary_operator(op) => eval_unary(op, operand, env_vars),
-        [left, op, right] if is_binary_operator(op) => eval_binary(left, op, right),
+        [left, op, right] if is_binary_operator(op) => eval_binary(left, op, right, env_vars),
         _ => Err("syntax error".to_string()),
     }
 }
@@ -300,7 +300,12 @@ fn is_binary_operator(op: &str) -> bool {
     )
 }
 
-fn eval_binary(left: &str, op: &str, right: &str) -> Result<bool, String> {
+fn eval_binary(
+    left: &str,
+    op: &str,
+    right: &str,
+    env_vars: &HashMap<String, String>,
+) -> Result<bool, String> {
     match op {
         "=" | "==" => Ok(left == right),
         "!=" => Ok(left != right),
@@ -312,9 +317,9 @@ fn eval_binary(left: &str, op: &str, right: &str) -> Result<bool, String> {
         "-le" => Ok(parse_int(left)? <= parse_int(right)?),
         "-gt" => Ok(parse_int(left)? > parse_int(right)?),
         "-ge" => Ok(parse_int(left)? >= parse_int(right)?),
-        "-nt" => Ok(modified(left) > modified(right)),
-        "-ot" => Ok(modified(left) < modified(right)),
-        "-ef" => Ok(same_file(left, right)),
+        "-nt" => Ok(modified(left, env_vars) > modified(right, env_vars)),
+        "-ot" => Ok(modified(left, env_vars) < modified(right, env_vars)),
+        "-ef" => Ok(same_file(left, right, env_vars)),
         _ => Err(format!("{}: binary operator expected", op)),
     }
 }
@@ -325,17 +330,17 @@ fn parse_int(value: &str) -> Result<i64, String> {
         .map_err(|_| format!("{}: integer expression expected", value))
 }
 
-fn modified(path: &str) -> Option<std::time::SystemTime> {
-    fs::metadata(path)
+fn modified(path: &str, env_vars: &HashMap<String, String>) -> Option<std::time::SystemTime> {
+    fs::metadata(test_path(path, env_vars))
         .and_then(|metadata| metadata.modified())
         .ok()
 }
 
-fn same_file(left: &str, right: &str) -> bool {
-    let Ok(left) = fs::canonicalize(left) else {
+fn same_file(left: &str, right: &str, env_vars: &HashMap<String, String>) -> bool {
+    let Ok(left) = fs::canonicalize(test_path(left, env_vars)) else {
         return false;
     };
-    let Ok(right) = fs::canonicalize(right) else {
+    let Ok(right) = fs::canonicalize(test_path(right, env_vars)) else {
         return false;
     };
     left == right
