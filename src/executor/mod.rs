@@ -7215,7 +7215,74 @@ impl Executor {
     }
 
     fn parameter_assignment_transform(&self, name: &str) -> String {
-        if !is_shell_name(name) || is_marked_array_var(&self.env_vars, name) {
+        if let Some(array_name) = name.strip_suffix("[*]") {
+            return self.array_assignment_transform(array_name);
+        }
+
+        if name.ends_with("[@]") {
+            return String::new();
+        }
+
+        if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
+            let Some(value) = self
+                .env_vars
+                .get(array_name)
+                .and_then(|value| array_value_at(value, index))
+            else {
+                return String::new();
+            };
+            let array_flag = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                "-A"
+            } else {
+                "-a"
+            };
+            return format!(
+                "declare {array_flag} {array_name}={}",
+                shell_single_quote_assignment_value(&value)
+            );
+        }
+
+        if let Some((array_name, key)) = parse_array_subscript(name) {
+            if !is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                return String::new();
+            }
+            let Some(value) = self
+                .env_vars
+                .get(array_name)
+                .and_then(|value| assoc_value_at(value, key))
+            else {
+                return String::new();
+            };
+            return format!(
+                "declare -A {array_name}={}",
+                shell_single_quote_assignment_value(&value)
+            );
+        }
+
+        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            return format!("declare -A {name}");
+        }
+
+        if self
+            .env_vars
+            .get(name)
+            .is_some_and(|value| is_array_storage(value))
+            || is_marked_array_var(&self.env_vars, name)
+        {
+            return self
+                .env_vars
+                .get(name)
+                .and_then(|value| array_value_at(value, 0))
+                .map(|value| {
+                    format!(
+                        "declare -a {name}={}",
+                        shell_single_quote_assignment_value(&value)
+                    )
+                })
+                .unwrap_or_else(|| format!("declare -a {name}"));
+        }
+
+        if !is_shell_name(name) {
             return String::new();
         }
 
@@ -7238,6 +7305,36 @@ impl Executor {
             (true, false, false) => format!("declare -r {name}={rendered}"),
             (false, true, false) => format!("declare -x {name}={rendered}"),
         }
+    }
+
+    fn array_assignment_transform(&self, name: &str) -> String {
+        let Some(value) = self.env_vars.get(name) else {
+            return String::new();
+        };
+
+        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            let entries = assoc_entries(value);
+            if entries.is_empty() {
+                return format!("declare -A {name}");
+            }
+            let rendered = entries
+                .into_iter()
+                .map(|(key, value)| format!("[{key}]={}", quote_array_value(&value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return format!("declare -A {name}=({rendered} )");
+        }
+
+        if is_marked_array_var(&self.env_vars, name) || is_array_storage(value) {
+            let rendered = indexed_array_entries(value)
+                .into_iter()
+                .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return format!("declare -a {name}=({rendered})");
+        }
+
+        String::new()
     }
 
     fn expand_assignment_tilde(&self, value: &str) -> String {

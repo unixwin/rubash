@@ -83,6 +83,48 @@ fn test_parameter_transform_assignment_includes_attributes() {
 }
 
 #[test]
+fn test_parameter_transform_assignment_prints_indexed_arrays() {
+    let output_path = "target/rubash-param-transform-assignment-array-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(alpha beta); printf '<%s>\\n' \"${{arr@A}}\" \"${{arr[1]@A}}\" \"${{arr[*]@A}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<declare -a arr='alpha'>\n<declare -a arr='beta'>\n<declare -a arr=([0]=\"alpha\" [1]=\"beta\")>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_parameter_transform_assignment_prints_assoc_arrays() {
+    let output_path = "target/rubash-param-transform-assignment-assoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("declare -A assoc; assoc[one]=alpha; assoc[two]=beta; printf '<%s>\\n' \"${{assoc@A}}\" \"${{assoc[one]@A}}\" \"${{assoc[*]@A}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<declare -A assoc>\n<declare -A assoc='alpha'>\n<declare -A assoc=([one]=\"alpha\" [two]=\"beta\" )>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);
