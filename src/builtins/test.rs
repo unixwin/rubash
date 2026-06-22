@@ -70,6 +70,10 @@ where
 }
 
 fn eval_expr(args: &[&str], env_vars: &HashMap<String, String>) -> Result<bool, String> {
+    if let Some(inner) = outer_parenthesized_expr(args) {
+        return eval_expr(inner, env_vars);
+    }
+
     if let Some(index) = find_logical_operator(args, "-o") {
         return Ok(eval_expr(&args[..index], env_vars)? || eval_expr(&args[index + 1..], env_vars)?);
     }
@@ -89,7 +93,49 @@ fn eval_expr(args: &[&str], env_vars: &HashMap<String, String>) -> Result<bool, 
 }
 
 fn find_logical_operator(args: &[&str], op: &str) -> Option<usize> {
-    args.iter().rposition(|arg| *arg == op)
+    let mut depth = 0usize;
+    for (index, arg) in args.iter().enumerate().rev() {
+        if is_close_paren(arg) {
+            depth += 1;
+            continue;
+        }
+        if is_open_paren(arg) {
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if depth == 0 && *arg == op {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn outer_parenthesized_expr<'a>(args: &'a [&str]) -> Option<&'a [&'a str]> {
+    if args.len() < 2 || !is_open_paren(args[0]) || !is_close_paren(args[args.len() - 1]) {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (index, arg) in args.iter().enumerate() {
+        if is_open_paren(arg) {
+            depth += 1;
+        } else if is_close_paren(arg) {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 && index != args.len() - 1 {
+                return None;
+            }
+        }
+    }
+
+    (depth == 0).then_some(&args[1..args.len() - 1])
+}
+
+fn is_open_paren(value: &str) -> bool {
+    matches!(value, "(" | "\\(")
+}
+
+fn is_close_paren(value: &str) -> bool {
+    matches!(value, ")" | "\\)")
 }
 
 fn is_unary_operator(op: &str) -> bool {
@@ -380,6 +426,18 @@ mod tests {
         assert_eq!(run(&["!", ""], false).0, EXECUTION_SUCCESS);
         assert_eq!(run(&["x", "-a", ""], false).0, EXECUTION_FAILURE);
         assert_eq!(run(&["x", "-o", ""], false).0, EXECUTION_SUCCESS);
+    }
+
+    #[test]
+    fn supports_parenthesized_logical_expressions() {
+        assert_eq!(
+            run(&["(", "", "-o", "x", ")", "-a", ""], false).0,
+            EXECUTION_FAILURE
+        );
+        assert_eq!(
+            run(&["\\(", "", "-o", "x", "\\)", "-a", "x"], false).0,
+            EXECUTION_SUCCESS
+        );
     }
 
     #[test]
