@@ -148,9 +148,6 @@ fn test_path(operand: &str, env_vars: &HashMap<String, String>) -> std::path::Pa
 }
 
 fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
-    // TODO(test.c/variables.c/array.c): Bash `test -v name[subscript]`
-    // consults shell variable attributes and array elements. This handles the
-    // array forms used by upstream builtins5.sub.
     if let Some(name) = operand
         .strip_suffix("[@]")
         .or_else(|| operand.strip_suffix("[*]"))
@@ -169,6 +166,28 @@ fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
         return env_vars.contains_key(name) || env::var_os(name).is_some();
     }
 
+    if let Some((name, subscript)) = parse_array_subscript(operand) {
+        let arrays = marked_vars(env_vars, ARRAY_VARS);
+        let assocs = marked_vars(env_vars, ASSOC_VARS);
+        let Some(value) = env_vars.get(name) else {
+            return false;
+        };
+
+        if assocs.iter().any(|marked| marked == name) {
+            return assoc_key_is_set(value, subscript);
+        }
+
+        if arrays.iter().any(|marked| marked == name) || is_array_storage(value) {
+            return subscript
+                .parse::<usize>()
+                .ok()
+                .map(|index| array_index_is_set(value, index))
+                .unwrap_or(false);
+        }
+
+        return subscript == "0" && (!value.is_empty() || env_vars.contains_key(name));
+    }
+
     let arrays = marked_vars(env_vars, ARRAY_VARS);
     let assocs = marked_vars(env_vars, ASSOC_VARS);
     if arrays.iter().any(|marked| marked == operand)
@@ -181,6 +200,72 @@ fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
     }
 
     env_vars.contains_key(operand) || env::var_os(operand).is_some()
+}
+
+fn parse_array_subscript(value: &str) -> Option<(&str, &str)> {
+    let (name, subscript) = value.split_once('[')?;
+    Some((name, subscript.strip_suffix(']')?))
+}
+
+fn is_array_storage(value: &str) -> bool {
+    value.starts_with('(') && value.ends_with(')') || value.starts_with('\x1d')
+}
+
+fn array_index_is_set(value: &str, index: usize) -> bool {
+    array_entries(value)
+        .into_iter()
+        .any(|(entry_index, _)| entry_index == index)
+}
+
+fn array_entries(value: &str) -> Vec<(usize, String)> {
+    let value = value.strip_prefix('\x1d').unwrap_or(value);
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+
+    inner
+        .split_whitespace()
+        .enumerate()
+        .filter_map(|(default_index, part)| {
+            if let Some((left, right)) = part.split_once('=') {
+                let index = left
+                    .strip_prefix('[')
+                    .and_then(|left| left.strip_suffix(']'))
+                    .and_then(|index| index.parse::<usize>().ok())?;
+                return Some((index, strip_array_value_quotes(right).to_string()));
+            }
+            Some((default_index, strip_array_value_quotes(part).to_string()))
+        })
+        .collect()
+}
+
+fn assoc_key_is_set(value: &str, key: &str) -> bool {
+    let value = value.strip_prefix('\x1d').unwrap_or(value);
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return false;
+    };
+
+    inner.split_whitespace().any(|part| {
+        let Some((left, _)) = part.split_once('=') else {
+            return false;
+        };
+        left.strip_prefix('[')
+            .and_then(|left| left.strip_suffix(']'))
+            == Some(key)
+    })
+}
+
+fn strip_array_value_quotes(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
