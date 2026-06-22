@@ -8467,7 +8467,7 @@ impl Executor {
         if !is_shell_name(name) {
             return None;
         }
-        let rhs = eval_conditional_arith_value(rhs, &self.env_vars)?;
+        let rhs = self.eval_arithmetic_command_value(rhs)?;
         let current = self.arithmetic_variable_value(name);
         let value = match op {
             "=" => rhs,
