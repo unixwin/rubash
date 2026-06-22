@@ -19,6 +19,7 @@ use std::process::{Command, Stdio};
 use self::path::{find_shell, find_user_command, shell_path_to_windows, should_run_with_shell};
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
@@ -6836,6 +6837,9 @@ impl Executor {
                 }
             }
             if let Some((var_name, transform)) = parse_parameter_transform(name) {
+                if transform == ParameterTransform::Assignment {
+                    return self.parameter_assignment_transform(var_name);
+                }
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -7207,6 +7211,32 @@ impl Executor {
                 }
                 self.env_vars.get(name).cloned()
             }
+        }
+    }
+
+    fn parameter_assignment_transform(&self, name: &str) -> String {
+        if !is_shell_name(name) || is_marked_array_var(&self.env_vars, name) {
+            return String::new();
+        }
+
+        let Some(value) = self.env_vars.get(name) else {
+            return String::new();
+        };
+
+        let rendered = shell_single_quote_assignment_value(value);
+        let readonly = is_marked_var(&self.env_vars, READONLY_VARS, name);
+        let exported = is_marked_var(&self.env_vars, EXPORTED_VARS, name);
+        let integer = is_marked_var(&self.env_vars, INTEGER_VARS, name);
+
+        match (readonly, exported, integer) {
+            (false, false, false) => format!("{name}={rendered}"),
+            (true, true, true) => format!("declare -irx {name}={rendered}"),
+            (true, false, true) => format!("declare -ir {name}={rendered}"),
+            (false, true, true) => format!("declare -ix {name}={rendered}"),
+            (false, false, true) => format!("declare -i {name}={rendered}"),
+            (true, true, false) => format!("declare -rx {name}={rendered}"),
+            (true, false, false) => format!("declare -r {name}={rendered}"),
+            (false, true, false) => format!("declare -x {name}={rendered}"),
         }
     }
 
@@ -9154,10 +9184,11 @@ fn find_parameter_pattern_match(
     None
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ParameterTransform {
     Quote,
     Escape,
+    Assignment,
     Upper,
     Lower,
 }
@@ -9167,6 +9198,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
     let transform = match operation {
         "Q" => ParameterTransform::Quote,
         "E" => ParameterTransform::Escape,
+        "A" => ParameterTransform::Assignment,
         "U" => ParameterTransform::Upper,
         "L" => ParameterTransform::Lower,
         _ => return None,
@@ -9178,9 +9210,14 @@ fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> Stri
     match transform {
         ParameterTransform::Quote => shell_quote_parameter_value(value),
         ParameterTransform::Escape => decode_ansi_c_escapes(value),
+        ParameterTransform::Assignment => shell_single_quote_assignment_value(value),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
     }
+}
+
+fn shell_single_quote_assignment_value(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn shell_quote_parameter_value(value: &str) -> String {
