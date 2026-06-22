@@ -115,6 +115,15 @@ mod operators {
         assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[2].kind, TokenKind::RedirectErr);
     }
+
+    #[test]
+    fn test_clobber_redirect_stderr() {
+        let input = "echo error 2>| err.txt";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[2].kind, TokenKind::RedirectErr);
+        assert_eq!(tokens[2].value, "2>|");
+    }
 }
 
 // ============================================================================

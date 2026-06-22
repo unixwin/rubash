@@ -3820,6 +3820,43 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_noclobber_prevents_stderr_overwrite() {
+        let error_path = "target/rubash-noclobber-stderr.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "old\n").unwrap();
+        let input = format!("set -C; unalias no_such_alias 2> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::IoError(_))));
+        assert_eq!(fs::read_to_string(error_path).unwrap(), "old\n");
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_stderr_clobber_redirect_overrides_noclobber() {
+        let error_path = "target/rubash-clobber-stderr.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "old\n").unwrap();
+        let input = format!("set -C; unalias no_such_alias 2>| {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let output = fs::read_to_string(error_path).unwrap();
+        assert!(output.contains("no_such_alias"));
+        assert!(!output.contains("old"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_nounset_errors_for_unbound_variable() {
         let output_path = "target/rubash-nounset-unbound-output.txt";
         let _ = fs::remove_file(output_path);

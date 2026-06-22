@@ -183,6 +183,15 @@ mod redirection_tests {
     }
 
     #[test]
+    fn test_clobber_stderr_redirect() {
+        let input = "echo hello 2>| err.txt";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert!(ast.commands[0].redirect_err.as_ref().unwrap().clobber);
+    }
+
+    #[test]
     fn test_here_string_redirect() {
         let input = "read x <<<\"alpha\"";
         let tokens = tokenize(input);
