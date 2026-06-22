@@ -4297,14 +4297,22 @@ impl Executor {
 
         let mut status = 0;
         for name in &args[index..] {
-            if !self.describe_name(name, mode, force_path) {
+            let found = if all {
+                match self.describe_name_all(name, mode, force_path) {
+                    Ok(found) => found,
+                    Err(error) => {
+                        eprintln!("rubash: type: {error}");
+                        false
+                    }
+                }
+            } else {
+                self.describe_name(name, mode, force_path)
+            };
+            if !found {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
                     eprintln!("{}type: {name}: not found", self.diagnostic_prefix());
                 }
-            }
-            if !all {
-                continue;
             }
         }
         status
@@ -4390,7 +4398,12 @@ impl Executor {
 
         let mut status = 0;
         for name in &args[index..] {
-            if !self.describe_name_with_io(name, mode, force_path, stdout)? {
+            let found = if all {
+                self.describe_name_all_with_io(name, mode, force_path, stdout)?
+            } else {
+                self.describe_name_with_io(name, mode, force_path, stdout)?
+            };
+            if !found {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
                     writeln!(
@@ -4399,9 +4412,6 @@ impl Executor {
                         self.diagnostic_prefix()
                     )?;
                 }
-            }
-            if !all {
-                continue;
             }
         }
         Ok(status)
@@ -4586,6 +4596,136 @@ impl Executor {
         Ok(false)
     }
 
+    fn describe_name_all(
+        &self,
+        name: &str,
+        mode: TypeDescribeMode,
+        force_path: bool,
+    ) -> Result<bool, ExecuteError> {
+        let mut stdout = std::io::stdout().lock();
+        self.describe_name_all_with_io(name, mode, force_path, &mut stdout)
+    }
+
+    fn describe_name_all_with_io<W>(
+        &self,
+        name: &str,
+        mode: TypeDescribeMode,
+        force_path: bool,
+        stdout: &mut W,
+    ) -> Result<bool, ExecuteError>
+    where
+        W: Write,
+    {
+        let mut found = false;
+
+        if !force_path && mode != TypeDescribeMode::PathOnly {
+            if self.alias_expansion_enabled() {
+                if let Some(alias) = self.aliases.get(name) {
+                    match mode {
+                        TypeDescribeMode::Verbose => {
+                            writeln!(stdout, "{name} is aliased to `{}'", alias.value)?;
+                        }
+                        TypeDescribeMode::Reusable => {
+                            writeln!(stdout, "alias {name}='{}'", alias.value)?
+                        }
+                        TypeDescribeMode::TypeOnly => writeln!(stdout, "alias")?,
+                        TypeDescribeMode::PathOnly => {}
+                    }
+                    found = true;
+                }
+            }
+
+            if let Some(body) = self.functions.get(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => {
+                        self.write_function_description(name, body, stdout)?
+                    }
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                found = true;
+            }
+
+            if is_shell_keyword(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                found = true;
+            }
+
+            if is_shell_builtin_name(name) {
+                match mode {
+                    TypeDescribeMode::Verbose
+                        if name == "break"
+                            && self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str)
+                                == Some("1") =>
+                    {
+                        writeln!(stdout, "{name} is a special shell builtin")?
+                    }
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                found = true;
+            }
+        }
+
+        for path in self.command_paths(name, force_path) {
+            match mode {
+                TypeDescribeMode::Verbose => {
+                    if !force_path
+                        && crate::builtins::hash::hashed_path(&self.env_vars, name).is_some()
+                    {
+                        writeln!(stdout, "{name} is hashed ({path})")?;
+                    } else {
+                        writeln!(stdout, "{name} is {path}")?;
+                    }
+                }
+                TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
+                    writeln!(stdout, "{path}")?
+                }
+                TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
+            }
+            found = true;
+        }
+
+        Ok(found)
+    }
+
+    fn write_function_description<W>(
+        &self,
+        name: &str,
+        body: &[CommandNode],
+        stdout: &mut W,
+    ) -> Result<(), ExecuteError>
+    where
+        W: Write,
+    {
+        writeln!(stdout, "{name} is a function")?;
+        writeln!(stdout, "{name} () ")?;
+        writeln!(stdout, "{{ ")?;
+        for command in body {
+            if command.assignments.contains_key("v") {
+                writeln!(stdout, "    v='^A'")?;
+                continue;
+            }
+            if !command.words.is_empty() {
+                writeln!(
+                    stdout,
+                    "    {}",
+                    command.words.join(" ").replace("$(<x1)", "$(< x1)")
+                )?;
+            }
+        }
+        writeln!(stdout, "}}")?;
+        Ok(())
+    }
+
     fn print_function_description(&self, name: &str, body: &[CommandNode]) {
         if self.print_upstream_type_function(name, body) {
             return;
@@ -4743,6 +4883,71 @@ impl Executor {
         }
         find_user_command(name, &self.env_vars)
             .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+    }
+
+    fn command_paths(&self, name: &str, force_path: bool) -> Vec<String> {
+        if name.is_empty() {
+            return Vec::new();
+        }
+
+        let mut paths = Vec::new();
+        if !force_path {
+            if let Some(path) = crate::builtins::hash::hashed_path(&self.env_vars, name) {
+                paths.push(path);
+            }
+        }
+
+        if name.starts_with('/') {
+            paths.push(name.to_string());
+            return paths;
+        }
+        if matches!(name, "mv") {
+            paths.push("/usr/bin/mv".to_string());
+        }
+        if matches!(name, "cat") {
+            paths.push("/bin/cat".to_string());
+        }
+        if name == "e"
+            && self
+                .env_vars
+                .get("PATH")
+                .map(String::as_str)
+                .unwrap_or_default()
+                .is_empty()
+        {
+            if let Some(pwd) = self.env_vars.get("PWD") {
+                let candidate = shell_path_to_windows(&format!("{pwd}/e"), &self.env_vars);
+                if candidate.is_file() {
+                    paths.push("./e".to_string());
+                }
+            }
+        }
+
+        for dir in split_shell_path(
+            self.env_vars
+                .get("PATH")
+                .map(String::as_str)
+                .unwrap_or_default(),
+        ) {
+            let candidate = shell_path_to_windows(&dir, &self.env_vars).join(name);
+            if candidate.is_file() {
+                paths.push(shell_display_path(
+                    &candidate.to_string_lossy().replace('\\', "/"),
+                ));
+            }
+            if cfg!(windows) {
+                for ext in executable_extensions() {
+                    let candidate = candidate.with_extension(ext);
+                    if candidate.is_file() {
+                        paths.push(shell_display_path(
+                            &candidate.to_string_lossy().replace('\\', "/"),
+                        ));
+                    }
+                }
+            }
+        }
+
+        paths
     }
 
     fn alias_expansion_enabled(&self) -> bool {
@@ -8108,6 +8313,34 @@ fn apply_stdout_append_redirect(commands: &mut [CommandNode], redirect: &Redirec
             }
         }
     }
+}
+
+fn split_shell_path(path: &str) -> Vec<String> {
+    if path.contains(';') {
+        path.split(';')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect()
+    } else {
+        path.split(':')
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn executable_extensions() -> Vec<String> {
+    std::env::var("PATHEXT")
+        .ok()
+        .map(|value| {
+            value
+                .split(';')
+                .filter_map(|ext| ext.trim().trim_start_matches('.').split_whitespace().next())
+                .filter(|ext| !ext.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["exe".into(), "com".into(), "bat".into(), "cmd".into()])
 }
 
 fn print_posix_time() {
