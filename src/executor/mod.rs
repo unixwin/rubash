@@ -1946,6 +1946,10 @@ impl Executor {
                     self.exit_code = self.execute_conditional(&cmd.words[1..]);
                     Ok(())
                 }
+                "((" => {
+                    self.exit_code = self.execute_arithmetic_command(cmd);
+                    Ok(())
+                }
                 _ if self.functions.contains_key(word.as_str()) => {
                     self.execute_function(word, &cmd.words[1..])
                 }
@@ -8288,6 +8292,14 @@ impl Executor {
             "-gt" => left > right,
             "-ge" => left >= right,
             _ => false,
+        }
+    }
+
+    fn execute_arithmetic_command(&self, cmd: &CommandNode) -> i32 {
+        let expression = cmd.words.get(1).map(String::as_str).unwrap_or_default();
+        match eval_conditional_arith_value(expression, &self.env_vars) {
+            Some(0) | None => 1,
+            Some(_) => 0,
         }
     }
 
