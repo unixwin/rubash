@@ -3661,6 +3661,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_let_bitwise_assignment_operators() {
+        let output_path = "target/rubash-let-bitwise-assign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=12; let 'n&=10'; echo $? $n > {output_path}; let 'n|=1'; echo $? $n >> {output_path}; let 'n^=3'; echo $? $n >> {output_path}; let 'n<<=2'; echo $? $n >> {output_path}; let 'n>>=1'; echo $? $n >> {output_path}; let 'n&=0'; echo $? $n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 8\n0 9\n0 10\n0 40\n0 20\n1 0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_exponentiation_operators() {
         let output_path = "target/rubash-arithmetic-command-exponent-output.txt";
         let _ = fs::remove_file(output_path);
