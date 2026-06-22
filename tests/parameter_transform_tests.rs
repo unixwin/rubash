@@ -43,6 +43,46 @@ fn test_parameter_transform_expands_ansi_c_escapes() {
 }
 
 #[test]
+fn test_parameter_transform_prints_assignment() {
+    let output_path = "target/rubash-param-transform-assignment-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("v=\"two words\"; printf '<%s>\\n' \"${{v@A}}\" > {output_path}; v=\"a'b\"; printf '<%s>\\n' \"${{v@A}}\" >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<v='two words'>\n<v='a'\\''b'>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_parameter_transform_assignment_includes_attributes() {
+    let output_path = "target/rubash-param-transform-assignment-attrs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("export x=value; readonly r=value; declare -i n=7; printf '<%s>\\n' \"${{x@A}}\" \"${{r@A}}\" \"${{n@A}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<declare -x x='value'>\n<declare -r r='value'>\n<declare -i n='7'>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);
