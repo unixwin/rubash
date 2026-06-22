@@ -2481,10 +2481,47 @@ impl Executor {
     }
 
     fn execute_unset(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
-        let args = &cmd.words[1..];
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return self.execute_unset_with_stderr(&cmd.words[1..], &mut std::io::sink());
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_unset_with_stderr(&cmd.words[1..], &mut file);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return self.execute_unset_with_stderr(&cmd.words[1..], &mut file);
+        }
+
+        self.execute_unset_with_stderr(&cmd.words[1..], &mut std::io::stderr().lock())
+    }
+
+    fn execute_unset_with_stderr<W>(
+        &mut self,
+        args: &[String],
+        stderr: &mut W,
+    ) -> Result<i32, ExecuteError>
+    where
+        W: Write,
+    {
         // TODO(builtins/set.def/variables.c/execute_cmd.c): `unset` searches
         // variables and functions with nuanced attributes. Keep function table
         // and variable table behavior aligned for builtins6.sub.
+        if unset_args_need_builtin_diagnostics(args) {
+            return crate::builtins::set::unset_with_stderr(
+                args.iter().map(String::as_str),
+                &mut self.env_vars,
+                stderr,
+            )
+            .map_err(ExecuteError::from);
+        }
+
         let function_only = args.iter().any(|arg| arg == "-f");
         let variable_only = args.iter().any(|arg| arg == "-v");
         let names: Vec<String> = args
@@ -2511,43 +2548,10 @@ impl Executor {
             variable_names.push(name);
         }
 
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
-            if is_null_device(&target) {
-                return crate::builtins::set::unset_with_stderr(
-                    variable_names.iter().map(String::as_str),
-                    &mut self.env_vars,
-                    &mut std::io::sink(),
-                )
-                .map_err(ExecuteError::from);
-            }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return crate::builtins::set::unset_with_stderr(
-                variable_names.iter().map(String::as_str),
-                &mut self.env_vars,
-                &mut file,
-            )
-            .map_err(ExecuteError::from);
-        }
-
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return crate::builtins::set::unset_with_stderr(
-                variable_names.iter().map(String::as_str),
-                &mut self.env_vars,
-                &mut file,
-            )
-            .map_err(ExecuteError::from);
-        }
-
         crate::builtins::set::unset_with_stderr(
             variable_names.iter().map(String::as_str),
             &mut self.env_vars,
-            &mut std::io::stderr().lock(),
+            stderr,
         )
         .map_err(ExecuteError::from)
     }
@@ -11052,6 +11056,31 @@ impl ConditionalArithParser<'_> {
             }
         }
     }
+}
+
+fn unset_args_need_builtin_diagnostics(args: &[String]) -> bool {
+    let mut functions = false;
+    let mut variables = false;
+
+    for arg in args {
+        if arg == "--" || arg == "-" {
+            break;
+        }
+        if !arg.starts_with('-') {
+            break;
+        }
+
+        for option in arg[1..].chars() {
+            match option {
+                'f' => functions = true,
+                'v' => variables = true,
+                'n' => {}
+                _ => return true,
+            }
+        }
+    }
+
+    functions && variables
 }
 
 fn command_has_no_effect(cmd: &CommandNode) -> bool {

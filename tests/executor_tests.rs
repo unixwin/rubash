@@ -2058,6 +2058,49 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unset_invalid_option_redirects_stderr() {
+        let error_path = "target/rubash-unset-invalid-option-stderr-output.txt";
+        let status_path = "target/rubash-unset-invalid-option-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("unset -Z 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("unset: -Z: invalid option"));
+        assert!(error.contains("unset: usage:"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_unset_conflicting_options_append_stderr() {
+        let error_path = "target/rubash-unset-conflicting-options-stderr-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("unset -fv value 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("unset: cannot simultaneously unset a function and a variable"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_enable_redirects_output() {
         let output_path = "target/rubash-enable-redirect-output.txt";
         let _ = fs::remove_file(output_path);
