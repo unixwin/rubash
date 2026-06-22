@@ -2358,6 +2358,47 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_for_loop_executes() {
+        let output_path = "target/rubash-arithmetic-for-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("for (( i = 0; i < 3; i++ )); do echo $i >> {output_path}; done");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0]
+            .for_command
+            .as_ref()
+            .and_then(|for_command| for_command.arithmetic.as_ref())
+            .is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_for_loop_break_continue_and_empty_test() {
+        let output_path = "target/rubash-arithmetic-for-control-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "for (( i = 0; ; i++ )); do if (( i == 1 )); then continue; fi; echo $i >> {output_path}; if (( i == 3 )); then break; fi; done"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n2\n3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_positional_count_expands() {
         let output_path = "target/rubash-function-count-output.txt";
         let _ = fs::remove_file(output_path);

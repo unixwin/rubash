@@ -7,8 +7,8 @@ pub(crate) mod path;
 use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
 use crate::parser::{
-    Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand, FunctionCommand,
-    Redirect,
+    ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand,
+    FunctionCommand, Redirect,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -1524,6 +1524,7 @@ impl Executor {
             variable: words[1].clone(),
             words: words[3..].to_vec(),
             default_positional: false,
+            arithmetic: None,
             body,
         };
         self.execute_for_command(&for_command)?;
@@ -2442,6 +2443,10 @@ impl Executor {
         // TODO(parse.y/execute_cmd.c): Bash `execute_for_command` applies the
         // full expansion pipeline, loop-control state, traps, and redirections.
         // This covers common `for name [in words]; do compound_list; done` forms.
+        if let Some(arithmetic) = &for_command.arithmetic {
+            return self.execute_arithmetic_for_command(arithmetic, &for_command.body);
+        }
+
         let values = if for_command.default_positional {
             self.positional_params.clone()
         } else {
@@ -2481,6 +2486,67 @@ impl Executor {
         }
 
         self.exit_code = 0;
+        Ok(())
+    }
+
+    fn execute_arithmetic_for_command(
+        &mut self,
+        arithmetic: &ArithmeticForCommand,
+        body: &[CommandNode],
+    ) -> Result<(), ExecuteError> {
+        if !arithmetic.init.trim().is_empty()
+            && self
+                .eval_arithmetic_command_value(&arithmetic.init)
+                .is_none()
+        {
+            self.exit_code = 1;
+            return Ok(());
+        }
+
+        loop {
+            if !arithmetic.test.trim().is_empty() {
+                match self.eval_arithmetic_command_value(&arithmetic.test) {
+                    Some(0) => break,
+                    Some(_) => {}
+                    None => {
+                        self.exit_code = 1;
+                        break;
+                    }
+                }
+            }
+
+            let ast = Ast {
+                commands: body.to_vec(),
+            };
+            self.loop_depth += 1;
+            let result = self.execute_ast(&ast);
+            self.loop_depth -= 1;
+            match result {
+                Ok(()) => {}
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
+
+            if !arithmetic.update.trim().is_empty()
+                && self
+                    .eval_arithmetic_command_value(&arithmetic.update)
+                    .is_none()
+            {
+                self.exit_code = 1;
+                break;
+            }
+        }
+
         Ok(())
     }
 
