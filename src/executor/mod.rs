@@ -8095,6 +8095,34 @@ impl Executor {
                 }
                 Some('(') => {
                     chars.next();
+                    if chars.peek().copied() == Some('(') {
+                        chars.next();
+                        let mut expression = String::new();
+                        let mut paren_depth: usize = 0;
+                        while let Some(expression_ch) = chars.next() {
+                            match expression_ch {
+                                '(' => {
+                                    paren_depth += 1;
+                                    expression.push(expression_ch);
+                                }
+                                ')' if paren_depth == 0 && chars.peek().copied() == Some(')') => {
+                                    chars.next();
+                                    break;
+                                }
+                                ')' => {
+                                    paren_depth = paren_depth.saturating_sub(1);
+                                    expression.push(expression_ch);
+                                }
+                                _ => expression.push(expression_ch),
+                            }
+                        }
+                        if let Some(value) =
+                            eval_conditional_arith_value(&expression, &self.env_vars)
+                        {
+                            output.push_str(&value.to_string());
+                        }
+                        continue;
+                    }
                     let mut depth = 1;
                     let mut source = String::new();
                     let mut single = false;
