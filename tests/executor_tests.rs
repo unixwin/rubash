@@ -3767,6 +3767,53 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_set_noglob_updates_shell_flags_and_option_tests() {
+        let output_path = "target/rubash-set-noglob-flags-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -f; echo $- > {output_path}; [[ -o noglob ]]; echo $? >> {output_path}; \
+             set +f; echo $- >> {output_path}; [[ -o noglob ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let lines: Vec<String> = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(lines[0].contains('f'));
+        assert_eq!(lines[1], "0");
+        assert!(!lines[2].contains('f'));
+        assert_eq!(lines[3], "1");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_set_noglob_with_positional_operands() {
+        let output_path = "target/rubash-set-noglob-operands-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -f alpha beta; echo $# $1 $2 $- > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("2 alpha beta "));
+        assert!(output.trim_end().ends_with('f'));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_noclobber_prevents_output_overwrite() {
         let output_path = "target/rubash-noclobber-output.txt";
         let _ = fs::remove_file(output_path);
