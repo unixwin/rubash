@@ -9411,7 +9411,7 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
         pos: 0,
         env_vars,
     };
-    let value = parser.parse_expr()?;
+    let value = parser.parse_comparison()?;
     parser.skip_ws();
     (parser.pos == parser.input.len()).then_some(value)
 }
@@ -9445,6 +9445,29 @@ struct ConditionalArithParser<'a> {
 }
 
 impl ConditionalArithParser<'_> {
+    fn parse_comparison(&mut self) -> Option<i128> {
+        let mut left = self.parse_expr()?;
+        loop {
+            self.skip_ws();
+            let result = if self.consume("==") {
+                left == self.parse_expr()?
+            } else if self.consume("!=") {
+                left != self.parse_expr()?
+            } else if self.consume(">=") {
+                left >= self.parse_expr()?
+            } else if self.consume("<=") {
+                left <= self.parse_expr()?
+            } else if self.consume(">") {
+                left > self.parse_expr()?
+            } else if self.consume("<") {
+                left < self.parse_expr()?
+            } else {
+                return Some(left);
+            };
+            left = i128::from(result);
+        }
+    }
+
     fn parse_expr(&mut self) -> Option<i128> {
         let mut value = self.parse_term()?;
         loop {
@@ -9550,6 +9573,15 @@ impl ConditionalArithParser<'_> {
 
     fn peek(&self) -> Option<u8> {
         self.input.get(self.pos).copied()
+    }
+
+    fn consume(&mut self, value: &str) -> bool {
+        if self.input[self.pos..].starts_with(value.as_bytes()) {
+            self.pos += value.len();
+            true
+        } else {
+            false
+        }
     }
 }
 
