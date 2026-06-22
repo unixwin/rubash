@@ -1903,7 +1903,7 @@ impl Executor {
                     Ok(())
                 }
                 "unset" => {
-                    self.exit_code = self.execute_unset(&cmd.words[1..])?;
+                    self.exit_code = self.execute_unset(cmd)?;
                     Ok(())
                 }
                 "read" => {
@@ -2480,7 +2480,8 @@ impl Executor {
         true
     }
 
-    fn execute_unset(&mut self, args: &[String]) -> Result<i32, ExecuteError> {
+    fn execute_unset(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let args = &cmd.words[1..];
         // TODO(builtins/set.def/variables.c/execute_cmd.c): `unset` searches
         // variables and functions with nuanced attributes. Keep function table
         // and variable table behavior aligned for builtins6.sub.
@@ -2510,7 +2511,45 @@ impl Executor {
             variable_names.push(name);
         }
 
-        crate::builtins::set::unset(&variable_names, &mut self.env_vars).map_err(ExecuteError::from)
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return crate::builtins::set::unset_with_stderr(
+                    variable_names.iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut std::io::sink(),
+                )
+                .map_err(ExecuteError::from);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return crate::builtins::set::unset_with_stderr(
+                variable_names.iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut file,
+            )
+            .map_err(ExecuteError::from);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return crate::builtins::set::unset_with_stderr(
+                variable_names.iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut file,
+            )
+            .map_err(ExecuteError::from);
+        }
+
+        crate::builtins::set::unset_with_stderr(
+            variable_names.iter().map(String::as_str),
+            &mut self.env_vars,
+            &mut std::io::stderr().lock(),
+        )
+        .map_err(ExecuteError::from)
     }
 
     fn unset_array_element(&mut self, name: &str) -> bool {
@@ -6308,6 +6347,39 @@ impl Executor {
                 &mut self.env_vars,
                 &mut file,
                 &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return Ok(crate::builtins::set::set_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::sink(),
+                )?);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::set::set_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::set::set_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut file,
             )?);
         }
 

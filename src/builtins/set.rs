@@ -375,7 +375,7 @@ pub fn unset(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Res
     unset_with_stderr(args.iter().map(String::as_str), env_vars, &mut stderr)
 }
 
-fn unset_with_stderr<'a, I, W>(
+pub(crate) fn unset_with_stderr<'a, I, W>(
     args: I,
     env_vars: &mut HashMap<String, String>,
     stderr: &mut W,
