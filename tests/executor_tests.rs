@@ -3785,7 +3785,7 @@ mod command_chaining {
         let output_path = "target/rubash-conditional-regex-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}"
+            "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}; [[ $value =~ '[' ]]; echo $? >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -3797,7 +3797,7 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "0 abc123 abc 123\n1\n"
+            "0 abc123 abc 123\n1\n2\n"
         );
         let _ = fs::remove_file(output_path);
     }
