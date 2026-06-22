@@ -1567,6 +1567,92 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_dirs_redirects_stderr() {
+        let error_path = "target/rubash-dirs-stderr-output.txt";
+        let status_path = "target/rubash-dirs-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("dirs bad 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("dirs: bad: invalid option"));
+        assert!(error.contains("dirs: usage:"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_dirs_appends_stderr() {
+        let error_path = "target/rubash-dirs-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("dirs bad 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("dirs: bad: invalid option"));
+        assert!(error.contains("dirs: usage:"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_pushd_redirects_stderr() {
+        let error_path = "target/rubash-pushd-stderr-output.txt";
+        let status_path = "target/rubash-pushd-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("pushd +9 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("pushd: +9: directory stack index out of range"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_popd_appends_stderr() {
+        let error_path = "target/rubash-popd-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("popd +9 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("popd: +9: directory stack index out of range"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_kill_redirects_output() {
         let output_path = "target/rubash-kill-redirect-output.txt";
         let _ = fs::remove_file(output_path);
