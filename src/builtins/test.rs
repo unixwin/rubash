@@ -103,7 +103,7 @@ fn find_logical_operator(args: &[&str], op: &str) -> Option<usize> {
             depth = depth.saturating_sub(1);
             continue;
         }
-        if depth == 0 && *arg == op {
+        if depth == 0 && *arg == op && index > 0 && index + 1 < args.len() {
             return Some(index);
         }
     }
@@ -160,6 +160,7 @@ fn is_unary_operator(op: &str) -> bool {
             | "-x"
             | "-z"
             | "-n"
+            | "-o"
             | "-v"
             | "-R"
             | "-O"
@@ -172,6 +173,8 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
     match op {
         "-z" => Ok(operand.is_empty()),
         "-n" => Ok(!operand.is_empty()),
+        "-o" => Ok(crate::builtins::set::is_shell_option(operand)
+            && crate::builtins::set::shell_option_enabled(env_vars, operand)),
         "-v" => Ok(variable_is_set(operand, env_vars)),
         "-R" => Ok(false),
         "-a" | "-e" => Ok(test_path(operand, env_vars).exists()),
@@ -398,9 +401,17 @@ mod tests {
 
     fn run(args: &[&str], bracket: bool) -> (i32, String) {
         let env_vars = HashMap::new();
+        run_with_env(args, bracket, &env_vars)
+    }
+
+    fn run_with_env(
+        args: &[&str],
+        bracket: bool,
+        env_vars: &HashMap<String, String>,
+    ) -> (i32, String) {
         let mut stderr = Vec::new();
         let status =
-            execute_with_stderr(args.iter().copied(), bracket, &env_vars, &mut stderr).unwrap();
+            execute_with_stderr(args.iter().copied(), bracket, env_vars, &mut stderr).unwrap();
         (status, String::from_utf8(stderr).unwrap())
     }
 
@@ -426,6 +437,45 @@ mod tests {
         assert_eq!(run(&["!", ""], false).0, EXECUTION_SUCCESS);
         assert_eq!(run(&["x", "-a", ""], false).0, EXECUTION_FAILURE);
         assert_eq!(run(&["x", "-o", ""], false).0, EXECUTION_SUCCESS);
+    }
+
+    #[test]
+    fn supports_shell_option_unary_operator() {
+        let mut env_vars = HashMap::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        crate::builtins::set::set_with_io(
+            ["-o", "errexit"],
+            &mut env_vars,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run_with_env(&["-o", "errexit"], false, &env_vars).0,
+            EXECUTION_SUCCESS
+        );
+        crate::builtins::set::set_with_io(
+            ["+o", "errexit"],
+            &mut env_vars,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(
+            run_with_env(&["-o", "errexit"], false, &env_vars).0,
+            EXECUTION_FAILURE
+        );
+        assert_eq!(
+            run_with_env(&["-o", "no_such_option"], false, &env_vars).0,
+            EXECUTION_FAILURE
+        );
+    }
+
+    #[test]
+    fn leading_file_operator_is_unary_not_logical_and() {
+        assert_eq!(run(&["-a", "Cargo.toml"], false).0, EXECUTION_SUCCESS);
     }
 
     #[test]
