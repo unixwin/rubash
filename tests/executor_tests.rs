@@ -3664,6 +3664,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_variables_evaluate_recursively() {
+        let output_path = "target/rubash-arithmetic-recursive-vars-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "x='1+2'; echo $((x)) > {output_path}; x=y; y=5; echo $((x)) >> {output_path}; n=1; x='n+=2'; echo $((x)) $n >> {output_path}; n=1; x='n+=2'; [[ x -eq 3 ]]; echo $? $n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "3\n5\n3 3\n0 3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_grouped_arithmetic_assignments_have_side_effects() {
         let output_path = "target/rubash-arithmetic-grouped-assign-output.txt";
         let _ = fs::remove_file(output_path);
