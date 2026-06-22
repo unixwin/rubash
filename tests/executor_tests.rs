@@ -1563,6 +1563,43 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_type_f_skips_shell_functions() {
+        let output_path = "target/rubash-type-f-function-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("function f {{ echo hi; }}; type -f f; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_type_f_still_reports_builtins() {
+        let output_path = "target/rubash-type-f-builtin-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("type -f echo > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "echo is a shell builtin\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_trap_p_redirects_saved_exit_trap() {
         let output_path = "target/rubash-trap-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
