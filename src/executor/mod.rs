@@ -9695,11 +9695,43 @@ fn arithmetic_digit_value(ch: char, base: u32) -> Option<u32> {
     }
 }
 
+fn skip_arith_ws(input: &[u8], pos: &mut usize) {
+    while input.get(*pos).is_some_and(|ch| ch.is_ascii_whitespace()) {
+        *pos += 1;
+    }
+}
+
+fn assignment_operator_at(input: &[u8], pos: usize) -> Option<&'static str> {
+    for op in [
+        "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+    ] {
+        if op == "="
+            && (input.get(pos + 1) == Some(&b'=')
+                || (pos > 0 && matches!(input.get(pos - 1), Some(b'!') | Some(b'<') | Some(b'>'))))
+        {
+            continue;
+        }
+        if input
+            .get(pos..)
+            .is_some_and(|rest| rest.starts_with(op.as_bytes()))
+        {
+            return Some(op);
+        }
+    }
+    None
+}
+
 struct ConditionalArithParser<'a> {
     input: &'a [u8],
     pos: usize,
     env_vars: &'a mut HashMap<String, String>,
     resolving: Vec<String>,
+}
+
+#[derive(Clone)]
+enum ArithLValue {
+    Scalar(String),
+    Indexed { name: String, index: usize },
 }
 
 impl ConditionalArithParser<'_> {
@@ -9717,15 +9749,60 @@ impl ConditionalArithParser<'_> {
     fn parse_assignment(&mut self) -> Option<i128> {
         self.skip_ws();
         let start = self.pos;
-        if let Some(name) = self.parse_assignment_lvalue() {
+        if self.assignment_lvalue_is_next() {
+            self.pos = start;
+            let lvalue = self.parse_lvalue()?;
             self.skip_ws();
             if let Some(op) = self.consume_assignment_operator() {
                 let rhs = self.parse_assignment()?;
-                return self.assign_variable(&name, op, rhs);
+                return self.assign_lvalue(&lvalue, op, rhs);
             }
         }
         self.pos = start;
         self.parse_conditional()
+    }
+
+    fn assignment_lvalue_is_next(&self) -> bool {
+        let mut pos = self.pos;
+        skip_arith_ws(self.input, &mut pos);
+        let Some(first) = self.input.get(pos).copied().map(char::from) else {
+            return false;
+        };
+        if !is_shell_name_start(first) {
+            return false;
+        }
+        pos += 1;
+        while self
+            .input
+            .get(pos)
+            .is_some_and(|ch| is_shell_name_char(*ch as char))
+        {
+            pos += 1;
+        }
+        skip_arith_ws(self.input, &mut pos);
+        if self.input.get(pos) == Some(&b'[') {
+            pos += 1;
+            let mut depth = 1usize;
+            while pos < self.input.len() {
+                match self.input[pos] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            pos += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                pos += 1;
+            }
+            if depth != 0 {
+                return false;
+            }
+        }
+        skip_arith_ws(self.input, &mut pos);
+        assignment_operator_at(self.input, pos).is_some()
     }
 
     fn parse_conditional(&mut self) -> Option<i128> {
@@ -9934,12 +10011,12 @@ impl ConditionalArithParser<'_> {
     fn parse_factor(&mut self) -> Option<i128> {
         self.skip_ws();
         if self.consume("++") {
-            let name = self.parse_assignment_lvalue()?;
-            return self.update_variable(&name, 1, true);
+            let lvalue = self.parse_lvalue()?;
+            return self.update_lvalue(&lvalue, 1, true);
         }
         if self.consume("--") {
-            let name = self.parse_assignment_lvalue()?;
-            return self.update_variable(&name, -1, true);
+            let lvalue = self.parse_lvalue()?;
+            return self.update_lvalue(&lvalue, -1, true);
         }
         match self.peek()? {
             b'+' => {
@@ -10017,21 +10094,17 @@ impl ConditionalArithParser<'_> {
     }
 
     fn parse_variable(&mut self) -> Option<i128> {
-        let start = self.pos;
-        while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
-            self.pos += 1;
-        }
-        let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+        let lvalue = self.parse_lvalue()?;
         if self.consume("++") {
-            return self.update_variable(name, 1, false);
+            return self.update_lvalue(&lvalue, 1, false);
         }
         if self.consume("--") {
-            return self.update_variable(name, -1, false);
+            return self.update_lvalue(&lvalue, -1, false);
         }
-        self.variable_value(name)
+        self.lvalue_value(&lvalue)
     }
 
-    fn parse_assignment_lvalue(&mut self) -> Option<String> {
+    fn parse_lvalue(&mut self) -> Option<ArithLValue> {
         self.skip_ws();
         let start = self.pos;
         let first = self.peek()? as char;
@@ -10042,30 +10115,42 @@ impl ConditionalArithParser<'_> {
         while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
             self.pos += 1;
         }
-        std::str::from_utf8(&self.input[start..self.pos])
-            .ok()
-            .map(str::to_string)
+        let name = std::str::from_utf8(&self.input[start..self.pos])
+            .ok()?
+            .to_string();
+
+        self.skip_ws();
+        if !self.consume("[") {
+            return Some(ArithLValue::Scalar(name));
+        }
+
+        let index = self.parse_comma()?;
+        self.skip_ws();
+        if !self.consume("]") {
+            return None;
+        }
+        let index = usize::try_from(index).ok()?;
+        Some(ArithLValue::Indexed { name, index })
     }
 
     fn consume_assignment_operator(&mut self) -> Option<&'static str> {
-        for op in [
-            "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
-        ] {
-            if op == "="
-                && (self.starts_with("==")
-                    || (self.pos > 0
-                        && matches!(
-                            self.input.get(self.pos - 1),
-                            Some(b'!') | Some(b'<') | Some(b'>')
-                        )))
-            {
-                continue;
-            }
-            if self.consume(op) {
-                return Some(op);
+        let op = assignment_operator_at(self.input, self.pos)?;
+        self.pos += op.len();
+        Some(op)
+    }
+
+    fn lvalue_value(&mut self, lvalue: &ArithLValue) -> Option<i128> {
+        match lvalue {
+            ArithLValue::Scalar(name) => self.variable_value(name),
+            ArithLValue::Indexed { name, index } => {
+                let value = self
+                    .env_vars
+                    .get(name)
+                    .and_then(|value| array_value_at(value, *index))
+                    .unwrap_or_default();
+                self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
             }
         }
-        None
     }
 
     fn variable_value(&mut self, name: &str) -> Option<i128> {
@@ -10079,6 +10164,18 @@ impl ConditionalArithParser<'_> {
             .cloned()
             .or_else(|| env::var(name).ok())
             .unwrap_or_default();
+        self.evaluate_variable_text(name, &value)
+    }
+
+    fn evaluate_variable_text(&mut self, resolving_name: &str, value: &str) -> Option<i128> {
+        if self
+            .resolving
+            .iter()
+            .any(|resolving| resolving == resolving_name)
+        {
+            return None;
+        }
+
         let value = value.trim();
         if value.is_empty() {
             return Some(0);
@@ -10088,7 +10185,7 @@ impl ConditionalArithParser<'_> {
         }
 
         let mut resolving = self.resolving.clone();
-        resolving.push(name.to_string());
+        resolving.push(resolving_name.to_string());
         let mut parser = ConditionalArithParser {
             input: value.as_bytes(),
             pos: 0,
@@ -10100,15 +10197,15 @@ impl ConditionalArithParser<'_> {
         (parser.pos == parser.input.len()).then_some(value)
     }
 
-    fn update_variable(&mut self, name: &str, delta: i128, prefix: bool) -> Option<i128> {
-        let current = self.variable_value(name)?;
+    fn update_lvalue(&mut self, lvalue: &ArithLValue, delta: i128, prefix: bool) -> Option<i128> {
+        let current = self.lvalue_value(lvalue)?;
         let updated = current + delta;
-        self.set_variable(name, updated);
+        self.set_lvalue(lvalue, updated);
         Some(if prefix { updated } else { current })
     }
 
-    fn assign_variable(&mut self, name: &str, op: &str, rhs: i128) -> Option<i128> {
-        let current = self.variable_value(name)?;
+    fn assign_lvalue(&mut self, lvalue: &ArithLValue, op: &str, rhs: i128) -> Option<i128> {
+        let current = self.lvalue_value(lvalue)?;
         let value = match op {
             "=" => rhs,
             "+=" => current + rhs,
@@ -10125,14 +10222,33 @@ impl ConditionalArithParser<'_> {
             "/=" | "%=" => return None,
             _ => return None,
         };
-        self.set_variable(name, value);
+        self.set_lvalue(lvalue, value);
         Some(value)
+    }
+
+    fn set_lvalue(&mut self, lvalue: &ArithLValue, value: i128) {
+        match lvalue {
+            ArithLValue::Scalar(name) => self.set_variable(name, value),
+            ArithLValue::Indexed { name, index } => self.set_array_element(name, *index, value),
+        }
     }
 
     fn set_variable(&mut self, name: &str, value: i128) {
         let value = value.to_string();
         self.env_vars.insert(name.to_string(), value.clone());
         env::set_var(name, value);
+    }
+
+    fn set_array_element(&mut self, name: &str, index: usize, value: i128) {
+        let mut entries = self
+            .env_vars
+            .get(name)
+            .map(|value| indexed_array_entries(value))
+            .unwrap_or_default();
+        entries.insert(index, value.to_string());
+        let value = format_indexed_array_storage(entries);
+        self.env_vars.insert(name.to_string(), value);
+        mark_env_name(self.env_vars, ARRAY_VARS, name);
     }
 
     fn skip_ws(&mut self) {
