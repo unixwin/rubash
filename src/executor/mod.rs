@@ -6843,6 +6843,9 @@ impl Executor {
                 if transform == ParameterTransform::Attributes {
                     return self.parameter_attribute_transform(var_name);
                 }
+                if transform == ParameterTransform::Prompt {
+                    return self.parameter_prompt_transform(var_name);
+                }
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -7369,6 +7372,142 @@ impl Executor {
             attrs.push('x');
         }
         attrs
+    }
+
+    fn parameter_prompt_transform(&self, name: &str) -> String {
+        let Some(value) = self.parameter_error_value(name) else {
+            return String::new();
+        };
+        self.expand_prompt_parameters(&self.decode_prompt_string(strip_matching_quotes(&value)))
+    }
+
+    fn decode_prompt_string(&self, value: &str) -> String {
+        let mut output = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                output.push(ch);
+                continue;
+            }
+
+            match chars.next() {
+                Some('a') => output.push('\x07'),
+                Some('e') | Some('E') => output.push('\x1b'),
+                Some('n') => output.push('\n'),
+                Some('r') => output.push('\r'),
+                Some('u') => output.push_str(&prompt_username(&self.env_vars)),
+                Some('h') => output.push_str(&prompt_hostname(&self.env_vars, false)),
+                Some('H') => output.push_str(&prompt_hostname(&self.env_vars, true)),
+                Some('w') => output.push_str(&self.prompt_working_directory(false)),
+                Some('W') => output.push_str(&self.prompt_working_directory(true)),
+                Some('s') => output.push_str("bash"),
+                Some('$') => output.push('$'),
+                Some('\\') => output.push('\\'),
+                Some('[') | Some(']') => {}
+                Some('0') => {
+                    push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 8, 3))
+                }
+                Some(other) => {
+                    output.push('\\');
+                    output.push(other);
+                }
+                None => output.push('\\'),
+            }
+        }
+        output
+    }
+
+    fn expand_prompt_parameters(&self, word: &str) -> String {
+        let mut output = String::new();
+        let mut chars = word.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                output.push(ch);
+                continue;
+            }
+
+            match chars.peek().copied() {
+                Some('{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    for name_ch in chars.by_ref() {
+                        if name_ch == '}' {
+                            break;
+                        }
+                        name.push(name_ch);
+                    }
+                    output.push_str(&self.parameter_error_value(&name).unwrap_or_default());
+                }
+                Some('(') => {
+                    chars.next();
+                    let mut depth = 1;
+                    let mut source = String::new();
+                    for source_ch in chars.by_ref() {
+                        match source_ch {
+                            '(' => {
+                                depth += 1;
+                                source.push(source_ch);
+                            }
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                                source.push(source_ch);
+                            }
+                            _ => source.push(source_ch),
+                        }
+                    }
+                    output.push_str(&self.expand_command_substitution(&source));
+                }
+                Some(first) if is_shell_name_start(first) => {
+                    let mut name = String::new();
+                    while let Some(name_ch) = chars.peek().copied() {
+                        if !is_shell_name_char(name_ch) {
+                            break;
+                        }
+                        chars.next();
+                        name.push(name_ch);
+                    }
+                    output.push_str(&self.parameter_error_value(&name).unwrap_or_default());
+                }
+                Some(other) => {
+                    chars.next();
+                    output.push('$');
+                    output.push(other);
+                }
+                None => output.push('$'),
+            }
+        }
+
+        output
+    }
+
+    fn prompt_working_directory(&self, basename_only: bool) -> String {
+        let pwd = self.env_vars.get("PWD").cloned().unwrap_or_default();
+        let rendered = if let Some(home) = self.env_vars.get("HOME") {
+            if pwd == *home {
+                "~".to_string()
+            } else if let Some(rest) = pwd.strip_prefix(&format!("{home}/")) {
+                format!("~/{rest}")
+            } else {
+                pwd
+            }
+        } else {
+            pwd
+        };
+
+        if basename_only {
+            rendered
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&rendered)
+                .to_string()
+        } else {
+            rendered
+        }
     }
 
     fn expand_assignment_tilde(&self, value: &str) -> String {
@@ -9321,6 +9460,7 @@ enum ParameterTransform {
     Escape,
     Assignment,
     Attributes,
+    Prompt,
     Upper,
     Lower,
 }
@@ -9332,6 +9472,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
         "E" => ParameterTransform::Escape,
         "A" => ParameterTransform::Assignment,
         "a" => ParameterTransform::Attributes,
+        "P" => ParameterTransform::Prompt,
         "U" => ParameterTransform::Upper,
         "L" => ParameterTransform::Lower,
         _ => return None,
@@ -9345,6 +9486,7 @@ fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> Stri
         ParameterTransform::Escape => decode_ansi_c_escapes(value),
         ParameterTransform::Assignment => shell_single_quote_assignment_value(value),
         ParameterTransform::Attributes => String::new(),
+        ParameterTransform::Prompt => value.to_string(),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
     }
@@ -9352,6 +9494,31 @@ fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> Stri
 
 fn shell_single_quote_assignment_value(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn prompt_username(env_vars: &HashMap<String, String>) -> String {
+    env_vars
+        .get("USER")
+        .or_else(|| env_vars.get("USERNAME"))
+        .cloned()
+        .or_else(|| env::var("USER").ok())
+        .or_else(|| env::var("USERNAME").ok())
+        .unwrap_or_default()
+}
+
+fn prompt_hostname(env_vars: &HashMap<String, String>, full: bool) -> String {
+    let hostname = env_vars
+        .get("HOSTNAME")
+        .or_else(|| env_vars.get("COMPUTERNAME"))
+        .cloned()
+        .or_else(|| env::var("HOSTNAME").ok())
+        .or_else(|| env::var("COMPUTERNAME").ok())
+        .unwrap_or_default();
+    if full {
+        hostname
+    } else {
+        hostname.split('.').next().unwrap_or(&hostname).to_string()
+    }
 }
 
 fn shell_quote_parameter_value(value: &str) -> String {

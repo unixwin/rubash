@@ -162,6 +162,46 @@ fn test_parameter_transform_prints_combined_attributes() {
 }
 
 #[test]
+fn test_parameter_transform_expands_prompt_escapes() {
+    let output_path = "target/rubash-param-transform-prompt-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("USER=alice; HOSTNAME=box.example; HOME=/home/alice; PWD=/home/alice/project; PS='\\u@\\h:\\w:\\W:\\$:\\\\'; printf '<%s>\\n' \"${{PS@P}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<alice@box:~/project:project:$:\\>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_parameter_transform_prompt_expands_variables_and_commands() {
+    let output_path = "target/rubash-param-transform-prompt-vars-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("USER=alice; HOST=box; PS='\\[red\\]${{HOST}} $(echo ok) \\u\\[reset\\]'; printf '<%s>\\n' \"${{PS@P}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<redbox ok alicereset>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);
