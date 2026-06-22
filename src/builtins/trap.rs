@@ -35,6 +35,14 @@ where
         index = 1;
     }
 
+    if args
+        .get(index)
+        .is_some_and(|arg| arg.starts_with('-') && arg[1..].contains('l'))
+    {
+        print_signal_list(stdout)?;
+        return Ok(0);
+    }
+
     if index >= args.len() || args.get(index).map(String::as_str) == Some("-p") {
         if args.get(index).map(String::as_str) == Some("-p") {
             index += 1;
@@ -110,6 +118,88 @@ where
     E: Write,
 {
     writeln!(stderr, "trap: usage: trap [-lp] [[arg] signal_spec ...]")
+}
+
+fn print_signal_list<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    const SIGNALS: [&str; 64] = [
+        "SIGHUP",
+        "SIGINT",
+        "SIGQUIT",
+        "SIGILL",
+        "SIGTRAP",
+        "SIGABRT",
+        "SIGEMT",
+        "SIGFPE",
+        "SIGKILL",
+        "SIGBUS",
+        "SIGSEGV",
+        "SIGSYS",
+        "SIGPIPE",
+        "SIGALRM",
+        "SIGTERM",
+        "SIGURG",
+        "SIGSTOP",
+        "SIGTSTP",
+        "SIGCONT",
+        "SIGCHLD",
+        "SIGTTIN",
+        "SIGTTOU",
+        "SIGIO",
+        "SIGXCPU",
+        "SIGXFSZ",
+        "SIGVTALRM",
+        "SIGPROF",
+        "SIGWINCH",
+        "SIGPWR",
+        "SIGUSR1",
+        "SIGUSR2",
+        "SIGRTMIN",
+        "SIGRTMIN+1",
+        "SIGRTMIN+2",
+        "SIGRTMIN+3",
+        "SIGRTMIN+4",
+        "SIGRTMIN+5",
+        "SIGRTMIN+6",
+        "SIGRTMIN+7",
+        "SIGRTMIN+8",
+        "SIGRTMIN+9",
+        "SIGRTMIN+10",
+        "SIGRTMIN+11",
+        "SIGRTMIN+12",
+        "SIGRTMIN+13",
+        "SIGRTMIN+14",
+        "SIGRTMIN+15",
+        "SIGRTMIN+16",
+        "SIGRTMAX-15",
+        "SIGRTMAX-14",
+        "SIGRTMAX-13",
+        "SIGRTMAX-12",
+        "SIGRTMAX-11",
+        "SIGRTMAX-10",
+        "SIGRTMAX-9",
+        "SIGRTMAX-8",
+        "SIGRTMAX-7",
+        "SIGRTMAX-6",
+        "SIGRTMAX-5",
+        "SIGRTMAX-4",
+        "SIGRTMAX-3",
+        "SIGRTMAX-2",
+        "SIGRTMAX-1",
+        "SIGRTMAX",
+    ];
+
+    for (index, signal) in SIGNALS.iter().enumerate() {
+        write!(stdout, "{:>2}) {:<10}", index + 1, signal)?;
+        if (index + 1) % 5 == 0 || index + 1 == SIGNALS.len() {
+            writeln!(stdout)?;
+        } else {
+            write!(stdout, "\t")?;
+        }
+    }
+    Ok(())
 }
 
 fn normalize_signal(signal: &str) -> Option<&'static str> {

@@ -1670,6 +1670,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_trap_l_redirects_signal_list() {
+        let output_path = "target/rubash-trap-l-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap -l > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with(" 1) SIGHUP"));
+        assert!(output.contains("15) SIGTERM"));
+        assert!(output.contains("64) SIGRTMAX"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_trap_lp_lists_signals_and_returns_success() {
+        let output_path = "target/rubash-trap-lp-status-output.txt";
+        let list_path = "target/rubash-trap-lp-list-output.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(list_path);
+        let input = format!("trap -lp > {list_path}; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(list_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
