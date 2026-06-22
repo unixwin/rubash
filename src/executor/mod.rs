@@ -6269,16 +6269,28 @@ impl Executor {
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
             if is_null_device(&target) {
-                let mut sink = std::io::sink();
                 return Ok(crate::builtins::alias::unalias_with_io(
                     &cmd.words[1..],
                     &mut self.aliases,
-                    &mut sink,
+                    &mut std::io::sink(),
                 )?);
             }
 
             let path = shell_path_to_windows(&target, &self.env_vars);
             let mut file = File::create(path)?;
+            return Ok(crate::builtins::alias::unalias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
             return Ok(crate::builtins::alias::unalias_with_io(
                 &cmd.words[1..],
                 &mut self.aliases,
@@ -6315,6 +6327,39 @@ impl Executor {
                 &mut self.aliases,
                 &mut file,
                 &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return Ok(crate::builtins::alias::alias_with_io(
+                    &cmd.words[1..],
+                    &mut self.aliases,
+                    &mut std::io::stdout(),
+                    &mut std::io::sink(),
+                )?);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::alias::alias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut std::io::stdout(),
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::alias::alias_with_io(
+                &cmd.words[1..],
+                &mut self.aliases,
+                &mut std::io::stdout(),
+                &mut file,
             )?);
         }
 
