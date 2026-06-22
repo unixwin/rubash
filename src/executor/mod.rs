@@ -9732,6 +9732,7 @@ struct ConditionalArithParser<'a> {
 enum ArithLValue {
     Scalar(String),
     Indexed { name: String, index: usize },
+    Assoc { name: String, key: String },
 }
 
 impl ConditionalArithParser<'_> {
@@ -10124,6 +10125,11 @@ impl ConditionalArithParser<'_> {
             return Some(ArithLValue::Scalar(name));
         }
 
+        if is_marked_var(self.env_vars, ASSOC_VARS, &name) {
+            let key = self.parse_assoc_subscript()?;
+            return Some(ArithLValue::Assoc { name, key });
+        }
+
         let index = self.parse_comma()?;
         self.skip_ws();
         if !self.consume("]") {
@@ -10131,6 +10137,33 @@ impl ConditionalArithParser<'_> {
         }
         let index = usize::try_from(index).ok()?;
         Some(ArithLValue::Indexed { name, index })
+    }
+
+    fn parse_assoc_subscript(&mut self) -> Option<String> {
+        let start = self.pos;
+        let mut depth = 0usize;
+        while self.pos < self.input.len() {
+            match self.input[self.pos] {
+                b'[' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b']' if depth == 0 => {
+                    let key = std::str::from_utf8(&self.input[start..self.pos])
+                        .ok()?
+                        .trim()
+                        .to_string();
+                    self.pos += 1;
+                    return Some(key);
+                }
+                b']' => {
+                    depth -= 1;
+                    self.pos += 1;
+                }
+                _ => self.pos += 1,
+            }
+        }
+        None
     }
 
     fn consume_assignment_operator(&mut self) -> Option<&'static str> {
@@ -10149,6 +10182,14 @@ impl ConditionalArithParser<'_> {
                     .and_then(|value| array_value_at(value, *index))
                     .unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
+            }
+            ArithLValue::Assoc { name, key } => {
+                let value = self
+                    .env_vars
+                    .get(name)
+                    .and_then(|value| assoc_value_at(value, key))
+                    .unwrap_or_default();
+                self.evaluate_variable_text(&format!("{name}[{key}]"), &value)
             }
         }
     }
@@ -10230,6 +10271,7 @@ impl ConditionalArithParser<'_> {
         match lvalue {
             ArithLValue::Scalar(name) => self.set_variable(name, value),
             ArithLValue::Indexed { name, index } => self.set_array_element(name, *index, value),
+            ArithLValue::Assoc { name, key } => self.set_assoc_element(name, key, value),
         }
     }
 
@@ -10249,6 +10291,23 @@ impl ConditionalArithParser<'_> {
         let value = format_indexed_array_storage(entries);
         self.env_vars.insert(name.to_string(), value);
         mark_env_name(self.env_vars, ARRAY_VARS, name);
+    }
+
+    fn set_assoc_element(&mut self, name: &str, key: &str, value: i128) {
+        let mut entries = self
+            .env_vars
+            .get(name)
+            .map(|value| assoc_entries(value))
+            .unwrap_or_default();
+        let value = value.to_string();
+        if let Some((_, existing)) = entries.iter_mut().find(|(entry_key, _)| entry_key == key) {
+            *existing = value;
+        } else {
+            entries.push((key.to_string(), value));
+        }
+        self.env_vars
+            .insert(name.to_string(), format_assoc_storage(entries));
+        mark_env_name(self.env_vars, ASSOC_VARS, name);
     }
 
     fn skip_ws(&mut self) {
