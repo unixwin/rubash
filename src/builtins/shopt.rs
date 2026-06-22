@@ -28,6 +28,10 @@ pub(crate) fn checkhash_enabled() -> bool {
     CHECKHASH.load(Ordering::Relaxed)
 }
 
+pub(crate) fn cdable_vars_enabled(env_vars: &HashMap<String, String>) -> bool {
+    option_enabled(env_vars, "cdable_vars")
+}
+
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();

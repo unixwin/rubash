@@ -1780,8 +1780,7 @@ impl Executor {
                         self.exit_code = 0;
                         return Ok(());
                     }
-                    self.exit_code =
-                        crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                    self.exit_code = self.execute_cd(cmd)?;
                     Ok(())
                 }
                 "pushd" => {
@@ -4010,7 +4009,7 @@ impl Executor {
                 Ok(())
             }
             "cd" => {
-                self.exit_code = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
+                self.exit_code = self.execute_cd(cmd)?;
                 Ok(())
             }
             "pwd" => {
@@ -5164,6 +5163,46 @@ impl Executor {
         Ok(crate::builtins::exit::execute(
             &cmd.words[1..],
             self.exit_code,
+        )?)
+    }
+
+    fn execute_cd(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return Ok(crate::builtins::cd::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut std::io::sink(),
+                    &mut std::io::stderr().lock(),
+                )?);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::cd::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::cd::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        Ok(crate::builtins::cd::execute(
+            &cmd.words[1..],
+            &mut self.env_vars,
         )?)
     }
 
