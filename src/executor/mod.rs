@@ -8622,6 +8622,9 @@ impl Executor {
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
             flags.push('C');
         }
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "noglob") {
+            flags.push('f');
+        }
         flags
     }
 
@@ -8646,7 +8649,7 @@ impl Executor {
             if flags.is_empty()
                 || flags
                     .chars()
-                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C'))
+                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f'))
             {
                 return false;
             }
@@ -8679,6 +8682,13 @@ impl Executor {
                         crate::builtins::set::set_shell_option(
                             &mut self.env_vars,
                             "noclobber",
+                            enabled,
+                        );
+                    }
+                    ('f', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "noglob",
                             enabled,
                         );
                     }
@@ -8722,7 +8732,7 @@ impl Executor {
             if flags.is_empty()
                 || flags
                     .chars()
-                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C'))
+                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f'))
             {
                 return false;
             }
@@ -8763,6 +8773,13 @@ impl Executor {
                         crate::builtins::set::set_shell_option(
                             &mut self.env_vars,
                             "noclobber",
+                            enabled,
+                        );
+                    }
+                    ('f', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "noglob",
                             enabled,
                         );
                     }
