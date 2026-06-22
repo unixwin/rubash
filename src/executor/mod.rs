@@ -8553,13 +8553,13 @@ impl Executor {
         0
     }
 
-    fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
+    fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
-        let Some(left) = eval_conditional_arith_value(&left, &self.env_vars) else {
+        let Some(left) = eval_mutable_arith_value(&left, &mut self.env_vars) else {
             return false;
         };
-        let Some(right) = eval_conditional_arith_value(&right, &self.env_vars) else {
+        let Some(right) = eval_mutable_arith_value(&right, &mut self.env_vars) else {
             return false;
         };
         match op {
@@ -9657,6 +9657,7 @@ fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>)
         input: value.as_bytes(),
         pos: 0,
         env_vars,
+        resolving: Vec::new(),
     };
     let value = parser.parse_comma()?;
     parser.skip_ws();
@@ -9698,6 +9699,7 @@ struct ConditionalArithParser<'a> {
     input: &'a [u8],
     pos: usize,
     env_vars: &'a mut HashMap<String, String>,
+    resolving: Vec<String>,
 }
 
 impl ConditionalArithParser<'_> {
@@ -10026,7 +10028,7 @@ impl ConditionalArithParser<'_> {
         if self.consume("--") {
             return self.update_variable(name, -1, false);
         }
-        Some(self.variable_value(name))
+        self.variable_value(name)
     }
 
     fn parse_assignment_lvalue(&mut self) -> Option<String> {
@@ -10066,24 +10068,47 @@ impl ConditionalArithParser<'_> {
         None
     }
 
-    fn variable_value(&self, name: &str) -> i128 {
-        self.env_vars
+    fn variable_value(&mut self, name: &str) -> Option<i128> {
+        if self.resolving.iter().any(|resolving| resolving == name) {
+            return None;
+        }
+
+        let value = self
+            .env_vars
             .get(name)
             .cloned()
             .or_else(|| env::var(name).ok())
-            .and_then(|value| value.trim().parse::<i128>().ok())
-            .unwrap_or(0)
+            .unwrap_or_default();
+        let value = value.trim();
+        if value.is_empty() {
+            return Some(0);
+        }
+        if let Ok(number) = value.parse::<i128>() {
+            return Some(number);
+        }
+
+        let mut resolving = self.resolving.clone();
+        resolving.push(name.to_string());
+        let mut parser = ConditionalArithParser {
+            input: value.as_bytes(),
+            pos: 0,
+            env_vars: self.env_vars,
+            resolving,
+        };
+        let value = parser.parse_comma()?;
+        parser.skip_ws();
+        (parser.pos == parser.input.len()).then_some(value)
     }
 
     fn update_variable(&mut self, name: &str, delta: i128, prefix: bool) -> Option<i128> {
-        let current = self.variable_value(name);
+        let current = self.variable_value(name)?;
         let updated = current + delta;
         self.set_variable(name, updated);
         Some(if prefix { updated } else { current })
     }
 
     fn assign_variable(&mut self, name: &str, op: &str, rhs: i128) -> Option<i128> {
-        let current = self.variable_value(name);
+        let current = self.variable_value(name)?;
         let value = match op {
             "=" => rhs,
             "+=" => current + rhs,
