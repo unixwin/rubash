@@ -1636,6 +1636,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_trap_invalid_signal_returns_failure() {
+        let output_path = "target/rubash-trap-invalid-signal-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo bad' NO_SUCH_SIGNAL; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_trap_missing_signal_spec_returns_usage() {
+        let output_path = "target/rubash-trap-missing-signal-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 512; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_r_reads_here_string_without_backslash_escape() {
         let output_path = "target/rubash-read-r-output.txt";
         let _ = fs::remove_file(output_path);
