@@ -8272,10 +8272,12 @@ impl Executor {
     }
 
     fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
-        let Some(left) = self.expand_word(left).parse::<i128>().ok() else {
+        let left = self.expand_word(left);
+        let right = self.expand_word(right);
+        let Some(left) = eval_conditional_arith_value(&left, &self.env_vars) else {
             return false;
         };
-        let Some(right) = self.expand_word(right).parse::<i128>().ok() else {
+        let Some(right) = eval_conditional_arith_value(&right, &self.env_vars) else {
             return false;
         };
         match op {
@@ -9322,6 +9324,132 @@ fn eval_arith_value(value: &str) -> i128 {
         .split('+')
         .map(|part| part.trim().parse::<i128>().unwrap_or(0))
         .sum()
+}
+
+fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>) -> Option<i128> {
+    let mut parser = ConditionalArithParser {
+        input: value.as_bytes(),
+        pos: 0,
+        env_vars,
+    };
+    let value = parser.parse_expr()?;
+    parser.skip_ws();
+    (parser.pos == parser.input.len()).then_some(value)
+}
+
+struct ConditionalArithParser<'a> {
+    input: &'a [u8],
+    pos: usize,
+    env_vars: &'a HashMap<String, String>,
+}
+
+impl ConditionalArithParser<'_> {
+    fn parse_expr(&mut self) -> Option<i128> {
+        let mut value = self.parse_term()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'+') => {
+                    self.pos += 1;
+                    value += self.parse_term()?;
+                }
+                Some(b'-') => {
+                    self.pos += 1;
+                    value -= self.parse_term()?;
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn parse_term(&mut self) -> Option<i128> {
+        let mut value = self.parse_factor()?;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some(b'*') => {
+                    self.pos += 1;
+                    value *= self.parse_factor()?;
+                }
+                Some(b'/') => {
+                    self.pos += 1;
+                    let rhs = self.parse_factor()?;
+                    if rhs == 0 {
+                        return None;
+                    }
+                    value /= rhs;
+                }
+                Some(b'%') => {
+                    self.pos += 1;
+                    let rhs = self.parse_factor()?;
+                    if rhs == 0 {
+                        return None;
+                    }
+                    value %= rhs;
+                }
+                _ => return Some(value),
+            }
+        }
+    }
+
+    fn parse_factor(&mut self) -> Option<i128> {
+        self.skip_ws();
+        match self.peek()? {
+            b'+' => {
+                self.pos += 1;
+                self.parse_factor()
+            }
+            b'-' => {
+                self.pos += 1;
+                self.parse_factor().map(|value| -value)
+            }
+            b'(' => {
+                self.pos += 1;
+                let value = self.parse_expr()?;
+                self.skip_ws();
+                (self.peek()? == b')').then(|| self.pos += 1)?;
+                Some(value)
+            }
+            ch if ch.is_ascii_digit() => self.parse_number(),
+            ch if is_shell_name_start(ch as char) => self.parse_variable(),
+            _ => None,
+        }
+    }
+
+    fn parse_number(&mut self) -> Option<i128> {
+        let start = self.pos;
+        while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+            self.pos += 1;
+        }
+        std::str::from_utf8(&self.input[start..self.pos])
+            .ok()?
+            .parse()
+            .ok()
+    }
+
+    fn parse_variable(&mut self) -> Option<i128> {
+        let start = self.pos;
+        while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
+            self.pos += 1;
+        }
+        let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+        self.env_vars
+            .get(name)
+            .cloned()
+            .or_else(|| env::var(name).ok())
+            .and_then(|value| value.trim().parse::<i128>().ok())
+            .or(Some(0))
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.input.get(self.pos).copied()
+    }
 }
 
 fn is_shell_keyword(word: &str) -> bool {
