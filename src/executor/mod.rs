@@ -1600,10 +1600,10 @@ impl Executor {
         }
 
         self.apply_parameter_assignment_expansions(cmd);
-        if let Some((name, message)) = self.parameter_expansion_error(cmd) {
+        if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
             eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
-            self.exit_code = 1;
-            return Err(ExecuteError::ExitCode(1));
+            self.exit_code = status;
+            return Err(ExecuteError::ExitCode(status));
         }
 
         if self.execute_parser_level_alias(cmd)? {
@@ -7976,7 +7976,7 @@ impl Executor {
         }
     }
 
-    fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String)> {
+    fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String, i32)> {
         for word in &cmd.words {
             if let Some(error) = self.parameter_expansion_error_in_word(word) {
                 return Some(error);
@@ -7985,11 +7985,16 @@ impl Executor {
         None
     }
 
-    fn parameter_expansion_error_in_word(&self, word: &str) -> Option<(String, String)> {
+    fn parameter_expansion_error_in_word(&self, word: &str) -> Option<(String, String, i32)> {
         let word = word
             .strip_prefix('\x1b')
             .or_else(|| word.strip_prefix('\x1d'))
             .unwrap_or(word);
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
+            if let Some(name) = self.nounset_unbound_parameter(word) {
+                return Some((name, "unbound variable".to_string(), 127));
+            }
+        }
         let mut rest = word;
         while let Some(start) = rest.find("${") {
             let after_start = &rest[start + 2..];
@@ -8015,12 +8020,100 @@ impl Executor {
                     } else {
                         self.expand_parameter_word(message)
                     };
-                    return Some((name.to_string(), message));
+                    return Some((name.to_string(), message, 1));
                 }
             }
             rest = &after_start[end + 1..];
         }
         None
+    }
+
+    fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
+        let mut chars = word.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1f' {
+                continue;
+            }
+            if ch != '$' {
+                continue;
+            }
+
+            match chars.peek().copied() {
+                Some('{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    for name_ch in chars.by_ref() {
+                        if name_ch == '}' {
+                            break;
+                        }
+                        name.push(name_ch);
+                    }
+                    if self.nounset_braced_parameter_is_unbound(&name) {
+                        return Some(name);
+                    }
+                }
+                Some(first) if first.is_ascii_digit() => {
+                    chars.next();
+                    let index = first.to_digit(10).unwrap_or(0) as usize;
+                    if index > 0 && self.positional_params.get(index - 1).is_none() {
+                        return Some(format!("${first}"));
+                    }
+                }
+                Some(first) if is_shell_name_start(first) => {
+                    let mut name = String::new();
+                    while let Some(name_ch) = chars.peek().copied() {
+                        if !is_shell_name_char(name_ch) {
+                            break;
+                        }
+                        chars.next();
+                        name.push(name_ch);
+                    }
+                    if !self.env_vars.contains_key(&name) && std::env::var(&name).is_err() {
+                        return Some(name);
+                    }
+                }
+                Some('?') | Some('$') | Some('@') | Some('*') | Some('#') | Some('-') => {
+                    chars.next();
+                }
+                Some('(') => {
+                    chars.next();
+                }
+                Some(_) | None => {}
+            }
+        }
+        None
+    }
+
+    fn nounset_braced_parameter_is_unbound(&self, name: &str) -> bool {
+        if name.is_empty()
+            || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
+            || name.starts_with('!')
+            || parse_parameter_error_operator(name).is_some()
+            || name.contains(":-")
+            || name.contains(":=")
+            || name.contains(":+")
+            || name.contains('-')
+            || name.contains('=')
+            || name.contains('+')
+            || name.contains('#')
+            || name.contains('%')
+            || name.contains('/')
+            || name.contains('^')
+            || name.contains(',')
+            || name.contains('@')
+        {
+            return false;
+        }
+
+        if let Ok(index) = name.parse::<usize>() {
+            return index > 0 && self.positional_params.get(index - 1).is_none();
+        }
+
+        if is_shell_name(name) {
+            return !self.env_vars.contains_key(name) && std::env::var(name).is_err();
+        }
+
+        false
     }
 
     fn parameter_error_value(&self, name: &str) -> Option<String> {
