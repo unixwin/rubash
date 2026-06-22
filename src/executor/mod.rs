@@ -21,6 +21,7 @@ use self::path::{find_shell, find_user_command, shell_path_to_windows, should_ru
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
@@ -8151,7 +8152,7 @@ impl Executor {
         output
     }
 
-    fn execute_conditional(&self, args: &[String]) -> i32 {
+    fn execute_conditional(&mut self, args: &[String]) -> i32 {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
         // logic. Keep extending this bridge with test.c-compatible primitives.
@@ -8194,11 +8195,11 @@ impl Executor {
                 i32::from(!self.conditional_file_unary(op, operand))
             }
             [left, op, right, end]
-                if matches!(op.as_str(), "=" | "==" | "!=" | "<" | ">") && end == "]]" =>
+                if matches!(op.as_str(), "=" | "==" | "!=" | "=~" | "<" | ">") && end == "]]" =>
             {
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
-            [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=" | "<" | ">") => {
+            [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=" | "=~" | "<" | ">") => {
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
             [left, op, right, end]
@@ -8216,12 +8217,13 @@ impl Executor {
         }
     }
 
-    fn conditional_string_binary(&self, left: &str, op: &str, right: &str) -> bool {
+    fn conditional_string_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
         match op {
             "=" | "==" => conditional_pattern_or_string_matches(&left, &right),
             "!=" => !conditional_pattern_or_string_matches(&left, &right),
+            "=~" => self.conditional_regex_match(&left, &right),
             "<" => left < right,
             ">" => left > right,
             _ => false,
@@ -8240,6 +8242,29 @@ impl Executor {
     fn conditional_file_unary(&self, op: &str, operand: &str) -> bool {
         let args = vec![op.to_string(), self.expand_word(operand)];
         crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
+    }
+
+    fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
+        let Ok(regex) = regex::Regex::new(right) else {
+            return false;
+        };
+        let Some(captures) = regex.captures(left) else {
+            return false;
+        };
+
+        let entries: BTreeMap<usize, String> = captures
+            .iter()
+            .enumerate()
+            .filter_map(|(index, capture)| {
+                capture.map(|matched| (index, matched.as_str().to_string()))
+            })
+            .collect();
+        self.env_vars.insert(
+            "BASH_REMATCH".to_string(),
+            format_indexed_array_storage(entries),
+        );
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
+        true
     }
 
     fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
