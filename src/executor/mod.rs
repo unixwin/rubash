@@ -8154,9 +8154,15 @@ impl Executor {
     fn execute_conditional(&self, args: &[String]) -> i32 {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
-        // logic. Upstream builtins.tests currently needs equality and integer
-        // equality only.
+        // logic. Keep extending this bridge with test.c-compatible primitives.
         match args {
+            [op, operand, end] if op == "-v" && end == "]]" => i32::from(
+                !crate::builtins::test::variable_is_set(operand, &self.env_vars),
+            ),
+            [op, operand] if op == "-v" => i32::from(!crate::builtins::test::variable_is_set(
+                operand,
+                &self.env_vars,
+            )),
             [left, op, right, end] if op == "==" && end == "]]" => {
                 i32::from(self.expand_word(left) != self.expand_word(right))
             }
