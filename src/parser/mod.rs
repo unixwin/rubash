@@ -707,10 +707,8 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             return Some((command, arithmetic_command_next_index(tokens, i + 2)));
         }
 
-        if matches!(tokens[i].value.as_str(), ">" | "<" | "!")
-            && tokens.get(i + 1).map(|token| token.value.as_str()) == Some("=")
-        {
-            parts.push(format!("{}=", tokens[i].value));
+        if let Some(combined) = arithmetic_combined_operator(&tokens[i], tokens.get(i + 1)) {
+            parts.push(combined);
             i += 2;
             continue;
         }
@@ -731,6 +729,22 @@ fn arithmetic_command_next_index(tokens: &[Token], index: usize) -> usize {
     } else {
         index
     }
+}
+
+fn arithmetic_combined_operator(token: &Token, next: Option<&Token>) -> Option<String> {
+    let op = token.value.as_str();
+    if !matches!(op, ">" | "<" | "!" | "&" | "|" | "<<" | ">>") {
+        return None;
+    }
+
+    let next = next?;
+    if next.value == "=" {
+        return Some(format!("{op}="));
+    }
+
+    next.value
+        .strip_prefix('=')
+        .map(|rhs| format!("{op}={rhs}"))
 }
 
 fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
@@ -912,6 +926,28 @@ mod unit_tests {
                 vec!["until", "((", "n == 5", "))"],
                 vec!["do", "((", "n++", "))"],
                 vec!["done"],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_arithmetic_bitwise_assignment_operators() {
+        let tokens = tokenize("(( n &= 10 )); (( n |= 1 )); (( n <<= 2 )); (( n >>= 1 ))");
+        let ast = parse(&tokens);
+        let words: Vec<Vec<String>> = ast
+            .commands
+            .iter()
+            .filter(|command| !command.words.is_empty())
+            .map(|command| command.words.clone())
+            .collect();
+
+        assert_eq!(
+            words,
+            vec![
+                vec!["((", "n &= 10", "))"],
+                vec!["((", "n |= 1", "))"],
+                vec!["((", "n <<= 2", "))"],
+                vec!["((", "n >>= 1", "))"],
             ]
         );
     }
