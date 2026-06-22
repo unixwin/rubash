@@ -9452,6 +9452,32 @@ fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
     base.checked_pow(exponent)
 }
 
+fn parse_arithmetic_digits(digits: &[u8], base: u32) -> Option<i128> {
+    let mut value = 0i128;
+    for digit in std::str::from_utf8(digits).ok()?.chars() {
+        let digit = arithmetic_digit_value(digit, base)?;
+        if digit >= base {
+            return None;
+        }
+        value = value
+            .checked_mul(i128::from(base))?
+            .checked_add(i128::from(digit))?;
+    }
+    Some(value)
+}
+
+fn arithmetic_digit_value(ch: char, base: u32) -> Option<u32> {
+    match ch {
+        '0'..='9' => Some(ch as u32 - '0' as u32),
+        'a'..='z' => Some(10 + ch as u32 - 'a' as u32),
+        'A'..='Z' if base <= 36 => Some(10 + ch as u32 - 'A' as u32),
+        'A'..='Z' => Some(36 + ch as u32 - 'A' as u32),
+        '@' => Some(62),
+        '_' => Some(63),
+        _ => None,
+    }
+}
+
 fn split_top_level_arithmetic_commas(expression: &str) -> Option<Vec<&str>> {
     let mut parts = Vec::new();
     let mut depth = 0usize;
@@ -9731,10 +9757,44 @@ impl ConditionalArithParser<'_> {
         while self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
             self.pos += 1;
         }
-        std::str::from_utf8(&self.input[start..self.pos])
-            .ok()?
-            .parse()
-            .ok()
+        if self.peek() == Some(b'#') {
+            let base_text = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+            let base = base_text.parse::<u32>().ok()?;
+            if !(2..=64).contains(&base) {
+                return None;
+            }
+            self.pos += 1;
+            let digit_start = self.pos;
+            while self.peek().is_some_and(|ch| {
+                arithmetic_digit_value(ch as char, base).is_some_and(|value| value < base)
+            }) {
+                self.pos += 1;
+            }
+            if self.pos == digit_start {
+                return None;
+            }
+            return parse_arithmetic_digits(&self.input[digit_start..self.pos], base);
+        }
+
+        if self.input[start..].starts_with(b"0x") || self.input[start..].starts_with(b"0X") {
+            self.pos = start + 2;
+            let digit_start = self.pos;
+            while self.peek().is_some_and(|ch| ch.is_ascii_hexdigit()) {
+                self.pos += 1;
+            }
+            if self.pos == digit_start {
+                return None;
+            }
+            return parse_arithmetic_digits(&self.input[digit_start..self.pos], 16);
+        }
+
+        let text = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+        let base = if text.len() > 1 && text.starts_with('0') {
+            8
+        } else {
+            10
+        };
+        parse_arithmetic_digits(text.as_bytes(), base)
     }
 
     fn parse_variable(&mut self) -> Option<i128> {
