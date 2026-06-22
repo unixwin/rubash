@@ -524,7 +524,11 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
         return None;
     }
 
-    let body = parse(&tokens[body_start..i]).commands;
+    let body = parse(&tokens[body_start..i])
+        .commands
+        .into_iter()
+        .filter(|command| !command_is_empty(command))
+        .collect();
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
@@ -627,7 +631,11 @@ fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         return None;
     }
 
-    let body = parse(&tokens[body_start..i]).commands;
+    let body = parse(&tokens[body_start..i])
+        .commands
+        .into_iter()
+        .filter(|command| !command_is_empty(command))
+        .collect();
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
