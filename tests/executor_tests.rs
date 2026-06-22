@@ -3469,6 +3469,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_conditional_regex_match_sets_bash_rematch() {
+        let output_path = "target/rubash-conditional-regex-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 abc123 abc 123\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_conditional_logical_operators_stay_inside_expression() {
         let output_path = "target/rubash-conditional-logical-output.txt";
         let _ = fs::remove_file(output_path);
