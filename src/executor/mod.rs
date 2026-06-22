@@ -8475,6 +8475,11 @@ impl Executor {
             "-=" => current - rhs,
             "*=" => current * rhs,
             "**=" => checked_arithmetic_pow(current, rhs)?,
+            "<<=" => current.checked_shl(u32::try_from(rhs).ok()?).unwrap_or(0),
+            ">>=" => current.checked_shr(u32::try_from(rhs).ok()?).unwrap_or(0),
+            "&=" => current & rhs,
+            "^=" => current ^ rhs,
+            "|=" => current | rhs,
             "/=" if rhs != 0 => current / rhs,
             "%=" if rhs != 0 => current % rhs,
             "/=" | "%=" => return None,
@@ -9549,7 +9554,9 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
 }
 
 fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
-    for op in ["**=", "+=", "-=", "*=", "/=", "%=", "="] {
+    for op in [
+        "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+    ] {
         let Some(index) = expression.find(op) else {
             continue;
         };
