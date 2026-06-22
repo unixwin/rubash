@@ -3598,6 +3598,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_expansion_applies_side_effects() {
+        let output_path = "target/rubash-arithmetic-expansion-side-effects-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=1; echo $((n++)) $n > {output_path}; echo pre$((n+=4))post $n >> {output_path}; echo $((a=b=3)) $a $b >> {output_path}; x=$((n++)); echo $x $n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1 2\npre6post 6\n3 3 3\n6 7\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_updates_variables() {
         let output_path = "target/rubash-arithmetic-command-updates-output.txt";
         let _ = fs::remove_file(output_path);
