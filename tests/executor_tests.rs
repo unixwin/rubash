@@ -3428,6 +3428,37 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_conditional_file_unary_checks_paths() {
+        let output_path = "target/rubash-conditional-file-unary-output.txt";
+        let file_path = "target/rubash-conditional-file-unary.txt";
+        let dir_path = "target/rubash-conditional-file-unary-dir";
+        let missing_path = "target/rubash-conditional-file-unary-missing";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir_all(dir_path);
+        fs::write(file_path, "data").unwrap();
+        fs::create_dir_all(dir_path).unwrap();
+        let input = format!(
+            "[[ -e {file_path} ]]; echo $? > {output_path}; [[ -f {file_path} ]]; echo $? >> {output_path}; [[ -d {dir_path} ]]; echo $? >> {output_path}; [[ -s {file_path} ]]; echo $? >> {output_path}; [[ -e {missing_path} ]]; echo $? >> {output_path}; [[ -d {file_path} ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0\n0\n0\n0\n1\n1\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(file_path);
+        let _ = fs::remove_dir_all(dir_path);
+    }
+
+    #[test]
     fn test_if_true_executes_then_body() {
         let output_path = "target/rubash-if-true-output.txt";
         let _ = fs::remove_file(output_path);

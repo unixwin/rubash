@@ -8169,6 +8169,12 @@ impl Executor {
             [op, operand] if matches!(op.as_str(), "-n" | "-z") => {
                 i32::from(!self.conditional_string_unary(op, operand))
             }
+            [op, operand, end] if is_conditional_file_unary(op) && end == "]]" => {
+                i32::from(!self.conditional_file_unary(op, operand))
+            }
+            [op, operand] if is_conditional_file_unary(op) => {
+                i32::from(!self.conditional_file_unary(op, operand))
+            }
             [left, op, right, end] if matches!(op.as_str(), "=" | "==" | "!=") && end == "]]" => {
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
@@ -8207,6 +8213,11 @@ impl Executor {
             "-z" => value.is_empty(),
             _ => false,
         }
+    }
+
+    fn conditional_file_unary(&self, op: &str, operand: &str) -> bool {
+        let args = vec![op.to_string(), self.expand_word(operand)];
+        crate::builtins::test::execute(&args, false, &self.env_vars).unwrap_or(1) == 0
     }
 
     fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
@@ -9829,6 +9840,32 @@ fn case_pattern_matches(pattern: &str, word: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     case_pattern_matches_at(&pattern, 0, &word, 0)
+}
+
+fn is_conditional_file_unary(op: &str) -> bool {
+    matches!(
+        op,
+        "-a" | "-b"
+            | "-c"
+            | "-d"
+            | "-e"
+            | "-f"
+            | "-g"
+            | "-h"
+            | "-L"
+            | "-k"
+            | "-p"
+            | "-r"
+            | "-s"
+            | "-S"
+            | "-t"
+            | "-u"
+            | "-w"
+            | "-x"
+            | "-O"
+            | "-G"
+            | "-N"
+    )
 }
 
 fn case_pattern_matches_at(
