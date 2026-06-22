@@ -3602,7 +3602,7 @@ mod command_chaining {
         let output_path = "target/rubash-arithmetic-expansion-side-effects-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "n=1; echo $((n++)) $n > {output_path}; echo pre$((n+=4))post $n >> {output_path}; echo $((a=b=3)) $a $b >> {output_path}; x=$((n++)); echo $x $n >> {output_path}"
+            "n=1; echo $((n++)) $n > {output_path}; echo pre$((n+=4))post $n >> {output_path}; echo $((a=b=3)) $a $b >> {output_path}; x=$((n++)); echo $x $n >> {output_path}; echo $((0 && (n+=99))) $n >> {output_path}; echo $((1 || (n+=99))) $n >> {output_path}; echo $((1 && (n+=2))) $n >> {output_path}; echo $((0 || (n+=3))) $n >> {output_path}; echo $((1 ? (n+=4) : (n+=99))) $n >> {output_path}; echo $((0 ? (n+=99) : (n+=5))) $n >> {output_path}; echo $((n++ + 1)) $n >> {output_path}; echo $((++n + 1)) $n >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -3614,7 +3614,7 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "1 2\npre6post 6\n3 3 3\n6 7\n"
+            "1 2\npre6post 6\n3 3 3\n6 7\n0 7\n1 7\n1 9\n1 12\n16 16\n21 21\n22 22\n24 23\n"
         );
         let _ = fs::remove_file(output_path);
     }
