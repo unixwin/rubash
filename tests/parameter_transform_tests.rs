@@ -202,6 +202,26 @@ fn test_parameter_transform_prompt_expands_variables_and_commands() {
 }
 
 #[test]
+fn test_parameter_transform_prints_key_value_pairs() {
+    let output_path = "target/rubash-param-transform-key-value-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("v=value; arr=(alpha beta); declare -A assoc; assoc[one]=alpha; assoc[two]=beta; echo scalar:${{v@K}}:${{v@k}} > {output_path}; echo indexed:${{arr[@]@K}} / ${{arr[@]@k}} >> {output_path}; echo assoc:${{assoc[@]@K}} / ${{assoc[@]@k}} >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "scalar:'value':'value'\nindexed:0 \"alpha\" 1 \"beta\" / 0 alpha 1 beta\nassoc:one \"alpha\" two \"beta\" / one alpha two beta\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_changes_case() {
     let output_path = "target/rubash-param-transform-case-output.txt";
     let _ = fs::remove_file(output_path);

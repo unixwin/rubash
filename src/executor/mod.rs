@@ -6846,6 +6846,12 @@ impl Executor {
                 }
             }
             if let Some((var_name, transform)) = parse_parameter_transform(name) {
+                if transform == ParameterTransform::KeyValueQuoted {
+                    return self.parameter_key_value_transform(var_name, true);
+                }
+                if transform == ParameterTransform::KeyValueSplit {
+                    return self.parameter_key_value_transform(var_name, false);
+                }
                 if transform == ParameterTransform::Assignment {
                     return self.parameter_assignment_transform(var_name);
                 }
@@ -7384,6 +7390,54 @@ impl Executor {
             attrs.push('x');
         }
         attrs
+    }
+
+    fn parameter_key_value_transform(&self, name: &str, quoted: bool) -> String {
+        let array_name = name
+            .strip_suffix("[@]")
+            .or_else(|| name.strip_suffix("[*]"));
+
+        if let Some(array_name) = array_name {
+            let Some(value) = self.env_vars.get(array_name) else {
+                return String::new();
+            };
+            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                return assoc_entries(value)
+                    .into_iter()
+                    .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+
+            return indexed_array_entries(value)
+                .into_iter()
+                .map(|(index, value)| {
+                    format_key_value_transform_part(&index.to_string(), &value, quoted)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+
+        if let Some((array_name, key)) = parse_array_subscript(name) {
+            let Some(value) = self.env_vars.get(array_name) else {
+                return String::new();
+            };
+            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                return assoc_value_at(value, key)
+                    .map(|value| format_key_value_transform_part(key, &value, quoted))
+                    .unwrap_or_default();
+            }
+            if let Ok(index) = key.parse::<usize>() {
+                return array_value_at(value, index)
+                    .map(|value| format_key_value_transform_part(key, &value, quoted))
+                    .unwrap_or_default();
+            }
+            return String::new();
+        }
+
+        self.parameter_error_value(name)
+            .map(|value| shell_single_quote_assignment_value(&value))
+            .unwrap_or_default()
     }
 
     fn parameter_prompt_transform(&self, name: &str) -> String {
@@ -9592,6 +9646,8 @@ enum ParameterTransform {
     Escape,
     Assignment,
     Attributes,
+    KeyValueQuoted,
+    KeyValueSplit,
     Prompt,
     Upper,
     Lower,
@@ -9604,6 +9660,8 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
         "E" => ParameterTransform::Escape,
         "A" => ParameterTransform::Assignment,
         "a" => ParameterTransform::Attributes,
+        "K" => ParameterTransform::KeyValueQuoted,
+        "k" => ParameterTransform::KeyValueSplit,
         "P" => ParameterTransform::Prompt,
         "U" => ParameterTransform::Upper,
         "L" => ParameterTransform::Lower,
@@ -9618,9 +9676,19 @@ fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> Stri
         ParameterTransform::Escape => decode_ansi_c_escapes(value),
         ParameterTransform::Assignment => shell_single_quote_assignment_value(value),
         ParameterTransform::Attributes => String::new(),
+        ParameterTransform::KeyValueQuoted => shell_single_quote_assignment_value(value),
+        ParameterTransform::KeyValueSplit => shell_single_quote_assignment_value(value),
         ParameterTransform::Prompt => value.to_string(),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
+    }
+}
+
+fn format_key_value_transform_part(key: &str, value: &str, quoted: bool) -> String {
+    if quoted {
+        format!("{key} {}", quote_array_value(value))
+    } else {
+        format!("{key} {value}")
     }
 }
 
