@@ -8234,9 +8234,15 @@ impl Executor {
             [left, op, right, end]
                 if matches!(op.as_str(), "=" | "==" | "!=" | "=~" | "<" | ">") && end == "]]" =>
             {
+                if op == "=~" {
+                    return self.conditional_regex_match_status(left, right);
+                }
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
             [left, op, right] if matches!(op.as_str(), "=" | "==" | "!=" | "=~" | "<" | ">") => {
+                if op == "=~" {
+                    return self.conditional_regex_match_status(left, right);
+                }
                 i32::from(!self.conditional_string_binary(left, op, right))
             }
             [left, op, right, end]
@@ -8304,6 +8310,11 @@ impl Executor {
             return false;
         };
 
+        self.store_bash_rematch(captures);
+        true
+    }
+
+    fn store_bash_rematch(&mut self, captures: regex::Captures<'_>) {
         let entries: BTreeMap<usize, String> = captures
             .iter()
             .enumerate()
@@ -8316,7 +8327,20 @@ impl Executor {
             format_indexed_array_storage(entries),
         );
         mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
-        true
+    }
+
+    fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
+        let left = self.expand_word(left);
+        let right = self.expand_word(right);
+        let Ok(regex) = regex::Regex::new(&right) else {
+            return 2;
+        };
+        let Some(captures) = regex.captures(&left) else {
+            return 1;
+        };
+
+        self.store_bash_rematch(captures);
+        0
     }
 
     fn conditional_numeric_binary(&self, left: &str, op: &str, right: &str) -> bool {
