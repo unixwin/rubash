@@ -8156,6 +8156,7 @@ impl Executor {
         // with its own parser, operators, pattern matching, and short-circuit
         // logic. Keep extending this bridge with test.c-compatible primitives.
         match args {
+            [not, rest @ ..] if not == "!" => i32::from(self.execute_conditional(rest) == 0),
             [op, operand, end] if op == "-v" && end == "]]" => i32::from(
                 !crate::builtins::test::variable_is_set(operand, &self.env_vars),
             ),
