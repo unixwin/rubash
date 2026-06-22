@@ -147,7 +147,7 @@ fn test_path(operand: &str, env_vars: &HashMap<String, String>) -> std::path::Pa
     crate::executor::path::shell_path_to_windows(operand, env_vars)
 }
 
-fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
+pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>) -> bool {
     if let Some(name) = operand
         .strip_suffix("[@]")
         .or_else(|| operand.strip_suffix("[*]"))
