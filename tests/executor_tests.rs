@@ -1510,6 +1510,59 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_type_a_reports_builtin_and_path_matches() {
+        let bin_dir = "target/rubash-type-a-bin";
+        let echo_path = format!("{bin_dir}/echo");
+        let output_path = "target/rubash-type-a-output.txt";
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&echo_path, "").unwrap();
+        let _ = fs::remove_file(output_path);
+        let input = format!("type -a echo > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("echo is a shell builtin\n"));
+        assert!(output.contains("echo is target/rubash-type-a-bin/echo\n"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(echo_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
+    fn test_type_ap_reports_only_path_matches() {
+        let bin_dir = "target/rubash-type-ap-bin";
+        let echo_path = format!("{bin_dir}/echo");
+        let output_path = "target/rubash-type-ap-output.txt";
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&echo_path, "").unwrap();
+        let _ = fs::remove_file(output_path);
+        let input = format!("type -ap echo > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "target/rubash-type-ap-bin/echo\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(echo_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
     fn test_trap_p_redirects_saved_exit_trap() {
         let output_path = "target/rubash-trap-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
