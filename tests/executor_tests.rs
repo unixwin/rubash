@@ -3723,6 +3723,42 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_nounset_errors_for_unbound_assignment_value() {
+        let output_path = "target/rubash-nounset-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset RUBASH_NOUNSET_ASSIGNMENT; set -u; value=$RUBASH_NOUNSET_ASSIGNMENT; echo after > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
+        assert_eq!(executor.last_exit_code(), 127);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
+    fn test_nounset_errors_for_unbound_assignment_prefix() {
+        let output_path = "target/rubash-nounset-assignment-prefix-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset RUBASH_NOUNSET_PREFIX; set -u; value=$RUBASH_NOUNSET_PREFIX echo after > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
+        assert_eq!(executor.last_exit_code(), 127);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_braced_positional_parameters_expand() {
         let output_path = "target/rubash-braced-positional-output.txt";
         let _ = fs::remove_file(output_path);
