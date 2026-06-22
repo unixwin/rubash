@@ -8,6 +8,7 @@ use std::io::{self, Write};
 
 const TRAP_LIST: &str = "__RUBASH_TRAPS";
 const TRAP_PREFIX: &str = "__RUBASH_TRAP_";
+const EX_USAGE: i32 = 2;
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut env_vars = HashMap::new();
@@ -42,30 +43,31 @@ where
         let selected = if args[index..].is_empty() {
             None
         } else {
-            Some(signals.as_slice())
+            Some(signals.signals.as_slice())
         };
         print_traps(env_vars, selected, stdout)?;
-        return Ok(0);
+        return Ok(i32::from(signals.invalid));
     }
 
     let action = args[index].as_str();
     index += 1;
     if index >= args.len() {
-        return Ok(0);
+        print_usage(stderr)?;
+        return Ok(EX_USAGE);
     }
 
     let signals = normalized_signals(&args[index..], stderr)?;
     if action == "-" {
-        for signal in signals {
+        for signal in signals.signals {
             remove_trap(env_vars, &signal);
         }
-        return Ok(0);
+        return Ok(i32::from(signals.invalid));
     }
 
-    for signal in signals {
+    for signal in signals.signals {
         set_trap(env_vars, &signal, action);
     }
-    Ok(0)
+    Ok(i32::from(signals.invalid))
 }
 
 pub fn list_first_signal_for_sed() -> &'static str {
@@ -80,20 +82,34 @@ pub(crate) fn take_exit_trap(env_vars: &mut HashMap<String, String>) -> Option<S
     action
 }
 
-fn normalized_signals<E>(args: &[String], stderr: &mut E) -> io::Result<Vec<String>>
+struct NormalizedSignals {
+    signals: Vec<String>,
+    invalid: bool,
+}
+
+fn normalized_signals<E>(args: &[String], stderr: &mut E) -> io::Result<NormalizedSignals>
 where
     E: Write,
 {
     let mut signals = Vec::new();
+    let mut invalid = false;
     for arg in args {
         match normalize_signal(arg) {
             Some(signal) => signals.push(signal.to_string()),
             None => {
+                invalid = true;
                 writeln!(stderr, "rubash: trap: {arg}: invalid signal specification")?;
             }
         }
     }
-    Ok(signals)
+    Ok(NormalizedSignals { signals, invalid })
+}
+
+fn print_usage<E>(stderr: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    writeln!(stderr, "trap: usage: trap [-lp] [[arg] signal_spec ...]")
 }
 
 fn normalize_signal(signal: &str) -> Option<&'static str> {
