@@ -847,6 +847,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_pwd_redirects_stderr() {
+        let error_path = "target/rubash-pwd-stderr-output.txt";
+        let status_path = "target/rubash-pwd-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+
+        let input = format!("pwd -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("rubash: pwd: -x: invalid option"));
+        assert!(error.contains("pwd: usage: pwd [-LP]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_pwd_appends_stderr() {
+        let error_path = "target/rubash-pwd-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+
+        let input = format!("pwd -x 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 2);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("rubash: pwd: -x: invalid option"));
+        assert!(error.contains("pwd: usage: pwd [-LP]"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_hash_redirects_output() {
         let output_path = "target/rubash-hash-redirect-output.txt";
         let _ = fs::remove_file(output_path);
