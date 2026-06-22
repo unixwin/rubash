@@ -9495,14 +9495,34 @@ struct ConditionalArithParser<'a> {
 
 impl ConditionalArithParser<'_> {
     fn parse_comma(&mut self) -> Option<i128> {
-        let mut value = self.parse_logical_or()?;
+        let mut value = self.parse_conditional()?;
         loop {
             self.skip_ws();
             if !self.consume(",") {
                 return Some(value);
             }
-            value = self.parse_logical_or()?;
+            value = self.parse_conditional()?;
         }
+    }
+
+    fn parse_conditional(&mut self) -> Option<i128> {
+        let condition = self.parse_logical_or()?;
+        self.skip_ws();
+        if !self.consume("?") {
+            return Some(condition);
+        }
+
+        let true_value = self.parse_comma()?;
+        self.skip_ws();
+        if !self.consume(":") {
+            return None;
+        }
+        let false_value = self.parse_conditional()?;
+        Some(if condition != 0 {
+            true_value
+        } else {
+            false_value
+        })
     }
 
     fn parse_logical_or(&mut self) -> Option<i128> {
