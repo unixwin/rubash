@@ -8360,6 +8360,7 @@ impl Executor {
             "+=" => current + rhs,
             "-=" => current - rhs,
             "*=" => current * rhs,
+            "**=" => checked_arithmetic_pow(current, rhs)?,
             "/=" if rhs != 0 => current / rhs,
             "%=" if rhs != 0 => current % rhs,
             "/=" | "%=" => return None,
@@ -9425,7 +9426,7 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
 }
 
 fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
-    for op in ["+=", "-=", "*=", "/=", "%=", "="] {
+    for op in ["**=", "+=", "-=", "*=", "/=", "%=", "="] {
         let Some(index) = expression.find(op) else {
             continue;
         };
@@ -9444,6 +9445,11 @@ fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
         }
     }
     None
+}
+
+fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
+    let exponent = u32::try_from(exponent).ok()?;
+    base.checked_pow(exponent)
 }
 
 fn split_top_level_arithmetic_commas(expression: &str) -> Option<Vec<&str>> {
@@ -9625,17 +9631,20 @@ impl ConditionalArithParser<'_> {
     }
 
     fn parse_term(&mut self) -> Option<i128> {
-        let mut value = self.parse_factor()?;
+        let mut value = self.parse_power()?;
         loop {
             self.skip_ws();
             match self.peek() {
                 Some(b'*') => {
+                    if self.starts_with("**") {
+                        return Some(value);
+                    }
                     self.pos += 1;
-                    value *= self.parse_factor()?;
+                    value *= self.parse_power()?;
                 }
                 Some(b'/') => {
                     self.pos += 1;
-                    let rhs = self.parse_factor()?;
+                    let rhs = self.parse_power()?;
                     if rhs == 0 {
                         return None;
                     }
@@ -9643,7 +9652,7 @@ impl ConditionalArithParser<'_> {
                 }
                 Some(b'%') => {
                     self.pos += 1;
-                    let rhs = self.parse_factor()?;
+                    let rhs = self.parse_power()?;
                     if rhs == 0 {
                         return None;
                     }
@@ -9651,6 +9660,17 @@ impl ConditionalArithParser<'_> {
                 }
                 _ => return Some(value),
             }
+        }
+    }
+
+    fn parse_power(&mut self) -> Option<i128> {
+        let value = self.parse_factor()?;
+        self.skip_ws();
+        if self.consume("**") {
+            let rhs = self.parse_power()?;
+            checked_arithmetic_pow(value, rhs)
+        } else {
+            Some(value)
         }
     }
 
