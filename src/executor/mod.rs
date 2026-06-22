@@ -8600,88 +8600,7 @@ impl Executor {
     }
 
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
-        let expression = expression.trim();
-
-        if let Some(inner) = strip_balanced_outer_arithmetic_parens(expression) {
-            return self.eval_arithmetic_command_value(inner);
-        }
-
-        if let Some(parts) = split_top_level_arithmetic_commas(expression) {
-            let mut value = 0;
-            for part in parts {
-                value = self.eval_arithmetic_command_value(part)?;
-            }
-            return Some(value);
-        }
-
-        if let Some(name) = expression.strip_suffix("++").map(str::trim) {
-            return self.update_arithmetic_variable(name, 1, false);
-        }
-        if let Some(name) = expression.strip_suffix("--").map(str::trim) {
-            return self.update_arithmetic_variable(name, -1, false);
-        }
-        if let Some(name) = expression.strip_prefix("++").map(str::trim) {
-            return self.update_arithmetic_variable(name, 1, true);
-        }
-        if let Some(name) = expression.strip_prefix("--").map(str::trim) {
-            return self.update_arithmetic_variable(name, -1, true);
-        }
-
-        if let Some((name, op, rhs)) = split_arithmetic_assignment(expression) {
-            return self.assign_arithmetic_variable(name, op, rhs);
-        }
-
-        eval_conditional_arith_value(expression, &self.env_vars)
-    }
-
-    fn update_arithmetic_variable(
-        &mut self,
-        name: &str,
-        delta: i128,
-        prefix: bool,
-    ) -> Option<i128> {
-        if !is_shell_name(name) {
-            return None;
-        }
-        let current = self.arithmetic_variable_value(name);
-        let updated = current + delta;
-        self.set_env(name, &updated.to_string());
-        Some(if prefix { updated } else { current })
-    }
-
-    fn assign_arithmetic_variable(&mut self, name: &str, op: &str, rhs: &str) -> Option<i128> {
-        if !is_shell_name(name) {
-            return None;
-        }
-        let rhs = self.eval_arithmetic_command_value(rhs)?;
-        let current = self.arithmetic_variable_value(name);
-        let value = match op {
-            "=" => rhs,
-            "+=" => current + rhs,
-            "-=" => current - rhs,
-            "*=" => current * rhs,
-            "**=" => checked_arithmetic_pow(current, rhs)?,
-            "<<=" => current.checked_shl(u32::try_from(rhs).ok()?).unwrap_or(0),
-            ">>=" => current.checked_shr(u32::try_from(rhs).ok()?).unwrap_or(0),
-            "&=" => current & rhs,
-            "^=" => current ^ rhs,
-            "|=" => current | rhs,
-            "/=" if rhs != 0 => current / rhs,
-            "%=" if rhs != 0 => current % rhs,
-            "/=" | "%=" => return None,
-            _ => return None,
-        };
-        self.set_env(name, &value.to_string());
-        Some(value)
-    }
-
-    fn arithmetic_variable_value(&self, name: &str) -> i128 {
-        self.env_vars
-            .get(name)
-            .cloned()
-            .or_else(|| env::var(name).ok())
-            .and_then(|value| value.trim().parse::<i128>().ok())
-            .unwrap_or(0)
+        eval_mutable_arith_value(expression, &mut self.env_vars)
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -9729,6 +9648,11 @@ fn eval_arith_value(value: &str) -> i128 {
 }
 
 fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>) -> Option<i128> {
+    let mut env_vars = env_vars.clone();
+    eval_mutable_arith_value(value, &mut env_vars)
+}
+
+fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>) -> Option<i128> {
     let mut parser = ConditionalArithParser {
         input: value.as_bytes(),
         pos: 0,
@@ -9737,53 +9661,6 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
     let value = parser.parse_comma()?;
     parser.skip_ws();
     (parser.pos == parser.input.len()).then_some(value)
-}
-
-fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
-    for op in [
-        "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
-    ] {
-        let Some(index) = expression.find(op) else {
-            continue;
-        };
-        if op == "="
-            && (expression.as_bytes().get(index + 1) == Some(&b'=')
-                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'!'))
-                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'<'))
-                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'>')))
-        {
-            continue;
-        }
-        let name = expression[..index].trim();
-        let rhs = expression[index + op.len()..].trim();
-        if !name.is_empty() && !rhs.is_empty() {
-            return Some((name, op, rhs));
-        }
-    }
-    None
-}
-
-fn strip_balanced_outer_arithmetic_parens(expression: &str) -> Option<&str> {
-    let bytes = expression.as_bytes();
-    if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
-        return None;
-    }
-
-    let mut depth = 0usize;
-    for (index, byte) in bytes.iter().enumerate() {
-        match byte {
-            b'(' => depth += 1,
-            b')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 && index + 1 != bytes.len() {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    (depth == 0).then_some(expression[1..expression.len() - 1].trim())
 }
 
 fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
@@ -9817,57 +9694,36 @@ fn arithmetic_digit_value(ch: char, base: u32) -> Option<u32> {
     }
 }
 
-fn split_top_level_arithmetic_commas(expression: &str) -> Option<Vec<&str>> {
-    let mut parts = Vec::new();
-    let mut depth = 0usize;
-    let mut start = 0usize;
-    let mut saw_comma = false;
-
-    for (index, ch) in expression.char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                let part = expression[start..index].trim();
-                if part.is_empty() {
-                    return None;
-                }
-                parts.push(part);
-                start = index + ch.len_utf8();
-                saw_comma = true;
-            }
-            _ => {}
-        }
-    }
-
-    if !saw_comma {
-        return None;
-    }
-
-    let part = expression[start..].trim();
-    if part.is_empty() {
-        return None;
-    }
-    parts.push(part);
-    Some(parts)
-}
-
 struct ConditionalArithParser<'a> {
     input: &'a [u8],
     pos: usize,
-    env_vars: &'a HashMap<String, String>,
+    env_vars: &'a mut HashMap<String, String>,
 }
 
 impl ConditionalArithParser<'_> {
     fn parse_comma(&mut self) -> Option<i128> {
-        let mut value = self.parse_conditional()?;
+        let mut value = self.parse_assignment()?;
         loop {
             self.skip_ws();
             if !self.consume(",") {
                 return Some(value);
             }
-            value = self.parse_conditional()?;
+            value = self.parse_assignment()?;
         }
+    }
+
+    fn parse_assignment(&mut self) -> Option<i128> {
+        self.skip_ws();
+        let start = self.pos;
+        if let Some(name) = self.parse_assignment_lvalue() {
+            self.skip_ws();
+            if let Some(op) = self.consume_assignment_operator() {
+                let rhs = self.parse_assignment()?;
+                return self.assign_variable(&name, op, rhs);
+            }
+        }
+        self.pos = start;
+        self.parse_conditional()
     }
 
     fn parse_conditional(&mut self) -> Option<i128> {
@@ -9883,7 +9739,7 @@ impl ConditionalArithParser<'_> {
             if !self.consume(":") {
                 return None;
             }
-            return self.parse_conditional();
+            return self.parse_assignment();
         }
 
         let true_value = self.parse_comma()?;
@@ -10075,6 +9931,14 @@ impl ConditionalArithParser<'_> {
 
     fn parse_factor(&mut self) -> Option<i128> {
         self.skip_ws();
+        if self.consume("++") {
+            let name = self.parse_assignment_lvalue()?;
+            return self.update_variable(&name, 1, true);
+        }
+        if self.consume("--") {
+            let name = self.parse_assignment_lvalue()?;
+            return self.update_variable(&name, -1, true);
+        }
         match self.peek()? {
             b'+' => {
                 self.pos += 1;
@@ -10156,12 +10020,94 @@ impl ConditionalArithParser<'_> {
             self.pos += 1;
         }
         let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+        if self.consume("++") {
+            return self.update_variable(name, 1, false);
+        }
+        if self.consume("--") {
+            return self.update_variable(name, -1, false);
+        }
+        Some(self.variable_value(name))
+    }
+
+    fn parse_assignment_lvalue(&mut self) -> Option<String> {
+        self.skip_ws();
+        let start = self.pos;
+        let first = self.peek()? as char;
+        if !is_shell_name_start(first) {
+            return None;
+        }
+        self.pos += 1;
+        while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
+            self.pos += 1;
+        }
+        std::str::from_utf8(&self.input[start..self.pos])
+            .ok()
+            .map(str::to_string)
+    }
+
+    fn consume_assignment_operator(&mut self) -> Option<&'static str> {
+        for op in [
+            "<<=", ">>=", "**=", "+=", "-=", "*=", "/=", "%=", "&=", "^=", "|=", "=",
+        ] {
+            if op == "="
+                && (self.starts_with("==")
+                    || (self.pos > 0
+                        && matches!(
+                            self.input.get(self.pos - 1),
+                            Some(b'!') | Some(b'<') | Some(b'>')
+                        )))
+            {
+                continue;
+            }
+            if self.consume(op) {
+                return Some(op);
+            }
+        }
+        None
+    }
+
+    fn variable_value(&self, name: &str) -> i128 {
         self.env_vars
             .get(name)
             .cloned()
             .or_else(|| env::var(name).ok())
             .and_then(|value| value.trim().parse::<i128>().ok())
-            .or(Some(0))
+            .unwrap_or(0)
+    }
+
+    fn update_variable(&mut self, name: &str, delta: i128, prefix: bool) -> Option<i128> {
+        let current = self.variable_value(name);
+        let updated = current + delta;
+        self.set_variable(name, updated);
+        Some(if prefix { updated } else { current })
+    }
+
+    fn assign_variable(&mut self, name: &str, op: &str, rhs: i128) -> Option<i128> {
+        let current = self.variable_value(name);
+        let value = match op {
+            "=" => rhs,
+            "+=" => current + rhs,
+            "-=" => current - rhs,
+            "*=" => current * rhs,
+            "**=" => checked_arithmetic_pow(current, rhs)?,
+            "<<=" => current.checked_shl(u32::try_from(rhs).ok()?).unwrap_or(0),
+            ">>=" => current.checked_shr(u32::try_from(rhs).ok()?).unwrap_or(0),
+            "&=" => current & rhs,
+            "^=" => current ^ rhs,
+            "|=" => current | rhs,
+            "/=" if rhs != 0 => current / rhs,
+            "%=" if rhs != 0 => current % rhs,
+            "/=" | "%=" => return None,
+            _ => return None,
+        };
+        self.set_variable(name, value);
+        Some(value)
+    }
+
+    fn set_variable(&mut self, name: &str, value: i128) {
+        let value = value.to_string();
+        self.env_vars.insert(name.to_string(), value.clone());
+        env::set_var(name, value);
     }
 
     fn skip_ws(&mut self) {
