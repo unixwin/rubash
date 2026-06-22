@@ -184,6 +184,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
         }
 
+        if command_is_empty(&current_cmd)
+            && ((token.kind == TokenKind::Keyword && token.value == "(")
+                || token.value.starts_with("(("))
+        {
+            if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
+                ast.commands.push(arith_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
                 current_cmd.subshell |= in_subshell;
@@ -635,6 +647,68 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
     }
 
     Some((format!("({})", values.join(" ")), i))
+}
+
+fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    let first = tokens.get(start)?.value.as_str();
+
+    if let Some(inner) = first
+        .strip_prefix("((")
+        .and_then(|value| value.strip_suffix("))"))
+    {
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.words.push("((".to_string());
+        command.words.push(inner.to_string());
+        command.words.push("))".to_string());
+        return Some((command, arithmetic_command_next_index(tokens, start + 1)));
+    }
+
+    let mut i;
+    let mut parts = Vec::new();
+    if first == "((" {
+        i = start + 1;
+    } else if is_keyword(tokens, start, "(") && is_keyword(tokens, start + 1, "(") {
+        i = start + 2;
+    } else {
+        return None;
+    }
+
+    while i + 1 < tokens.len() {
+        if tokens[i].value == "))" {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|token| token.position);
+            command.words.push("((".to_string());
+            command.words.push(parts.join(" "));
+            command.words.push("))".to_string());
+            return Some((command, arithmetic_command_next_index(tokens, i + 1)));
+        }
+
+        if is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|token| token.position);
+            command.words.push("((".to_string());
+            command.words.push(parts.join(" "));
+            command.words.push("))".to_string());
+            return Some((command, arithmetic_command_next_index(tokens, i + 2)));
+        }
+
+        parts.push(tokens[i].value.clone());
+        i += 1;
+    }
+
+    None
+}
+
+fn arithmetic_command_next_index(tokens: &[Token], index: usize) -> usize {
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        index + 1
+    } else {
+        index
+    }
 }
 
 fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
