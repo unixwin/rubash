@@ -3470,7 +3470,7 @@ mod command_chaining {
         let output_path = "target/rubash-arithmetic-expansion-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "n=5; echo $((n+2*3)) > {output_path}; echo $((16#ff-250)) >> {output_path}; echo $((n>4?7:9)) >> {output_path}; echo $((2**3**2)) >> {output_path}"
+            "n=5; echo $((n+2*3)) > {output_path}; echo $((16#ff-250)) >> {output_path}; echo $((n>4?7:9)) >> {output_path}; echo $((2**3**2)) >> {output_path}; echo pre$((1+(2*3)))post >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -3480,7 +3480,10 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "11\n5\n7\n512\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "11\n5\n7\n512\npre7post\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 
