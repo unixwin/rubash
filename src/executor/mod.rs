@@ -8306,6 +8306,14 @@ impl Executor {
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
         let expression = expression.trim();
 
+        if let Some(parts) = split_top_level_arithmetic_commas(expression) {
+            let mut value = 0;
+            for part in parts {
+                value = self.eval_arithmetic_command_value(part)?;
+            }
+            return Some(value);
+        }
+
         if let Some(name) = expression.strip_suffix("++").map(str::trim) {
             return self.update_arithmetic_variable(name, 1, false);
         }
@@ -9411,7 +9419,7 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
         pos: 0,
         env_vars,
     };
-    let value = parser.parse_logical_or()?;
+    let value = parser.parse_comma()?;
     parser.skip_ws();
     (parser.pos == parser.input.len()).then_some(value)
 }
@@ -9438,6 +9446,41 @@ fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
     None
 }
 
+fn split_top_level_arithmetic_commas(expression: &str) -> Option<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut saw_comma = false;
+
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let part = expression[start..index].trim();
+                if part.is_empty() {
+                    return None;
+                }
+                parts.push(part);
+                start = index + ch.len_utf8();
+                saw_comma = true;
+            }
+            _ => {}
+        }
+    }
+
+    if !saw_comma {
+        return None;
+    }
+
+    let part = expression[start..].trim();
+    if part.is_empty() {
+        return None;
+    }
+    parts.push(part);
+    Some(parts)
+}
+
 struct ConditionalArithParser<'a> {
     input: &'a [u8],
     pos: usize,
@@ -9445,6 +9488,17 @@ struct ConditionalArithParser<'a> {
 }
 
 impl ConditionalArithParser<'_> {
+    fn parse_comma(&mut self) -> Option<i128> {
+        let mut value = self.parse_logical_or()?;
+        loop {
+            self.skip_ws();
+            if !self.consume(",") {
+                return Some(value);
+            }
+            value = self.parse_logical_or()?;
+        }
+    }
+
     fn parse_logical_or(&mut self) -> Option<i128> {
         let mut left = self.parse_logical_and()?;
         loop {
@@ -9621,7 +9675,7 @@ impl ConditionalArithParser<'_> {
             }
             b'(' => {
                 self.pos += 1;
-                let value = self.parse_logical_or()?;
+                let value = self.parse_comma()?;
                 self.skip_ws();
                 (self.peek()? == b')').then(|| self.pos += 1)?;
                 Some(value)
