@@ -9411,7 +9411,7 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
         pos: 0,
         env_vars,
     };
-    let value = parser.parse_comparison()?;
+    let value = parser.parse_logical_or()?;
     parser.skip_ws();
     (parser.pos == parser.input.len()).then_some(value)
 }
@@ -9445,6 +9445,30 @@ struct ConditionalArithParser<'a> {
 }
 
 impl ConditionalArithParser<'_> {
+    fn parse_logical_or(&mut self) -> Option<i128> {
+        let mut left = self.parse_logical_and()?;
+        loop {
+            self.skip_ws();
+            if !self.consume("||") {
+                return Some(left);
+            }
+            let right = self.parse_logical_and()?;
+            left = i128::from(left != 0 || right != 0);
+        }
+    }
+
+    fn parse_logical_and(&mut self) -> Option<i128> {
+        let mut left = self.parse_comparison()?;
+        loop {
+            self.skip_ws();
+            if !self.consume("&&") {
+                return Some(left);
+            }
+            let right = self.parse_comparison()?;
+            left = i128::from(left != 0 && right != 0);
+        }
+    }
+
     fn parse_comparison(&mut self) -> Option<i128> {
         let mut left = self.parse_expr()?;
         loop {
@@ -9526,6 +9550,10 @@ impl ConditionalArithParser<'_> {
             b'-' => {
                 self.pos += 1;
                 self.parse_factor().map(|value| -value)
+            }
+            b'!' => {
+                self.pos += 1;
+                self.parse_factor().map(|value| i128::from(value == 0))
             }
             b'(' => {
                 self.pos += 1;
