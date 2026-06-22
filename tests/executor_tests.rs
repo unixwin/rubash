@@ -3606,6 +3606,71 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_set_nounset_updates_shell_flags_and_option_tests() {
+        let output_path = "target/rubash-set-nounset-flags-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -u; echo $- > {output_path}; [[ -o nounset ]]; echo $? >> {output_path}; \
+             set +u; echo $- >> {output_path}; [[ -o nounset ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let lines: Vec<String> = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(lines[0].contains('u'));
+        assert_eq!(lines[1], "0");
+        assert!(!lines[2].contains('u'));
+        assert_eq!(lines[3], "1");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_set_nounset_with_positional_operands() {
+        let output_path = "target/rubash-set-nounset-operands-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("name=beta; set -u alpha $name; echo $# $1 $2 $- > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("2 alpha beta "));
+        assert!(output.trim_end().ends_with('u'));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_set_o_nounset_updates_shell_flags() {
+        let output_path = "target/rubash-set-o-nounset-flags-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -o nounset; echo $- > {output_path}; test -o nounset");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains('u'));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_braced_positional_parameters_expand() {
         let output_path = "target/rubash-braced-positional-output.txt";
         let _ = fs::remove_file(output_path);

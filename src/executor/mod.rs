@@ -8497,6 +8497,9 @@ impl Executor {
         {
             flags.push('x');
         }
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
+            flags.push('u');
+        }
         flags
     }
 
@@ -8510,7 +8513,7 @@ impl Executor {
                 return false;
             };
             let flags = &arg[1..];
-            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x')) {
+            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x' | 'u')) {
                 return false;
             }
 
@@ -8530,6 +8533,13 @@ impl Executor {
                     }
                     ('x', false) => {
                         self.env_vars.remove("__RUBASH_XTRACE");
+                    }
+                    ('u', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "nounset",
+                            enabled,
+                        );
                     }
                     _ => {}
                 }
@@ -8568,7 +8578,7 @@ impl Executor {
             };
 
             let flags = &arg[1..];
-            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x')) {
+            if flags.is_empty() || flags.chars().any(|flag| !matches!(flag, 'e' | 'x' | 'u')) {
                 return false;
             }
 
@@ -8596,6 +8606,13 @@ impl Executor {
                     }
                     ('x', false) => {
                         self.env_vars.remove("__RUBASH_XTRACE");
+                    }
+                    ('u', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "nounset",
+                            enabled,
+                        );
                     }
                     _ => {}
                 }
