@@ -6498,6 +6498,12 @@ impl Executor {
                     .unwrap_or_default();
             }
             if let Some(indirect_name) = name.strip_prefix('!') {
+                if let Some((var_name, transform)) = parse_parameter_transform(name) {
+                    if let Some(value) = self.indirect_parameter_transform(var_name, transform) {
+                        return value;
+                    }
+                }
+
                 if let Some(array_name) = indirect_name
                     .strip_suffix("[@]")
                     .or_else(|| indirect_name.strip_suffix("[*]"))
@@ -6845,6 +6851,9 @@ impl Executor {
                 }
                 if transform == ParameterTransform::Prompt {
                     return self.parameter_prompt_transform(var_name);
+                }
+                if let Some(value) = self.indirect_parameter_transform(var_name, transform) {
+                    return value;
                 }
                 if matches!(var_name, "@" | "*") {
                     return self
@@ -7379,6 +7388,39 @@ impl Executor {
             return String::new();
         };
         self.expand_prompt_parameters(&self.decode_prompt_string(strip_matching_quotes(&value)))
+    }
+
+    fn indirect_parameter_transform(
+        &self,
+        name: &str,
+        transform: ParameterTransform,
+    ) -> Option<String> {
+        let indirect_name = name.strip_prefix('!')?;
+        let ref_name = indirect_name
+            .strip_suffix("[@]")
+            .or_else(|| indirect_name.strip_suffix("[*]"))?;
+        let target_name = self.env_vars.get(ref_name)?;
+        let value = if let Some(array_expr) = target_name
+            .strip_suffix("[@]")
+            .or_else(|| target_name.strip_suffix("[*]"))
+        {
+            self.env_vars
+                .get(array_expr)
+                .and_then(|value| array_value_at(value, 0))
+                .unwrap_or_default()
+        } else {
+            self.env_vars
+                .get(target_name)
+                .and_then(|value| {
+                    if is_array_storage(value) || is_marked_array_var(&self.env_vars, target_name) {
+                        array_value_at(value, 0)
+                    } else {
+                        Some(value.clone())
+                    }
+                })
+                .unwrap_or_default()
+        };
+        Some(apply_parameter_transform(&value, transform))
     }
 
     fn decode_prompt_string(&self, value: &str) -> String {
