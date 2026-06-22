@@ -5200,6 +5200,39 @@ impl Executor {
             )?);
         }
 
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_null_device(&target) {
+                return Ok(crate::builtins::cd::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut std::io::stdout().lock(),
+                    &mut std::io::sink(),
+                )?);
+            }
+            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::cd::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::cd::execute_with_io(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
+        }
+
         Ok(crate::builtins::cd::execute(
             &cmd.words[1..],
             &mut self.env_vars,
