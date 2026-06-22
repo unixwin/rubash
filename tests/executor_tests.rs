@@ -1228,6 +1228,48 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_umask_redirects_stderr() {
+        let error_path = "target/rubash-umask-stderr-output.txt";
+        let status_path = "target/rubash-umask-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("umask -Z 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("rubash: umask: -Z: invalid option"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_umask_appends_stderr() {
+        let error_path = "target/rubash-umask-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("umask -Z 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("rubash: umask: -Z: invalid option"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_times_redirects_output() {
         let output_path = "target/rubash-times-redirect-output.txt";
         let _ = fs::remove_file(output_path);
@@ -1266,6 +1308,50 @@ mod command_chaining {
             "before\n0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n"
         );
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_times_redirects_stderr() {
+        let error_path = "target/rubash-times-stderr-output.txt";
+        let status_path = "target/rubash-times-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("times -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("rubash: times: -x: invalid option"));
+        assert!(error.contains("times: usage: times"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_times_appends_stderr() {
+        let error_path = "target/rubash-times-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("times -x 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 2);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("rubash: times: -x: invalid option"));
+        assert!(error.contains("times: usage: times"));
+        let _ = fs::remove_file(error_path);
     }
 
     #[test]
@@ -1504,6 +1590,50 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "before\n1024\n");
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_ulimit_redirects_stderr() {
+        let error_path = "target/rubash-ulimit-stderr-output.txt";
+        let status_path = "target/rubash-ulimit-stderr-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("ulimit -g 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("ulimit: -g: invalid option"));
+        assert!(error.contains("ulimit: usage:"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_ulimit_appends_stderr() {
+        let error_path = "target/rubash-ulimit-stderr-append-output.txt";
+        let _ = fs::remove_file(error_path);
+        fs::write(error_path, "before\n").unwrap();
+        let input = format!("ulimit -g 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 1);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before\n"));
+        assert!(error.contains("ulimit: -g: invalid option"));
+        assert!(error.contains("ulimit: usage:"));
+        let _ = fs::remove_file(error_path);
     }
 
     #[test]
