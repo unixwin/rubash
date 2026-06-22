@@ -6473,13 +6473,13 @@ impl Executor {
             return "HUP".to_string();
         }
 
-        if word.starts_with("$((")
-            && word.ends_with("))")
-            && word.contains("128")
-            && word.contains('+')
-            && word.contains('1')
+        if let Some(expression) = word
+            .strip_prefix("$((")
+            .and_then(|rest| rest.strip_suffix("))"))
         {
-            return "129".to_string();
+            if let Some(value) = eval_conditional_arith_value(expression, &self.env_vars) {
+                return value.to_string();
+            }
         }
 
         if let Some(source) = word
