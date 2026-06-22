@@ -339,7 +339,7 @@ pub(crate) fn shell_option_enabled(env_vars: &HashMap<String, String>, name: &st
         })
 }
 
-fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+pub(crate) fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
     env_vars.insert(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
