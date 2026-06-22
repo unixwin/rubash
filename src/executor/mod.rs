@@ -8606,6 +8606,20 @@ impl Executor {
 
     fn shell_option_flags(&self) -> String {
         let mut flags = String::new();
+        if crate::builtins::set::shell_option_enabled(&self.env_vars, "hashall") {
+            flags.push('h');
+        }
+        for (flag, option) in [
+            ('a', "allexport"),
+            ('b', "notify"),
+            ('k', "keyword"),
+            ('P', "physical"),
+            ('v', "verbose"),
+        ] {
+            if crate::builtins::set::shell_option_enabled(&self.env_vars, option) {
+                flags.push(flag);
+            }
+        }
         if self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
             || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
         {
@@ -8649,7 +8663,7 @@ impl Executor {
             if flags.is_empty()
                 || flags
                     .chars()
-                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f'))
+                    .any(|flag| !self.is_supported_short_set_flag(flag))
             {
                 return false;
             }
@@ -8692,7 +8706,15 @@ impl Executor {
                             enabled,
                         );
                     }
-                    _ => {}
+                    (flag, _) => {
+                        if let Some(option) = short_set_flag_option(flag) {
+                            crate::builtins::set::set_shell_option(
+                                &mut self.env_vars,
+                                option,
+                                enabled,
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -8732,7 +8754,7 @@ impl Executor {
             if flags.is_empty()
                 || flags
                     .chars()
-                    .any(|flag| !matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f'))
+                    .any(|flag| !self.is_supported_short_set_flag(flag))
             {
                 return false;
             }
@@ -8783,10 +8805,22 @@ impl Executor {
                             enabled,
                         );
                     }
-                    _ => {}
+                    (flag, _) => {
+                        if let Some(option) = short_set_flag_option(flag) {
+                            crate::builtins::set::set_shell_option(
+                                &mut self.env_vars,
+                                option,
+                                enabled,
+                            );
+                        }
+                    }
                 }
             }
         }
+    }
+
+    fn is_supported_short_set_flag(&self, flag: char) -> bool {
+        matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f') || short_set_flag_option(flag).is_some()
     }
 
     fn expand_case_word(&self, word: &str) -> String {
@@ -10112,6 +10146,18 @@ fn loop_control_level(args: &[String]) -> Result<usize, LoopControlError> {
 
 fn invert_exit_status(status: i32) -> i32 {
     i32::from(status == 0)
+}
+
+fn short_set_flag_option(flag: char) -> Option<&'static str> {
+    match flag {
+        'a' => Some("allexport"),
+        'b' => Some("notify"),
+        'h' => Some("hashall"),
+        'k' => Some("keyword"),
+        'P' => Some("physical"),
+        'v' => Some("verbose"),
+        _ => None,
+    }
 }
 
 fn apply_stdout_append_redirect(commands: &mut [CommandNode], redirect: &Redirect) {
