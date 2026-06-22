@@ -8295,12 +8295,79 @@ impl Executor {
         }
     }
 
-    fn execute_arithmetic_command(&self, cmd: &CommandNode) -> i32 {
+    fn execute_arithmetic_command(&mut self, cmd: &CommandNode) -> i32 {
         let expression = cmd.words.get(1).map(String::as_str).unwrap_or_default();
-        match eval_conditional_arith_value(expression, &self.env_vars) {
+        match self.eval_arithmetic_command_value(expression) {
             Some(0) | None => 1,
             Some(_) => 0,
         }
+    }
+
+    fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
+        let expression = expression.trim();
+
+        if let Some(name) = expression.strip_suffix("++").map(str::trim) {
+            return self.update_arithmetic_variable(name, 1, false);
+        }
+        if let Some(name) = expression.strip_suffix("--").map(str::trim) {
+            return self.update_arithmetic_variable(name, -1, false);
+        }
+        if let Some(name) = expression.strip_prefix("++").map(str::trim) {
+            return self.update_arithmetic_variable(name, 1, true);
+        }
+        if let Some(name) = expression.strip_prefix("--").map(str::trim) {
+            return self.update_arithmetic_variable(name, -1, true);
+        }
+
+        if let Some((name, op, rhs)) = split_arithmetic_assignment(expression) {
+            return self.assign_arithmetic_variable(name, op, rhs);
+        }
+
+        eval_conditional_arith_value(expression, &self.env_vars)
+    }
+
+    fn update_arithmetic_variable(
+        &mut self,
+        name: &str,
+        delta: i128,
+        prefix: bool,
+    ) -> Option<i128> {
+        if !is_shell_name(name) {
+            return None;
+        }
+        let current = self.arithmetic_variable_value(name);
+        let updated = current + delta;
+        self.set_env(name, &updated.to_string());
+        Some(if prefix { updated } else { current })
+    }
+
+    fn assign_arithmetic_variable(&mut self, name: &str, op: &str, rhs: &str) -> Option<i128> {
+        if !is_shell_name(name) {
+            return None;
+        }
+        let rhs = eval_conditional_arith_value(rhs, &self.env_vars)?;
+        let current = self.arithmetic_variable_value(name);
+        let value = match op {
+            "=" => rhs,
+            "+=" => current + rhs,
+            "-=" => current - rhs,
+            "*=" => current * rhs,
+            "/=" if rhs != 0 => current / rhs,
+            "%=" if rhs != 0 => current % rhs,
+            "/=" | "%=" => return None,
+            _ => return None,
+        };
+        self.set_env(name, &value.to_string());
+        Some(value)
+    }
+
+    fn arithmetic_variable_value(&self, name: &str) -> i128 {
+        self.env_vars
+            .get(name)
+            .cloned()
+            .or_else(|| env::var(name).ok())
+            .and_then(|value| value.trim().parse::<i128>().ok())
+            .unwrap_or(0)
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -9347,6 +9414,28 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
     let value = parser.parse_expr()?;
     parser.skip_ws();
     (parser.pos == parser.input.len()).then_some(value)
+}
+
+fn split_arithmetic_assignment(expression: &str) -> Option<(&str, &str, &str)> {
+    for op in ["+=", "-=", "*=", "/=", "%=", "="] {
+        let Some(index) = expression.find(op) else {
+            continue;
+        };
+        if op == "="
+            && (expression.as_bytes().get(index + 1) == Some(&b'=')
+                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'!'))
+                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'<'))
+                || (index > 0 && expression.as_bytes().get(index - 1) == Some(&b'>')))
+        {
+            continue;
+        }
+        let name = expression[..index].trim();
+        let rhs = expression[index + op.len()..].trim();
+        if !name.is_empty() && !rhs.is_empty() {
+            return Some((name, op, rhs));
+        }
+    }
+    None
 }
 
 struct ConditionalArithParser<'a> {
