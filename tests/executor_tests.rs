@@ -3598,6 +3598,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_arithmetic_command_conditional_operator() {
+        let output_path = "target/rubash-arithmetic-command-conditional-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=3; (( n > 2 ? n - 3 : 9 )); echo $? > {output_path}; (( n < 2 ? 0 : n + 1 )); echo $? >> {output_path}; [[ n==3?7:9 -eq 7 ]]; echo $? >> {output_path}; [[ n==4?7:9 -eq 9 ]]; echo $? >> {output_path}; [[ 0?1:0?2:3 -eq 3 ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n0\n0\n0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_drives_if_conditions() {
         let output_path = "target/rubash-arithmetic-if-output.txt";
         let _ = fs::remove_file(output_path);
