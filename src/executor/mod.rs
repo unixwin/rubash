@@ -4276,7 +4276,8 @@ impl Executor {
             if !arg.starts_with('-') || arg == "-" {
                 break;
             }
-            for option in arg[1..].chars() {
+            let normalized = normalize_type_option(arg);
+            for option in normalized[1..].chars() {
                 match option {
                     'a' => all = true,
                     'f' => skip_functions = true,
@@ -4374,7 +4375,8 @@ impl Executor {
             if !arg.starts_with('-') || arg == "-" {
                 break;
             }
-            for option in arg[1..].chars() {
+            let normalized = normalize_type_option(arg);
+            for option in normalized[1..].chars() {
                 match option {
                     'a' => all = true,
                     'f' => skip_functions = true,
@@ -8361,6 +8363,15 @@ fn executable_extensions() -> Vec<String> {
                 .collect()
         })
         .unwrap_or_else(|| vec!["exe".into(), "com".into(), "bat".into(), "cmd".into()])
+}
+
+fn normalize_type_option(option: &str) -> &str {
+    match option {
+        "-type" | "--type" => "-t",
+        "-path" | "--path" => "-p",
+        "-all" | "--all" => "-a",
+        other => other,
+    }
 }
 
 fn print_posix_time() {
