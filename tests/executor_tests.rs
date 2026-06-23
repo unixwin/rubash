@@ -3222,6 +3222,30 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_kill_translates_int_and_term_signals() {
+        let output_path = "target/rubash-kill-common-signals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "kill -l 2 > {output_path}; kill -l 130 >> {output_path}; \
+             kill -l TERM >> {output_path}; kill -l 15 >> {output_path}; \
+             kill -l 143 >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "INT\nINT\n15\nTERM\nTERM\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_kill_redirects_stderr() {
         let error_path = "target/rubash-kill-stderr-output.txt";
         let status_path = "target/rubash-kill-stderr-status.txt";
