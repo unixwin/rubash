@@ -2594,7 +2594,7 @@ impl Executor {
     }
 
     fn execute_declare_functions(
-        &self,
+        &mut self,
         args: &[String],
         stdout: &mut impl Write,
         stderr: &mut impl Write,
@@ -2614,6 +2614,12 @@ impl Executor {
         let exported_only = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('x'));
+        let readonly = args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('r'));
+        let print = args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('p'));
         let exported_functions = marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS);
         if names.is_empty() {
             let mut functions: Vec<_> = self.functions.iter().collect();
@@ -2650,6 +2656,12 @@ impl Executor {
             let is_exported = exported_functions.iter().any(|exported| exported == name);
             if exported_only && !is_exported {
                 continue;
+            }
+            if readonly {
+                mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
+                if !print {
+                    continue;
+                }
             }
             if function_names_only {
                 if exported_only {
