@@ -155,23 +155,67 @@ where
 fn is_shell_builtin(name: &str) -> bool {
     matches!(
         name,
-        ":" | "["
+        "." | ":"
+            | "["
+            | "alias"
+            | "bg"
+            | "bind"
+            | "break"
+            | "builtin"
+            | "caller"
             | "cd"
             | "command"
+            | "compgen"
+            | "complete"
+            | "compopt"
+            | "continue"
+            | "declare"
+            | "dirs"
+            | "disown"
             | "echo"
+            | "enable"
             | "env"
             | "eval"
+            | "exec"
             | "exit"
             | "export"
             | "false"
+            | "fc"
+            | "fg"
+            | "getopts"
+            | "hash"
+            | "help"
+            | "history"
+            | "jobs"
+            | "kill"
+            | "let"
+            | "local"
+            | "logout"
+            | "mapfile"
+            | "popd"
             | "printf"
+            | "pushd"
             | "pwd"
+            | "read"
+            | "readarray"
+            | "readonly"
+            | "return"
             | "set"
+            | "shift"
+            | "shopt"
+            | "source"
+            | "suspend"
             | "test"
             | "times"
+            | "trap"
             | "true"
             | "type"
+            | "typeset"
+            | "ulimit"
+            | "umask"
+            | "unalias"
             | "unset"
+            | "wait"
     )
 }
 
@@ -233,6 +277,18 @@ mod tests {
         assert_eq!(
             run(&["-t", "echo"]),
             (EXECUTION_SUCCESS, "builtin\n".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn reports_extended_builtins() {
+        assert_eq!(
+            run(&["-t", "read", "mapfile", "declare", "alias"]),
+            (
+                EXECUTION_SUCCESS,
+                "builtin\nbuiltin\nbuiltin\nbuiltin\n".to_string(),
+                String::new()
+            )
         );
     }
 
