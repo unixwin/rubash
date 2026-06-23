@@ -10795,17 +10795,17 @@ impl Executor {
         if integer {
             flags.push('i');
         }
-        if lowercase {
-            flags.push('l');
-        }
         if readonly {
             flags.push('r');
         }
-        if uppercase {
-            flags.push('u');
-        }
         if exported {
             flags.push('x');
+        }
+        if lowercase {
+            flags.push('l');
+        }
+        if uppercase {
+            flags.push('u');
         }
         if flags.len() > 1 {
             format!("declare {flags} {name}={rendered}")
@@ -10871,6 +10871,12 @@ impl Executor {
         }
         if is_marked_var(&self.env_vars, EXPORTED_VARS, base_name) {
             attrs.push('x');
+        }
+        if is_marked_var(&self.env_vars, LOWERCASE_VARS, base_name) {
+            attrs.push('l');
+        }
+        if is_marked_var(&self.env_vars, UPPERCASE_VARS, base_name) {
+            attrs.push('u');
         }
         attrs
     }

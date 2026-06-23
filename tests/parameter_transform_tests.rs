@@ -66,7 +66,7 @@ fn test_parameter_transform_prints_assignment() {
 fn test_parameter_transform_assignment_includes_attributes() {
     let output_path = "target/rubash-param-transform-assignment-attrs-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("export x=value; readonly r=value; declare -i n=7; printf '<%s>\\n' \"${{x@A}}\" \"${{r@A}}\" \"${{n@A}}\" > {output_path}");
+    let input = format!("export x=value; readonly r=value; declare -i n=7; declare -lrx lr=ABC; declare -ux ux=abc; printf '<%s>\\n' \"${{x@A}}\" \"${{r@A}}\" \"${{n@A}}\" \"${{lr@A}}\" \"${{ux@A}}\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -77,7 +77,7 @@ fn test_parameter_transform_assignment_includes_attributes() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<declare -x x='value'>\n<declare -r r='value'>\n<declare -i n='7'>\n"
+        "<declare -x x='value'>\n<declare -r r='value'>\n<declare -i n='7'>\n<declare -rxl lr='abc'>\n<declare -xu ux='ABC'>\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -148,7 +148,7 @@ fn test_parameter_transform_prints_attributes() {
 fn test_parameter_transform_prints_combined_attributes() {
     let output_path = "target/rubash-param-transform-combined-attrs-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("declare -ix xi=7; readonly -a ra=(alpha); printf '<%s>\\n' \"${{xi@a}}\" \"${{ra@a}}\" > {output_path}");
+    let input = format!("declare -ix xi=7; readonly -a ra=(alpha); declare -lrx lr=ABC; declare -ux ux=abc; printf '<%s>\\n' \"${{xi@a}}\" \"${{ra@a}}\" \"${{lr@a}}\" \"${{ux@a}}\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -157,7 +157,10 @@ fn test_parameter_transform_prints_combined_attributes() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ix>\n<ar>\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<ix>\n<ar>\n<rxl>\n<xu>\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 
