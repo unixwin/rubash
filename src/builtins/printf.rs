@@ -14,6 +14,8 @@ struct FormatSpec {
     left_adjust: bool,
     zero_pad: bool,
     alternate_form: bool,
+    explicit_sign: bool,
+    leading_space_sign: bool,
     width: Option<usize>,
     width_from_arg: bool,
     precision: Option<usize>,
@@ -163,7 +165,9 @@ where
             '-' => spec.left_adjust = true,
             '0' => spec.zero_pad = true,
             '#' => spec.alternate_form = true,
-            '+' | ' ' | '\'' => {}
+            '+' => spec.explicit_sign = true,
+            ' ' => spec.leading_space_sign = true,
+            '\'' => {}
             _ => break,
         }
         chars.next();
@@ -233,7 +237,7 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
         'q' => truncate_precision(shell_quote(value), spec.precision),
         'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
         'c' => value.chars().next().unwrap_or('\0').to_string(),
-        'd' | 'i' => parse_i64(value).to_string(),
+        'd' | 'i' => format_signed_integer(parse_i64(value), spec),
         'u' => (parse_i64(value) as u64).to_string(),
         'x' => format_integer_with_alternate(parse_i64(value), 16, false, spec.alternate_form),
         'X' => format_integer_with_alternate(parse_i64(value), 16, true, spec.alternate_form),
@@ -296,6 +300,18 @@ fn format_integer_with_alternate(
     }
 }
 
+fn format_signed_integer(value: i64, spec: &FormatSpec) -> String {
+    if value < 0 {
+        value.to_string()
+    } else if spec.explicit_sign {
+        format!("+{value}")
+    } else if spec.leading_space_sign {
+        format!(" {value}")
+    } else {
+        value.to_string()
+    }
+}
+
 fn apply_width(value: String, spec: &FormatSpec) -> String {
     let Some(width) = spec.width else {
         return value;
@@ -316,6 +332,11 @@ fn apply_width(value: String, spec: &FormatSpec) -> String {
 
     if spec.left_adjust {
         format!("{value}{padding}")
+    } else if spec.zero_pad && matches!(value.chars().next(), Some('+' | '-' | ' ')) {
+        let mut chars = value.chars();
+        let sign = chars.next().unwrap_or_default();
+        let rest: String = chars.collect();
+        format!("{sign}{padding}{rest}")
     } else {
         format!("{padding}{value}")
     }
@@ -607,6 +628,22 @@ mod tests {
         assert_eq!(
             run(&["%#o:%#x:%#X:%#o:%#x", "115", "115", "115", "0", "0"]).1,
             "0163:0x73:0X73:0:0"
+        );
+    }
+
+    #[test]
+    fn signed_integer_formats_honor_sign_flags_and_zero_padding() {
+        assert_eq!(
+            run(&[
+                "<%+d><% d><%+5d><%05d><%+05d>",
+                "42",
+                "42",
+                "42",
+                "-42",
+                "42"
+            ])
+            .1,
+            "<+42>< 42><  +42><-0042><+0042>"
         );
     }
 }
