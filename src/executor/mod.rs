@@ -16,7 +16,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
-use self::path::{find_shell, find_user_command, shell_path_to_windows, should_run_with_shell};
+use self::path::{
+    find_shell, find_user_command, shell_path_to_windows, should_run_with_shell, standard_path,
+};
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
@@ -1794,11 +1796,14 @@ impl Executor {
                         }
                         crate::builtins::command::CommandAction::Execute {
                             words,
-                            use_standard_path: _,
+                            use_standard_path,
                         } => {
                             let mut command = cmd.clone();
                             command.words = words;
-                            self.execute_command_without_aliases(&command)
+                            self.execute_command_without_aliases_with_path(
+                                &command,
+                                use_standard_path,
+                            )
                         }
                     }
                 }
@@ -4202,11 +4207,11 @@ impl Executor {
                 }
                 crate::builtins::command::CommandAction::Execute {
                     words,
-                    use_standard_path: _,
+                    use_standard_path,
                 } => {
                     let mut command = cmd.clone();
                     command.words = words;
-                    self.execute_command_without_aliases(&command)
+                    self.execute_command_without_aliases_with_path(&command, use_standard_path)
                 }
             },
             "printf" => {
@@ -4224,6 +4229,30 @@ impl Executor {
             "shift" => self.execute_shift_command(cmd),
             _ => self.execute_external(cmd),
         }
+    }
+
+    fn execute_command_without_aliases_with_path(
+        &mut self,
+        cmd: &CommandNode,
+        use_standard_path: bool,
+    ) -> Result<(), ExecuteError> {
+        if !use_standard_path {
+            return self.execute_command_without_aliases(cmd);
+        }
+
+        let saved_path = self.env_vars.get("PATH").cloned();
+        self.env_vars
+            .insert("PATH".to_string(), standard_path(&self.env_vars));
+        let result = self.execute_command_without_aliases(cmd);
+        match saved_path {
+            Some(path) => {
+                self.env_vars.insert("PATH".to_string(), path);
+            }
+            None => {
+                self.env_vars.remove("PATH");
+            }
+        }
+        result
     }
 
     fn execute_builtin_direct_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
