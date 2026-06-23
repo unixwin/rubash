@@ -6231,6 +6231,48 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_trap_accepts_common_signal_names() {
+        let output_path = "target/rubash-trap-common-signals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "trap 'echo pipe' PIPE; trap 'echo alarm' 14; trap -p SIGPIPE ALRM > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trap -- 'echo pipe' SIGPIPE\ntrap -- 'echo alarm' SIGALRM\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_trap_accepts_realtime_signal_names() {
+        let output_path = "target/rubash-trap-realtime-signals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo rt' RTMIN+1; trap -p SIGRTMIN+1 > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trap -- 'echo rt' SIGRTMIN+1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_exit_runs_exit_trap_and_preserves_status() {
         let output_path = "target/rubash-exit-trap-output.txt";
         let _ = fs::remove_file(output_path);
