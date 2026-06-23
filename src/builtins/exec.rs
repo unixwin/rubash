@@ -34,24 +34,38 @@ where
     let mut index = 0;
 
     while let Some(arg) = args.get(index) {
-        match arg.as_str() {
-            "-c" => clean_env = true,
-            "-l" => login = true,
-            "-a" => {
-                index += 1;
-                let Some(name) = args.get(index) else {
-                    writeln!(stderr, "rubash: exec: -a: option requires an argument")?;
+        let Some(options) = arg.strip_prefix('-') else {
+            break;
+        };
+        if options.is_empty() {
+            break;
+        }
+
+        for (offset, option) in options.char_indices() {
+            match option {
+                'c' => clean_env = true,
+                'l' => login = true,
+                'a' => {
+                    let rest = &options[offset + option.len_utf8()..];
+                    if !rest.is_empty() {
+                        argv0 = Some(rest.to_string());
+                        break;
+                    }
+                    index += 1;
+                    let Some(name) = args.get(index) else {
+                        writeln!(stderr, "rubash: exec: -a: option requires an argument")?;
+                        write_usage(stderr)?;
+                        return Ok(EX_BADUSAGE);
+                    };
+                    argv0 = Some(name.clone());
+                    break;
+                }
+                _ => {
+                    writeln!(stderr, "rubash: exec: -{option}: invalid option")?;
                     write_usage(stderr)?;
                     return Ok(EX_BADUSAGE);
-                };
-                argv0 = Some(name.clone());
+                }
             }
-            _ if arg.starts_with('-') => {
-                writeln!(stderr, "rubash: exec: {arg}: invalid option")?;
-                write_usage(stderr)?;
-                return Ok(EX_BADUSAGE);
-            }
-            _ => break,
         }
         index += 1;
     }

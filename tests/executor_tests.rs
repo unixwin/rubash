@@ -4713,6 +4713,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exec_combined_options_set_login_argv0() {
+        let output_path = "target/rubash-exec-combined-options-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("exec -la custom sh -c 'echo $0' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "-custom\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_exec_a_accepts_attached_argument() {
+        let output_path = "target/rubash-exec-a-attached-argument-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("exec -acustom sh -c 'echo $0' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_exec_invalid_option_redirects_stderr() {
         let output_path = "target/rubash-exec-invalid-option-output.txt";
         let error_path = "target/rubash-exec-invalid-option-error.txt";
