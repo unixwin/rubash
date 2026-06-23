@@ -19,6 +19,7 @@ const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
+const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 
 /// Execute `set` with arguments after the command name.
 pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -486,33 +487,45 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
-    if is_unsettable_bash_variable(name) {
+    let unset_name = if !options.nameref && is_marked_variable(env_vars, NAMEREF_VARS, name) {
+        env_vars
+            .get(name)
+            .filter(|target| valid_identifier(target))
+            .map(String::as_str)
+            .unwrap_or(name)
+    } else {
+        name
+    };
+
+    if is_unsettable_bash_variable(unset_name) {
         writeln!(
             stderr,
-            "{}unset: {name}: cannot unset",
+            "{}unset: {unset_name}: cannot unset",
             diagnostic_prefix(env_vars)
         )?;
         return Ok(EXECUTION_FAILURE);
     }
 
-    if is_marked_variable(env_vars, READONLY_VARS, name) {
+    if is_marked_variable(env_vars, READONLY_VARS, unset_name) {
         writeln!(
             stderr,
-            "{}unset: {name}: cannot unset: readonly variable",
+            "{}unset: {unset_name}: cannot unset: readonly variable",
             diagnostic_prefix(env_vars)
         )?;
         return Ok(EXECUTION_FAILURE);
     }
 
-    env_vars.remove(name);
-    env::remove_var(name);
-    unmark_variable(env_vars, EXPORTED_VARS, name);
-    unmark_variable(env_vars, READONLY_VARS, name);
-    unmark_variable(env_vars, ARRAY_VARS, name);
-    unmark_variable(env_vars, ASSOC_VARS, name);
-    unmark_variable(env_vars, INTEGER_VARS, name);
-    unmark_variable(env_vars, UPPERCASE_VARS, name);
-    unmark_variable(env_vars, LOWERCASE_VARS, name);
+    let unset_name = unset_name.to_string();
+    env_vars.remove(&unset_name);
+    env::remove_var(&unset_name);
+    unmark_variable(env_vars, EXPORTED_VARS, &unset_name);
+    unmark_variable(env_vars, READONLY_VARS, &unset_name);
+    unmark_variable(env_vars, ARRAY_VARS, &unset_name);
+    unmark_variable(env_vars, ASSOC_VARS, &unset_name);
+    unmark_variable(env_vars, INTEGER_VARS, &unset_name);
+    unmark_variable(env_vars, UPPERCASE_VARS, &unset_name);
+    unmark_variable(env_vars, LOWERCASE_VARS, &unset_name);
+    unmark_variable(env_vars, NAMEREF_VARS, &unset_name);
     Ok(EXECUTION_SUCCESS)
 }
 

@@ -3479,16 +3479,20 @@ impl Executor {
             return Ok(function_status);
         }
 
-        let mut variable_names = Vec::new();
+        let mut variable_args: Vec<String> = args
+            .iter()
+            .filter(|arg| arg.starts_with('-') && arg.as_str() != "-f")
+            .cloned()
+            .collect();
         for name in names {
             if self.unset_array_element(&name) {
                 continue;
             }
-            variable_names.push(name);
+            variable_args.push(name);
         }
 
         let variable_status = crate::builtins::set::unset_with_stderr(
-            variable_names.iter().map(String::as_str),
+            variable_args.iter().map(String::as_str),
             &mut self.env_vars,
             stderr,
         )
