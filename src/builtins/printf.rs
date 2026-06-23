@@ -258,7 +258,7 @@ fn truncate_precision(value: String, precision: Option<usize>) -> String {
 }
 
 fn format_float(value: &str, precision: Option<usize>, mode: char) -> String {
-    let value = value.parse::<f64>().unwrap_or(0.0);
+    let value = parse_f64(value);
     match (mode, precision) {
         ('e', Some(precision)) => format!("{value:.precision$e}"),
         ('E', Some(precision)) => format!("{value:.precision$E}"),
@@ -295,9 +295,25 @@ fn apply_width(value: String, spec: &FormatSpec) -> String {
 }
 
 fn parse_i64(value: &str) -> i64 {
-    value
-        .parse::<i64>()
-        .unwrap_or_else(|_| value.chars().next().map(|ch| ch as i64).unwrap_or_default())
+    if let Some(ch) = printf_char_constant(value) {
+        return ch as i64;
+    }
+    value.parse::<i64>().unwrap_or_default()
+}
+
+fn parse_f64(value: &str) -> f64 {
+    if let Some(ch) = printf_char_constant(value) {
+        return ch as u32 as f64;
+    }
+    value.parse::<f64>().unwrap_or_default()
+}
+
+fn printf_char_constant(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some('\'') | Some('"') => chars.next(),
+        _ => None,
+    }
 }
 
 fn expand_format_escape<I>(chars: &mut std::iter::Peekable<I>) -> char
@@ -540,6 +556,22 @@ mod tests {
         assert_eq!(
             run(&["%b", "\\01017 \\1017 \\x417 \\u0041"]).1,
             "A7 A7 A7 A"
+        );
+    }
+
+    #[test]
+    fn numeric_formats_accept_bash_character_constants() {
+        assert_eq!(
+            run(&[
+                "%d:%o:%x:%.2f:%d",
+                "'string'",
+                "\"string\"",
+                "'string'",
+                "'string'",
+                "GNU"
+            ])
+            .1,
+            "115:163:73:115.00:0"
         );
     }
 }
