@@ -45,7 +45,7 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
                 index += 1;
             }
-            "--noprofile" | "--norc" => {
+            "--login" | "--noprofile" | "--norc" | "-l" => {
                 index += 1;
             }
             "-O" | "+O" => {
