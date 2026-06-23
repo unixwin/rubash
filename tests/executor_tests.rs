@@ -2184,6 +2184,36 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_p_preserves_combined_attribute_order() {
+        let output_path = target_test_path("rubash-declare-combined-attrs-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "declare -lrx RUBASH_DECLARE_LRX=ABC; declare -p RUBASH_DECLARE_LRX > {shell_output_path}; \
+             declare -ux RUBASH_DECLARE_UX=abc; declare -p RUBASH_DECLARE_UX >> {shell_output_path}; \
+             declare -irx RUBASH_DECLARE_IRX=7; declare -p RUBASH_DECLARE_IRX >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -rxl RUBASH_DECLARE_LRX=\"abc\"\n\
+declare -xu RUBASH_DECLARE_UX=\"ABC\"\n\
+declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
+        );
+        std::env::remove_var("RUBASH_DECLARE_LRX");
+        std::env::remove_var("RUBASH_DECLARE_UX");
+        std::env::remove_var("RUBASH_DECLARE_IRX");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_declare_rx_without_assignment_marks_unset_variable() {
         let output_path = target_test_path("rubash-declare-rx-unset-output.txt");
         let _ = fs::remove_file(&output_path);

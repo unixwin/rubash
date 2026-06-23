@@ -519,17 +519,17 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
     if attrs.integer {
         flags.push('i');
     }
-    if attrs.lowercase {
-        flags.push('l');
-    }
     if attrs.readonly {
         flags.push('r');
     }
-    if attrs.uppercase {
-        flags.push('u');
-    }
     if attrs.exported {
         flags.push('x');
+    }
+    if attrs.lowercase {
+        flags.push('l');
+    }
+    if attrs.uppercase {
+        flags.push('u');
     }
     (flags.len() > 1).then_some(flags)
 }
@@ -539,17 +539,17 @@ fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
     if attrs.integer {
         flags.push('i');
     }
-    if attrs.lowercase {
-        flags.push('l');
-    }
     if attrs.readonly {
         flags.push('r');
     }
-    if attrs.uppercase {
-        flags.push('u');
-    }
     if attrs.exported {
         flags.push('x');
+    }
+    if attrs.lowercase {
+        flags.push('l');
+    }
+    if attrs.uppercase {
+        flags.push('u');
     }
     flags
 }
