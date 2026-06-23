@@ -4648,6 +4648,24 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_combined_silent_raw_treats_backslash_as_literal() {
+        let output_path = "target/rubash-read-sr-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -sr value <<< 'alpha\\ beta'; printf '<%s>' \"$value\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<alpha\\ beta>");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_multiple_names_respects_backslash_escaped_custom_ifs() {
         let output_path = "target/rubash-read-escaped-custom-ifs-output.txt";
         let _ = fs::remove_file(output_path);
