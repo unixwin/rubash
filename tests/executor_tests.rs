@@ -9289,6 +9289,35 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_prints_function_here_strings_like_bash() {
+        let output_path = target_test_path("rubash-declare-function-herestr-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "a=hot; b=damn; \
+             f() {{ cat <<< \"abcde\"; cat <<< \"$a $b\"; cat <<< 'double\"quote'; }}; \
+             g() {{ cat <<< \"$@\"; }}; \
+             h() {{ cat <<< onetwothree; }}; \
+             declare -f f g h > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.contains("    cat <<< \"abcde\";\n"));
+        assert!(output.contains("    cat <<< \"$a $b\";\n"));
+        assert!(output.contains("    cat <<< 'double\"quote'\n"));
+        assert!(output.contains("    cat <<< \"$@\"\n"));
+        assert!(output.contains("    cat <<< onetwothree\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_exported_functions_are_empty_without_function_exports() {
         let output_path = "target/rubash-declare-exported-functions-output.txt";
         let _ = fs::remove_file(output_path);
