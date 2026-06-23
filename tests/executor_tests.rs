@@ -5580,6 +5580,67 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_history_without_entries_returns_success() {
+        let output_path = "target/rubash-history-empty-output.txt";
+        let status_path = "target/rubash-history-empty-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("history > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_history_clear_returns_success() {
+        let status_path = "target/rubash-history-clear-status.txt";
+        let _ = fs::remove_file(status_path);
+        let input = format!("history -c; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_history_invalid_option_returns_usage() {
+        let error_path = "target/rubash-history-invalid-error.txt";
+        let status_path = "target/rubash-history-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("history -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("history: -x: invalid option"));
+        assert!(error.contains("history: usage: history [-c] [-d offset]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_builtin_break_breaks_loop() {
         let output_path = "target/rubash-builtin-break-output.txt";
         let _ = fs::remove_file(output_path);
