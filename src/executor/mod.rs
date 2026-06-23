@@ -1876,42 +1876,7 @@ impl Executor {
                     self.do_env();
                     Ok(())
                 }
-                "set" => {
-                    if cmd.words.get(1).map(String::as_str) == Some("-o")
-                        && cmd.words.get(2).map(String::as_str) == Some("posix")
-                    {
-                        self.env_vars
-                            .insert("__RUBASH_POSIX_MODE".to_string(), "1".to_string());
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if cmd.words.get(1).map(String::as_str) == Some("+o")
-                        && cmd.words.get(2).map(String::as_str) == Some("posix")
-                    {
-                        self.env_vars.remove("__RUBASH_POSIX_MODE");
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if self.apply_simple_set_flags(&cmd.words[1..]) {
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if self.apply_set_positional_operands(&cmd.words[1..]) {
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    if cmd.words.get(1).map(String::as_str) == Some("--") {
-                        // TODO(builtins/set.def/variables.c): `set --`
-                        // replaces the shell positional parameters. Full set
-                        // option parsing lives in builtins::set; this branch
-                        // covers upstream source tests that inspect `$@`.
-                        self.positional_params = cmd.words[2..].to_vec();
-                        self.exit_code = 0;
-                        return Ok(());
-                    }
-                    self.exit_code = self.execute_set(cmd)?;
-                    Ok(())
-                }
+                "set" => self.execute_set_command(cmd),
                 "shopt" => {
                     self.exit_code = self.execute_shopt(cmd)?;
                     Ok(())
@@ -4295,10 +4260,7 @@ impl Executor {
                 self.exit_code = self.execute_help(&builtin_cmd)?;
                 Ok(())
             }
-            "set" => {
-                self.exit_code = self.execute_set(&builtin_cmd)?;
-                Ok(())
-            }
+            "set" => self.execute_set_command(&builtin_cmd),
             "shopt" => {
                 self.exit_code = self.execute_shopt(&builtin_cmd)?;
                 Ok(())
@@ -4349,6 +4311,11 @@ impl Executor {
                 command.words = args.to_vec();
                 self.exit_code = self.execute_cd(&command)?;
                 Ok(())
+            }
+            "set" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.execute_set_command(&command)
             }
             "command" => {
                 let mut command = CommandNode::new();
@@ -6809,6 +6776,43 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_set_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if cmd.words.get(1).map(String::as_str) == Some("-o")
+            && cmd.words.get(2).map(String::as_str) == Some("posix")
+        {
+            self.env_vars
+                .insert("__RUBASH_POSIX_MODE".to_string(), "1".to_string());
+            self.exit_code = 0;
+            return Ok(());
+        }
+        if cmd.words.get(1).map(String::as_str) == Some("+o")
+            && cmd.words.get(2).map(String::as_str) == Some("posix")
+        {
+            self.env_vars.remove("__RUBASH_POSIX_MODE");
+            self.exit_code = 0;
+            return Ok(());
+        }
+        if self.apply_simple_set_flags(&cmd.words[1..]) {
+            self.exit_code = 0;
+            return Ok(());
+        }
+        if self.apply_set_positional_operands(&cmd.words[1..]) {
+            self.exit_code = 0;
+            return Ok(());
+        }
+        if cmd.words.get(1).map(String::as_str) == Some("--") {
+            // TODO(builtins/set.def/variables.c): `set --` replaces shell
+            // positional parameters. Full set option parsing lives in
+            // builtins::set; this branch covers upstream source tests that
+            // inspect `$@`.
+            self.positional_params = cmd.words[2..].to_vec();
+            self.exit_code = 0;
+            return Ok(());
+        }
+        self.exit_code = self.execute_set(cmd)?;
+        Ok(())
     }
 
     fn execute_enable(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
