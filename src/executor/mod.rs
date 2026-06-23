@@ -11477,7 +11477,7 @@ impl Executor {
         self.positional_params.clone()
     }
 
-    pub(crate) fn set_positional_params(&mut self, positional_params: Vec<String>) {
+    pub fn set_positional_params(&mut self, positional_params: Vec<String>) {
         self.positional_params = positional_params;
     }
 
