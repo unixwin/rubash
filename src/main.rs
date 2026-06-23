@@ -57,7 +57,7 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 print_usage();
                 return 0;
             }
-            script => return run_script_file(executor, script),
+            script => return run_script_file(executor, script, &args[index + 1..]),
         }
     }
 
@@ -69,7 +69,7 @@ fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
     finish_shell(executor, status, false)
 }
 
-fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
+fn run_script_file(executor: &mut Executor, script: &str, args: &[String]) -> i32 {
     let path = Path::new(script);
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
@@ -80,6 +80,7 @@ fn run_script_file(executor: &mut Executor, script: &str) -> i32 {
     };
 
     executor.set_env("__RUBASH_SCRIPT_NAME", script);
+    executor.set_positional_params(args.to_vec());
     let status = run_source(executor, &contents, false);
     finish_shell(executor, status, false)
 }
