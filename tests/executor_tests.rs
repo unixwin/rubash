@@ -12171,6 +12171,94 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_nameref_reads_and_assigns_target() {
+        let output_path = target_test_path("rubash-declare-nameref-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_NAMEREF_TARGET");
+        std::env::remove_var("RUBASH_NAMEREF_REF");
+        let input = format!(
+            "RUBASH_NAMEREF_TARGET=value; declare -n RUBASH_NAMEREF_REF=RUBASH_NAMEREF_TARGET; \
+             echo read:$RUBASH_NAMEREF_REF > {shell_output_path}; \
+             RUBASH_NAMEREF_REF=changed; echo target:$RUBASH_NAMEREF_TARGET >> {shell_output_path}; \
+             declare -p RUBASH_NAMEREF_REF >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "read:value\ntarget:changed\ndeclare -n RUBASH_NAMEREF_REF=\"RUBASH_NAMEREF_TARGET\"\n"
+        );
+        std::env::remove_var("RUBASH_NAMEREF_TARGET");
+        std::env::remove_var("RUBASH_NAMEREF_REF");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_plus_n_clears_nameref_attribute() {
+        let output_path = target_test_path("rubash-declare-plus-nameref-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_NAMEREF_CLEAR_TARGET");
+        std::env::remove_var("RUBASH_NAMEREF_CLEAR_REF");
+        let input = format!(
+            "RUBASH_NAMEREF_CLEAR_TARGET=value; declare -n RUBASH_NAMEREF_CLEAR_REF=RUBASH_NAMEREF_CLEAR_TARGET; declare +n RUBASH_NAMEREF_CLEAR_REF; RUBASH_NAMEREF_CLEAR_REF=changed; \
+             echo target:$RUBASH_NAMEREF_CLEAR_TARGET ref:$RUBASH_NAMEREF_CLEAR_REF > {shell_output_path}; declare -p RUBASH_NAMEREF_CLEAR_REF >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "target:value ref:changed\ndeclare -- RUBASH_NAMEREF_CLEAR_REF=\"changed\"\n"
+        );
+        std::env::remove_var("RUBASH_NAMEREF_CLEAR_TARGET");
+        std::env::remove_var("RUBASH_NAMEREF_CLEAR_REF");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_nameref_restores_after_function() {
+        let output_path = target_test_path("rubash-local-nameref-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_LOCAL_NAMEREF_TARGET");
+        std::env::remove_var("RUBASH_LOCAL_NAMEREF_REF");
+        let input = format!(
+            "RUBASH_LOCAL_NAMEREF_TARGET=value; f() {{ local -n RUBASH_LOCAL_NAMEREF_REF=RUBASH_LOCAL_NAMEREF_TARGET; RUBASH_LOCAL_NAMEREF_REF=localchanged; \
+                    echo in:$RUBASH_LOCAL_NAMEREF_TARGET > {shell_output_path}; }}; \
+             f; echo out:$RUBASH_LOCAL_NAMEREF_TARGET >> {shell_output_path}; \
+             declare -p RUBASH_LOCAL_NAMEREF_REF 2>/dev/null || echo ref-unset >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "in:localchanged\nout:localchanged\nref-unset\n"
+        );
+        std::env::remove_var("RUBASH_LOCAL_NAMEREF_TARGET");
+        std::env::remove_var("RUBASH_LOCAL_NAMEREF_REF");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);

@@ -16,6 +16,7 @@ const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
+const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -41,6 +42,7 @@ where
     let mut integer = false;
     let mut uppercase = false;
     let mut lowercase = false;
+    let mut nameref = false;
     let mut readonly = false;
     let mut unset_export = false;
     let mut unset_array = false;
@@ -48,6 +50,7 @@ where
     let mut unset_integer = false;
     let mut unset_uppercase = false;
     let mut unset_lowercase = false;
+    let mut unset_nameref = false;
     let mut unset_readonly = false;
     let mut names = Vec::new();
 
@@ -81,6 +84,8 @@ where
                             unset_lowercase = true;
                         }
                     }
+                    'n' if set_attr => nameref = true,
+                    'n' => unset_nameref = true,
                     'r' if set_attr => readonly = true,
                     'r' => unset_readonly = true,
                     'g' => {
@@ -111,6 +116,7 @@ where
         || unset_integer
         || unset_uppercase
         || unset_lowercase
+        || unset_nameref
         || unset_readonly
     {
         let arrays = marked_vars(variables, ARRAY_VARS);
@@ -154,6 +160,9 @@ where
             }
             if unset_lowercase {
                 unmark_typed(variables, LOWERCASE_VARS, name);
+            }
+            if unset_nameref {
+                unmark_typed(variables, NAMEREF_VARS, name);
             }
         }
     }
@@ -233,6 +242,13 @@ where
             }
         }
     }
+    if nameref {
+        for name in &names {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            mark_typed(variables, NAMEREF_VARS, name);
+        }
+    }
     if readonly {
         for name in &names {
             let has_assignment = name.contains('=');
@@ -262,6 +278,7 @@ where
     let filter_integer = integer;
     let filter_uppercase = uppercase;
     let filter_lowercase = lowercase;
+    let filter_nameref = nameref;
 
     let mut status = attr_status;
     let exported = exported_vars(variables);
@@ -271,6 +288,7 @@ where
     let integers = marked_vars(variables, INTEGER_VARS);
     let uppercase = marked_vars(variables, UPPERCASE_VARS);
     let lowercase = marked_vars(variables, LOWERCASE_VARS);
+    let namerefs = marked_vars(variables, NAMEREF_VARS);
     let names_to_print = if names.is_empty() {
         declaration_names_to_print(
             variables,
@@ -281,8 +299,10 @@ where
             filter_integer,
             filter_uppercase,
             filter_lowercase,
+            filter_nameref,
             &uppercase,
             &lowercase,
+            &namerefs,
         )
     } else {
         names
@@ -301,6 +321,7 @@ where
             integer: integers.contains(&name),
             uppercase: uppercase.contains(&name),
             lowercase: lowercase.contains(&name),
+            nameref: namerefs.contains(&name),
         };
         if let Some(value) = variables.get(&name) {
             print_declaration(&name, value, attrs, stdout)?;
@@ -329,15 +350,18 @@ fn declaration_names_to_print(
     integer: bool,
     uppercase: bool,
     lowercase: bool,
+    nameref: bool,
     uppercase_vars: &HashSet<String>,
     lowercase_vars: &HashSet<String>,
+    nameref_vars: &HashSet<String>,
 ) -> Vec<String> {
     let exported = exported_vars(variables);
     let readonly_vars = marked_vars(variables, READONLY_VARS);
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
     let integers = marked_vars(variables, INTEGER_VARS);
-    let filter_by_attr = export || readonly || array || assoc || integer || uppercase || lowercase;
+    let filter_by_attr =
+        export || readonly || array || assoc || integer || uppercase || lowercase || nameref;
     let mut names: Vec<String> = variables
         .keys()
         .filter(|name| !name.starts_with("__RUBASH_"))
@@ -352,10 +376,15 @@ fn declaration_names_to_print(
                 && (!integer || integers.contains(*name))
                 && (!uppercase || uppercase_vars.contains(*name))
                 && (!lowercase || lowercase_vars.contains(*name))
+                && (!nameref || nameref_vars.contains(*name))
         })
         .cloned()
         .collect();
-    for name in exported.iter().chain(readonly_vars.iter()) {
+    for name in exported
+        .iter()
+        .chain(readonly_vars.iter())
+        .chain(nameref_vars.iter())
+    {
         if name.starts_with("__RUBASH_") {
             continue;
         }
@@ -366,7 +395,8 @@ fn declaration_names_to_print(
                 && (!assoc || assocs.contains(name))
                 && (!integer || integers.contains(name))
                 && (!uppercase || uppercase_vars.contains(name))
-                && (!lowercase || lowercase_vars.contains(name)))
+                && (!lowercase || lowercase_vars.contains(name))
+                && (!nameref || nameref_vars.contains(name)))
         {
             continue;
         }
@@ -460,11 +490,17 @@ struct DeclarationAttrs {
     integer: bool,
     uppercase: bool,
     lowercase: bool,
+    nameref: bool,
 }
 
 impl DeclarationAttrs {
     fn has_scalar_attribute(self) -> bool {
-        self.exported || self.readonly || self.integer || self.uppercase || self.lowercase
+        self.exported
+            || self.readonly
+            || self.integer
+            || self.uppercase
+            || self.lowercase
+            || self.nameref
     }
 }
 
@@ -528,6 +564,9 @@ where
 
 fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
     let mut flags = String::from("-");
+    if attrs.nameref {
+        flags.push('n');
+    }
     if attrs.integer {
         flags.push('i');
     }
@@ -548,6 +587,9 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
 
 fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
     let mut flags = String::from("-a");
+    if attrs.nameref {
+        flags.push('n');
+    }
     if attrs.integer {
         flags.push('i');
     }

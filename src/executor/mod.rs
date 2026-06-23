@@ -29,6 +29,7 @@ const READONLY_FUNCTIONS: &str = "__RUBASH_READONLY_FUNCTIONS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
+const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
@@ -650,6 +651,7 @@ struct VarAttrs {
     integer: bool,
     uppercase: bool,
     lowercase: bool,
+    nameref: bool,
     array: bool,
     assoc: bool,
 }
@@ -9446,6 +9448,10 @@ impl Executor {
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
         let (base_name, append) = assignment_name_and_append(name);
+        let target_name = self
+            .nameref_target_name(base_name)
+            .unwrap_or_else(|| base_name.to_string());
+        let base_name = target_name.as_str();
         if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", base_name) {
             eprintln!(
                 "{}{}: readonly variable",
@@ -9538,6 +9544,34 @@ impl Executor {
         } else {
             value
         }
+    }
+
+    fn nameref_target_name(&self, name: &str) -> Option<String> {
+        let mut current = name;
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            if !seen.insert(current.to_string())
+                || !is_marked_var(&self.env_vars, NAMEREF_VARS, current)
+            {
+                return None;
+            }
+            let target = self.env_vars.get(current)?;
+            if !is_shell_name(target) {
+                return None;
+            }
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, target) {
+                return Some(target.clone());
+            }
+            current = target;
+        }
+        None
+    }
+
+    fn shell_variable_value(&self, name: &str) -> Option<String> {
+        if let Some(target) = self.nameref_target_name(name) {
+            return self.env_vars.get(&target).cloned();
+        }
+        self.env_vars.get(name).cloned()
     }
 
     fn eval_integer_assignment_value(&self, value: &str) -> i128 {
@@ -10246,7 +10280,10 @@ impl Executor {
             }
             return self
                 .dynamic_parameter_value(name)
-                .or_else(|| self.env_vars.get(name).map(|value| shell_safe_value(value)))
+                .or_else(|| {
+                    self.shell_variable_value(name)
+                        .map(|value| shell_safe_value(&value))
+                })
                 .unwrap_or_default();
         }
 
@@ -10254,7 +10291,7 @@ impl Executor {
             if is_shell_name(name) {
                 return self
                     .dynamic_parameter_value(name)
-                    .or_else(|| self.env_vars.get(name).cloned())
+                    .or_else(|| self.shell_variable_value(name))
                     .unwrap_or_default();
             }
         }
@@ -10321,7 +10358,10 @@ impl Executor {
         if is_shell_name(name) {
             return self
                 .dynamic_parameter_value(name)
-                .or_else(|| self.env_vars.get(name).map(|value| shell_safe_value(value)))
+                .or_else(|| {
+                    self.shell_variable_value(name)
+                        .map(|value| shell_safe_value(&value))
+                })
                 .unwrap_or_default();
         }
 
@@ -11928,9 +11968,7 @@ impl Executor {
                         name.push(name_ch);
                     }
                     if let Some(value) = self.dynamic_parameter_value(&name).or_else(|| {
-                        self.env_vars
-                            .get(&name)
-                            .cloned()
+                        self.shell_variable_value(&name)
                             .or_else(|| std::env::var(&name).ok())
                     }) {
                         output.push_str(&shell_safe_value(&value));
@@ -15007,6 +15045,7 @@ fn capture_var_attrs(env_vars: &HashMap<String, String>, name: &str) -> VarAttrs
         integer: is_marked_var(env_vars, INTEGER_VARS, name),
         uppercase: is_marked_var(env_vars, UPPERCASE_VARS, name),
         lowercase: is_marked_var(env_vars, LOWERCASE_VARS, name),
+        nameref: is_marked_var(env_vars, NAMEREF_VARS, name),
         array: is_marked_var(env_vars, ARRAY_VARS, name),
         assoc: is_marked_var(env_vars, ASSOC_VARS, name),
     }
@@ -15018,6 +15057,7 @@ fn set_var_attrs(env_vars: &mut HashMap<String, String>, name: &str, attrs: VarA
     set_marked_var(env_vars, INTEGER_VARS, name, attrs.integer);
     set_marked_var(env_vars, UPPERCASE_VARS, name, attrs.uppercase);
     set_marked_var(env_vars, LOWERCASE_VARS, name, attrs.lowercase);
+    set_marked_var(env_vars, NAMEREF_VARS, name, attrs.nameref);
     set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
     set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
 }
