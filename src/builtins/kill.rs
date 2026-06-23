@@ -25,7 +25,18 @@ where
 
     match args.get(1).map(String::as_str) {
         None => {
-            writeln!(stdout, " 1) SIGHUP  2) SIGINT")?;
+            writeln!(
+                stdout,
+                " 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP"
+            )?;
+            writeln!(
+                stdout,
+                " 6) SIGABRT\t 7) SIGEMT\t 8) SIGFPE\t 9) SIGKILL\t10) SIGBUS"
+            )?;
+            writeln!(
+                stdout,
+                "11) SIGSEGV\t12) SIGSYS\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM"
+            )?;
             Ok(0)
         }
         Some("0") => {
