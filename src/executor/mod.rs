@@ -2160,7 +2160,7 @@ impl Executor {
                     Ok(())
                 }
                 _ if self.functions.contains_key(word.as_str()) => {
-                    self.execute_function(word, &cmd.words[1..], cmd.line)
+                    self.execute_function(word, &cmd.words[1..], cmd)
                 }
                 _ => self.execute_external(cmd),
             }
@@ -2202,14 +2202,15 @@ impl Executor {
         &mut self,
         name: &str,
         args: &[String],
-        call_line: Option<usize>,
+        call_cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let Some(body) = self.functions.get(name).cloned() else {
+        let Some(mut body) = self.functions.get(name).cloned() else {
             return Ok(());
         };
         if self.execute_upstream_cprint_function(name) {
             return Ok(());
         }
+        self.apply_function_call_redirects(&mut body, call_cmd)?;
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_funcname = self.env_vars.get("FUNCNAME").cloned();
         let old_bash_argc = self.env_vars.get("BASH_ARGC").cloned();
@@ -2231,7 +2232,7 @@ impl Executor {
         funcname_stack.insert(0, name.to_string());
         store_indexed_array(&mut self.env_vars, "FUNCNAME", funcname_stack);
         let mut lineno_stack = self.indexed_array_stack("BASH_LINENO");
-        lineno_stack.insert(0, call_line.unwrap_or(0).to_string());
+        lineno_stack.insert(0, call_cmd.line.unwrap_or(0).to_string());
         store_indexed_array(&mut self.env_vars, "BASH_LINENO", lineno_stack);
         let mut source_stack = self.indexed_array_stack("BASH_SOURCE");
         source_stack.insert(0, self.current_bash_source());
@@ -2291,6 +2292,56 @@ impl Executor {
             }
             other => other,
         }
+    }
+
+    fn apply_function_call_redirects(
+        &self,
+        body: &mut [CommandNode],
+        call_cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &call_cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            self.create_redirect_output(&target, redirect.clobber)?;
+            let append_redirect = Redirect {
+                append: true,
+                ..redirect.clone()
+            };
+            for command in body.iter_mut() {
+                if command.redirect_out.is_none() && command.append.is_none() {
+                    command.append = Some(append_redirect.clone());
+                }
+            }
+        } else if let Some(redirect) = &call_cmd.append {
+            for command in body.iter_mut() {
+                if command.redirect_out.is_none() && command.append.is_none() {
+                    command.append = Some(redirect.clone());
+                }
+            }
+        }
+
+        if let Some(redirect) = &call_cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let append_redirect = Redirect {
+                append: true,
+                ..redirect.clone()
+            };
+            for command in body.iter_mut() {
+                if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
+                    command.redirect_err_append = Some(append_redirect.clone());
+                }
+            }
+        } else if let Some(redirect) = &call_cmd.redirect_err_append {
+            for command in body.iter_mut() {
+                if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
+                    command.redirect_err_append = Some(redirect.clone());
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn save_local_names(&mut self, args: &[String]) {
