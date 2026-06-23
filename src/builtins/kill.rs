@@ -28,8 +28,16 @@ where
             writeln!(stdout, " 1) SIGHUP  2) SIGINT")?;
             Ok(0)
         }
+        Some("0") => {
+            writeln!(stdout, "EXIT")?;
+            Ok(0)
+        }
         Some("1") | Some("129") => {
             writeln!(stdout, "HUP")?;
+            Ok(0)
+        }
+        Some("EXIT") | Some("SIGEXIT") => {
+            writeln!(stdout, "0")?;
             Ok(0)
         }
         Some("HUP") | Some("SIGHUP") => {
@@ -57,7 +65,9 @@ pub fn list_first_signal_for_sed() -> &'static str {
 
 pub fn translate_signal(value: &str) -> Option<&'static str> {
     match value {
+        "0" => Some("EXIT"),
         "1" | "129" => Some("HUP"),
+        "EXIT" | "SIGEXIT" => Some("0"),
         "HUP" | "SIGHUP" => Some("1"),
         "INT" | "SIGINT" => Some("2"),
         _ => None,
