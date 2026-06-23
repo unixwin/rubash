@@ -11460,8 +11460,12 @@ impl Executor {
         crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
     }
 
-    pub fn set_shopt_option(&mut self, name: &str, enabled: bool) {
+    pub fn set_shopt_option(&mut self, name: &str, enabled: bool) -> bool {
+        if !crate::builtins::shopt::is_supported_option(name) {
+            return false;
+        }
         crate::builtins::shopt::set_option(&mut self.env_vars, name, enabled);
+        true
     }
 
     fn restore_shell_env(&mut self, saved_env: HashMap<String, String>) {

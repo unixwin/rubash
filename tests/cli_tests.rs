@@ -153,6 +153,21 @@ fn cli_plus_shopt_options_disable_previous_options() {
 }
 
 #[test]
+fn invalid_cli_shopt_option_fails_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-O")
+        .arg("no_such_shopt")
+        .arg("-c")
+        .arg("echo should-not-run")
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid shell option name"));
+}
+
+#[test]
 fn stdin_script_uses_s_positional_arguments() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")

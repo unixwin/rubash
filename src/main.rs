@@ -47,7 +47,10 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
             }
             "-O" | "+O" => {
                 if let Some(option) = args.get(index + 1) {
-                    executor.set_shopt_option(option, args[index] == "-O");
+                    if !executor.set_shopt_option(option, args[index] == "-O") {
+                        eprintln!("rubash: {option}: invalid shell option name");
+                        return 2;
+                    }
                     index += 2;
                 } else {
                     eprintln!("rubash: {}: option requires an argument", args[index]);
