@@ -9819,6 +9819,12 @@ impl Executor {
                     return self.positional_params.last().cloned().unwrap_or_default();
                 }
 
+                if is_shell_name(indirect_name) {
+                    if let Some(target_name) = self.nameref_target_name(indirect_name) {
+                        return target_name;
+                    }
+                }
+
                 let target_name = if let Ok(index) = indirect_name.parse::<usize>() {
                     self.positional_params
                         .get(index.saturating_sub(1))
