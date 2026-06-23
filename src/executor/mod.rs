@@ -6183,18 +6183,24 @@ impl Executor {
                     index += 2;
                 }
                 "-n" => {
-                    char_limit = cmd
-                        .words
-                        .get(index + 1)
-                        .and_then(|word| word.parse::<usize>().ok());
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            eprintln!("{}read: {word}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = false;
                     index += 2;
                 }
                 "-N" => {
-                    char_limit = cmd
-                        .words
-                        .get(index + 1)
-                        .and_then(|word| word.parse::<usize>().ok());
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            eprintln!("{}read: {word}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = true;
                     index += 2;
                 }
@@ -6237,23 +6243,47 @@ impl Executor {
                 }
                 word if word.starts_with("-rn") && word.len() > 3 => {
                     raw = true;
-                    char_limit = word[3..].parse::<usize>().ok();
+                    char_limit = match read_char_limit_argument(Some(&word[3..])) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = false;
                     index += 1;
                 }
                 word if word.starts_with("-rN") && word.len() > 3 => {
                     raw = true;
-                    char_limit = word[3..].parse::<usize>().ok();
+                    char_limit = match read_char_limit_argument(Some(&word[3..])) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = true;
                     index += 1;
                 }
                 word if word.starts_with("-n") && word.len() > 2 => {
-                    char_limit = word[2..].parse::<usize>().ok();
+                    char_limit = match read_char_limit_argument(Some(&word[2..])) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = false;
                     index += 1;
                 }
                 word if word.starts_with("-N") && word.len() > 2 => {
-                    char_limit = word[2..].parse::<usize>().ok();
+                    char_limit = match read_char_limit_argument(Some(&word[2..])) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
+                            return 1;
+                        }
+                    };
                     exact_char_limit = true;
                     index += 1;
                 }
@@ -11049,6 +11079,20 @@ fn print_posix_time() {
     println!("real 0.00");
     println!("user 0.00");
     println!("sys 0.00");
+}
+
+fn read_char_limit_argument<S>(word: Option<&S>) -> Result<Option<usize>, String>
+where
+    S: AsRef<str> + ?Sized,
+{
+    let Some(word) = word else {
+        return Ok(None);
+    };
+    let value = word.as_ref();
+    value
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|_| value.to_string())
 }
 
 fn read_stdin_until(
