@@ -6215,14 +6215,17 @@ impl Executor {
         }
 
         if let Some(name) = array_name {
-            let value = if let Some(mut line) =
+            let value = if let Some(line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
-                if !raw {
-                    line = unescape_read_backslashes(&line);
-                }
-                let values =
-                    split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str));
+                let values = if raw {
+                    split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str))
+                } else {
+                    split_read_array_words_with_backslashes(
+                        &line,
+                        self.env_vars.get("IFS").map(String::as_str),
+                    )
+                };
                 read_array_storage(&values)
             } else {
                 // TODO(builtins/read.def/redir.c): This preserves the existing
@@ -11019,6 +11022,110 @@ fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
             .collect(),
         _ => line.split_whitespace().map(str::to_string).collect(),
     }
+}
+
+fn split_read_array_words_with_backslashes(line: &str, ifs: Option<&str>) -> Vec<String> {
+    match ifs {
+        Some("/") => split_escaped_words(line, '/'),
+        Some(ifs) if !ifs.is_empty() => split_escaped_words_on_set(line, ifs),
+        _ => split_escaped_words_on_whitespace(line),
+    }
+}
+
+fn split_escaped_words_on_whitespace(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some('\r') if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                }
+                Some(next) => current.push(next),
+                None => {}
+            }
+            continue;
+        }
+
+        if ch.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn split_escaped_words_on_set(line: &str, separators: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some('\r') if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                }
+                Some(next) => current.push(next),
+                None => {}
+            }
+            continue;
+        }
+
+        if separators.contains(ch) {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn split_escaped_words(line: &str, separator: char) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some('\r') if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                }
+                Some(next) => current.push(next),
+                None => {}
+            }
+            continue;
+        }
+
+        if ch == separator {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
 }
 
 fn read_array_storage(values: &[String]) -> String {
