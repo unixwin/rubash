@@ -166,6 +166,9 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
             .strip_suffix('+')
             .map(|base| (base, true))
             .unwrap_or((var_name, false));
+        if is_noassign_bash_array(var_name) {
+            continue;
+        }
         let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
             compound
         } else if value.is_empty() && var_name == "assoc" {
@@ -412,6 +415,13 @@ fn parse_array_words(value: &str) -> Vec<String> {
         return vec![value.to_string()];
     };
     inner.split_whitespace().map(str::to_string).collect()
+}
+
+fn is_noassign_bash_array(name: &str) -> bool {
+    matches!(
+        name,
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE"
+    )
 }
 
 fn parse_assoc_words(value: &str) -> Vec<(String, String)> {

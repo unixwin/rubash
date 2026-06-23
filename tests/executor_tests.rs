@@ -850,6 +850,85 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_call_stack_arrays_are_initialized() {
+        let output_path = "target/rubash-bash-call-stack-arrays-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("declare -p BASH_ARGC BASH_ARGV BASH_LINENO BASH_SOURCE > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./call-stack.tests");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("declare -a BASH_ARGC=()\n"));
+        assert!(output.contains("declare -a BASH_ARGV=()\n"));
+        assert!(output.contains("declare -a BASH_LINENO=([0]=\"0\")\n"));
+        assert!(output.contains("declare -a BASH_SOURCE=([0]=\"./call-stack.tests\")\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_call_stack_arrays_ignore_assignment() {
+        let output_path = "target/rubash-bash-call-stack-noassign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "BASH_ARGC=(xxx); echo argc:$?:${{#BASH_ARGC[@]}} > {output_path}; \
+             declare BASH_ARGV[1]=foo; echo argv:$?:${{#BASH_ARGV[@]}} >> {output_path}; \
+             BASH_SOURCE[0]=other; echo source:$?:${{BASH_SOURCE[0]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./call-stack.tests");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "argc:0:0\nargv:0:0\nsource:0:./call-stack.tests\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_call_stack_arrays_cannot_be_unset() {
+        let output_path = "target/rubash-bash-call-stack-unset-output.txt";
+        let error_path = "target/rubash-bash-call-stack-unset-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "unset -v BASH_LINENO BASH_SOURCE 2> {error_path}; \
+             echo status:$? > {output_path}; \
+             echo values:${{BASH_LINENO[0]}}:${{BASH_SOURCE[0]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./call-stack-unset.case");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "status:1\nvalues:0:./call-stack-unset.case\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("unset: BASH_LINENO: cannot unset"));
+        assert!(error.contains("unset: BASH_SOURCE: cannot unset"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_uid_and_euid_are_readonly_nonzero_ids() {
         let output_path = "target/rubash-uid-output.txt";
         let _ = fs::remove_file(output_path);

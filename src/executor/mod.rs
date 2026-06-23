@@ -649,6 +649,10 @@ impl Executor {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
+        env_vars.remove("__RUBASH_SCRIPT_NAME");
+        env::remove_var("__RUBASH_CURRENT_FUNCTION");
+        env::remove_var("__RUBASH_IN_SOURCE");
+        env::remove_var("__RUBASH_SCRIPT_NAME");
         env_vars.remove("BASH_ARGV0");
         env_vars.entry("PWD".to_string()).or_insert_with(|| {
             std::env::current_dir()
@@ -678,6 +682,10 @@ impl Executor {
             .or_insert_with(bash_version_value);
         store_indexed_array(&mut env_vars, "BASH_VERSINFO", bash_versinfo_values());
         mark_env_name(&mut env_vars, READONLY_VARS, "BASH_VERSINFO");
+        store_indexed_array(&mut env_vars, "BASH_ARGC", Vec::new());
+        store_indexed_array(&mut env_vars, "BASH_ARGV", Vec::new());
+        store_indexed_array(&mut env_vars, "BASH_LINENO", vec!["0".to_string()]);
+        store_indexed_array(&mut env_vars, "BASH_SOURCE", Vec::new());
         env_vars
             .entry("HOSTTYPE".to_string())
             .or_insert_with(hosttype_value);
@@ -7933,6 +7941,10 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        if is_noassign_bash_array(name) {
+            self.exit_code = 0;
+            return true;
+        }
         if is_marked_var(&self.env_vars, READONLY_VARS, name) {
             eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
             self.exit_code = 1;
@@ -8094,6 +8106,9 @@ impl Executor {
             return;
         }
         if base_name == "BASH_COMMAND" && !append {
+            return;
+        }
+        if is_noassign_bash_array(base_name) && !append {
             return;
         }
         let value = if append {
@@ -11206,6 +11221,9 @@ impl Executor {
     pub fn set_env(&mut self, name: &str, value: &str) {
         self.env_vars.insert(name.to_string(), value.to_string());
         env::set_var(name, value);
+        if name == "__RUBASH_SCRIPT_NAME" {
+            store_indexed_array(&mut self.env_vars, "BASH_SOURCE", vec![value.to_string()]);
+        }
     }
 
     pub(crate) fn remove_env(&mut self, name: &str) {
@@ -12708,6 +12726,9 @@ impl ConditionalArithParser<'_> {
     }
 
     fn set_variable(&mut self, name: &str, value: i128) {
+        if is_noassign_bash_array(name) {
+            return;
+        }
         let value = value.to_string();
         if name == "RANDOM" {
             if let Some(state) = self.random_state {
@@ -12719,6 +12740,9 @@ impl ConditionalArithParser<'_> {
     }
 
     fn set_array_element(&mut self, name: &str, index: usize, value: i128) {
+        if is_noassign_bash_array(name) {
+            return;
+        }
         let mut entries = self
             .env_vars
             .get(name)
@@ -14144,6 +14168,13 @@ fn store_indexed_array(env_vars: &mut HashMap<String, String>, name: &str, value
     let entries = values.into_iter().enumerate().collect();
     env_vars.insert(name.to_string(), format_indexed_array_storage(entries));
     mark_env_name(env_vars, ARRAY_VARS, name);
+}
+
+fn is_noassign_bash_array(name: &str) -> bool {
+    matches!(
+        name,
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE"
+    )
 }
 
 fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: bool) -> Vec<String> {
