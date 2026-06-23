@@ -2785,6 +2785,53 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_umask_symbolic_modes_update_mask() {
+        let output_path = "target/rubash-umask-symbolic-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "umask 022; umask u=rwx,g=rx,o=; umask > {output_path}; \
+             umask -S >> {output_path}; umask a+r; umask >> {output_path}; \
+             umask -S >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0027\nu=rwx,g=rx,o=\n0023\nu=rwx,g=rx,o=r\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_umask_symbolic_modes_copy_permissions() {
+        let output_path = "target/rubash-umask-symbolic-copy-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "umask 022; umask g+u,o+rwx-u; umask -S > {output_path}; \
+             umask 022; umask o=u; umask -p -S >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "u=rwx,g=rwx,o=\numask -S u=rwx,g=rx,o=rwx\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_umask_redirects_stderr() {
         let error_path = "target/rubash-umask-stderr-output.txt";
         let status_path = "target/rubash-umask-stderr-status.txt";
