@@ -40,6 +40,14 @@ where
             writeln!(stdout, "INT")?;
             Ok(0)
         }
+        Some("3") | Some("131") => {
+            writeln!(stdout, "QUIT")?;
+            Ok(0)
+        }
+        Some("9") | Some("137") => {
+            writeln!(stdout, "KILL")?;
+            Ok(0)
+        }
         Some("15") | Some("143") => {
             writeln!(stdout, "TERM")?;
             Ok(0)
@@ -54,6 +62,14 @@ where
         }
         Some("INT") | Some("SIGINT") => {
             writeln!(stdout, "2")?;
+            Ok(0)
+        }
+        Some("QUIT") | Some("SIGQUIT") => {
+            writeln!(stdout, "3")?;
+            Ok(0)
+        }
+        Some("KILL") | Some("SIGKILL") => {
+            writeln!(stdout, "9")?;
             Ok(0)
         }
         Some("TERM") | Some("SIGTERM") => {
@@ -80,10 +96,14 @@ pub fn translate_signal(value: &str) -> Option<&'static str> {
         "0" => Some("EXIT"),
         "1" | "129" => Some("HUP"),
         "2" | "130" => Some("INT"),
+        "3" | "131" => Some("QUIT"),
+        "9" | "137" => Some("KILL"),
         "15" | "143" => Some("TERM"),
         "EXIT" | "SIGEXIT" => Some("0"),
         "HUP" | "SIGHUP" => Some("1"),
         "INT" | "SIGINT" => Some("2"),
+        "QUIT" | "SIGQUIT" => Some("3"),
+        "KILL" | "SIGKILL" => Some("9"),
         "TERM" | "SIGTERM" => Some("15"),
         _ => None,
     }
