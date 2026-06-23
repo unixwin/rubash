@@ -1148,6 +1148,7 @@ impl Executor {
         let mut input = String::new();
         let mut statuses = Vec::new();
         for command in &commands {
+            self.set_current_command(command);
             let Some((next_input, next_status)) = self.execute_pipeline_stage(command, &input)?
             else {
                 return Ok(None);
@@ -1613,6 +1614,7 @@ impl Executor {
     /// Execute a single command
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         self.set_current_line(cmd);
+        self.set_current_command(cmd);
 
         if let Some(for_command) = &cmd.for_command {
             return self.execute_for_command(for_command);
@@ -7892,6 +7894,9 @@ impl Executor {
         if base_name == "LINENO" && !append {
             return;
         }
+        if base_name == "BASH_COMMAND" && !append {
+            return;
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8749,6 +8754,12 @@ impl Executor {
                     .cloned()
                     .unwrap_or_else(|| "1".to_string()),
             ),
+            "BASH_COMMAND" => Some(
+                self.env_vars
+                    .get("__RUBASH_CURRENT_COMMAND")
+                    .cloned()
+                    .unwrap_or_default(),
+            ),
             _ => None,
         }
     }
@@ -8764,6 +8775,7 @@ impl Executor {
                 | "FUNCNAME"
                 | "GROUPS"
                 | "LINENO"
+                | "BASH_COMMAND"
         )
     }
 
@@ -11032,6 +11044,13 @@ impl Executor {
         }
     }
 
+    fn set_current_command(&mut self, cmd: &CommandNode) {
+        let command = bash_command_text(cmd);
+        self.env_vars
+            .insert("__RUBASH_CURRENT_COMMAND".to_string(), command.clone());
+        env::set_var("__RUBASH_CURRENT_COMMAND", command);
+    }
+
     pub(crate) fn diagnostic_prefix(&self) -> String {
         if let (Some(script), Some(line)) = (
             self.env_vars.get("__RUBASH_SCRIPT_NAME"),
@@ -12587,6 +12606,48 @@ fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+}
+
+fn bash_command_text(cmd: &CommandNode) -> String {
+    let mut parts = Vec::new();
+    for (name, value) in &cmd.assignments {
+        parts.push(format!("{name}={value}"));
+    }
+    parts.extend(cmd.words.iter().cloned());
+
+    if let Some(redirect) = &cmd.redirect_in {
+        parts.push(format_redirect("<", redirect));
+    }
+    if let Some(redirect) = &cmd.redirect_out {
+        parts.push(format_redirect(
+            if redirect.clobber { ">|" } else { ">" },
+            redirect,
+        ));
+    }
+    if let Some(redirect) = &cmd.append {
+        parts.push(format_redirect(">>", redirect));
+    }
+    if let Some(redirect) = &cmd.redirect_err {
+        parts.push(format_redirect("2>", redirect));
+    }
+    if let Some(redirect) = &cmd.redirect_err_append {
+        parts.push(format_redirect("2>>", redirect));
+    }
+    if let Some(here_string) = &cmd.here_string {
+        parts.push(format!("<<< {here_string}"));
+    }
+
+    parts.join(" ")
+}
+
+fn format_redirect(operator: &str, redirect: &Redirect) -> String {
+    match redirect.fd {
+        Some(_) if operator.starts_with(char::is_numeric) => {
+            format!("{operator} {}", redirect.target)
+        }
+        Some(fd) => format!("{fd}{operator} {}", redirect.target),
+        None => format!("{operator} {}", redirect.target),
+    }
 }
 
 fn is_shell_keyword(word: &str) -> bool {

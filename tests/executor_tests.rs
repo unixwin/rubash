@@ -724,6 +724,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_command_expands_to_current_command() {
+        let output_path = "target/rubash-bash-command-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("echo $BASH_COMMAND > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            format!("echo $BASH_COMMAND > {output_path}\n")
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_command_assignment_does_not_override_dynamic_value() {
+        let output_path = "target/rubash-bash-command-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("BASH_COMMAND=ignored; echo $BASH_COMMAND > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            format!("echo $BASH_COMMAND > {output_path}\n")
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_expands_inside_function() {
         let output_path = "target/rubash-funcname-output.txt";
         let _ = fs::remove_file(output_path);
