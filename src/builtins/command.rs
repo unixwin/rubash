@@ -134,24 +134,67 @@ where
 fn is_shell_builtin(name: &str) -> bool {
     matches!(
         name,
-        ":" | "["
+        "." | ":"
+            | "["
+            | "alias"
+            | "bg"
+            | "bind"
+            | "break"
+            | "builtin"
+            | "caller"
             | "cd"
             | "command"
+            | "compgen"
+            | "complete"
+            | "compopt"
+            | "continue"
+            | "declare"
+            | "dirs"
+            | "disown"
             | "echo"
+            | "enable"
             | "env"
+            | "eval"
+            | "exec"
             | "exit"
             | "export"
             | "false"
+            | "fc"
+            | "fg"
+            | "getopts"
             | "hash"
             | "help"
+            | "history"
+            | "jobs"
+            | "kill"
+            | "let"
+            | "local"
+            | "logout"
+            | "mapfile"
+            | "popd"
             | "printf"
+            | "pushd"
             | "pwd"
+            | "read"
+            | "readarray"
+            | "readonly"
+            | "return"
             | "set"
             | "shift"
+            | "shopt"
+            | "source"
+            | "suspend"
             | "test"
+            | "times"
+            | "trap"
             | "type"
+            | "typeset"
             | "true"
+            | "ulimit"
+            | "umask"
+            | "unalias"
             | "unset"
+            | "wait"
     )
 }
 
@@ -222,6 +265,15 @@ mod tests {
 
         assert_eq!(action, CommandAction::Complete(EXECUTION_SUCCESS));
         assert_eq!(stdout, "echo\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn reusable_description_reports_extended_builtin_names() {
+        let (action, stdout, stderr) = run(&["-v", "read", "mapfile", "declare", "alias"]);
+
+        assert_eq!(action, CommandAction::Complete(EXECUTION_SUCCESS));
+        assert_eq!(stdout, "read\nmapfile\ndeclare\nalias\n");
         assert!(stderr.is_empty());
     }
 
