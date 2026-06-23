@@ -79,7 +79,11 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
 }
 
 fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
-    let Some(flags) = option.strip_prefix('-') else {
+    let (enabled, flags) = if let Some(flags) = option.strip_prefix('-') {
+        (true, flags)
+    } else if let Some(flags) = option.strip_prefix('+') {
+        (false, flags)
+    } else {
         return false;
     };
     if flags.is_empty() || flags.contains('c') || flags.contains('o') || flags.contains('s') {
@@ -89,7 +93,7 @@ fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
         let Some(name) = cli_shell_flag_name(flag) else {
             return false;
         };
-        executor.set_shell_option(name, true);
+        executor.set_shell_option(name, enabled);
     }
     true
 }
