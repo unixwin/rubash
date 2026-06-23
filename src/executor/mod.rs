@@ -2050,6 +2050,20 @@ impl Executor {
                     self.exit_code = self.execute_wait(cmd)?;
                     Ok(())
                 }
+                "fg" => {
+                    self.exit_code =
+                        self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+                    Ok(())
+                }
+                "bg" => {
+                    self.exit_code =
+                        self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
+                    Ok(())
+                }
+                "suspend" => {
+                    self.exit_code = self.execute_suspend(cmd)?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4600,6 +4614,20 @@ impl Executor {
                 self.exit_code = self.execute_wait(cmd)?;
                 Ok(())
             }
+            "fg" => {
+                self.exit_code =
+                    self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+                Ok(())
+            }
+            "bg" => {
+                self.exit_code =
+                    self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
+                Ok(())
+            }
+            "suspend" => {
+                self.exit_code = self.execute_suspend(cmd)?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4817,6 +4845,20 @@ impl Executor {
             }
             "wait" => {
                 self.exit_code = self.execute_wait(&builtin_cmd)?;
+                Ok(())
+            }
+            "fg" => {
+                self.exit_code = self
+                    .execute_fg_bg(&builtin_cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+                Ok(())
+            }
+            "bg" => {
+                self.exit_code = self
+                    .execute_fg_bg(&builtin_cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
+                Ok(())
+            }
+            "suspend" => {
+                self.exit_code = self.execute_suspend(&builtin_cmd)?;
                 Ok(())
             }
             "time" => {
@@ -5124,6 +5166,26 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_wait(&command)?;
+                Ok(())
+            }
+            "fg" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code =
+                    self.execute_fg_bg(&command, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+                Ok(())
+            }
+            "bg" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code =
+                    self.execute_fg_bg(&command, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
+                Ok(())
+            }
+            "suspend" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_suspend(&command)?;
                 Ok(())
             }
             "time" => {
@@ -7137,6 +7199,32 @@ impl Executor {
     fn execute_wait(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
         let status = crate::builtins::wait::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_fg_bg(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::fg_bg::JobControlBuiltin,
+    ) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::fg_bg::execute_with_io(
+            builtin,
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_suspend(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::suspend::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
