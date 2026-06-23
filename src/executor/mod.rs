@@ -16,6 +16,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use self::path::{
     find_shell, find_user_command, shell_path_to_windows, should_run_with_shell, standard_path,
@@ -105,6 +106,12 @@ const PROCSUB_TEST_DONE: &str = "__RUBASH_PROCSUB_TEST_DONE";
 const TRAP_TEST_DONE: &str = "__RUBASH_TRAP_TEST_DONE";
 const SET_E_TEST_DONE: &str = "__RUBASH_SET_E_TEST_DONE";
 const JOBS_TEST_DONE: &str = "__RUBASH_JOBS_TEST_DONE";
+
+static EXECUTION_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static EXECUTION_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
 const HISTORY_TEST_DONE: &str = "__RUBASH_HISTORY_TEST_DONE";
 const HISTEXP_TEST_DONE: &str = "__RUBASH_HISTEXP_TEST_DONE";
 const HEREDOC_TEST_DONE: &str = "__RUBASH_HEREDOC_TEST_DONE";
@@ -749,6 +756,24 @@ impl Executor {
 
     /// Execute an AST
     pub fn execute_ast(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
+        if EXECUTION_LOCK_DEPTH.with(|depth| depth.get() > 0) {
+            return self.execute_ast_inner(ast);
+        }
+
+        let _guard = EXECUTION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original_dir = env::current_dir().ok();
+        EXECUTION_LOCK_DEPTH.with(|depth| depth.set(1));
+        let result = self.execute_ast_inner(ast);
+        EXECUTION_LOCK_DEPTH.with(|depth| depth.set(0));
+        if let Some(original_dir) = original_dir {
+            let _ = env::set_current_dir(original_dir);
+        }
+        result
+    }
+
+    fn execute_ast_inner(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
         if self.execute_upstream_precedence_script() {
             return Ok(());
         }
