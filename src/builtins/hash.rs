@@ -8,6 +8,7 @@ use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
+const EX_USAGE: i32 = 2;
 const HASH_TABLE: &str = "__RUBASH_HASH_TABLE";
 
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -36,7 +37,19 @@ where
 
     while let Some(arg) = args.get(index) {
         if arg == "-p" {
-            pathname = args.get(index + 1).map(String::as_str);
+            let Some(value) = args.get(index + 1).map(String::as_str) else {
+                writeln!(
+                    stderr,
+                    "{}hash: -p: option requires an argument",
+                    script_prefix()
+                )?;
+                writeln!(
+                    stderr,
+                    "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
+                )?;
+                return Ok(EX_USAGE);
+            };
+            pathname = Some(value);
             if let Some(name) = args.get(index + 2) {
                 names.push(name.as_str());
             }
@@ -68,20 +81,20 @@ where
 
     let mut table = hash_table(env_vars);
     if let Some(pathname) = pathname {
-        let Some(name) = names.first().copied() else {
-            return Ok(EXECUTION_FAILURE);
-        };
-        if pathname == "/" {
-            writeln!(
-                stderr,
-                "{}hash: {pathname}: Is a directory",
-                script_prefix()
-            )?;
-            return Ok(EXECUTION_FAILURE);
+        if let Some(name) = names.first().copied() {
+            if pathname == "/" {
+                writeln!(
+                    stderr,
+                    "{}hash: {pathname}: Is a directory",
+                    script_prefix()
+                )?;
+                return Ok(EXECUTION_FAILURE);
+            }
+            table.insert(name.to_string(), pathname.to_string());
+            store_hash_table(env_vars, &table);
+            return Ok(EXECUTION_SUCCESS);
         }
-        table.insert(name.to_string(), pathname.to_string());
-        store_hash_table(env_vars, &table);
-        return Ok(EXECUTION_SUCCESS);
+        print = true;
     }
 
     if delete {
