@@ -8725,13 +8725,7 @@ impl Executor {
     }
 
     fn next_random_value(&self) -> u32 {
-        let next = self
-            .random_state
-            .get()
-            .wrapping_mul(1_103_515_245)
-            .wrapping_add(12_345);
-        self.random_state.set(next);
-        (next / 65_536) % 32_768
+        next_random_from_state(&self.random_state)
     }
 
     fn script_name_value(&self) -> String {
@@ -10362,10 +10356,18 @@ impl Executor {
     fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
-        let Some(left) = eval_mutable_arith_value(&left, &mut self.env_vars) else {
+        let Some(left) = eval_mutable_arith_value_with_random(
+            &left,
+            &mut self.env_vars,
+            Some(&self.random_state),
+        ) else {
             return false;
         };
-        let Some(right) = eval_mutable_arith_value(&right, &mut self.env_vars) else {
+        let Some(right) = eval_mutable_arith_value_with_random(
+            &right,
+            &mut self.env_vars,
+            Some(&self.random_state),
+        ) else {
             return false;
         };
         match op {
@@ -10406,7 +10408,11 @@ impl Executor {
     }
 
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
-        eval_mutable_arith_value(expression, &mut self.env_vars)
+        eval_mutable_arith_value_with_random(
+            expression,
+            &mut self.env_vars,
+            Some(&self.random_state),
+        )
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -11709,11 +11715,20 @@ fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>)
 }
 
 fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>) -> Option<i128> {
+    eval_mutable_arith_value_with_random(value, env_vars, None)
+}
+
+fn eval_mutable_arith_value_with_random(
+    value: &str,
+    env_vars: &mut HashMap<String, String>,
+    random_state: Option<&Cell<u32>>,
+) -> Option<i128> {
     let mut parser = ConditionalArithParser {
         input: value.as_bytes(),
         pos: 0,
         env_vars,
         resolving: Vec::new(),
+        random_state,
     };
     let value = parser.parse_comma()?;
     parser.skip_ws();
@@ -11782,6 +11797,7 @@ struct ConditionalArithParser<'a> {
     pos: usize,
     env_vars: &'a mut HashMap<String, String>,
     resolving: Vec<String>,
+    random_state: Option<&'a Cell<u32>>,
 }
 
 #[derive(Clone)]
@@ -12254,6 +12270,11 @@ impl ConditionalArithParser<'_> {
         if self.resolving.iter().any(|resolving| resolving == name) {
             return None;
         }
+        if name == "RANDOM" {
+            return self
+                .random_state
+                .map(|state| i128::from(next_random_from_state(state)));
+        }
 
         let value = self
             .env_vars
@@ -12288,6 +12309,7 @@ impl ConditionalArithParser<'_> {
             pos: 0,
             env_vars: self.env_vars,
             resolving,
+            random_state: self.random_state,
         };
         let value = parser.parse_comma()?;
         parser.skip_ws();
@@ -12333,6 +12355,11 @@ impl ConditionalArithParser<'_> {
 
     fn set_variable(&mut self, name: &str, value: i128) {
         let value = value.to_string();
+        if name == "RANDOM" {
+            if let Some(state) = self.random_state {
+                state.set(value.parse::<u32>().unwrap_or(0));
+            }
+        }
         self.env_vars.insert(name.to_string(), value.clone());
         env::set_var(name, value);
     }
@@ -13298,6 +13325,12 @@ fn current_epoch_micros() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_micros() as i64)
         .unwrap_or(0)
+}
+
+fn next_random_from_state(state: &Cell<u32>) -> u32 {
+    let next = state.get().wrapping_mul(1_103_515_245).wrapping_add(12_345);
+    state.set(next);
+    (next / 65_536) % 32_768
 }
 
 fn strip_shebang(source: &str) -> &str {
