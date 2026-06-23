@@ -364,6 +364,104 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_printf_time_format_uses_posix_timezone_rules() {
+        let output_path = "target/rubash-printf-time-format-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "TZ=EST5EDT,M3.2.0/2,M11.1.0/2 printf '%()T|%(%e-%b-%Y %T)T|%(%F %r %z %Z)T\\n' 1275250155 1275250155 0 > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "16:09:15|30-May-2010 16:09:15|1969-12-31 07:00:00 PM -0500 EST\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_printf_time_format_honors_width_precision_and_embedded_parens() {
+        let output_path = "target/rubash-printf-time-width-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "TZ=EST5EDT,M3.2.0/2,M11.1.0/2 printf '%-40.50(%x (foo) %X)T date-style time\\n' 1275250155 > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "05/30/10 (foo) 16:09:15                  date-style time\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_printf_time_format_without_argument_uses_current_time() {
+        let output_path = "target/rubash-printf-time-current-output.txt";
+        let status_path = "target/rubash-printf-time-current-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let input = format!("TZ=UTC printf '%(%s)T' > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let rendered: i64 = fs::read_to_string(output_path)
+            .unwrap()
+            .parse()
+            .expect("current epoch seconds");
+        assert!((before..=after).contains(&rendered));
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_printf_invalid_time_format_warns_and_outputs_raw_format() {
+        let output_path = "target/rubash-printf-invalid-time-output.txt";
+        let status_path = "target/rubash-printf-invalid-time-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("printf '%(abde)Z\\n' -1 > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "%(abde)Z\n");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = target_test_path("rubash-pipeline-external-output.txt");
         #[cfg(windows)]
