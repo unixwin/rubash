@@ -4706,7 +4706,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
         let _ = fs::remove_file(output_path);
@@ -4723,7 +4723,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "-custom\n");
         let _ = fs::remove_file(output_path);
@@ -4740,7 +4740,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
         let _ = fs::remove_file(output_path);
@@ -4757,7 +4757,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "sh\n");
         let _ = fs::remove_file(output_path);
@@ -4793,13 +4793,57 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(&output_path)
                 .unwrap()
                 .replace("\r\n", "\n"),
             "exec-ran\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn test_exec_stops_after_successful_command() {
+        let output_path = target_test_path("rubash-exec-stops-output.txt");
+        #[cfg(windows)]
+        let script_path = target_test_path("rubash-exec-stops.cmd");
+        #[cfg(not(windows))]
+        let script_path = target_test_path("rubash-exec-stops.sh");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_script_path = shell_test_path(&script_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
+        #[cfg(windows)]
+        fs::write(&script_path, "@echo off\r\necho exec-only\r\n").unwrap();
+        #[cfg(not(windows))]
+        fs::write(&script_path, "#!/bin/sh\nprintf '%s\\n' exec-only\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+        let input = format!(
+            "exec {shell_script_path} > {shell_output_path}; echo after >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path)
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "exec-only\n"
         );
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(script_path);
@@ -4816,7 +4860,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(127))));
         assert_eq!(executor.last_exit_code(), 127);
         let error = fs::read_to_string(error_path).unwrap();
         assert!(error.contains("exec: no_such_rubash_command: not found"));
@@ -4880,7 +4924,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
         let _ = fs::remove_file(output_path);
@@ -5095,7 +5139,7 @@ mod command_chaining {
 
         let result = executor.execute_ast(&ast);
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
         let _ = fs::remove_file(output_path);
