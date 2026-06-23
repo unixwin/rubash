@@ -1866,7 +1866,9 @@ impl Executor {
                     self.exit_code = self.execute_pwd(cmd)?;
                     Ok(())
                 }
-                "source" | "." => crate::builtins::source::execute(self, &cmd.words[1..]),
+                "source" | "." => {
+                    crate::builtins::source::execute_named(self, &cmd.words[0], &cmd.words[1..])
+                }
                 "printf" => {
                     if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
                         return self.execute_external(cmd);
@@ -4744,7 +4746,11 @@ impl Executor {
             "exec" => self.execute_exec_command(&builtin_cmd),
             "eval" => self.execute_eval(&builtin_cmd),
             "command" => self.execute_command_without_aliases(&builtin_cmd),
-            "source" | "." => crate::builtins::source::execute(self, &builtin_cmd.words[1..]),
+            "source" | "." => crate::builtins::source::execute_named(
+                self,
+                &builtin_cmd.words[0],
+                &builtin_cmd.words[1..],
+            ),
             "return" => self.execute_return(&builtin_cmd.words[1..]),
             "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Continue),
@@ -4907,7 +4913,7 @@ impl Executor {
                 command.words = args.to_vec();
                 self.execute_exec_command(&command)
             }
-            "source" | "." => crate::builtins::source::execute(self, &args[1..]),
+            "source" | "." => crate::builtins::source::execute_named(self, &args[0], &args[1..]),
             "return" => self.execute_return(&args[1..]),
             "break" => {
                 let mut command = CommandNode::new();
@@ -5100,7 +5106,7 @@ impl Executor {
             return Ok(());
         };
         if shell_path_to_windows(filename, &self.env_vars).exists() {
-            return crate::builtins::source::execute(self, &cmd.words[1..]);
+            return crate::builtins::source::execute_named(self, &cmd.words[0], &cmd.words[1..]);
         }
 
         if self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1") {
