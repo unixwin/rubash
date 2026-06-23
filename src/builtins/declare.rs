@@ -104,8 +104,7 @@ where
         }
     }
 
-    assign_declare_names(&names, variables, integer);
-    let mut attr_status = EXECUTION_SUCCESS;
+    let mut attr_status = assign_declare_names(&names, variables, integer, stderr)?;
     if unset_export
         || unset_array
         || unset_assoc
@@ -367,7 +366,17 @@ fn declaration_names_to_print(
     names
 }
 
-fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>, integer: bool) {
+fn assign_declare_names<W>(
+    names: &[&str],
+    variables: &mut HashMap<String, String>,
+    integer: bool,
+    stderr: &mut W,
+) -> io::Result<i32>
+where
+    W: Write,
+{
+    let readonly = marked_vars(variables, READONLY_VARS);
+    let mut status = EXECUTION_SUCCESS;
     for name in names {
         let Some((var_name, value)) = name.split_once('=') else {
             continue;
@@ -377,6 +386,16 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
             .map(|base| (base, true))
             .unwrap_or((var_name, false));
         if is_noassign_bash_array(var_name) {
+            continue;
+        }
+        if readonly.contains(var_name) {
+            writeln!(
+                stderr,
+                "{}declare: {}: readonly variable",
+                diagnostic_prefix(),
+                var_name
+            )?;
+            status = EXECUTION_FAILURE;
             continue;
         }
         let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
@@ -417,6 +436,7 @@ fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>,
         variables.insert(var_name.to_string(), value.clone());
         env::set_var(var_name, value);
     }
+    Ok(status)
 }
 
 #[derive(Clone, Copy)]
