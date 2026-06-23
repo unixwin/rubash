@@ -1578,10 +1578,9 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(
-            fs::read_to_string(output_path).unwrap(),
-            "declare -r RUBASH_READONLY_REDIR=\"value\"\n"
-        );
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("declare -r RUBASH_READONLY_REDIR=\"value\"\n"));
+        assert!(output.contains("declare -r SHELLOPTS=\""));
         std::env::remove_var("RUBASH_READONLY_REDIR");
         let _ = fs::remove_file(output_path);
     }
@@ -6386,6 +6385,47 @@ mod command_chaining {
         let output = fs::read_to_string(output_path).unwrap();
         assert!(output.contains('u'));
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_shellopts_reflects_set_options() {
+        let output_path = "target/rubash-shellopts-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $SHELLOPTS > {output_path}; shopt -so physical; echo $SHELLOPTS >> {output_path}; readonly -p >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("braceexpand:hashall:interactive-comments\n"));
+        assert!(output.contains("braceexpand:hashall:interactive-comments:physical\n"));
+        assert!(output.contains(
+            "declare -r SHELLOPTS=\"braceexpand:hashall:interactive-comments:physical\""
+        ));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_shellopts_assignment_reports_readonly() {
+        let status_path = "target/rubash-shellopts-readonly-status.txt";
+        let _ = fs::remove_file(status_path);
+        let input = format!("SHELLOPTS=ignored; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(status_path);
     }
 
     #[test]

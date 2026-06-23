@@ -169,8 +169,21 @@ where
             status = EXECUTION_FAILURE;
             continue;
         }
-        if print || mode == ShoptMode::List {
-            crate::builtins::set::print_shell_option(env_vars, name, true, stdout)?;
+        match mode {
+            ShoptMode::Set if !print => {
+                crate::builtins::set::set_shell_option(env_vars, name, true);
+            }
+            ShoptMode::Unset if !print => {
+                crate::builtins::set::set_shell_option(env_vars, name, false);
+            }
+            _ if print || mode == ShoptMode::List => {
+                crate::builtins::set::print_shell_option(env_vars, name, true, stdout)?;
+            }
+            ShoptMode::Query if !crate::builtins::set::shell_option_enabled(env_vars, name) => {
+                status = EXECUTION_FAILURE;
+            }
+            ShoptMode::Query => {}
+            ShoptMode::List | ShoptMode::Set | ShoptMode::Unset => {}
         }
     }
 

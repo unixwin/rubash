@@ -339,15 +339,30 @@ pub(crate) fn shell_option_enabled(env_vars: &HashMap<String, String>, name: &st
         })
 }
 
+pub(crate) fn shellopts_value(env_vars: &HashMap<String, String>) -> String {
+    SHELL_OPTIONS
+        .iter()
+        .map(|option| option.name)
+        .filter(|name| shellopts_includes_option(name))
+        .filter(|name| shell_option_enabled(env_vars, name))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 pub(crate) fn set_shell_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
     env_vars.insert(
         shell_option_key(name),
         if enabled { "1" } else { "0" }.to_string(),
     );
+    env_vars.insert("SHELLOPTS".to_string(), shellopts_value(env_vars));
 }
 
 fn shell_option_key(name: &str) -> String {
     format!("__RUBASH_SETOPT_{}", name.replace('-', "_"))
+}
+
+fn shellopts_includes_option(name: &str) -> bool {
+    !matches!(name, "emacs" | "history" | "vi")
 }
 
 fn shell_quote(value: &str) -> String {

@@ -659,6 +659,11 @@ impl Executor {
             SHELL_START_EPOCH.to_string(),
             current_epoch_seconds().to_string(),
         );
+        env_vars.insert(
+            "SHELLOPTS".to_string(),
+            crate::builtins::set::shellopts_value(&env_vars),
+        );
+        mark_env_name(&mut env_vars, READONLY_VARS, "SHELLOPTS");
 
         Self {
             exit_code: 0,
@@ -1637,11 +1642,11 @@ impl Executor {
                 self.exit_code = status;
                 return Err(ExecuteError::ExitCode(status));
             }
+            self.exit_code = 0;
             for (name, value) in &cmd.assignments {
                 let expanded_value = self.expand_assignment_value(value);
                 self.apply_shell_assignment(name, expanded_value);
             }
-            self.exit_code = 0;
             return Ok(());
         }
 
@@ -8760,6 +8765,7 @@ impl Executor {
                     .cloned()
                     .unwrap_or_default(),
             ),
+            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.env_vars)),
             _ => None,
         }
     }
@@ -8776,6 +8782,7 @@ impl Executor {
                 | "GROUPS"
                 | "LINENO"
                 | "BASH_COMMAND"
+                | "SHELLOPTS"
         )
     }
 
