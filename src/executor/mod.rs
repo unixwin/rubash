@@ -2604,16 +2604,25 @@ impl Executor {
         // bodies, so render the simple function form used by builtins6.sub.
         let names: Vec<&str> = args
             .iter()
-            .filter(|arg| !arg.starts_with('-'))
+            .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
             .map(String::as_str)
             .collect();
         let print_not_found = args.iter().any(|arg| arg == "-p");
         let function_names_only = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('F'));
-        let exported_only = args
+        let function_definition_mode = args
+            .iter()
+            .any(|arg| (arg.starts_with('-') || arg.starts_with('+')) && arg.contains('f'));
+        let set_export = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('x'));
+        let clear_export = args
+            .iter()
+            .any(|arg| arg.starts_with('+') && arg.contains('x'));
+        let set_export_attribute = set_export && function_definition_mode;
+        let clear_export_attribute = clear_export && function_definition_mode;
+        let exported_only = set_export;
         let readonly = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('r'));
@@ -2654,8 +2663,19 @@ impl Executor {
                 continue;
             };
             let is_exported = exported_functions.iter().any(|exported| exported == name);
-            if exported_only && !is_exported {
+            if exported_only && !is_exported && !set_export_attribute {
                 continue;
+            }
+            if clear_export_attribute {
+                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                if !print {
+                    continue;
+                }
+            } else if set_export_attribute {
+                mark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+                if !print && !function_names_only {
+                    continue;
+                }
             }
             if readonly {
                 mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
@@ -2750,7 +2770,10 @@ impl Executor {
     fn execute_declare_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if cmd.words[1..]
             .iter()
-            .any(|word| word.starts_with('-') && (word.contains('f') || word.contains('F')))
+            .any(|word| {
+                (word.starts_with('-') || word.starts_with('+'))
+                    && (word.contains('f') || word.contains('F'))
+            })
         {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
