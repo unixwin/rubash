@@ -1754,6 +1754,9 @@ impl Executor {
                     }
                 }
                 "echo" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
+                        return self.execute_external(cmd);
+                    }
                     self.execute_echo(cmd)?;
                     self.exit_code = 0;
                     Ok(())
@@ -4186,6 +4189,9 @@ impl Executor {
                 Ok(())
             }
             "echo" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
+                    return self.execute_external(cmd);
+                }
                 self.execute_echo(cmd)?;
                 self.exit_code = 0;
                 Ok(())
