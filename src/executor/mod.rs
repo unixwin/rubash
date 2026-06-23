@@ -4317,6 +4317,18 @@ impl Executor {
                 command.words = args.to_vec();
                 self.execute_set_command(&command)
             }
+            "shopt" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_shopt(&command)?;
+                Ok(())
+            }
+            "enable" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_enable(&command)?;
+                Ok(())
+            }
             "command" => {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
@@ -4404,7 +4416,12 @@ impl Executor {
             && args[1] == "test"
             && crate::builtins::enable::is_disabled(&self.env_vars, "test")
         {
-            self.exit_code = 1;
+            if self.command_path("test", false).is_some() {
+                println!("file");
+                self.exit_code = 0;
+            } else {
+                self.exit_code = 1;
+            }
             return Ok(true);
         }
 
@@ -4434,6 +4451,10 @@ impl Executor {
             && args[1] == "test"
             && crate::builtins::enable::is_disabled(&self.env_vars, "test")
         {
+            if self.command_path("test", false).is_some() {
+                writeln!(stdout, "file")?;
+                return Ok(Some(0));
+            }
             return Ok(Some(1));
         }
 
