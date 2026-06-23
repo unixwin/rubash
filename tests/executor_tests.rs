@@ -8694,6 +8694,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_function_call_redirects_entire_body_output() {
+        let output_path = "target/rubash-function-call-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "rubash_redirect_func() {{ echo one; echo two; }}; \
+             rubash_redirect_func > {output_path}; echo done >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "one\ntwo\ndone\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_local_outside_function_reports_error() {
         let error_path = "target/rubash-local-outside-error.txt";
         let status_path = "target/rubash-local-outside-status.txt";
