@@ -2716,6 +2716,123 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_source_updates_current_shell() {
+        let script_path = "target/rubash-builtin-source-script.sh";
+        let output_path = "target/rubash-builtin-source-output.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        fs::write(script_path, "RUBASH_BUILTIN_SOURCE=ok\n").unwrap();
+        let input =
+            format!("builtin source {script_path}; echo $RUBASH_BUILTIN_SOURCE > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_dot_updates_current_shell() {
+        let script_path = "target/rubash-builtin-dot-script.sh";
+        let output_path = "target/rubash-builtin-dot-output.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        fs::write(script_path, "RUBASH_BUILTIN_DOT=ok\n").unwrap();
+        let input = format!("builtin . {script_path}; echo $RUBASH_BUILTIN_DOT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_return_returns_from_function() {
+        let output_path = "target/rubash-builtin-return-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ builtin return 6; echo bad > {output_path}; }}; f; echo $? > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "6\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_break_breaks_loop() {
+        let output_path = "target/rubash-builtin-break-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "for value in a b; do builtin break; echo bad; done; echo done > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "done\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_continue_continues_loop() {
+        let output_path = "target/rubash-builtin-continue-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "for value in a b; do builtin continue; echo bad; done; echo done > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "done\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_kill_redirects_output() {
+        let output_path = "target/rubash-builtin-kill-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin kill -l HUP > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_command_echo_redirects_output() {
         let output_path = "target/rubash-command-echo-redirect-output.txt";
         let _ = fs::remove_file(output_path);
