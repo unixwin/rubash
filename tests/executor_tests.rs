@@ -565,6 +565,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_n_zero_reads_all_lines() {
+        let output_path = "target/rubash-mapfile-n-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "mapfile -n 0 -t arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_readarray_compact_n_limits_read_lines() {
         let output_path = "target/rubash-readarray-compact-n-output.txt";
         let _ = fs::remove_file(output_path);

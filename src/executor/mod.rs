@@ -6383,7 +6383,7 @@ impl Executor {
                 .into_iter()
                 .skip(skip)
                 .collect::<Vec<_>>();
-            if let Some(count) = count {
+            if let Some(count) = count.filter(|count| *count > 0) {
                 values.truncate(count);
             }
             let start = origin.unwrap_or(0);
