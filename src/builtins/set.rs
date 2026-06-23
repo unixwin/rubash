@@ -479,6 +479,15 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    if is_unsettable_bash_variable(name) {
+        writeln!(
+            stderr,
+            "{}unset: {name}: cannot unset",
+            diagnostic_prefix(env_vars)
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+
     env_vars.remove(name);
     env::remove_var(name);
     unmark_variable(env_vars, "__RUBASH_ARRAY_VARS", name);
@@ -511,6 +520,21 @@ fn valid_identifier(name: &str) -> bool {
 
     (first == '_' || first.is_ascii_alphabetic())
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_unsettable_bash_variable(name: &str) -> bool {
+    matches!(name, "BASH_LINENO" | "BASH_SOURCE")
+}
+
+fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let (Some(script), Some(line)) = (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+
+    "rubash: ".to_string()
 }
 
 #[cfg(test)]

@@ -426,6 +426,12 @@ fn readonly_error_subject(value: &str, explicit_array: bool) -> Option<String> {
 }
 
 fn format_array_value(value: &str) -> String {
+    if let Some(rendered) = value.strip_prefix('\x1d') {
+        return rendered.to_string();
+    }
+    if value == "()" {
+        return "()".to_string();
+    }
     let inner = value
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
