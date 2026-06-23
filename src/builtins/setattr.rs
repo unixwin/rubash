@@ -14,6 +14,8 @@ const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
+const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,27 +314,36 @@ where
     let readonly = marked_vars(env_vars, READONLY_VARS);
     let exported = marked_vars(env_vars, EXPORTED_VARS);
     let arrays = marked_vars(env_vars, ARRAY_VARS);
+    let integers = marked_vars(env_vars, INTEGER_VARS);
+    let uppercase = marked_vars(env_vars, UPPERCASE_VARS);
+    let lowercase = marked_vars(env_vars, LOWERCASE_VARS);
     let mut names: Vec<_> = readonly.into_iter().collect();
     names.sort();
     for name in names {
         if let Some(value) = env_vars.get(&name) {
             if arrays.contains(&name) || is_array_value(value) {
-                let attrs = if exported.contains(&name) {
-                    "-arx"
-                } else {
-                    "-ar"
-                };
+                let attrs = setattr_array_attrs(
+                    &name,
+                    true,
+                    exported.contains(&name),
+                    &integers,
+                    &uppercase,
+                    &lowercase,
+                );
                 writeln!(
                     stdout,
                     "declare {attrs} {name}={}",
                     format_array_value(value)
                 )?;
             } else {
-                let attrs = if exported.contains(&name) {
-                    "-rx"
-                } else {
-                    "-r"
-                };
+                let attrs = setattr_scalar_attrs(
+                    &name,
+                    true,
+                    exported.contains(&name),
+                    &integers,
+                    &uppercase,
+                    &lowercase,
+                );
                 writeln!(
                     stdout,
                     "declare {attrs} {name}=\"{}\"",
@@ -340,11 +351,14 @@ where
                 )?;
             }
         } else {
-            let attrs = if exported.contains(&name) {
-                "-rx"
-            } else {
-                "-r"
-            };
+            let attrs = setattr_scalar_attrs(
+                &name,
+                true,
+                exported.contains(&name),
+                &integers,
+                &uppercase,
+                &lowercase,
+            );
             writeln!(stdout, "declare {attrs} {name}")?;
         }
     }
@@ -356,6 +370,10 @@ where
     W: Write,
 {
     let readonly = marked_vars(env_vars, READONLY_VARS);
+    let arrays = marked_vars(env_vars, ARRAY_VARS);
+    let integers = marked_vars(env_vars, INTEGER_VARS);
+    let uppercase = marked_vars(env_vars, UPPERCASE_VARS);
+    let lowercase = marked_vars(env_vars, LOWERCASE_VARS);
     let mut names: Vec<_> = marked_vars(env_vars, EXPORTED_VARS).into_iter().collect();
     names.sort();
 
@@ -363,24 +381,94 @@ where
         if name.starts_with("__RUBASH_") {
             continue;
         }
-        let attrs = if readonly.contains(&name) {
-            "-rx"
-        } else {
-            "-x"
-        };
         if let Some(value) = env_vars.get(&name) {
-            writeln!(
-                stdout,
-                "declare {attrs} {}=\"{}\"",
-                name,
-                quote_export_value(value)
-            )?;
+            if arrays.contains(&name) || is_array_value(value) {
+                let attrs = setattr_array_attrs(
+                    &name,
+                    readonly.contains(&name),
+                    true,
+                    &integers,
+                    &uppercase,
+                    &lowercase,
+                );
+                writeln!(
+                    stdout,
+                    "declare {attrs} {name}={}",
+                    format_array_value(value)
+                )?;
+            } else {
+                let attrs = setattr_scalar_attrs(
+                    &name,
+                    readonly.contains(&name),
+                    true,
+                    &integers,
+                    &uppercase,
+                    &lowercase,
+                );
+                writeln!(
+                    stdout,
+                    "declare {attrs} {}=\"{}\"",
+                    name,
+                    quote_export_value(value)
+                )?;
+            }
         } else {
+            let attrs = setattr_scalar_attrs(
+                &name,
+                readonly.contains(&name),
+                true,
+                &integers,
+                &uppercase,
+                &lowercase,
+            );
             writeln!(stdout, "declare {attrs} {name}")?;
         }
     }
 
     Ok(())
+}
+
+fn setattr_scalar_attrs(
+    name: &str,
+    readonly: bool,
+    exported: bool,
+    integers: &HashSet<String>,
+    uppercase: &HashSet<String>,
+    lowercase: &HashSet<String>,
+) -> String {
+    let mut attrs = String::from("-");
+    if integers.contains(name) {
+        attrs.push('i');
+    }
+    if readonly {
+        attrs.push('r');
+    }
+    if exported {
+        attrs.push('x');
+    }
+    if lowercase.contains(name) {
+        attrs.push('l');
+    }
+    if uppercase.contains(name) {
+        attrs.push('u');
+    }
+    attrs
+}
+
+fn setattr_array_attrs(
+    name: &str,
+    readonly: bool,
+    exported: bool,
+    integers: &HashSet<String>,
+    uppercase: &HashSet<String>,
+    lowercase: &HashSet<String>,
+) -> String {
+    let mut attrs = String::from("-a");
+    attrs.push_str(
+        setattr_scalar_attrs(name, readonly, exported, integers, uppercase, lowercase)
+            .trim_start_matches('-'),
+    );
+    attrs
 }
 
 fn mark_exported(env_vars: &mut HashMap<String, String>, name: &str) {

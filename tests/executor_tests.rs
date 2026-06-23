@@ -2518,6 +2518,36 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_attribute_printing_preserves_combined_flags() {
+        let output_path = target_test_path("rubash-attribute-combined-flags-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "declare -ir RUBASH_READONLY_INT=7; readonly -p > {shell_output_path}; \
+             export RUBASH_READONLY_INT; export -p >> {shell_output_path}; \
+             declare -ux RUBASH_EXPORT_UPPER=abc; export -p >> {shell_output_path}; \
+             declare -lrx RUBASH_READONLY_LOWER=ABC; readonly -p >> {shell_output_path}; export -p >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.contains("declare -ir RUBASH_READONLY_INT=\"7\"\n"));
+        assert!(output.contains("declare -irx RUBASH_READONLY_INT=\"7\"\n"));
+        assert!(output.contains("declare -xu RUBASH_EXPORT_UPPER=\"ABC\"\n"));
+        assert!(output.contains("declare -rxl RUBASH_READONLY_LOWER=\"abc\"\n"));
+        std::env::remove_var("RUBASH_READONLY_INT");
+        std::env::remove_var("RUBASH_EXPORT_UPPER");
+        std::env::remove_var("RUBASH_READONLY_LOWER");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_child_environment_contains_only_exported_variables() {
         let output_path = target_test_path("rubash-child-export-env-output.txt");
         let _ = fs::remove_file(&output_path);
