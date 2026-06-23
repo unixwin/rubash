@@ -360,7 +360,7 @@ fn parse_i64(value: &str) -> i64 {
     if let Some(ch) = printf_char_constant(value) {
         return ch as i64;
     }
-    value.parse::<i64>().unwrap_or_default()
+    parse_integer_literal(value).unwrap_or_default()
 }
 
 fn parse_f64(value: &str) -> f64 {
@@ -376,6 +376,27 @@ fn printf_char_constant(value: &str) -> Option<char> {
         Some('\'') | Some('"') => chars.next(),
         _ => None,
     }
+}
+
+fn parse_integer_literal(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (sign, digits) = match value.as_bytes().first().copied() {
+        Some(b'-') => (-1_i64, &value[1..]),
+        Some(b'+') => (1_i64, &value[1..]),
+        _ => (1_i64, value),
+    };
+
+    let parsed = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        i64::from_str_radix(hex, 16).ok()?
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        i64::from_str_radix(&digits[1..], 8).ok()?
+    } else {
+        digits.parse::<i64>().ok()?
+    };
+    Some(sign * parsed)
 }
 
 fn expand_format_escape<I>(chars: &mut std::iter::Peekable<I>) -> char
@@ -674,6 +695,25 @@ mod tests {
             ])
             .1,
             "<+000000123>< 000000123><123.><123.><      +123>"
+        );
+    }
+
+    #[test]
+    fn integer_formats_parse_bash_numeric_bases() {
+        assert_eq!(
+            run(&[
+                "%d:%d:%d:%i:%u:%x:<%*s>",
+                "0x1a",
+                "032",
+                "-010",
+                "010",
+                "0x10",
+                "032",
+                "010",
+                "x"
+            ])
+            .1,
+            "26:26:-8:8:16:1a:<       x>"
         );
     }
 }
