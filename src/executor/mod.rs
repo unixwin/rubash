@@ -13429,7 +13429,14 @@ fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
 
 fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: bool) -> Vec<String> {
     let Some(delimiter) = delimiter else {
-        return input.lines().map(str::to_string).collect();
+        return input
+            .split_inclusive('\n')
+            .map(|line| {
+                line.trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string()
+            })
+            .collect();
     };
 
     let mut values = Vec::new();
