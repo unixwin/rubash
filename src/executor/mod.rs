@@ -13193,11 +13193,19 @@ fn imported_function_name(env_name: &str) -> Option<&str> {
     let name = env_name
         .strip_prefix("BASH_FUNC_")?
         .strip_suffix("%%")?;
-    if is_shell_name(name) {
+    if is_imported_function_name(name) {
         Some(name)
     } else {
         None
     }
+}
+
+fn is_imported_function_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('=')
+        && !name
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
 fn parse_exported_function_body(value: &str) -> Option<Vec<CommandNode>> {

@@ -94,6 +94,17 @@ mod function_tests {
         assert_eq!(function.name, "greet");
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
+
+    #[test]
+    fn test_bash_function_name_can_contain_hyphen() {
+        let input = "foo-a() { echo hi; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo-a");
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
+    }
 }
 
 mod assignment_tests {
