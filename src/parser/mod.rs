@@ -664,13 +664,14 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
     // parser-state-sensitive reserved words. This maps the upstream builtins
     // `name() { ...; }` and `function name { ...; }` forms onto a function
     // command node.
-    let (name_index, mut i) = if is_keyword(tokens, start, "function") {
+    let keyword_form = is_keyword(tokens, start, "function");
+    let (name_index, mut i) = if keyword_form {
         (start + 1, start + 2)
     } else {
         (start, start + 1)
     };
     let name = tokens.get(name_index)?.value.clone();
-    if !is_function_name(&name) {
+    if !(is_function_name(&name) || (keyword_form && is_function_keyword_name(&name))) {
         return None;
     }
 
@@ -679,7 +680,7 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
             return None;
         }
         i += 2;
-    } else if !is_keyword(tokens, start, "function") {
+    } else if !keyword_form {
         return None;
     }
 
@@ -1027,6 +1028,13 @@ fn is_function_name(name: &str) -> bool {
     !name
         .chars()
         .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
+}
+
+fn is_function_keyword_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .chars()
+            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
 #[cfg(test)]

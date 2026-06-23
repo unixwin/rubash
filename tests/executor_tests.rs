@@ -8630,6 +8630,37 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_export_f_rejects_nonexportable_function_names() {
+        let output_path = "target/rubash-export-nonexportable-function-output.txt";
+        let error_path = "target/rubash-export-nonexportable-function-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "function foo=bar {{ echo equals; }}; \
+             export -f 'foo=bar' 2> {error_path}; echo equals_status:$? > {output_path}; \
+             function /bin/echo {{ echo slash; }}; /bin/echo >> {output_path}; \
+             export -f '/bin/echo' 2>> {error_path}; echo slash_status:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "equals_status:1\nslash\nslash_status:1\n"
+        );
+        let errors = fs::read_to_string(error_path).unwrap();
+        assert!(errors.contains("export: foo=bar: cannot export"));
+        assert!(errors.contains("export: /bin/echo: cannot export"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_export_nf_unmarks_exported_function() {
         let output_path = "target/rubash-export-nf-output.txt";
         let _ = fs::remove_file(output_path);

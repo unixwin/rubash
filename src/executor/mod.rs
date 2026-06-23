@@ -1775,6 +1775,14 @@ impl Executor {
             return Ok(());
         }
 
+        if let Some(function_name) = cmd
+            .words
+            .first()
+            .and_then(|word| self.function_name_for_command_word(word))
+        {
+            return self.execute_function(&function_name, &cmd.words[1..], cmd);
+        }
+
         if self.execute_assignment_words(cmd) {
             return Ok(());
         }
@@ -2198,6 +2206,18 @@ impl Executor {
             .insert(function.name.clone(), function.body.clone());
         self.exit_code = 0;
         Ok(())
+    }
+
+    fn function_name_for_command_word(&self, word: &str) -> Option<String> {
+        if self.functions.contains_key(word) {
+            return Some(word.to_string());
+        }
+        let unescaped = word.replace("\\=", "=");
+        if unescaped != word && self.functions.contains_key(&unescaped) {
+            Some(unescaped)
+        } else {
+            None
+        }
     }
 
     fn execute_function(
@@ -2884,6 +2904,15 @@ impl Executor {
                 writeln!(
                     stderr,
                     "{}export: {name}: not a function",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+                continue;
+            }
+            if !unset && !is_exportable_function_name(name) {
+                writeln!(
+                    stderr,
+                    "{}export: {name}: cannot export",
                     self.diagnostic_prefix()
                 )?;
                 status = 1;
@@ -13206,6 +13235,10 @@ fn is_imported_function_name(name: &str) -> bool {
         && !name
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
+}
+
+fn is_exportable_function_name(name: &str) -> bool {
+    is_imported_function_name(name) && !name.contains('/') && !name.contains('\\')
 }
 
 fn parse_exported_function_body(value: &str) -> Option<Vec<CommandNode>> {
