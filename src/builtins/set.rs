@@ -12,6 +12,13 @@ const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
 const SET_FLAGS: &str = "abefhkmnptuvxBCEHPT";
+const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
+const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
+const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
+const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 
 /// Execute `set` with arguments after the command name.
 pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -488,12 +495,32 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    if is_marked_variable(env_vars, READONLY_VARS, name) {
+        writeln!(
+            stderr,
+            "{}unset: {name}: cannot unset: readonly variable",
+            diagnostic_prefix(env_vars)
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+
     env_vars.remove(name);
     env::remove_var(name);
-    unmark_variable(env_vars, "__RUBASH_ARRAY_VARS", name);
-    unmark_variable(env_vars, "__RUBASH_ASSOC_VARS", name);
-    unmark_variable(env_vars, "__RUBASH_INTEGER_VARS", name);
+    unmark_variable(env_vars, EXPORTED_VARS, name);
+    unmark_variable(env_vars, READONLY_VARS, name);
+    unmark_variable(env_vars, ARRAY_VARS, name);
+    unmark_variable(env_vars, ASSOC_VARS, name);
+    unmark_variable(env_vars, INTEGER_VARS, name);
+    unmark_variable(env_vars, UPPERCASE_VARS, name);
+    unmark_variable(env_vars, LOWERCASE_VARS, name);
     Ok(EXECUTION_SUCCESS)
+}
+
+fn is_marked_variable(env_vars: &HashMap<String, String>, key: &str, name: &str) -> bool {
+    env_vars
+        .get(key)
+        .map(|value| value.split('\x1f').any(|marked| marked == name))
+        .unwrap_or(false)
 }
 
 fn unmark_variable(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
