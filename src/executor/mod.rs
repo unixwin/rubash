@@ -10,6 +10,7 @@ use crate::parser::{
     ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand,
     FunctionCommand, Redirect,
 };
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -640,6 +641,7 @@ pub struct Executor {
     expanding_aliases: Vec<String>,
     loop_depth: usize,
     function_depth: usize,
+    random_state: Cell<u32>,
 }
 
 impl Executor {
@@ -667,6 +669,7 @@ impl Executor {
             expanding_aliases: Vec::new(),
             loop_depth: 0,
             function_depth: 0,
+            random_state: Cell::new(current_epoch_micros() as u32),
         }
     }
 
@@ -7870,6 +7873,12 @@ impl Executor {
             self.env_vars
                 .insert("__RUBASH_SCRIPT_NAME".to_string(), value.clone());
         }
+        if base_name == "RANDOM" && !append {
+            self.random_state
+                .set(value.trim().parse::<u32>().unwrap_or(0));
+            env::set_var(base_name, value);
+            return;
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8703,12 +8712,26 @@ impl Executor {
                         .to_string(),
                 )
             }
+            "RANDOM" => Some(self.next_random_value().to_string()),
             _ => None,
         }
     }
 
     fn dynamic_parameter_is_set(&self, name: &str) -> bool {
-        matches!(name, "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS")
+        matches!(
+            name,
+            "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS" | "RANDOM"
+        )
+    }
+
+    fn next_random_value(&self) -> u32 {
+        let next = self
+            .random_state
+            .get()
+            .wrapping_mul(1_103_515_245)
+            .wrapping_add(12_345);
+        self.random_state.set(next);
+        (next / 65_536) % 32_768
     }
 
     fn script_name_value(&self) -> String {
