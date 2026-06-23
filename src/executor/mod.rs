@@ -690,6 +690,8 @@ impl Executor {
         store_indexed_array(&mut env_vars, "BASH_SOURCE", Vec::new());
         env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
         mark_env_name(&mut env_vars, ASSOC_VARS, "BASH_CMDS");
+        env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
+        mark_env_name(&mut env_vars, ASSOC_VARS, "BASH_ALIASES");
         env_vars.insert("FUNCNAME".to_string(), String::new());
         mark_env_name(&mut env_vars, ARRAY_VARS, "FUNCNAME");
         env_vars
@@ -2748,6 +2750,18 @@ impl Executor {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
             return false;
         };
+        if array_name == "BASH_ALIASES" {
+            let key = subscript.trim_matches('\'').trim_matches('"');
+            self.aliases.remove(key);
+            self.sync_dynamic_assoc_vars();
+            return true;
+        }
+        if array_name == "BASH_CMDS" {
+            let key = subscript.trim_matches('\'').trim_matches('"');
+            crate::builtins::hash::remove_hashed_path(&mut self.env_vars, key);
+            self.sync_dynamic_assoc_vars();
+            return true;
+        }
         let Some(current) = self.env_vars.get(array_name).cloned() else {
             return false;
         };
@@ -7980,6 +7994,7 @@ impl Executor {
             }
             self.aliases
                 .insert(alias_name.to_string(), Alias::new(value));
+            self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
             return true;
         }
@@ -9055,10 +9070,23 @@ impl Executor {
     }
 
     fn parameter_array_storage(&self, name: &str) -> Option<String> {
+        if name == "BASH_ALIASES" {
+            return Some(self.bash_aliases_storage());
+        }
         if name == "BASH_CMDS" {
             return Some(self.bash_cmds_storage());
         }
         self.env_vars.get(name).cloned()
+    }
+
+    fn bash_aliases_storage(&self) -> String {
+        let mut entries: Vec<_> = self
+            .aliases
+            .iter()
+            .map(|(name, alias)| (name.clone(), alias.value.clone()))
+            .collect();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        format_assoc_storage(entries)
     }
 
     fn bash_cmds_storage(&self) -> String {
@@ -9066,6 +9094,9 @@ impl Executor {
     }
 
     fn sync_dynamic_assoc_vars(&mut self) {
+        self.env_vars
+            .insert("BASH_ALIASES".to_string(), self.bash_aliases_storage());
+        mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_ALIASES");
         self.env_vars
             .insert("BASH_CMDS".to_string(), self.bash_cmds_storage());
         mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_CMDS");

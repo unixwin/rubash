@@ -1739,6 +1739,7 @@ mod command_chaining {
              BASH_CMDS[bar]=/usr/bin/bar; \
              printf '%s\\n' \"${{!BASH_CMDS[@]}}\" \"${{BASH_CMDS[@]}}\" \"${{BASH_CMDS[foo]}}\" > {output_path}; \
              hash -t bar >> {output_path}; \
+             unset 'BASH_CMDS[foo]'; hash -t foo 2>/dev/null; echo $? >> {output_path}; \
              declare -p BASH_CMDS >> {output_path}"
         );
         let tokens = tokenize(&input);
@@ -1751,7 +1752,34 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n/usr/bin/bar\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" [foo]=\"/usr/sbin/foo\" )\n"
+            "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n/usr/bin/bar\n1\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_aliases_reflects_alias_table() {
+        let output_path = "target/rubash-bash-aliases-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "alias foo=/usr/sbin/foo; \
+             BASH_ALIASES[bar]=/usr/bin/bar; \
+             printf '%s\\n' \"${{!BASH_ALIASES[@]}}\" \"${{BASH_ALIASES[@]}}\" \"${{BASH_ALIASES[foo]}}\" > {output_path}; \
+             unset 'BASH_ALIASES[foo]'; \
+             alias foo 2>/dev/null; echo $? >> {output_path}; \
+             declare -p BASH_ALIASES >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n1\ndeclare -A BASH_ALIASES=([bar]=\"/usr/bin/bar\" )\n"
         );
         let _ = fs::remove_file(output_path);
     }

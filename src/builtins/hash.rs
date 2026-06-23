@@ -143,6 +143,12 @@ pub(crate) fn set_hashed_path(env_vars: &mut HashMap<String, String>, name: &str
     store_hash_table(env_vars, &table);
 }
 
+pub(crate) fn remove_hashed_path(env_vars: &mut HashMap<String, String>, name: &str) {
+    let mut table = hash_table(env_vars);
+    table.remove(name);
+    store_hash_table(env_vars, &table);
+}
+
 pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
     hash_table(env_vars).remove(name)
 }
