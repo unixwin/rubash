@@ -53,6 +53,10 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 eprintln!("rubash: -c: option requires an argument");
                 return 2;
             }
+            "-s" => {
+                executor.set_positional_params(args[index + 1..].to_vec());
+                return run_stdin_script(executor);
+            }
             "--help" | "-h" => {
                 print_usage();
                 return 0;
