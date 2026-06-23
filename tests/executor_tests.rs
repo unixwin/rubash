@@ -1344,6 +1344,48 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_set_updates_shell_options() {
+        let output_path = "target/rubash-builtin-set-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "builtin set -u; echo $- > {output_path}; [[ -o nounset ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let lines: Vec<String> = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(lines[0].contains('u'));
+        assert_eq!(lines[1], "0");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_set_replaces_positional_parameters() {
+        let output_path = "target/rubash-builtin-set-positionals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin set -- alpha beta; echo $# $1 $2 > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_cd_redirects_stderr() {
         let error_path = "target/rubash-cd-stderr-output.txt";
         let status_path = "target/rubash-cd-stderr-status.txt";
