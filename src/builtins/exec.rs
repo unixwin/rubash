@@ -7,19 +7,23 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
+const EX_BADUSAGE: i32 = 2;
 
 pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
-    execute_with_io(args, env_vars, &mut stdout)
+    let mut stderr = io::stderr().lock();
+    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
 }
 
-pub(crate) fn execute_with_io<W>(
+pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     env_vars: &HashMap<String, String>,
     stdout: &mut W,
+    stderr: &mut E,
 ) -> io::Result<i32>
 where
     W: Write,
+    E: Write,
 {
     // TODO(builtins/exec.def/execute_cmd.c): GNU Bash replaces the shell
     // process, controls argv[0] with -a/-l, and can clear the environment with
@@ -37,7 +41,14 @@ where
                 index += 1;
                 argv0 = args.get(index).cloned();
             }
-            _ if arg.starts_with('-') => {}
+            _ if arg.starts_with('-') => {
+                writeln!(stderr, "rubash: exec: {arg}: invalid option")?;
+                writeln!(
+                    stderr,
+                    "exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]"
+                )?;
+                return Ok(EX_BADUSAGE);
+            }
             _ => break,
         }
         index += 1;
