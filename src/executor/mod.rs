@@ -7889,6 +7889,9 @@ impl Executor {
         if base_name == "FUNCNAME" && !append {
             return;
         }
+        if base_name == "LINENO" && !append {
+            return;
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8740,6 +8743,12 @@ impl Executor {
                     .unwrap_or_default(),
             ),
             "GROUPS" => self.group_value_at(0),
+            "LINENO" => Some(
+                self.env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .cloned()
+                    .unwrap_or_else(|| "1".to_string()),
+            ),
             _ => None,
         }
     }
@@ -8754,6 +8763,7 @@ impl Executor {
                 | "BASHPID"
                 | "FUNCNAME"
                 | "GROUPS"
+                | "LINENO"
         )
     }
 
@@ -12318,6 +12328,13 @@ impl ConditionalArithParser<'_> {
             return self
                 .random_state
                 .map(|state| i128::from(next_random_from_state(state)));
+        }
+        if name == "LINENO" {
+            return self
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .and_then(|line| line.parse::<i128>().ok())
+                .or(Some(1));
         }
 
         let value = self
