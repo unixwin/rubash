@@ -2352,7 +2352,10 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(&output_path).unwrap(), "unset/exported\n");
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "unset/exported\n"
+        );
         std::env::remove_var("RUBASH_CHILD_LOCAL");
         std::env::remove_var("RUBASH_CHILD_EXPORTED");
         let _ = fs::remove_file(&output_path);
@@ -2416,11 +2419,60 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        let output = fs::read_to_string(&output_path).unwrap().replace("\r\n", "\n");
+        let output = fs::read_to_string(&output_path)
+            .unwrap()
+            .replace("\r\n", "\n");
         assert_ne!(output, "unset\n");
         assert!(!output.trim().is_empty());
         let _ = fs::remove_file(&output_path);
         let _ = fs::remove_file(&script_path);
+    }
+
+    #[test]
+    fn test_shell_level_increments_inherited_environment() {
+        let output_path = target_test_path("rubash-shlvl-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let original_shlvl = std::env::var("SHLVL").ok();
+        std::env::set_var("SHLVL", "7");
+        let input = format!("printf '%s\\n' \"$SHLVL\" > {shell_output_path}; declare -p SHLVL >> {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        match original_shlvl {
+            Some(value) => std::env::set_var("SHLVL", value),
+            None => std::env::remove_var("SHLVL"),
+        }
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "8\ndeclare -x SHLVL=\"8\"\n"
+        );
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_child_rubash_increments_shell_level() {
+        let output_path = target_test_path("rubash-child-shlvl-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input =
+            format!("SHLVL=12 {rubash} -c 'printf \"%s\\n\" \"$SHLVL\"' > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "13\n");
+        let _ = fs::remove_file(&output_path);
     }
 
     #[test]
@@ -6325,7 +6377,10 @@ mod command_chaining {
 
         assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(&output_path).unwrap(), "unset/exported\n");
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "unset/exported\n"
+        );
         std::env::remove_var("RUBASH_EXEC_LOCAL");
         std::env::remove_var("RUBASH_EXEC_EXPORTED");
         let _ = fs::remove_file(&output_path);
