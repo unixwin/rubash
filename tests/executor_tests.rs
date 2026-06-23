@@ -6478,6 +6478,140 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_complete_empty_state_redirects_no_output() {
+        let output_path = "target/rubash-complete-output.txt";
+        let status_path = "target/rubash-complete-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("complete > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_complete_invalid_option_reports_usage() {
+        let error_path = "target/rubash-complete-error.txt";
+        let status_path = "target/rubash-complete-error-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("complete -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("complete: -x: invalid option\n"));
+        assert!(error.contains("complete: usage: complete "));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_compgen_empty_state_redirects_no_output() {
+        let output_path = "target/rubash-compgen-output.txt";
+        let status_path = "target/rubash-compgen-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("compgen > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_compgen_invalid_option_reports_usage() {
+        let error_path = "target/rubash-compgen-error.txt";
+        let status_path = "target/rubash-compgen-error-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("compgen -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("compgen: -x: invalid option\n"));
+        assert!(error.contains("compgen: usage: compgen "));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_compopt_outside_completion_function_fails() {
+        let error_path = "target/rubash-compopt-error.txt";
+        let status_path = "target/rubash-compopt-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("compopt 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("compopt: not currently executing completion function\n"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_builtin_compopt_invalid_option_reports_usage() {
+        let error_path = "target/rubash-builtin-compopt-error.txt";
+        let status_path = "target/rubash-builtin-compopt-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("builtin compopt -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("compopt: -x: invalid option\n"));
+        assert!(error.contains("compopt: usage: compopt "));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_eval_redirects_loop_body_without_retruncating() {
         let output_path = "target/rubash-eval-loop-redirect-output.txt";
         let _ = fs::remove_file(output_path);
