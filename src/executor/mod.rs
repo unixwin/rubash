@@ -670,8 +670,10 @@ impl Executor {
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
                 .unwrap_or_else(|_| "/".to_string())
         });
+        env_vars.remove("OLDPWD");
         initialize_shell_level(&mut env_vars);
         mark_initial_exported_vars(&mut env_vars);
+        mark_env_name(&mut env_vars, EXPORTED_VARS, "OLDPWD");
         env_vars.insert(
             SHELL_START_EPOCH.to_string(),
             current_epoch_seconds().to_string(),

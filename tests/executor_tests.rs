@@ -2672,6 +2672,36 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_initial_oldpwd_is_exported_but_unset() {
+        let output_path = target_test_path("rubash-initial-oldpwd-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let original_oldpwd = std::env::var("OLDPWD").ok();
+        std::env::set_var("OLDPWD", "/tmp/parent-oldpwd");
+        let input = format!(
+            "printf '<%s>\\n' \"${{OLDPWD-unset}}\" > {shell_output_path}; \
+             declare -p OLDPWD >> {shell_output_path}; export -p >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        match original_oldpwd {
+            Some(value) => std::env::set_var("OLDPWD", value),
+            None => std::env::remove_var("OLDPWD"),
+        }
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("<unset>\ndeclare -x OLDPWD\n"));
+        assert!(output.contains("declare -x OLDPWD\n"));
+        assert!(!output.contains("parent-oldpwd"));
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_shell_level_increments_inherited_environment() {
         let output_path = target_test_path("rubash-shlvl-output.txt");
         let _ = fs::remove_file(&output_path);
