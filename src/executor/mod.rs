@@ -4283,6 +4283,27 @@ impl Executor {
                 self.exit_code = self.execute_unset(&builtin_cmd)?;
                 Ok(())
             }
+            "pushd" => {
+                self.exit_code = self.execute_stack_builtin(
+                    &builtin_cmd,
+                    crate::builtins::pushd::StackBuiltin::Pushd,
+                )?;
+                Ok(())
+            }
+            "popd" => {
+                self.exit_code = self.execute_stack_builtin(
+                    &builtin_cmd,
+                    crate::builtins::pushd::StackBuiltin::Popd,
+                )?;
+                Ok(())
+            }
+            "dirs" => {
+                self.exit_code = self.execute_stack_builtin(
+                    &builtin_cmd,
+                    crate::builtins::pushd::StackBuiltin::Dirs,
+                )?;
+                Ok(())
+            }
             "set" => self.execute_set_command(&builtin_cmd),
             "shopt" => {
                 self.exit_code = self.execute_shopt(&builtin_cmd)?;
@@ -4421,6 +4442,27 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_unset(&command)?;
+                Ok(())
+            }
+            "pushd" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self
+                    .execute_stack_builtin(&command, crate::builtins::pushd::StackBuiltin::Pushd)?;
+                Ok(())
+            }
+            "popd" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self
+                    .execute_stack_builtin(&command, crate::builtins::pushd::StackBuiltin::Popd)?;
+                Ok(())
+            }
+            "dirs" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self
+                    .execute_stack_builtin(&command, crate::builtins::pushd::StackBuiltin::Dirs)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),

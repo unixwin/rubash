@@ -1810,6 +1810,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_dirs_redirects_output() {
+        let output_path = "target/rubash-builtin-dirs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("PWD=/tmp/rubash-builtin-dirs builtin dirs > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "/tmp/rubash-builtin-dirs\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_dirs_redirects_stderr() {
         let error_path = "target/rubash-dirs-stderr-output.txt";
         let status_path = "target/rubash-dirs-stderr-status.txt";
