@@ -2309,6 +2309,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_export_n_clears_export_attribute_without_unsetting_variable() {
+        let output_path = "target/rubash-export-n-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "RUBASH_EXPORT_CLEAR=value; export RUBASH_EXPORT_CLEAR; export -n RUBASH_EXPORT_CLEAR; \
+             printf '<%s>\\n' \"$RUBASH_EXPORT_CLEAR\" > {output_path}; \
+             export -p >> {output_path}; printf '%s\\n' --- >> {output_path}; \
+             declare -p RUBASH_EXPORT_CLEAR >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("<value>\n"));
+        assert!(!output.contains("declare -x RUBASH_EXPORT_CLEAR="));
+        assert!(output.contains("---\ndeclare -- RUBASH_EXPORT_CLEAR=\"value\"\n"));
+        std::env::remove_var("RUBASH_EXPORT_CLEAR");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_readonly_p_redirects_output() {
         let output_path = "target/rubash-readonly-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);

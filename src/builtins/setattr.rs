@@ -158,7 +158,6 @@ where
             }
         }
         ExportMode::Unset => {
-            env_vars.remove(name);
             env::remove_var(name);
             unmark_exported(env_vars, name);
         }
