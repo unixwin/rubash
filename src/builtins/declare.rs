@@ -420,7 +420,7 @@ fn parse_array_words(value: &str) -> Vec<String> {
 fn is_noassign_bash_array(name: &str) -> bool {
     matches!(
         name,
-        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE"
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
     )
 }
 

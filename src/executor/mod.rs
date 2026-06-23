@@ -687,6 +687,8 @@ impl Executor {
         store_indexed_array(&mut env_vars, "BASH_ARGV", Vec::new());
         store_indexed_array(&mut env_vars, "BASH_LINENO", vec!["0".to_string()]);
         store_indexed_array(&mut env_vars, "BASH_SOURCE", Vec::new());
+        env_vars.insert("FUNCNAME".to_string(), String::new());
+        mark_env_name(&mut env_vars, ARRAY_VARS, "FUNCNAME");
         env_vars
             .entry("HOSTTYPE".to_string())
             .or_insert_with(hosttype_value);
@@ -2087,16 +2089,30 @@ impl Executor {
             return Ok(());
         }
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
+        let old_funcname = self.env_vars.get("FUNCNAME").cloned();
         let old_positional_params = self.positional_params.clone();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
+        let mut funcname_stack = self.funcname_stack();
+        funcname_stack.insert(0, name.to_string());
+        store_indexed_array(&mut self.env_vars, "FUNCNAME", funcname_stack);
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
         self.function_depth += 1;
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
         self.positional_params = old_positional_params;
+        match old_funcname {
+            Some(value) => {
+                self.env_vars.insert("FUNCNAME".to_string(), value);
+                mark_env_name(&mut self.env_vars, ARRAY_VARS, "FUNCNAME");
+            }
+            None => {
+                self.env_vars.insert("FUNCNAME".to_string(), String::new());
+                mark_env_name(&mut self.env_vars, ARRAY_VARS, "FUNCNAME");
+            }
+        }
         match old_function {
             Some(value) => {
                 self.env_vars
@@ -8956,12 +8972,7 @@ impl Executor {
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
             "BASHPID" => Some(std::process::id().to_string()),
-            "FUNCNAME" => Some(
-                self.env_vars
-                    .get("__RUBASH_CURRENT_FUNCTION")
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
+            "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
                 self.env_vars
@@ -9002,6 +9013,13 @@ impl Executor {
                 | "BASHOPTS"
                 | "PIPESTATUS"
         )
+    }
+
+    fn funcname_stack(&self) -> Vec<String> {
+        self.env_vars
+            .get("FUNCNAME")
+            .map(|value| array_values(value))
+            .unwrap_or_default()
     }
 
     fn next_random_value(&self) -> u32 {
@@ -14174,7 +14192,7 @@ fn store_indexed_array(env_vars: &mut HashMap<String, String>, name: &str, value
 fn is_noassign_bash_array(name: &str) -> bool {
     matches!(
         name,
-        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE"
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
     )
 }
 

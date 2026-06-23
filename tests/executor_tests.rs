@@ -973,6 +973,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_funcname_tracks_nested_function_stack() {
+        let output_path = "target/rubash-funcname-stack-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "outer() {{ inner; }}; \
+             inner() {{ printf '%s|%s|%s|%s|%s\\n' \"$FUNCNAME\" \"${{FUNCNAME[0]}}\" \"${{FUNCNAME[1]}}\" \"${{FUNCNAME[@]}}\" \"${{#FUNCNAME[@]}}\" > {output_path}; }}; \
+             outer"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "inner|inner|outer|inner outer|2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_funcname_assignment_does_not_change_stack() {
+        let output_path = "target/rubash-funcname-noassign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "show_name() {{ FUNCNAME[0]=bad; declare FUNCNAME=also_bad; printf '%s:%s:%s\\n' \"$?\" \"$FUNCNAME\" \"${{FUNCNAME[0]}}\" > {output_path}; }}; show_name"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0:show_name:show_name\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_assignment_does_not_override_dynamic_value() {
         let output_path = "target/rubash-funcname-assignment-output.txt";
         let _ = fs::remove_file(output_path);
