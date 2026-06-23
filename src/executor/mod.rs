@@ -2068,6 +2068,10 @@ impl Executor {
                     self.exit_code = self.execute_history(cmd)?;
                     Ok(())
                 }
+                "bind" => {
+                    self.exit_code = self.execute_bind(cmd)?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4636,6 +4640,10 @@ impl Executor {
                 self.exit_code = self.execute_history(cmd)?;
                 Ok(())
             }
+            "bind" => {
+                self.exit_code = self.execute_bind(cmd)?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4871,6 +4879,10 @@ impl Executor {
             }
             "history" => {
                 self.exit_code = self.execute_history(&builtin_cmd)?;
+                Ok(())
+            }
+            "bind" => {
+                self.exit_code = self.execute_bind(&builtin_cmd)?;
                 Ok(())
             }
             "time" => {
@@ -5204,6 +5216,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_history(&command)?;
+                Ok(())
+            }
+            "bind" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_bind(&command)?;
                 Ok(())
             }
             "time" => {
@@ -7254,6 +7272,17 @@ impl Executor {
     fn execute_history(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
         let status = crate::builtins::history::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_bind(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::bind::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
