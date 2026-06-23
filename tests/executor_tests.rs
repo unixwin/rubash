@@ -9880,6 +9880,32 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_g_inside_function_updates_global_behind_local() {
+        let output_path =
+            target_test_path("rubash-function-declare-global-behind-local-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "x=global; f() {{ local x=local; declare -g x=changed; \
+                    echo in:$x > {shell_output_path}; }}; \
+             f; echo out:$x >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "in:local\nout:changed\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
         let output_path = target_test_path("rubash-function-readonly-attrs-output.txt");
         let shell_output_path = shell_test_path(&output_path);
