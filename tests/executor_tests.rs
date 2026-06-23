@@ -172,6 +172,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_underscore_tracks_last_command_argument() {
+        let output_path = "target/rubash-underscore-last-arg-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "printf '%s\\n' alpha beta > {output_path}; \
+             printf '%s\\n' \"$_\" >> {output_path}; \
+             :; printf '%s\\n' \"$_\" >> {output_path}; \
+             _=temporary printf '%s\\n' final >> {output_path}; \
+             printf '%s\\n' \"$_\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "alpha\nbeta\nbeta\n:\nfinal\nfinal\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_and_operator() {
         let input = "true && echo success";
         let tokens = tokenize(input);

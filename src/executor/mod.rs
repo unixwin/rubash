@@ -2085,10 +2085,18 @@ impl Executor {
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
         }
+        self.update_underscore_parameter(cmd);
         if self.errexit_enabled() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
         }
         result
+    }
+
+    fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
+        if let Some(value) = cmd.words.last() {
+            self.env_vars.insert("_".to_string(), value.clone());
+            env::set_var("_", value);
+        }
     }
 
     fn define_function(&mut self, function: &FunctionCommand) -> Result<(), ExecuteError> {
