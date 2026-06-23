@@ -6167,6 +6167,13 @@ impl Executor {
                     }
                     index += 2;
                 }
+                word if word.starts_with("-a") && word.len() > 2 => {
+                    let name = &word[2..];
+                    if is_shell_name(name) {
+                        array_name = Some(name.to_string());
+                    }
+                    index += 1;
+                }
                 "-d" => {
                     delimiter = cmd
                         .words
