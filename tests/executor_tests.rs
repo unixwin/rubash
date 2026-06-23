@@ -2524,6 +2524,78 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_disabled_echo_builtin_uses_external_command() {
+        let bin_dir = "target/rubash-disabled-echo-bin";
+        let script_path = format!("{bin_dir}/echo");
+        let output_path = "target/rubash-disabled-echo-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "printf 'external-echo %s\\n' \"$*\"\n").unwrap();
+        let input = format!(
+            "enable -n echo; echo hello > {output_path}; enable echo; echo builtin >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-echo hello\nbuiltin\n"
+        );
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
+    fn test_command_uses_external_echo_when_builtin_is_disabled() {
+        let bin_dir = "target/rubash-disabled-command-echo-bin";
+        let script_path = format!("{bin_dir}/echo");
+        let output_path = "target/rubash-disabled-command-echo-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(
+            &script_path,
+            "printf 'external-command-echo %s\\n' \"$*\"\n",
+        )
+        .unwrap();
+        let input = format!("enable -n echo; command echo hello > {output_path}; enable echo");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-command-echo hello\n"
+        );
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
     fn test_enable_appends_output() {
         let output_path = "target/rubash-enable-append-output.txt";
         let _ = fs::remove_file(output_path);
