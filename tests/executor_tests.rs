@@ -766,6 +766,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bashpid_changes_in_command_substitution() {
+        let output_path = "target/rubash-bashpid-command-substitution-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "printf '%s:%s:%s\\n' \"$$\" \"$BASHPID\" \"$(echo $BASHPID)\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let parts: Vec<_> = output.trim_end().split(':').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], parts[1]);
+        assert_ne!(parts[0], parts[2]);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_bash_subshell_tracks_command_substitution_depth() {
         let output_path = "target/rubash-bash-subshell-output.txt";
         let _ = fs::remove_file(output_path);
