@@ -670,6 +670,7 @@ impl Executor {
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
                 .unwrap_or_else(|_| "/".to_string())
         });
+        mark_initial_exported_vars(&mut env_vars);
         env_vars.insert(
             SHELL_START_EPOCH.to_string(),
             current_epoch_seconds().to_string(),
@@ -13331,6 +13332,64 @@ fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) 
         names.push(name.to_string());
     }
     env_vars.insert(key.to_string(), names.join("\x1f"));
+}
+
+fn mark_initial_exported_vars(env_vars: &mut HashMap<String, String>) {
+    let mut names: Vec<String> = env_vars
+        .keys()
+        .filter(|name| is_initial_export_candidate(name))
+        .cloned()
+        .collect();
+    names.sort();
+    env_vars.insert(EXPORTED_VARS.to_string(), names.join("\x1f"));
+}
+
+fn is_initial_export_candidate(name: &str) -> bool {
+    // Test runs share one process environment; ignore shell-local names that
+    // previous Executor instances may have written there.
+    !name.starts_with("__RUBASH_")
+        && name.len() > 1
+        && name
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_uppercase)
+        && !is_bash_managed_shell_var(name)
+}
+
+fn is_bash_managed_shell_var(name: &str) -> bool {
+    matches!(
+        name,
+        "BASH"
+            | "BASHOPTS"
+            | "BASH_ALIASES"
+            | "BASH_ARGC"
+            | "BASH_ARGV"
+            | "BASH_CMDS"
+            | "BASH_EXECUTION_STRING"
+            | "BASH_LINENO"
+            | "BASH_SOURCE"
+            | "BASH_VERSINFO"
+            | "BASH_VERSION"
+            | "DIRSTACK"
+            | "EUID"
+            | "FUNCNAME"
+            | "HOSTNAME"
+            | "HOSTTYPE"
+            | "LINENO"
+            | "MACHTYPE"
+            | "OLDPWD"
+            | "OPTARG"
+            | "OPTIND"
+            | "OSTYPE"
+            | "PIPESTATUS"
+            | "PPID"
+            | "PWD"
+            | "RANDOM"
+            | "SECONDS"
+            | "SHELLOPTS"
+            | "UID"
+            | "_"
+    )
 }
 
 fn unmark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
