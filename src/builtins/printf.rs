@@ -340,12 +340,81 @@ fn expand_percent_b(value: &str) -> String {
             Some('t') => output.push('\t'),
             Some('v') => output.push('\x0b'),
             Some('\\') => output.push('\\'),
+            Some('x') => {
+                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 2), "\\x")
+            }
+            Some('u') => {
+                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 4), "\\u")
+            }
+            Some('U') => {
+                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 8), "\\U")
+            }
+            Some('0') => {
+                let value = read_escape_digits(&mut chars, 8, 3).or(Some(0));
+                push_escape_codepoint(&mut output, value, "");
+            }
+            Some(octal @ '1'..='7') => {
+                let value = read_prefixed_escape_digits(&mut chars, octal, 8, 3);
+                push_escape_codepoint(&mut output, value, "");
+            }
             Some(other) => output.push(other),
             None => output.push('\\'),
         }
     }
 
     output
+}
+
+fn read_prefixed_escape_digits<I>(
+    chars: &mut std::iter::Peekable<I>,
+    first: char,
+    radix: u32,
+    max: usize,
+) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = first.to_string();
+    while value.len() < max {
+        let Some(ch) = chars.peek().copied() else {
+            break;
+        };
+        if ch.to_digit(radix).is_none() {
+            break;
+        }
+        value.push(ch);
+        chars.next();
+    }
+    u32::from_str_radix(&value, radix).ok()
+}
+
+fn read_escape_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, max: usize) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = String::new();
+    while value.len() < max {
+        let Some(ch) = chars.peek().copied() else {
+            break;
+        };
+        if ch.to_digit(radix).is_none() {
+            break;
+        }
+        value.push(ch);
+        chars.next();
+    }
+    if value.is_empty() {
+        None
+    } else {
+        u32::from_str_radix(&value, radix).ok()
+    }
+}
+
+fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str) {
+    match value.and_then(char::from_u32) {
+        Some(ch) => output.push(ch),
+        None => output.push_str(fallback),
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -464,5 +533,13 @@ mod tests {
     #[test]
     fn percent_q_and_upper_q_apply_precision_like_bash() {
         assert_eq!(run(&["<%.2q><%.2Q>", "a b", "a b"]).1, "<a\\><a\\ >");
+    }
+
+    #[test]
+    fn percent_b_decodes_numeric_escapes() {
+        assert_eq!(
+            run(&["%b", "\\01017 \\1017 \\x417 \\u0041"]).1,
+            "A7 A7 A7 A"
+        );
     }
 }
