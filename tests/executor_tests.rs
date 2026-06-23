@@ -16,6 +16,12 @@ fn shell_test_path(path: &std::path::Path) -> String {
     }
 }
 
+fn target_test_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(name)
+}
+
 mod simple_execution {
     use super::*;
 
@@ -359,22 +365,24 @@ mod command_chaining {
 
     #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
-        let output_path = "target/rubash-pipeline-external-output.txt";
+        let output_path = target_test_path("rubash-pipeline-external-output.txt");
         #[cfg(windows)]
-        let script_path = "target/rubash-pipeline-filter.cmd";
+        let script_path = target_test_path("rubash-pipeline-filter.cmd");
         #[cfg(not(windows))]
-        let script_path = "target/rubash-pipeline-filter.sh";
-        let _ = fs::remove_file(output_path);
-        let _ = fs::remove_file(script_path);
+        let script_path = target_test_path("rubash-pipeline-filter.sh");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_script_path = shell_test_path(&script_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
         #[cfg(windows)]
         fs::write(
-            script_path,
+            &script_path,
             "@echo off\r\nfor /f \"delims=\" %%L in ('findstr /r \".*\"') do if \"%%L\"==\"b\" echo external:%%L\r\n",
         )
         .unwrap();
         #[cfg(not(windows))]
         fs::write(
-            script_path,
+            &script_path,
             "#!/bin/sh\nwhile IFS= read -r line; do\n  if [ \"$line\" = b ]; then\n    printf 'external:%s\\n' \"$line\"\n  fi\ndone\n",
         )
         .unwrap();
@@ -382,16 +390,16 @@ mod command_chaining {
         {
             use std::os::unix::fs::PermissionsExt;
 
-            let mut permissions = fs::metadata(script_path).unwrap().permissions();
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
             permissions.set_mode(0o755);
-            fs::set_permissions(script_path, permissions).unwrap();
+            fs::set_permissions(&script_path, permissions).unwrap();
         }
-        let input = format!("printf 'a\\nb\\n' | {script_path} > {output_path}");
+        let input = format!("printf 'a\\nb\\n' | {shell_script_path} > {shell_output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
         assert!(ast.commands[0].pipe.is_some());
-        assert_eq!(ast.commands[1].words, [script_path]);
+        assert_eq!(ast.commands[1].words, [shell_script_path.as_str()]);
         assert!(ast.commands[1].redirect_out.is_some());
         let mut executor = Executor::new();
 
@@ -400,7 +408,7 @@ mod command_chaining {
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
-            fs::read_to_string(output_path)
+            fs::read_to_string(&output_path)
                 .unwrap()
                 .replace("\r\n", "\n"),
             "external:b\n"
@@ -2579,9 +2587,10 @@ mod command_chaining {
 
     #[test]
     fn test_builtin_enable_updates_disabled_builtin_state() {
-        let output_path = "target/rubash-builtin-enable-output.txt";
-        let _ = fs::remove_file(output_path);
-        let input = format!("builtin enable -n test; type -t test > {output_path}");
+        let output_path = target_test_path("rubash-builtin-enable-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!("builtin enable -n test; type -t test > {shell_output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -2590,7 +2599,7 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "file\n");
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "file\n");
         let _ = fs::remove_file(output_path);
     }
 
@@ -4056,15 +4065,18 @@ mod command_chaining {
 
     #[test]
     fn test_command_v_without_p_uses_current_path_for_external_command() {
-        let status_path = "target/rubash-command-v-without-p-status.txt";
-        let output_path = "target/rubash-command-v-without-p-output.txt";
-        let restored_path = "target/rubash-command-v-restored-output.txt";
-        let _ = fs::remove_file(status_path);
-        let _ = fs::remove_file(output_path);
-        let _ = fs::remove_file(restored_path);
+        let status_path = target_test_path("rubash-command-v-without-p-status.txt");
+        let output_path = target_test_path("rubash-command-v-without-p-output.txt");
+        let restored_path = target_test_path("rubash-command-v-restored-output.txt");
+        let shell_status_path = shell_test_path(&status_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_restored_path = shell_test_path(&restored_path);
+        let _ = fs::remove_file(&status_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&restored_path);
         let input = format!(
-            "PATH=target/rubash-no-such-bin command -v sh > {output_path}; \
-             echo $? > {status_path}; command -v sh > {restored_path}"
+            "PATH=target/rubash-no-such-bin command -v sh > {shell_output_path}; \
+             echo $? > {shell_status_path}; command -v sh > {shell_restored_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -4074,9 +4086,9 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
-        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
-        assert!(!fs::read_to_string(restored_path).unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(&status_path).unwrap(), "1\n");
+        assert!(!fs::read_to_string(&restored_path).unwrap().is_empty());
         let _ = fs::remove_file(status_path);
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(restored_path);
