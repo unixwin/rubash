@@ -584,6 +584,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_callback_runs_at_quantum() {
+        let output_path = "target/rubash-mapfile-callback-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "cb() {{ echo \"$1:$2\" >> {output_path}; }}; mapfile -C cb -c 2 -t arr <<< $'alpha\\nbeta\\ngamma'; echo ${{#arr[@]}} ${{arr[@]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1:beta\n3 alpha beta gamma\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_readarray_compact_n_limits_read_lines() {
         let output_path = "target/rubash-readarray-compact-n-output.txt";
         let _ = fs::remove_file(output_path);
