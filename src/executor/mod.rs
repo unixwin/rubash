@@ -665,6 +665,9 @@ impl Executor {
         );
         mark_env_name(&mut env_vars, READONLY_VARS, "SHELLOPTS");
         store_indexed_array(&mut env_vars, "PIPESTATUS", vec!["0".to_string()]);
+        env_vars.insert("OPTIND".to_string(), "1".to_string());
+        env_vars.remove("OPTARG");
+        env_vars.remove("__RUBASH_GETOPTS_OFFSET");
 
         Self {
             exit_code: 0,
@@ -1908,6 +1911,10 @@ impl Executor {
                     Ok(())
                 }
                 "set" => self.execute_set_command(cmd),
+                "getopts" => {
+                    self.exit_code = self.execute_getopts(cmd);
+                    Ok(())
+                }
                 "shopt" => {
                     self.exit_code = self.execute_shopt(cmd)?;
                     Ok(())
@@ -7568,6 +7575,159 @@ impl Executor {
         Ok(())
     }
 
+    fn execute_getopts(&mut self, cmd: &CommandNode) -> i32 {
+        let mut stderr = std::io::stderr().lock();
+        if cmd.words.len() < 3 {
+            let _ = writeln!(stderr, "getopts: usage: getopts optstring name [arg ...]");
+            return 2;
+        }
+
+        let optstring = &cmd.words[1];
+        let variable = &cmd.words[2];
+        if !is_shell_name(variable) {
+            let _ = writeln!(
+                stderr,
+                "{}getopts: `{variable}': not a valid identifier",
+                self.diagnostic_prefix()
+            );
+            return 2;
+        }
+
+        let args: Vec<String> = if cmd.words.len() > 3 {
+            cmd.words[3..].to_vec()
+        } else {
+            self.positional_params.clone()
+        };
+
+        let silent = optstring.starts_with(':');
+        let optspec = if silent {
+            &optstring[1..]
+        } else {
+            optstring.as_str()
+        };
+        let mut optind = self
+            .env_vars
+            .get("OPTIND")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
+        let mut offset = self
+            .env_vars
+            .get("__RUBASH_GETOPTS_OFFSET")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
+
+        let Some(current) = args.get(optind.saturating_sub(1)) else {
+            self.finish_getopts_scan(variable, optind, 1);
+            return 1;
+        };
+        if offset == 1 {
+            if current == "--" {
+                self.finish_getopts_scan(variable, optind + 1, 1);
+                return 1;
+            }
+            if current == "-" || !current.starts_with('-') {
+                self.finish_getopts_scan(variable, optind, 1);
+                return 1;
+            }
+        }
+
+        let option_chars: Vec<char> = current.chars().collect();
+        let Some(option) = option_chars.get(offset).copied() else {
+            self.finish_getopts_scan(variable, optind + 1, 1);
+            return 1;
+        };
+
+        let consumed_arg = offset + 1 >= option_chars.len();
+        if consumed_arg {
+            optind += 1;
+            offset = 1;
+        } else {
+            offset += 1;
+        }
+
+        let Some(spec_index) = optspec.find(option) else {
+            self.env_vars
+                .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+            self.set_optind(optind);
+            self.remove_env("OPTARG");
+            self.apply_shell_assignment(variable, "?".to_string());
+            if !silent && self.env_vars.get("OPTERR").map(String::as_str) != Some("0") {
+                let _ = writeln!(
+                    stderr,
+                    "{}illegal option -- {option}",
+                    self.script_name_value()
+                );
+            } else if silent {
+                self.apply_shell_assignment("OPTARG", option.to_string());
+            }
+            return 0;
+        };
+
+        let requires_arg = optspec[spec_index + option.len_utf8()..].starts_with(':');
+        if requires_arg {
+            let argument = if !consumed_arg {
+                let value = option_chars[offset - 1..].iter().collect::<String>();
+                optind += 1;
+                offset = 1;
+                Some(value)
+            } else {
+                let value = args.get(optind.saturating_sub(1)).cloned();
+                if value.is_some() {
+                    optind += 1;
+                }
+                value
+            };
+
+            let Some(argument) = argument else {
+                self.env_vars
+                    .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+                self.set_optind(optind);
+                if silent {
+                    self.apply_shell_assignment(variable, ":".to_string());
+                    self.apply_shell_assignment("OPTARG", option.to_string());
+                    return 0;
+                }
+                self.remove_env("OPTARG");
+                self.apply_shell_assignment(variable, "?".to_string());
+                if self.env_vars.get("OPTERR").map(String::as_str) != Some("0") {
+                    let _ = writeln!(
+                        stderr,
+                        "{}option requires an argument -- {option}",
+                        self.script_name_value()
+                    );
+                }
+                return 0;
+            };
+
+            self.apply_shell_assignment(variable, option.to_string());
+            self.apply_shell_assignment("OPTARG", argument);
+        } else {
+            self.apply_shell_assignment(variable, option.to_string());
+            self.remove_env("OPTARG");
+        }
+
+        self.env_vars
+            .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+        self.set_optind(optind);
+        0
+    }
+
+    fn finish_getopts_scan(&mut self, variable: &str, optind: usize, offset: usize) {
+        self.apply_shell_assignment(variable, "?".to_string());
+        self.remove_env("OPTARG");
+        self.set_optind(optind);
+        self.env_vars
+            .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
+    }
+
+    fn set_optind(&mut self, optind: usize) {
+        let value = optind.to_string();
+        self.env_vars.insert("OPTIND".to_string(), value.clone());
+        env::set_var("OPTIND", value);
+    }
+
     fn execute_enable(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
@@ -7869,6 +8029,9 @@ impl Executor {
             );
             self.exit_code = 1;
             return;
+        }
+        if base_name == "OPTIND" && !append {
+            self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
         }
         if base_name == "SECONDS" && !append {
             let assigned = value.trim().parse::<i64>().unwrap_or(0);
