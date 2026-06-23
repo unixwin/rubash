@@ -2042,6 +2042,14 @@ impl Executor {
                     self.exit_code = self.execute_caller(cmd)?;
                     Ok(())
                 }
+                "jobs" => {
+                    self.exit_code = self.execute_jobs(cmd)?;
+                    Ok(())
+                }
+                "wait" => {
+                    self.exit_code = self.execute_wait(cmd)?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4584,6 +4592,14 @@ impl Executor {
                 self.exit_code = self.execute_caller(cmd)?;
                 Ok(())
             }
+            "jobs" => {
+                self.exit_code = self.execute_jobs(cmd)?;
+                Ok(())
+            }
+            "wait" => {
+                self.exit_code = self.execute_wait(cmd)?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4793,6 +4809,14 @@ impl Executor {
             }
             "caller" => {
                 self.exit_code = self.execute_caller(&builtin_cmd)?;
+                Ok(())
+            }
+            "jobs" => {
+                self.exit_code = self.execute_jobs(&builtin_cmd)?;
+                Ok(())
+            }
+            "wait" => {
+                self.exit_code = self.execute_wait(&builtin_cmd)?;
                 Ok(())
             }
             "time" => {
@@ -5088,6 +5112,18 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_caller(&command)?;
+                Ok(())
+            }
+            "jobs" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_jobs(&command)?;
+                Ok(())
+            }
+            "wait" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_wait(&command)?;
                 Ok(())
             }
             "time" => {
@@ -7070,6 +7106,28 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_jobs(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::jobs::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_wait(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::wait::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
 
