@@ -2625,6 +2625,97 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_let_invokes_let_builtin() {
+        let output_path = "target/rubash-builtin-let-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin let n=1+2 n; echo $? $n > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0 3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_read_uses_here_string() {
+        let output_path = "target/rubash-builtin-read-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("builtin read left right <<< 'alpha beta'; echo $left/$right > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_mapfile_uses_here_string() {
+        let output_path = "target/rubash-builtin-mapfile-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "builtin mapfile -t arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_umask_redirects_output() {
+        let output_path = "target/rubash-builtin-umask-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin umask 077; builtin umask > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0077\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_trap_redirects_output() {
+        let output_path = "target/rubash-builtin-trap-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin trap 'echo bye' EXIT; builtin trap -p EXIT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trap -- 'echo bye' EXIT\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_command_echo_redirects_output() {
         let output_path = "target/rubash-command-echo-redirect-output.txt";
         let _ = fs::remove_file(output_path);

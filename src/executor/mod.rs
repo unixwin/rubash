@@ -4229,6 +4229,9 @@ impl Executor {
             && cmd.append.is_none()
             && cmd.redirect_err.is_none()
             && cmd.redirect_err_append.is_none()
+            && cmd.redirect_in.is_none()
+            && cmd.heredoc.is_none()
+            && cmd.here_string.is_none()
         {
             return self.execute_builtin_direct(args);
         }
@@ -4315,6 +4318,39 @@ impl Executor {
             }
             "enable" => {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
+                Ok(())
+            }
+            "let" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code = self.execute_let(&builtin_cmd.words[1..]);
+                Ok(())
+            }
+            "umask" => {
+                self.exit_code = self.execute_umask(&builtin_cmd)?;
+                Ok(())
+            }
+            "ulimit" => {
+                self.exit_code = self.execute_ulimit(&builtin_cmd)?;
+                Ok(())
+            }
+            "read" => {
+                self.exit_code = self.execute_read(&builtin_cmd);
+                Ok(())
+            }
+            "mapfile" | "readarray" => {
+                self.exit_code = self.execute_mapfile(&builtin_cmd);
+                Ok(())
+            }
+            "times" => {
+                self.exit_code = self.execute_times(&builtin_cmd)?;
+                Ok(())
+            }
+            "time" => {
+                self.execute_time_command(&builtin_cmd.words[1..])?;
+                Ok(())
+            }
+            "trap" => {
+                self.exit_code = self.execute_trap(&builtin_cmd)?;
                 Ok(())
             }
             "type" => {
@@ -4530,6 +4566,50 @@ impl Executor {
             }
             "[" => {
                 self.exit_code = crate::builtins::test::execute(&args[1..], true, &self.env_vars)?;
+                Ok(())
+            }
+            "let" => {
+                self.exit_code = self.execute_let(&args[1..]);
+                Ok(())
+            }
+            "umask" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_umask(&command)?;
+                Ok(())
+            }
+            "ulimit" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_ulimit(&command)?;
+                Ok(())
+            }
+            "read" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_read(&command);
+                Ok(())
+            }
+            "mapfile" | "readarray" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_mapfile(&command);
+                Ok(())
+            }
+            "times" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_times(&command)?;
+                Ok(())
+            }
+            "time" => {
+                self.execute_time_command(&args[1..])?;
+                Ok(())
+            }
+            "trap" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_trap(&command)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),
