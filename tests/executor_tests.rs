@@ -3999,6 +3999,55 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_nested_command_describe_uses_shell_state() {
+        let builtin_function_path = "target/rubash-builtin-command-v-function-output.txt";
+        let builtin_verbose_path = "target/rubash-builtin-command-v-verbose-output.txt";
+        let nested_function_path = "target/rubash-nested-command-v-function-output.txt";
+        let builtin_alias_path = "target/rubash-builtin-command-v-alias-output.txt";
+        for path in [
+            builtin_function_path,
+            builtin_verbose_path,
+            nested_function_path,
+            builtin_alias_path,
+        ] {
+            let _ = fs::remove_file(path);
+        }
+        let input = format!(
+            "function ff {{ echo f; }}; \
+             shopt -s expand_aliases; \
+             alias aa='echo alias value'; \
+             builtin command -v ff > {builtin_function_path}; \
+             builtin command -V ff > {builtin_verbose_path}; \
+             command command -v ff > {nested_function_path}; \
+             builtin command -v aa > {builtin_alias_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(builtin_function_path).unwrap(), "ff\n");
+        let verbose = fs::read_to_string(builtin_verbose_path).unwrap();
+        assert!(verbose.contains("ff is a function"));
+        assert_eq!(fs::read_to_string(nested_function_path).unwrap(), "ff\n");
+        assert_eq!(
+            fs::read_to_string(builtin_alias_path).unwrap(),
+            "alias aa='echo alias value'\n"
+        );
+        for path in [
+            builtin_function_path,
+            builtin_verbose_path,
+            nested_function_path,
+            builtin_alias_path,
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
     fn test_command_without_p_uses_current_path_for_external_command() {
         let output_path = "target/rubash-command-without-p-output.txt";
         let _ = fs::remove_file(output_path);
