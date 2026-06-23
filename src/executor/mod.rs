@@ -700,6 +700,9 @@ impl Executor {
             .entry("HOSTTYPE".to_string())
             .or_insert_with(hosttype_value);
         env_vars
+            .entry("HOSTNAME".to_string())
+            .or_insert_with(hostname_value);
+        env_vars
             .entry("OSTYPE".to_string())
             .or_insert_with(ostype_value);
         env_vars
@@ -11527,6 +11530,18 @@ fn bash_versinfo_values() -> Vec<String> {
 
 fn hosttype_value() -> String {
     std::env::consts::ARCH.to_string()
+}
+
+fn hostname_value() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or_else(|| "localhost".to_string())
 }
 
 fn ostype_value() -> String {
