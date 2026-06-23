@@ -1723,6 +1723,10 @@ impl Executor {
             return Ok(());
         }
         let result = if let Some(word) = cmd.words.first() {
+            if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+                return self.execute_external(cmd);
+            }
+
             match word.as_str() {
                 "exit" => {
                     if let Some(status) = cmd.words.get(1).filter(|status| *status != "--help") {
@@ -4192,6 +4196,10 @@ impl Executor {
             self.exit_code = 0;
             return Ok(());
         };
+
+        if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+            return self.execute_external(cmd);
+        }
 
         match word.as_str() {
             ":" => {
