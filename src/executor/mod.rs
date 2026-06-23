@@ -26,6 +26,7 @@ const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
+const SECONDS_OFFSET: &str = "__RUBASH_SECONDS_OFFSET";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -7851,6 +7852,19 @@ impl Executor {
             self.exit_code = 1;
             return;
         }
+        if base_name == "SECONDS" && !append {
+            let assigned = value.trim().parse::<i64>().unwrap_or(0);
+            let start = self
+                .env_vars
+                .get(SHELL_START_EPOCH)
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or_else(current_epoch_seconds);
+            let elapsed = current_epoch_seconds() - start;
+            self.env_vars
+                .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
+            env::set_var(base_name, assigned.to_string());
+            return;
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8575,24 +8589,26 @@ impl Executor {
                 }
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
+                        .dynamic_parameter_value(var_name)
+                        .or_else(|| self.env_vars.get(var_name).cloned())
                         .map(|value| {
-                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                            replace_parameter_pattern(&value, &pattern, &replacement, global)
                         })
                         .unwrap_or_default();
                 }
             }
             return self
-                .env_vars
-                .get(name)
-                .map(|value| shell_safe_value(value))
+                .dynamic_parameter_value(name)
+                .or_else(|| self.env_vars.get(name).map(|value| shell_safe_value(value)))
                 .unwrap_or_default();
         }
 
         if let Some(name) = word.strip_prefix('$') {
             if is_shell_name(name) {
-                return self.env_vars.get(name).cloned().unwrap_or_default();
+                return self
+                    .dynamic_parameter_value(name)
+                    .or_else(|| self.env_vars.get(name).cloned())
+                    .unwrap_or_default();
             }
         }
 
@@ -8662,13 +8678,44 @@ impl Executor {
 
         if is_shell_name(name) {
             return self
-                .env_vars
-                .get(name)
-                .map(|value| shell_safe_value(value))
+                .dynamic_parameter_value(name)
+                .or_else(|| self.env_vars.get(name).map(|value| shell_safe_value(value)))
                 .unwrap_or_default();
         }
 
         String::new()
+    }
+
+    fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
+        match name {
+            "EPOCHSECONDS" => Some(current_epoch_seconds().to_string()),
+            "EPOCHREALTIME" => {
+                let micros = current_epoch_micros();
+                Some(format!("{}.{:06}", micros / 1_000_000, micros % 1_000_000))
+            }
+            "SECONDS" => {
+                let start = self
+                    .env_vars
+                    .get(SHELL_START_EPOCH)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or_else(current_epoch_seconds);
+                let offset = self
+                    .env_vars
+                    .get(SECONDS_OFFSET)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                Some(
+                    (current_epoch_seconds() - start + offset)
+                        .max(0)
+                        .to_string(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn dynamic_parameter_is_set(&self, name: &str) -> bool {
+        matches!(name, "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS")
     }
 
     fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
@@ -8905,7 +8952,10 @@ impl Executor {
                         chars.next();
                         name.push(name_ch);
                     }
-                    if !self.env_vars.contains_key(&name) && std::env::var(&name).is_err() {
+                    if !self.dynamic_parameter_is_set(&name)
+                        && !self.env_vars.contains_key(&name)
+                        && std::env::var(&name).is_err()
+                    {
                         return Some(name);
                     }
                 }
@@ -8947,7 +8997,9 @@ impl Executor {
         }
 
         if is_shell_name(name) {
-            return !self.env_vars.contains_key(name) && std::env::var(name).is_err();
+            return !self.dynamic_parameter_is_set(name)
+                && !self.env_vars.contains_key(name)
+                && std::env::var(name).is_err();
         }
 
         false
@@ -8962,6 +9014,9 @@ impl Executor {
             "-" => Some(self.shell_option_flags()),
             "0" => self.env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
             _ => {
+                if let Some(value) = self.dynamic_parameter_value(name) {
+                    return Some(value);
+                }
                 if let Ok(index) = name.parse::<usize>() {
                     return self.positional_params.get(index.saturating_sub(1)).cloned();
                 }
@@ -10034,12 +10089,12 @@ impl Executor {
                         chars.next();
                         name.push(name_ch);
                     }
-                    if let Some(value) = self
-                        .env_vars
-                        .get(&name)
-                        .cloned()
-                        .or_else(|| std::env::var(&name).ok())
-                    {
+                    if let Some(value) = self.dynamic_parameter_value(&name).or_else(|| {
+                        self.env_vars
+                            .get(&name)
+                            .cloned()
+                            .or_else(|| std::env::var(&name).ok())
+                    }) {
                         output.push_str(&shell_safe_value(&value));
                     }
                 }
@@ -13216,6 +13271,13 @@ fn current_epoch_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn current_epoch_micros() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_micros() as i64)
         .unwrap_or(0)
 }
 

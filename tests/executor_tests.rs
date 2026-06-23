@@ -483,6 +483,82 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_epochseconds_expands_to_current_epoch_time() {
+        let output_path = "target/rubash-epochseconds-output.txt";
+        let _ = fs::remove_file(output_path);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let input =
+            format!("printf '%s\\n' \"$EPOCHSECONDS\" \"${{EPOCHSECONDS}}\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let values = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(|line| line.parse::<i64>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|value| (before..=after).contains(value)));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_epochrealtime_expands_with_microseconds() {
+        let output_path = "target/rubash-epochrealtime-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s\\n' \"$EPOCHREALTIME\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let value = output.trim_end();
+        let (seconds, micros) = value.split_once('.').expect("epoch realtime decimal");
+        assert!(seconds.parse::<i64>().is_ok());
+        assert_eq!(micros.len(), 6);
+        assert!(micros.chars().all(|ch| ch.is_ascii_digit()));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_seconds_assignment_resets_dynamic_counter() {
+        let output_path = "target/rubash-seconds-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("SECONDS=7; printf '%s\\n' \"$SECONDS\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let seconds: i64 = fs::read_to_string(output_path)
+            .unwrap()
+            .trim_end()
+            .parse()
+            .unwrap();
+        assert!((7..=8).contains(&seconds));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = target_test_path("rubash-pipeline-external-output.txt");
         #[cfg(windows)]
