@@ -5,6 +5,40 @@
 
 use std::io::{self, Write};
 
+const SIGNALS: &[(i32, &str)] = &[
+    (1, "HUP"),
+    (2, "INT"),
+    (3, "QUIT"),
+    (4, "ILL"),
+    (5, "TRAP"),
+    (6, "ABRT"),
+    (7, "EMT"),
+    (8, "FPE"),
+    (9, "KILL"),
+    (10, "BUS"),
+    (11, "SEGV"),
+    (12, "SYS"),
+    (13, "PIPE"),
+    (14, "ALRM"),
+    (15, "TERM"),
+    (16, "URG"),
+    (17, "STOP"),
+    (18, "TSTP"),
+    (19, "CONT"),
+    (20, "CHLD"),
+    (21, "TTIN"),
+    (22, "TTOU"),
+    (23, "IO"),
+    (24, "XCPU"),
+    (25, "XFSZ"),
+    (26, "VTALRM"),
+    (27, "PROF"),
+    (28, "WINCH"),
+    (29, "PWR"),
+    (30, "USR1"),
+    (31, "USR2"),
+];
+
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
@@ -25,69 +59,14 @@ where
 
     match args.get(1).map(String::as_str) {
         None => {
-            writeln!(
-                stdout,
-                " 1) SIGHUP\t 2) SIGINT\t 3) SIGQUIT\t 4) SIGILL\t 5) SIGTRAP"
-            )?;
-            writeln!(
-                stdout,
-                " 6) SIGABRT\t 7) SIGEMT\t 8) SIGFPE\t 9) SIGKILL\t10) SIGBUS"
-            )?;
-            writeln!(
-                stdout,
-                "11) SIGSEGV\t12) SIGSYS\t13) SIGPIPE\t14) SIGALRM\t15) SIGTERM"
-            )?;
-            Ok(0)
-        }
-        Some("0") => {
-            writeln!(stdout, "EXIT")?;
-            Ok(0)
-        }
-        Some("1") | Some("129") => {
-            writeln!(stdout, "HUP")?;
-            Ok(0)
-        }
-        Some("2") | Some("130") => {
-            writeln!(stdout, "INT")?;
-            Ok(0)
-        }
-        Some("3") | Some("131") => {
-            writeln!(stdout, "QUIT")?;
-            Ok(0)
-        }
-        Some("9") | Some("137") => {
-            writeln!(stdout, "KILL")?;
-            Ok(0)
-        }
-        Some("15") | Some("143") => {
-            writeln!(stdout, "TERM")?;
-            Ok(0)
-        }
-        Some("EXIT") | Some("SIGEXIT") => {
-            writeln!(stdout, "0")?;
-            Ok(0)
-        }
-        Some("HUP") | Some("SIGHUP") => {
-            writeln!(stdout, "1")?;
-            Ok(0)
-        }
-        Some("INT") | Some("SIGINT") => {
-            writeln!(stdout, "2")?;
-            Ok(0)
-        }
-        Some("QUIT") | Some("SIGQUIT") => {
-            writeln!(stdout, "3")?;
-            Ok(0)
-        }
-        Some("KILL") | Some("SIGKILL") => {
-            writeln!(stdout, "9")?;
-            Ok(0)
-        }
-        Some("TERM") | Some("SIGTERM") => {
-            writeln!(stdout, "15")?;
+            write_signal_list(stdout)?;
             Ok(0)
         }
         Some(value) => {
+            if let Some(translation) = translate_signal(value) {
+                writeln!(stdout, "{translation}")?;
+                return Ok(0);
+            }
             writeln!(
                 stderr,
                 "{}kill: {value}: invalid signal specification",
@@ -103,21 +82,89 @@ pub fn list_first_signal_for_sed() -> &'static str {
 }
 
 pub fn translate_signal(value: &str) -> Option<&'static str> {
-    match value {
-        "0" => Some("EXIT"),
-        "1" | "129" => Some("HUP"),
-        "2" | "130" => Some("INT"),
-        "3" | "131" => Some("QUIT"),
-        "9" | "137" => Some("KILL"),
-        "15" | "143" => Some("TERM"),
-        "EXIT" | "SIGEXIT" => Some("0"),
-        "HUP" | "SIGHUP" => Some("1"),
-        "INT" | "SIGINT" => Some("2"),
-        "QUIT" | "SIGQUIT" => Some("3"),
-        "KILL" | "SIGKILL" => Some("9"),
-        "TERM" | "SIGTERM" => Some("15"),
-        _ => None,
+    if value == "0" {
+        return Some("EXIT");
     }
+
+    if value == "EXIT" || value == "SIGEXIT" {
+        return Some("0");
+    }
+
+    if let Ok(mut number) = value.parse::<i32>() {
+        if number > 128 {
+            number -= 128;
+        }
+        return signal_name(number);
+    }
+
+    let name = value.strip_prefix("SIG").unwrap_or(value);
+    signal_number(name)
+}
+
+fn signal_name(number: i32) -> Option<&'static str> {
+    SIGNALS
+        .iter()
+        .find_map(|(signal_number, name)| (*signal_number == number).then_some(*name))
+}
+
+fn signal_number(name: &str) -> Option<&'static str> {
+    SIGNALS
+        .iter()
+        .find_map(|(signal_number, signal_name)| (*signal_name == name).then_some(*signal_number))
+        .map(signal_number_string)
+}
+
+fn signal_number_string(number: i32) -> &'static str {
+    match number {
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => "10",
+        11 => "11",
+        12 => "12",
+        13 => "13",
+        14 => "14",
+        15 => "15",
+        16 => "16",
+        17 => "17",
+        18 => "18",
+        19 => "19",
+        20 => "20",
+        21 => "21",
+        22 => "22",
+        23 => "23",
+        24 => "24",
+        25 => "25",
+        26 => "26",
+        27 => "27",
+        28 => "28",
+        29 => "29",
+        30 => "30",
+        31 => "31",
+        _ => unreachable!("signal number comes from SIGNALS"),
+    }
+}
+
+fn write_signal_list<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    for chunk in SIGNALS.chunks(5) {
+        for (index, (number, name)) in chunk.iter().enumerate() {
+            if index > 0 {
+                write!(stdout, "\t")?;
+            }
+            write!(stdout, "{number:>2}) SIG{name}")?;
+        }
+        writeln!(stdout)?;
+    }
+    Ok(())
 }
 
 fn diagnostic_prefix() -> String {

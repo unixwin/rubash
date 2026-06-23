@@ -3270,6 +3270,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_kill_translates_more_common_signals() {
+        let output_path = "target/rubash-kill-more-common-signals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "kill -l 6 > {output_path}; kill -l 134 >> {output_path}; \
+             kill -l SIGABRT >> {output_path}; kill -l PIPE >> {output_path}; \
+             kill -l 141 >> {output_path}; kill -l ALRM >> {output_path}; \
+             kill -l 142 >> {output_path}; kill -l SIGSEGV >> {output_path}; \
+             kill -l 139 >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "ABRT\nABRT\n6\n13\nPIPE\n14\nALRM\n11\nSEGV\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_kill_lists_common_signals() {
         let output_path = "target/rubash-kill-list-output.txt";
         let _ = fs::remove_file(output_path);
@@ -3287,6 +3313,7 @@ mod command_chaining {
         assert!(output.contains("3) SIGQUIT"));
         assert!(output.contains("9) SIGKILL"));
         assert!(output.contains("15) SIGTERM"));
+        assert!(output.contains("31) SIGUSR2"));
         let _ = fs::remove_file(output_path);
     }
 
