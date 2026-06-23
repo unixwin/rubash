@@ -493,6 +493,22 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_without_t_preserves_record_newlines() {
+        let input = "mapfile arr <<< $'alpha\\nbeta'";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            executor.get_env("arr"),
+            Some("\x1d([0]=$'alpha\\n' [1]=$'beta\\n')")
+        );
+    }
+    #[test]
     fn test_mapfile_t_preserves_trailing_empty_line() {
         let output_path = "target/rubash-mapfile-trailing-empty-output.txt";
         let _ = fs::remove_file(output_path);

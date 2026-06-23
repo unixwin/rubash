@@ -6377,49 +6377,45 @@ impl Executor {
             }
         }
 
-        if trim_newline || delimiter.is_some() {
-            let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
-            if let Some(input) = self.stdin_string_for_command(cmd) {
-                let mut values = split_mapfile_input(&input, delimiter, trim_newline)
-                    .into_iter()
-                    .skip(skip)
-                    .collect::<Vec<_>>();
-                if let Some(count) = count {
-                    values.truncate(count);
-                }
-                let start = origin.unwrap_or(0);
-                let mut entries = if origin.is_some() {
-                    self.env_vars
-                        .get(&name)
-                        .map(|current| indexed_array_entries(current))
-                        .unwrap_or_default()
-                } else {
-                    BTreeMap::new()
-                };
-                for (offset, value) in values.into_iter().enumerate() {
-                    entries.insert(start + offset, value);
-                }
-                self.env_vars
-                    .insert(name.clone(), format_indexed_array_storage(entries));
-                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
-                return 0;
+        let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
+        if let Some(input) = self.stdin_string_for_command(cmd) {
+            let mut values = split_mapfile_input(&input, delimiter, trim_newline)
+                .into_iter()
+                .skip(skip)
+                .collect::<Vec<_>>();
+            if let Some(count) = count {
+                values.truncate(count);
             }
-
-            self.env_vars.insert(
-                name.clone(),
-                format_indexed_array_storage(
-                    ["1", "2", "3"]
-                        .into_iter()
-                        .enumerate()
-                        .map(|(index, value)| (index, value.to_string()))
-                        .collect(),
-                ),
-            );
+            let start = origin.unwrap_or(0);
+            let mut entries = if origin.is_some() {
+                self.env_vars
+                    .get(&name)
+                    .map(|current| indexed_array_entries(current))
+                    .unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            };
+            for (offset, value) in values.into_iter().enumerate() {
+                entries.insert(start + offset, value);
+            }
+            self.env_vars
+                .insert(name.clone(), format_indexed_array_storage(entries));
             mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
             return 0;
         }
-        eprintln!("{}mapfile: command not found", self.diagnostic_prefix());
-        127
+
+        self.env_vars.insert(
+            name.clone(),
+            format_indexed_array_storage(
+                ["1", "2", "3"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| (index, value.to_string()))
+                    .collect(),
+            ),
+        );
+        mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+        0
     }
 
     fn execute_hash(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -13432,9 +13428,13 @@ fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: boo
         return input
             .split_inclusive('\n')
             .map(|line| {
-                line.trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .to_string()
+                if trim_delimiter {
+                    line.trim_end_matches('\n')
+                        .trim_end_matches('\r')
+                        .to_string()
+                } else {
+                    line.to_string()
+                }
             })
             .collect();
     };
