@@ -1781,29 +1781,30 @@ impl Executor {
                     Ok(())
                 }
                 "command" => {
-                    if cmd.redirect_out.is_some() || cmd.append.is_some() {
-                        if self.execute_command_describe_redirected(cmd)? {
-                            return Ok(());
-                        }
-                    }
-                    if self.execute_command_describe(&cmd.words[1..]) {
-                        return Ok(());
-                    }
-                    match crate::builtins::command::execute(&cmd.words[1..])? {
-                        crate::builtins::command::CommandAction::Complete(status) => {
-                            self.exit_code = status;
-                            Ok(())
-                        }
-                        crate::builtins::command::CommandAction::Execute {
-                            words,
-                            use_standard_path,
-                        } => {
-                            let mut command = cmd.clone();
-                            command.words = words;
-                            self.execute_command_without_aliases_with_path(
-                                &command,
+                    let described = if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                        self.execute_command_describe_redirected(cmd)?
+                    } else {
+                        false
+                    };
+                    if described || self.execute_command_describe(&cmd.words[1..]) {
+                        Ok(())
+                    } else {
+                        match crate::builtins::command::execute(&cmd.words[1..])? {
+                            crate::builtins::command::CommandAction::Complete(status) => {
+                                self.exit_code = status;
+                                Ok(())
+                            }
+                            crate::builtins::command::CommandAction::Execute {
+                                words,
                                 use_standard_path,
-                            )
+                            } => {
+                                let mut command = cmd.clone();
+                                command.words = words;
+                                self.execute_command_without_aliases_with_path(
+                                    &command,
+                                    use_standard_path,
+                                )
+                            }
                         }
                     }
                 }
@@ -4475,16 +4476,12 @@ impl Executor {
         // TODO(builtins/command.def/type.def/findcmd.c): `command -v/-V`
         // shares Bash's command-description machinery with `type`. Keep this
         // executor-local bridge while functions and aliases live on Executor.
-        let Some(option) = args.first().map(String::as_str) else {
+        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(args) else {
             return false;
         };
-        let mode = match option {
-            "-v" => TypeDescribeMode::Reusable,
-            "-V" => TypeDescribeMode::Verbose,
-            _ => return false,
-        };
+        let saved_path = self.use_standard_path_for_lookup(use_standard_path);
         let mut status = 0;
-        for name in &args[1..] {
+        for name in &args[first_name..] {
             if !self.describe_name(name, mode, false, false) {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
@@ -4492,6 +4489,7 @@ impl Executor {
                 }
             }
         }
+        self.restore_lookup_path(saved_path);
         self.exit_code = status;
         true
     }
@@ -4536,16 +4534,12 @@ impl Executor {
         W: Write,
         E: Write,
     {
-        let Some(option) = args.first().map(String::as_str) else {
+        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(args) else {
             return Ok(false);
         };
-        let mode = match option {
-            "-v" => TypeDescribeMode::Reusable,
-            "-V" => TypeDescribeMode::Verbose,
-            _ => return Ok(false),
-        };
+        let saved_path = self.use_standard_path_for_lookup(use_standard_path);
         let mut status = 0;
-        for name in &args[1..] {
+        for name in &args[first_name..] {
             if !self.describe_name_with_io(name, mode, false, false, stdout)? {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
@@ -4557,8 +4551,35 @@ impl Executor {
                 }
             }
         }
+        self.restore_lookup_path(saved_path);
         self.exit_code = status;
         Ok(true)
+    }
+
+    fn use_standard_path_for_lookup(&mut self, enabled: bool) -> Option<Option<String>> {
+        if !enabled {
+            return None;
+        }
+
+        let saved_path = self.env_vars.get("PATH").cloned();
+        self.env_vars
+            .insert("PATH".to_string(), standard_path(&self.env_vars));
+        Some(saved_path)
+    }
+
+    fn restore_lookup_path(&mut self, saved_path: Option<Option<String>>) {
+        let Some(saved_path) = saved_path else {
+            return;
+        };
+
+        match saved_path {
+            Some(path) => {
+                self.env_vars.insert("PATH".to_string(), path);
+            }
+            None => {
+                self.env_vars.remove("PATH");
+            }
+        }
     }
 
     fn execute_type(&mut self, args: &[String]) -> i32 {
@@ -10298,6 +10319,34 @@ fn normalize_type_option(option: &str) -> &str {
         "-all" | "--all" => "-a",
         other => other,
     }
+}
+
+fn parse_command_describe_args(args: &[String]) -> Option<(TypeDescribeMode, bool, usize)> {
+    let mut mode = None;
+    let mut use_standard_path = false;
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+
+        for option in arg[1..].chars() {
+            match option {
+                'p' => use_standard_path = true,
+                'v' => mode = Some(TypeDescribeMode::Reusable),
+                'V' => mode = Some(TypeDescribeMode::Verbose),
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+
+    mode.map(|mode| (mode, use_standard_path, index))
 }
 
 fn print_posix_time() {

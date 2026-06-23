@@ -2535,6 +2535,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_p_v_uses_standard_path_for_external_command() {
+        let output_path = "target/rubash-command-p-v-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("PATH=target/rubash-no-such-bin command -p -v sh > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.trim_end().ends_with("sh") || output.trim_end().ends_with("sh.exe"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_v_without_p_uses_current_path_for_external_command() {
+        let status_path = "target/rubash-command-v-without-p-status.txt";
+        let output_path = "target/rubash-command-v-without-p-output.txt";
+        let restored_path = "target/rubash-command-v-restored-output.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(restored_path);
+        let input = format!(
+            "PATH=target/rubash-no-such-bin command -v sh > {output_path}; \
+             echo $? > {status_path}; command -v sh > {restored_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(!fs::read_to_string(restored_path).unwrap().is_empty());
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(restored_path);
+    }
+
+    #[test]
     fn test_command_without_p_uses_current_path_for_external_command() {
         let output_path = "target/rubash-command-without-p-output.txt";
         let _ = fs::remove_file(output_path);
