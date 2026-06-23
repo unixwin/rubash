@@ -377,7 +377,7 @@ mod command_chaining {
         #[cfg(windows)]
         fs::write(
             &script_path,
-            "@echo off\r\nfor /f \"delims=\" %%L in ('findstr /r \".*\"') do if \"%%L\"==\"b\" echo external:%%L\r\n",
+            "@echo off\r\n\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoProfile -Command \"$input | Where-Object { $_ -eq 'b' } | ForEach-Object { 'external:' + $_ }\"\r\n",
         )
         .unwrap();
         #[cfg(not(windows))]
@@ -2587,13 +2587,31 @@ mod command_chaining {
 
     #[test]
     fn test_builtin_enable_updates_disabled_builtin_state() {
+        let bin_dir = target_test_path("rubash-builtin-enable-bin");
+        #[cfg(windows)]
+        let script_path = bin_dir.join("test.cmd");
+        #[cfg(not(windows))]
+        let script_path = bin_dir.join("test");
         let output_path = target_test_path("rubash-builtin-enable-output.txt");
+        let shell_bin_dir = shell_test_path(&bin_dir);
         let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_dir_all(&bin_dir);
         let _ = fs::remove_file(&output_path);
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(&script_path, "echo external-test\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
         let input = format!("builtin enable -n test; type -t test > {shell_output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
+        executor.set_env("PATH", &shell_bin_dir);
 
         let result = executor.execute_ast(&ast);
 
@@ -2601,6 +2619,7 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(&output_path).unwrap(), "file\n");
         let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir_all(bin_dir);
     }
 
     #[test]
@@ -4065,22 +4084,47 @@ mod command_chaining {
 
     #[test]
     fn test_command_v_without_p_uses_current_path_for_external_command() {
+        let bin_dir = target_test_path("rubash-command-v-bin");
+        let missing_bin_dir = target_test_path("rubash-no-such-bin");
+        #[cfg(windows)]
+        let script_path = bin_dir.join("sh.cmd");
+        #[cfg(not(windows))]
+        let script_path = bin_dir.join("sh");
         let status_path = target_test_path("rubash-command-v-without-p-status.txt");
         let output_path = target_test_path("rubash-command-v-without-p-output.txt");
         let restored_path = target_test_path("rubash-command-v-restored-output.txt");
+        let restored_status_path = target_test_path("rubash-command-v-restored-status.txt");
+        let shell_bin_dir = shell_test_path(&bin_dir);
+        let shell_missing_bin_dir = shell_test_path(&missing_bin_dir);
         let shell_status_path = shell_test_path(&status_path);
         let shell_output_path = shell_test_path(&output_path);
         let shell_restored_path = shell_test_path(&restored_path);
+        let shell_restored_status_path = shell_test_path(&restored_status_path);
+        let _ = fs::remove_dir_all(&bin_dir);
+        let _ = fs::remove_dir_all(&missing_bin_dir);
         let _ = fs::remove_file(&status_path);
         let _ = fs::remove_file(&output_path);
         let _ = fs::remove_file(&restored_path);
+        let _ = fs::remove_file(&restored_status_path);
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(&script_path, "echo fake-sh\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
         let input = format!(
-            "PATH=target/rubash-no-such-bin command -v sh > {shell_output_path}; \
-             echo $? > {shell_status_path}; command -v sh > {shell_restored_path}"
+            "PATH={shell_missing_bin_dir} command -v sh > {shell_output_path}; \
+             echo $? > {shell_status_path}; command -v sh > {shell_restored_path}; \
+             echo $? > {shell_restored_status_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
+        executor.set_env("PATH", &shell_bin_dir);
 
         let result = executor.execute_ast(&ast);
 
@@ -4089,9 +4133,12 @@ mod command_chaining {
         assert_eq!(fs::read_to_string(&output_path).unwrap(), "");
         assert_eq!(fs::read_to_string(&status_path).unwrap(), "1\n");
         assert!(!fs::read_to_string(&restored_path).unwrap().is_empty());
+        assert_eq!(fs::read_to_string(&restored_status_path).unwrap(), "0\n");
         let _ = fs::remove_file(status_path);
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(restored_path);
+        let _ = fs::remove_file(restored_status_path);
+        let _ = fs::remove_dir_all(bin_dir);
     }
 
     #[test]
