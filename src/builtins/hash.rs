@@ -147,6 +147,12 @@ pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Opt
     hash_table(env_vars).remove(name)
 }
 
+pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut entries: Vec<_> = hash_table(env_vars).into_iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
+}
+
 fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, String> {
     env_vars
         .get(HASH_TABLE)

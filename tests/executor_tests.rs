@@ -1730,6 +1730,33 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_cmds_reflects_hash_table() {
+        let output_path = "target/rubash-bash-cmds-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "hash -r; \
+             hash -p /usr/sbin/foo foo; \
+             BASH_CMDS[bar]=/usr/bin/bar; \
+             printf '%s\\n' \"${{!BASH_CMDS[@]}}\" \"${{BASH_CMDS[@]}}\" \"${{BASH_CMDS[foo]}}\" > {output_path}; \
+             hash -t bar >> {output_path}; \
+             declare -p BASH_CMDS >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n/usr/bin/bar\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" [foo]=\"/usr/sbin/foo\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_unset_indexed_array_element() {
         let output_path = "target/rubash-unset-array-element-output.txt";
         let _ = fs::remove_file(output_path);
