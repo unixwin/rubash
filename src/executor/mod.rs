@@ -22,6 +22,7 @@ use self::path::{
 };
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
+const EXPORTED_FUNCTIONS: &str = "__RUBASH_EXPORTED_FUNCTIONS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
@@ -2493,20 +2494,25 @@ impl Executor {
         let function_names_only = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('F'));
-        let exported_functions = args
+        let exported_only = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('x'));
-        if exported_functions {
-            return Ok(0);
-        }
+        let exported_functions = marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS);
         if names.is_empty() {
             let mut functions: Vec<_> = self.functions.iter().collect();
             functions.sort_by(|(left, _), (right, _)| left.cmp(right));
             for (name, body) in functions {
+                if exported_only && !exported_functions.iter().any(|exported| *exported == *name) {
+                    continue;
+                }
                 if function_names_only {
-                    writeln!(stdout, "declare -f {name}")?;
+                    if exported_only {
+                        writeln!(stdout, "declare -fx {name}")?;
+                    } else {
+                        writeln!(stdout, "declare -f {name}")?;
+                    }
                 } else {
-                    self.write_function_definition(name, body, stdout)?;
+                    self.write_function_definition(name, body, exported_only, stdout)?;
                 }
             }
             return Ok(0);
@@ -2525,9 +2531,18 @@ impl Executor {
                 continue;
             };
             if function_names_only {
-                writeln!(stdout, "{name}")?;
+                if exported_only && exported_functions.iter().any(|exported| exported == name) {
+                    writeln!(stdout, "declare -fx {name}")?;
+                } else {
+                    writeln!(stdout, "{name}")?;
+                }
             } else {
-                self.write_function_definition(name, body, stdout)?;
+                self.write_function_definition(
+                    name,
+                    body,
+                    exported_only && exported_functions.iter().any(|exported| exported == name),
+                    stdout,
+                )?;
             }
         }
         Ok(status)
@@ -2652,6 +2667,15 @@ impl Executor {
     }
 
     fn execute_export(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if export_args_request_functions(&cmd.words[1..]) {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let status =
+                self.execute_export_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(status);
+        }
+
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
@@ -2714,6 +2738,81 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_export_functions<W, E>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> io::Result<i32>
+    where
+        W: Write,
+        E: Write,
+    {
+        let mut unset = false;
+        let mut print = false;
+        let mut index = 0;
+        while let Some(arg) = args.get(index) {
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+            if !arg.starts_with('-') || arg == "-" {
+                break;
+            }
+            for option in arg[1..].chars() {
+                match option {
+                    'f' => {}
+                    'n' => unset = true,
+                    'p' => print = true,
+                    other => {
+                        writeln!(
+                            stderr,
+                            "{}export: -{other}: invalid option",
+                            self.diagnostic_prefix()
+                        )?;
+                        writeln!(
+                            stderr,
+                            "export: usage: export [-fn] [name[=value] ...] or export -p"
+                        )?;
+                        return Ok(2);
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        if print && index >= args.len() {
+            let mut names = marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS);
+            names.sort();
+            for name in names {
+                if let Some(body) = self.functions.get(&name) {
+                    self.write_function_definition(&name, body, true, stdout)?;
+                }
+            }
+            return Ok(0);
+        }
+
+        let mut status = 0;
+        for name in &args[index..] {
+            if !self.functions.contains_key(name) {
+                writeln!(
+                    stderr,
+                    "{}export: {name}: not a function",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+                continue;
+            }
+            if unset {
+                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+            } else {
+                mark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
+            }
+        }
+
+        Ok(status)
     }
 
     fn execute_readonly(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -2785,11 +2884,15 @@ impl Executor {
         &self,
         name: &str,
         body: &[CommandNode],
+        exported: bool,
         stdout: &mut W,
     ) -> io::Result<()>
     where
         W: Write,
     {
+        if exported {
+            writeln!(stdout, "declare -fx {name}")?;
+        }
         writeln!(stdout, "{name} () ")?;
         writeln!(stdout, "{{ ")?;
         for command in body {
@@ -12891,6 +12994,40 @@ fn mark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) 
         names.push(name.to_string());
     }
     env_vars.insert(key.to_string(), names.join("\x1f"));
+}
+
+fn unmark_env_name(env_vars: &mut HashMap<String, String>, key: &str, name: &str) {
+    let mut names = marked_env_names(env_vars, key);
+    names.retain(|current| current != name);
+    env_vars.insert(key.to_string(), names.join("\x1f"));
+}
+
+fn marked_env_names(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
+    env_vars
+        .get(key)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn export_args_request_functions(args: &[String]) -> bool {
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            return false;
+        }
+        if arg[1..].contains('f') {
+            return true;
+        }
+    }
+    false
 }
 
 fn split_assignment_word(word: &str) -> Option<(&str, &str)> {

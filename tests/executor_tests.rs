@@ -8581,6 +8581,74 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_export_f_marks_function_for_declare_export_listing() {
+        let output_path = "target/rubash-export-f-output.txt";
+        let status_path = "target/rubash-export-f-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!(
+            "foo() {{ echo hi; }}; export -f foo; echo export:$? > {status_path}; \
+             declare -xF > {output_path}; declare -xf >> {output_path}; export -pf >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "export:0\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -fx foo\ndeclare -fx foo\nfoo () \n{ \n    echo hi\n}\ndeclare -fx foo\nfoo () \n{ \n    echo hi\n}\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_export_nf_unmarks_exported_function() {
+        let output_path = "target/rubash-export-nf-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("foo() {{ :; }}; export -f foo; export -nf foo; declare -xF > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_export_f_missing_function_reports_error() {
+        let error_path = "target/rubash-export-f-missing-error.txt";
+        let status_path = "target/rubash-export-f-missing-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("export -f missing 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("export: missing: not a function"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_local_outside_function_reports_error() {
         let error_path = "target/rubash-local-outside-error.txt";
         let status_path = "target/rubash-local-outside-status.txt";
