@@ -2038,6 +2038,10 @@ impl Executor {
                     self.exit_code = self.execute_times(cmd)?;
                     Ok(())
                 }
+                "caller" => {
+                    self.exit_code = self.execute_caller(cmd)?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4576,6 +4580,10 @@ impl Executor {
                 self.exit_code = self.execute_times(cmd)?;
                 Ok(())
             }
+            "caller" => {
+                self.exit_code = self.execute_caller(cmd)?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4781,6 +4789,10 @@ impl Executor {
             }
             "times" => {
                 self.exit_code = self.execute_times(&builtin_cmd)?;
+                Ok(())
+            }
+            "caller" => {
+                self.exit_code = self.execute_caller(&builtin_cmd)?;
                 Ok(())
             }
             "time" => {
@@ -5070,6 +5082,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_times(&command)?;
+                Ok(())
+            }
+            "caller" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_caller(&command)?;
                 Ok(())
             }
             "time" => {
@@ -7034,6 +7052,66 @@ impl Executor {
         }
 
         Ok(crate::builtins::times::execute(&cmd.words[1..])?)
+    }
+
+    fn execute_caller(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let funcname = self.funcname_stack();
+        let lineno = self.indexed_array_stack("BASH_LINENO");
+        let source = self.indexed_array_stack("BASH_SOURCE");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = crate::builtins::caller::execute_with_io(
+            &cmd.words[1..],
+            &funcname,
+            &lineno,
+            &source,
+            &self.diagnostic_prefix(),
+            &mut stdout,
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
+    }
+
+    fn write_buffered_builtin_output(
+        &self,
+        cmd: &CommandNode,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+            file.write_all(stdout)?;
+        } else if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(stdout)?;
+        } else {
+            std::io::stdout().lock().write_all(stdout)?;
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if !is_null_device(&target) {
+                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                file.write_all(stderr)?;
+            }
+        } else if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(stderr)?;
+        } else {
+            std::io::stderr().lock().write_all(stderr)?;
+        }
+
+        Ok(())
     }
 
     fn execute_trap(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {

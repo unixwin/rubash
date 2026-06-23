@@ -1,6 +1,7 @@
 //! Builtin command implementations.
 
 pub mod alias;
+pub mod caller;
 pub mod cd;
 pub mod colon;
 pub mod command;

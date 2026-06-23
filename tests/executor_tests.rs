@@ -5234,6 +5234,97 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_caller_top_level_returns_failure() {
+        let output_path = "target/rubash-caller-top-output.txt";
+        let status_path = "target/rubash-caller-top-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("caller > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_caller_reports_current_function_call_site() {
+        let output_path = "target/rubash-caller-current-output.txt";
+        let status_path = "target/rubash-caller-current-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("f() {{ caller > {output_path}; echo $? > {status_path}; }}; f");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1 NULL\n");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_caller_zero_reports_parent_function_frame() {
+        let output_path = "target/rubash-caller-zero-output.txt";
+        let status_path = "target/rubash-caller-zero-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!(
+            "f() {{ caller 0 > {output_path}; echo $? > {status_path}; }}; g() {{ f; }}; g"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1 g environment\n"
+        );
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_caller_invalid_argument_returns_usage() {
+        let error_path = "target/rubash-caller-invalid-error.txt";
+        let status_path = "target/rubash-caller-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("f() {{ caller nope 2> {error_path}; echo $? > {status_path}; }}; f");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("caller: nope: invalid number"));
+        assert!(error.contains("caller: usage: caller [expr]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_builtin_break_breaks_loop() {
         let output_path = "target/rubash-builtin-break-output.txt";
         let _ = fs::remove_file(output_path);
