@@ -2836,6 +2836,84 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_disabled_builtin_dispatch_uses_external_commands() {
+        let bin_dir = "target/rubash-disabled-builtin-dispatch-bin";
+        let outputs = [
+            "target/rubash-disabled-cd-output.txt",
+            "target/rubash-disabled-alias-output.txt",
+            "target/rubash-disabled-type-output.txt",
+            "target/rubash-disabled-command-cd-output.txt",
+            "target/rubash-disabled-command-alias-output.txt",
+            "target/rubash-disabled-command-type-output.txt",
+            "target/rubash-disabled-command-builtin-output.txt",
+        ];
+        let _ = fs::remove_dir_all(bin_dir);
+        for path in outputs {
+            let _ = fs::remove_file(path);
+        }
+        fs::create_dir_all(bin_dir).unwrap();
+        for name in ["cd", "alias", "type", "command"] {
+            fs::write(
+                format!("{bin_dir}/{name}"),
+                format!("echo external-{name}\n"),
+            )
+            .unwrap();
+        }
+        let input = "\
+            enable -n cd alias type; \
+            cd > target/rubash-disabled-cd-output.txt; \
+            alias > target/rubash-disabled-alias-output.txt; \
+            type echo > target/rubash-disabled-type-output.txt; \
+            command cd > target/rubash-disabled-command-cd-output.txt; \
+            command alias > target/rubash-disabled-command-alias-output.txt; \
+            command type echo > target/rubash-disabled-command-type-output.txt; \
+            enable -n command; \
+            command echo > target/rubash-disabled-command-builtin-output.txt";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        for (path, expected) in [
+            ("target/rubash-disabled-cd-output.txt", "external-cd\n"),
+            (
+                "target/rubash-disabled-alias-output.txt",
+                "external-alias\n",
+            ),
+            ("target/rubash-disabled-type-output.txt", "external-type\n"),
+            (
+                "target/rubash-disabled-command-cd-output.txt",
+                "external-cd\n",
+            ),
+            (
+                "target/rubash-disabled-command-alias-output.txt",
+                "external-alias\n",
+            ),
+            (
+                "target/rubash-disabled-command-type-output.txt",
+                "external-type\n",
+            ),
+            (
+                "target/rubash-disabled-command-builtin-output.txt",
+                "external-command\n",
+            ),
+        ] {
+            assert_eq!(fs::read_to_string(path).unwrap(), expected);
+            let _ = fs::remove_file(path);
+        }
+        let _ = fs::remove_dir_all(bin_dir);
+    }
+
+    #[test]
     fn test_enable_appends_output() {
         let output_path = "target/rubash-enable-append-output.txt";
         let _ = fs::remove_file(output_path);
