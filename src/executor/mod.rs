@@ -2540,7 +2540,7 @@ impl Executor {
         }
 
         for saved in &saved_locals {
-            restore_optional_env_var(
+            restore_optional_shell_var(
                 &mut self.env_vars,
                 &saved.name,
                 scope.get(&saved.name).cloned().flatten(),
@@ -2576,7 +2576,7 @@ impl Executor {
                 saved.name.clone(),
                 capture_var_attrs(&self.env_vars, &saved.name),
             );
-            restore_optional_env_var(&mut self.env_vars, &saved.name, saved.local_value);
+            restore_optional_shell_var(&mut self.env_vars, &saved.name, saved.local_value);
             set_var_attrs(&mut self.env_vars, &saved.name, saved.local_attrs);
         }
     }
@@ -14979,6 +14979,23 @@ fn restore_optional_env_var(
         }
         None => {
             env_vars.remove(name);
+        }
+    }
+}
+
+fn restore_optional_shell_var(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    value: Option<String>,
+) {
+    match value {
+        Some(value) => {
+            env_vars.insert(name.to_string(), value.clone());
+            env::set_var(name, value);
+        }
+        None => {
+            env_vars.remove(name);
+            env::remove_var(name);
         }
     }
 }
