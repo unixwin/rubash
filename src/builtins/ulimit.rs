@@ -55,6 +55,7 @@ where
     }
 
     if args.iter().any(|arg| arg == "-a") {
+        write_all_limits(stdout, env_vars)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -120,6 +121,41 @@ fn default_limit(resource: &str) -> &'static str {
         "__RUBASH_ULIMIT_N" => "1024",
         _ => "unlimited",
     }
+}
+
+fn write_all_limits<W>(stdout: &mut W, env_vars: &HashMap<String, String>) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        stdout,
+        "core file size              (blocks, -c) {}",
+        limit_value(env_vars, "__RUBASH_ULIMIT_C")
+    )?;
+    writeln!(stdout, "data seg size               (kbytes, -d) unlimited")?;
+    writeln!(
+        stdout,
+        "file size                   (blocks, -f) {}",
+        limit_value(env_vars, "__RUBASH_ULIMIT_F")
+    )?;
+    writeln!(
+        stdout,
+        "open files                          (-n) {}",
+        limit_value(env_vars, "__RUBASH_ULIMIT_N")
+    )?;
+    writeln!(stdout, "pipe size                (512 bytes, -p) 8")?;
+    writeln!(stdout, "stack size                  (kbytes, -s) 8192")?;
+    writeln!(stdout, "cpu time                   (seconds, -t) unlimited")?;
+    writeln!(stdout, "max user processes                  (-u) unlimited")?;
+    writeln!(stdout, "virtual memory              (kbytes, -v) unlimited")?;
+    Ok(())
+}
+
+fn limit_value<'a>(env_vars: &'a HashMap<String, String>, resource: &str) -> &'a str {
+    env_vars
+        .get(resource)
+        .map(String::as_str)
+        .unwrap_or_else(|| default_limit(resource))
 }
 
 fn diagnostic_prefix() -> String {
