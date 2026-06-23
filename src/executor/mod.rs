@@ -1927,10 +1927,16 @@ impl Executor {
                     Ok(())
                 }
                 "read" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_read(cmd);
                     Ok(())
                 }
                 "mapfile" | "readarray" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_mapfile(cmd);
                     Ok(())
                 }
@@ -4365,10 +4371,16 @@ impl Executor {
                 Ok(())
             }
             "read" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_read(cmd);
                 Ok(())
             }
             "mapfile" | "readarray" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, &cmd.words[0]) {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_mapfile(cmd);
                 Ok(())
             }
