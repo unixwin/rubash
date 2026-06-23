@@ -1033,6 +1033,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_ppid_is_readonly_numeric_id() {
+        let output_path = "target/rubash-ppid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $PPID > {output_path}; \
+             test -R PPID; echo readonly:$? >> {output_path}; \
+             PPID=1; echo assign:$?:$PPID >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines[0].chars().all(|ch| ch.is_ascii_digit()));
+        assert_eq!(lines[1], "readonly:0");
+        assert_eq!(lines[2], format!("assign:1:{}", lines[0]));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_expands_inside_function() {
         let output_path = "target/rubash-funcname-output.txt";
         let _ = fs::remove_file(output_path);

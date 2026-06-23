@@ -707,8 +707,10 @@ impl Executor {
             .or_insert_with(machtype_value);
         env_vars.insert("UID".to_string(), uid_value());
         env_vars.insert("EUID".to_string(), euid_value());
+        env_vars.insert("PPID".to_string(), ppid_value());
         mark_env_name(&mut env_vars, READONLY_VARS, "UID");
         mark_env_name(&mut env_vars, READONLY_VARS, "EUID");
+        mark_env_name(&mut env_vars, READONLY_VARS, "PPID");
 
         Self {
             exit_code: 0,
@@ -11551,6 +11553,13 @@ fn uid_value() -> String {
 
 fn euid_value() -> String {
     std::env::var("EUID").unwrap_or_else(|_| uid_value())
+}
+
+fn ppid_value() -> String {
+    std::env::var("PPID")
+        .ok()
+        .filter(|value| value.chars().all(|ch| ch.is_ascii_digit()))
+        .unwrap_or_else(|| std::process::id().to_string())
 }
 
 fn declare_args_request_integer(args: &[String]) -> bool {
