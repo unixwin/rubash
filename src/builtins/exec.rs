@@ -39,14 +39,16 @@ where
             "-l" => login = true,
             "-a" => {
                 index += 1;
-                argv0 = args.get(index).cloned();
+                let Some(name) = args.get(index) else {
+                    writeln!(stderr, "rubash: exec: -a: option requires an argument")?;
+                    write_usage(stderr)?;
+                    return Ok(EX_BADUSAGE);
+                };
+                argv0 = Some(name.clone());
             }
             _ if arg.starts_with('-') => {
                 writeln!(stderr, "rubash: exec: {arg}: invalid option")?;
-                writeln!(
-                    stderr,
-                    "exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]"
-                )?;
+                write_usage(stderr)?;
                 return Ok(EX_BADUSAGE);
             }
             _ => break,
@@ -75,4 +77,14 @@ where
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+fn write_usage<W>(stderr: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        stderr,
+        "exec: usage: exec [-cl] [-a name] [command [argument ...]] [redirection ...]"
+    )
 }
