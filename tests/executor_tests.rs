@@ -2927,6 +2927,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_command_redirects_output() {
+        let output_path = "target/rubash-builtin-command-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin command echo hello > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_command_echo_redirects_output() {
         let output_path = "target/rubash-command-echo-redirect-output.txt";
         let _ = fs::remove_file(output_path);
@@ -3077,6 +3094,24 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "before\nalpha\nbeta\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_eval_redirects_entire_output() {
+        let output_path = "target/rubash-builtin-eval-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "old\n").unwrap();
+        let input = format!("builtin eval 'echo alpha; echo beta' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
         let _ = fs::remove_file(output_path);
     }
 

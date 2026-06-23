@@ -4354,6 +4354,8 @@ impl Executor {
                 self.exit_code = self.execute_exec(&builtin_cmd)?;
                 Ok(())
             }
+            "eval" => self.execute_eval(&builtin_cmd),
+            "command" => self.execute_command_without_aliases(&builtin_cmd),
             "source" | "." => crate::builtins::source::execute(self, &builtin_cmd.words[1..]),
             "return" => self.execute_return(&builtin_cmd.words[1..]),
             "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
