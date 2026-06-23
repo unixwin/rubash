@@ -360,8 +360,13 @@ impl<'a> SourceInvocation<'a> {
             return source_path_search(path, self.filename, executor);
         }
 
-        if posix_plain_name_lookup(executor, self.filename) {
-            return None;
+        if should_search_source_path(executor, self.filename) {
+            if let Some(path) = executor
+                .get_env("PATH")
+                .and_then(|path| source_path_search(path, self.filename, executor))
+            {
+                return Some(path);
+            }
         }
 
         let source_path = shell_path_to_windows(self.filename, executor.env_vars());
@@ -369,11 +374,15 @@ impl<'a> SourceInvocation<'a> {
     }
 }
 
+fn should_search_source_path(executor: &Executor, filename: &str) -> bool {
+    crate::builtins::shopt::sourcepath_enabled()
+        && !filename.contains('/')
+        && !filename.contains('\\')
+        && executor.get_env("PATH").is_some()
+}
+
 fn source_path_search(path: &str, filename: &str, executor: &Executor) -> Option<PathBuf> {
-    // TODO(builtins/source.def/findcmd.c): Bash `source -p path file` searches
-    // the supplied path list instead of sourcepath/PATH. Empty components mean
-    // the current directory. This keeps ownership with source.def while path
-    // canonicalization still lives in the findcmd.c-mapped executor::path.
+    // Empty components mean the current directory.
     for entry in path.split(':') {
         let candidate = if entry.is_empty() || entry == "." {
             PathBuf::from(filename)
