@@ -2046,6 +2046,10 @@ impl Executor {
                     self.exit_code = self.execute_jobs(cmd)?;
                     Ok(())
                 }
+                "disown" => {
+                    self.exit_code = self.execute_disown(cmd)?;
+                    Ok(())
+                }
                 "wait" => {
                     self.exit_code = self.execute_wait(cmd)?;
                     Ok(())
@@ -4647,6 +4651,10 @@ impl Executor {
                 self.exit_code = self.execute_jobs(cmd)?;
                 Ok(())
             }
+            "disown" => {
+                self.exit_code = self.execute_disown(cmd)?;
+                Ok(())
+            }
             "wait" => {
                 self.exit_code = self.execute_wait(cmd)?;
                 Ok(())
@@ -4915,6 +4923,10 @@ impl Executor {
             }
             "jobs" => {
                 self.exit_code = self.execute_jobs(&builtin_cmd)?;
+                Ok(())
+            }
+            "disown" => {
+                self.exit_code = self.execute_disown(&builtin_cmd)?;
                 Ok(())
             }
             "wait" => {
@@ -5273,6 +5285,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_jobs(&command)?;
+                Ok(())
+            }
+            "disown" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_disown(&command)?;
                 Ok(())
             }
             "wait" => {
@@ -7357,6 +7375,17 @@ impl Executor {
     fn execute_wait(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
         let status = crate::builtins::wait::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_disown(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::disown::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
