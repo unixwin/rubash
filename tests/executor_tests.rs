@@ -273,6 +273,30 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_pipestatus_tracks_simple_and_pipeline_statuses() {
+        let output_path = "target/rubash-pipestatus-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $PIPESTATUS:${{PIPESTATUS[@]}}:${{#PIPESTATUS[@]}} > {output_path}; \
+             false; echo $?:${{PIPESTATUS[@]}}:${{PIPESTATUS[0]}} >> {output_path}; \
+             false | true | false; echo $? -- $PIPESTATUS -- ${{PIPESTATUS[@]}} -- ${{PIPESTATUS[0]}} - ${{PIPESTATUS[1]}} - ${{PIPESTATUS[2]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0:0:1\n1:1:1\n1 -- 1 -- 1 0 1 -- 1 - 0 - 1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipefail_status_uses_rightmost_failing_command() {
         let output_path = "target/rubash-pipefail-status-output.txt";
         let _ = fs::remove_file(output_path);
@@ -289,6 +313,24 @@ mod command_chaining {
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_pipefail_status_keeps_pipestatus_entries() {
+        let output_path = "target/rubash-pipefail-pipestatus-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("set -o pipefail; false | true; echo $? -- ${{PIPESTATUS[@]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1 -- 1 0\n");
         let _ = fs::remove_file(output_path);
     }
 
