@@ -55,6 +55,27 @@ fn script_file_uses_script_name_and_positional_arguments() {
 }
 
 #[test]
+fn double_dash_allows_script_file_after_options() {
+    let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(&script_path, "printf '%s:%s\\n' \"$0\" \"$1\"\n").unwrap();
+    let script = script_path.to_string_lossy().to_string();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("--")
+        .arg(&script)
+        .arg("alpha")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{script}:alpha\n")
+    );
+    let _ = fs::remove_file(script_path);
+}
+
+#[test]
 fn stdin_script_uses_s_positional_arguments() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")
