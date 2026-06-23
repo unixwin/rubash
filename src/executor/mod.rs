@@ -10499,6 +10499,10 @@ impl Executor {
                     chars.next();
                     output.push_str(&self.positional_params.len().to_string());
                 }
+                Some('-') => {
+                    chars.next();
+                    output.push_str(&self.shell_option_flags());
+                }
                 Some('{') => {
                     chars.next();
                     let mut name = String::new();
