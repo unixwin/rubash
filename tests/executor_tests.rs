@@ -2759,6 +2759,66 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_source_searches_path_before_current_directory() {
+        let local_script = "rubash-sourcepath-temp.sh";
+        let bin_dir = "target/rubash-sourcepath-bin";
+        let path_script = format!("{bin_dir}/{local_script}");
+        let output_path = "target/rubash-sourcepath-output.txt";
+        let _ = fs::remove_file(local_script);
+        let _ = fs::remove_file(&path_script);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(local_script, "RUBASH_SOURCEPATH=local\n").unwrap();
+        fs::write(&path_script, "RUBASH_SOURCEPATH=path\n").unwrap();
+        let input = format!(
+            "PATH={bin_dir}; source {local_script}; echo $RUBASH_SOURCEPATH > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "path\n");
+        let _ = fs::remove_file(local_script);
+        let _ = fs::remove_file(path_script);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
+    fn test_sourcepath_disabled_uses_current_directory() {
+        let local_script = "rubash-sourcepath-disabled-temp.sh";
+        let bin_dir = "target/rubash-sourcepath-disabled-bin";
+        let path_script = format!("{bin_dir}/{local_script}");
+        let output_path = "target/rubash-sourcepath-disabled-output.txt";
+        let _ = fs::remove_file(local_script);
+        let _ = fs::remove_file(&path_script);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(local_script, "RUBASH_SOURCEPATH_DISABLED=local\n").unwrap();
+        fs::write(&path_script, "RUBASH_SOURCEPATH_DISABLED=path\n").unwrap();
+        let input = format!(
+            "PATH={bin_dir}; shopt -u sourcepath; source {local_script}; shopt -s sourcepath; echo $RUBASH_SOURCEPATH_DISABLED > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "local\n");
+        let _ = fs::remove_file(local_script);
+        let _ = fs::remove_file(path_script);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
     fn test_builtin_return_returns_from_function() {
         let output_path = "target/rubash-builtin-return-output.txt";
         let _ = fs::remove_file(output_path);
