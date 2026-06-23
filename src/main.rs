@@ -45,6 +45,15 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
                 index += 1;
             }
+            "-O" | "+O" => {
+                if let Some(option) = args.get(index + 1) {
+                    executor.set_shopt_option(option, args[index] == "-O");
+                    index += 2;
+                } else {
+                    eprintln!("rubash: {}: option requires an argument", args[index]);
+                    return 2;
+                }
+            }
             "-c" => {
                 if let Some(command) = args.get(index + 1) {
                     executor.set_env("BASH_EXECUTION_STRING", command);

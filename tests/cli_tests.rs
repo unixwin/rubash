@@ -123,6 +123,36 @@ fn cli_plus_shell_flags_disable_previous_flags() {
 }
 
 #[test]
+fn cli_shopt_options_apply_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-O")
+        .arg("nullglob")
+        .arg("-c")
+        .arg("shopt -q nullglob; echo $?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+}
+
+#[test]
+fn cli_plus_shopt_options_disable_previous_options() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-O")
+        .arg("nullglob")
+        .arg("+O")
+        .arg("nullglob")
+        .arg("-c")
+        .arg("shopt -q nullglob; echo $?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+}
+
+#[test]
 fn stdin_script_uses_s_positional_arguments() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")
