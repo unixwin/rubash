@@ -12138,6 +12138,39 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_plus_array_attributes_cannot_destroy_arrays() {
+        let output_path = target_test_path("rubash-declare-plus-array-attrs-output.txt");
+        let error_path = target_test_path("rubash-declare-plus-array-attrs-error.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let input = format!(
+            "declare -a a=(x y); declare +a a 2> {shell_error_path}; echo indexed:$? > {shell_output_path}; declare -p a >> {shell_output_path}; \
+             declare -A A=([k]=v); declare +A A 2>> {shell_error_path}; echo assoc:$? >> {shell_output_path}; declare -p A >> {shell_output_path}; \
+             declare +A a; echo cross-indexed:$? >> {shell_output_path}; declare -p a >> {shell_output_path}; \
+             declare +a A; echo cross-assoc:$? >> {shell_output_path}; declare -p A >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "indexed:1\ndeclare -a a=([0]=\"x\" [1]=\"y\")\nassoc:1\ndeclare -A A=([k]=\"v\" )\ncross-indexed:0\ndeclare -a a=([0]=\"x\" [1]=\"y\")\ncross-assoc:0\ndeclare -A A=([k]=\"v\" )\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains("declare: a: cannot destroy array variables in this way"));
+        assert!(error.contains("declare: A: cannot destroy array variables in this way"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);
