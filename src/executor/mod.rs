@@ -654,6 +654,7 @@ impl Executor {
         env::remove_var("__RUBASH_IN_SOURCE");
         env::remove_var("__RUBASH_SCRIPT_NAME");
         env_vars.remove("BASH_ARGV0");
+        env_vars.remove("BASH_EXECUTION_STRING");
         env_vars.entry("PWD".to_string()).or_insert_with(|| {
             std::env::current_dir()
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
