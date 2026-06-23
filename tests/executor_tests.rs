@@ -8636,8 +8636,8 @@ mod command_chaining {
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(error_path);
         let input = format!(
-            "function foo=bar {{ echo equals; }}; \
-             export -f 'foo=bar' 2> {error_path}; echo equals_status:$? > {output_path}; \
+            "function foo=bar {{ echo equals; }}; foo\\=bar > {output_path}; \
+             export -f 'foo=bar' 2> {error_path}; echo equals_status:$? >> {output_path}; \
              function /bin/echo {{ echo slash; }}; /bin/echo >> {output_path}; \
              export -f '/bin/echo' 2>> {error_path}; echo slash_status:$? >> {output_path}"
         );
@@ -8651,7 +8651,7 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "equals_status:1\nslash\nslash_status:1\n"
+            "equals\nequals_status:1\nslash\nslash_status:1\n"
         );
         let errors = fs::read_to_string(error_path).unwrap();
         assert!(errors.contains("export: foo=bar: cannot export"));

@@ -142,6 +142,17 @@ mod assignment_tests {
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].assignments.contains_key("X"));
     }
+
+    #[test]
+    fn test_escaped_equals_is_command_word_not_assignment() {
+        let input = "foo\\=bar > out.txt";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert!(ast.commands[0].assignments.is_empty());
+        assert_eq!(ast.commands[0].words, ["foo=bar"]);
+        assert!(ast.commands[0].redirect_out.is_some());
+    }
 }
 
 mod variable_tests {
