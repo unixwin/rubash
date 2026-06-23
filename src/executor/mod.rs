@@ -7111,13 +7111,27 @@ impl Executor {
 
     fn execute_jobs(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
-        let status = crate::builtins::jobs::execute_with_io(
+        let action = crate::builtins::jobs::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        Ok(status)
+        match action {
+            crate::builtins::jobs::JobsAction::Complete(status) => {
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                Ok(status)
+            }
+            crate::builtins::jobs::JobsAction::Execute(words) => {
+                if !stderr.is_empty() {
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(1);
+                }
+                let mut command = cmd.clone();
+                command.words = words;
+                self.execute_command(&command)?;
+                Ok(self.exit_code)
+            }
+        }
     }
 
     fn execute_wait(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
