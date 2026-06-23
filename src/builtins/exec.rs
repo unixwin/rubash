@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
 const EX_NOTFOUND: i32 = 127;
+const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 
 pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -168,10 +169,9 @@ where
         Command::new(program)
     };
 
-    if clean_env {
-        process.env_clear();
-    } else {
-        process.envs(env_vars);
+    process.env_clear();
+    if !clean_env {
+        apply_exported_environment(&mut process, env_vars);
     }
     process.args(operands);
     process.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -187,6 +187,29 @@ where
             Ok(126)
         }
     }
+}
+
+fn apply_exported_environment(process: &mut Command, env_vars: &HashMap<String, String>) {
+    let mut names = marked_vars(env_vars, EXPORTED_VARS);
+    names.sort();
+    for name in names {
+        if let Some(value) = env_vars.get(&name) {
+            process.env(&name, value);
+        }
+    }
+}
+
+fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
+    env_vars
+        .get(key)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn write_usage<W>(stderr: &mut W) -> io::Result<()>
