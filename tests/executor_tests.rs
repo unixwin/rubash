@@ -1785,6 +1785,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_aliases_preserves_values_with_spaces() {
+        let output_path = "target/rubash-bash-aliases-spaces-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "alias qux='/usr/local/bin/qux -l'; \
+             BASH_ALIASES[blat]='cd /blat ; echo $PWD'; \
+             printf '%s\\n' \"${{BASH_ALIASES[qux]}}\" \"${{BASH_ALIASES[blat]}}\" > {output_path}; \
+             declare -p BASH_ALIASES >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "/usr/local/bin/qux -l\ncd /blat ; echo $PWD\ndeclare -A BASH_ALIASES=([blat]=\"cd /blat ; echo \\$PWD\" [qux]=\"/usr/local/bin/qux -l\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_unset_indexed_array_element() {
         let output_path = "target/rubash-unset-array-element-output.txt";
         let _ = fs::remove_file(output_path);

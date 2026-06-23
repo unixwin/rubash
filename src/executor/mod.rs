@@ -12150,10 +12150,30 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
         "({})",
         entries
             .into_iter()
-            .map(|(key, value)| format!("[{key}]={value}"))
+            .map(|(key, value)| format!("[{key}]={}", quote_assoc_storage_value(&value)))
             .collect::<Vec<_>>()
             .join(" ")
     )
+}
+
+fn quote_assoc_storage_value(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        if matches!(ch, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn assoc_entries(value: &str) -> Vec<(String, String)> {
@@ -12164,15 +12184,14 @@ fn assoc_entries(value: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
 
-    inner
-        .split_whitespace()
+    split_storage_words(inner)
         .filter_map(|part| {
             let (key, value) = part.split_once('=')?;
             Some((
                 key.trim_start_matches('[')
                     .trim_end_matches(']')
                     .to_string(),
-                value.to_string(),
+                unquote_storage_value(value),
             ))
         })
         .collect()
@@ -12208,7 +12227,86 @@ fn array_assignment_tokens(value: &str) -> Vec<String> {
         };
     };
 
-    inner.split_whitespace().map(str::to_string).collect()
+    split_storage_words(inner).collect()
+}
+
+fn split_storage_words(value: &str) -> impl Iterator<Item = String> + '_ {
+    StorageWordIter {
+        input: value,
+        offset: 0,
+    }
+}
+
+struct StorageWordIter<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl Iterator for StorageWordIter<'_> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(ch) = self.input.get(self.offset..)?.chars().next() {
+            if !ch.is_ascii_whitespace() {
+                break;
+            }
+            self.offset += ch.len_utf8();
+        }
+
+        let mut word = String::new();
+        let mut in_double = false;
+        let mut escaped = false;
+        for (relative, ch) in self.input[self.offset..].char_indices() {
+            if escaped {
+                word.push(ch);
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && in_double {
+                word.push(ch);
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                in_double = !in_double;
+                word.push(ch);
+                continue;
+            }
+            if ch.is_ascii_whitespace() && !in_double {
+                self.offset += relative + ch.len_utf8();
+                return Some(word);
+            }
+            word.push(ch);
+        }
+        self.offset = self.input.len();
+        (!word.is_empty()).then_some(word)
+    }
+}
+
+fn unquote_storage_value(value: &str) -> String {
+    let Some(inner) = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return value.to_string();
+    };
+
+    let mut unquoted = String::new();
+    let mut escaped = false;
+    for ch in inner.chars() {
+        if escaped {
+            unquoted.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            unquoted.push(ch);
+        }
+    }
+    if escaped {
+        unquoted.push('\\');
+    }
+    unquoted
 }
 
 fn eval_arith_value(value: &str) -> i128 {
@@ -14234,14 +14332,12 @@ fn array_values(value: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    inner
-        .split_whitespace()
+    split_storage_words(inner)
         .map(|part| {
             part.split_once('=')
                 .map(|(_, value)| value)
+                .map(unquote_storage_value)
                 .unwrap_or(part)
-                .trim_matches('"')
-                .to_string()
         })
         .collect()
 }
