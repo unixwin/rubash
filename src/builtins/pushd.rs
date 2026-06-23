@@ -190,12 +190,17 @@ where
             };
 
             match operand {
-                PopdOperand::Top => {
-                    if stack.is_empty() {
+                PopdOperand::Top { no_cd } => {
+                    if stack.len() <= 1 {
                         writeln!(stderr, "{diagnostic_prefix}popd: directory stack empty")?;
                         return Ok(EXECUTION_FAILURE);
                     }
-                    stack.remove(0);
+                    stack.remove(if no_cd { 1 } else { 0 });
+                    if no_cd {
+                        save_stack(env_vars, &stack);
+                        writeln!(stdout, "{}", stack.join(" "))?;
+                        return Ok(EXECUTION_SUCCESS);
+                    }
                 }
                 PopdOperand::Index {
                     index,
@@ -246,7 +251,9 @@ enum PushdOperand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PopdOperand {
-    Top,
+    Top {
+        no_cd: bool,
+    },
     Index {
         index: usize,
         from_right: bool,
@@ -262,8 +269,7 @@ fn parse_pushd_operand<W>(
 where
     W: Write,
 {
-    let args = strip_double_dash(args);
-    let (no_cd, args) = strip_no_cd(args);
+    let (no_cd, args) = parse_stack_options(args);
     if args.is_empty() {
         return Ok(Some(PushdOperand::Swap));
     }
@@ -297,18 +303,9 @@ fn parse_popd_operand<W>(
 where
     W: Write,
 {
-    if args.first().copied() == Some("--") {
-        // TODO(builtins/pushd.def): Bash's popd option parser accepts `--`
-        // and, in the builtins12.sub regression, treats following +N/-N
-        // operands as non-options. Keep this narrow top-pop behavior until
-        // the real directory-stack parser is ported.
-        return Ok(Some(PopdOperand::Top));
-    }
-
-    let args = strip_double_dash(args);
-    let (no_cd, args) = strip_no_cd(args);
+    let (no_cd, args) = parse_stack_options(args);
     if args.is_empty() {
-        return Ok(Some(PopdOperand::Top));
+        return Ok(Some(PopdOperand::Top { no_cd }));
     }
 
     let arg = args[0];
@@ -328,6 +325,22 @@ where
         from_right: arg.starts_with('-'),
         no_cd,
     }))
+}
+
+fn parse_stack_options<'a>(args: &'a [&str]) -> (bool, &'a [&'a str]) {
+    let mut no_cd = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index).copied() {
+        match arg {
+            "--" => return (no_cd, &args[index + 1..]),
+            "-n" => {
+                no_cd = true;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    (no_cd, &args[index..])
 }
 
 fn strip_double_dash<'a>(args: &'a [&str]) -> &'a [&'a str] {
@@ -404,14 +417,6 @@ where
     };
     writeln!(stdout, "{}", stack[index])?;
     Ok(Some(EXECUTION_SUCCESS))
-}
-
-fn strip_no_cd<'a>(args: &'a [&str]) -> (bool, &'a [&'a str]) {
-    if args.first().copied() == Some("-n") {
-        (true, &args[1..])
-    } else {
-        (false, args)
-    }
 }
 
 fn stack_index(arg: &str, len: usize) -> Option<usize> {
