@@ -1304,6 +1304,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_cd_invokes_cd_builtin() {
+        let original_dir = std::env::current_dir().unwrap();
+        let original_pwd = std::env::var("PWD").ok();
+        let original_oldpwd = std::env::var("OLDPWD").ok();
+        let root = original_dir.join("target/rubash-builtin-cd");
+        let dest_dir = root.join("dest");
+        let output_path = root.join("output.txt");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dest_dir).unwrap();
+
+        let dest_display = shell_test_path(&dest_dir);
+        let output_display = output_path.to_string_lossy().replace('\\', "/");
+        let input = format!(
+            "function cd {{ echo function-cd; }}; builtin cd {dest_display}; pwd > {output_display}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+        let _ = std::env::set_current_dir(&original_dir);
+        match original_pwd {
+            Some(value) => std::env::set_var("PWD", value),
+            None => std::env::remove_var("PWD"),
+        }
+        match original_oldpwd {
+            Some(value) => std::env::set_var("OLDPWD", value),
+            None => std::env::remove_var("OLDPWD"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            format!("{dest_display}\n")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_cd_redirects_stderr() {
         let error_path = "target/rubash-cd-stderr-output.txt";
         let status_path = "target/rubash-cd-stderr-status.txt";
