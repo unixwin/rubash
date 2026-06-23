@@ -242,10 +242,10 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
         'x' => format_integer_with_alternate(parse_i64(value), 16, false, spec.alternate_form),
         'X' => format_integer_with_alternate(parse_i64(value), 16, true, spec.alternate_form),
         'o' => format_integer_with_alternate(parse_i64(value), 8, false, spec.alternate_form),
-        'f' | 'F' => format_float(value, spec.precision, 'f'),
-        'e' => format_float(value, spec.precision, 'e'),
-        'E' => format_float(value, spec.precision, 'E'),
-        'g' | 'G' => format_float(value, spec.precision, 'g'),
+        'f' | 'F' => format_float(value, spec, 'f'),
+        'e' => format_float(value, spec, 'e'),
+        'E' => format_float(value, spec, 'E'),
+        'g' | 'G' => format_float(value, spec, 'g'),
         other => {
             let mut fallback = String::from('%');
             fallback.push(other);
@@ -263,16 +263,30 @@ fn truncate_precision(value: String, precision: Option<usize>) -> String {
     value.chars().take(precision).collect()
 }
 
-fn format_float(value: &str, precision: Option<usize>, mode: char) -> String {
+fn format_float(value: &str, spec: &FormatSpec, mode: char) -> String {
     let value = parse_f64(value);
-    match (mode, precision) {
+    let mut rendered = match (mode, spec.precision) {
         ('e', Some(precision)) => format!("{value:.precision$e}"),
         ('E', Some(precision)) => format!("{value:.precision$E}"),
         (_, Some(precision)) => format!("{value:.precision$}"),
         ('e', None) => format!("{value:e}"),
         ('E', None) => format!("{value:E}"),
         _ => format!("{value}"),
+    };
+
+    if spec.alternate_form && matches!(mode, 'f') && !rendered.contains('.') {
+        rendered.push('.');
     }
+
+    if value >= 0.0 {
+        if spec.explicit_sign {
+            rendered.insert(0, '+');
+        } else if spec.leading_space_sign {
+            rendered.insert(0, ' ');
+        }
+    }
+
+    rendered
 }
 
 fn format_integer_with_alternate(
@@ -644,6 +658,22 @@ mod tests {
             ])
             .1,
             "<+42>< 42><  +42><-0042><+0042>"
+        );
+    }
+
+    #[test]
+    fn float_formats_honor_sign_flags_and_alternate_decimal_point() {
+        assert_eq!(
+            run(&[
+                "<%+010.0f><% 010.0f><%#4.0f><%#.0f><%+10.0f>",
+                "123",
+                "123",
+                "123",
+                "123",
+                "123"
+            ])
+            .1,
+            "<+000000123>< 000000123><123.><123.><      +123>"
         );
     }
 }
