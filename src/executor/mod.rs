@@ -7672,6 +7672,7 @@ impl Executor {
         {
             self.env_vars
                 .insert("__RUBASH_POSIX_MODE".to_string(), "1".to_string());
+            crate::builtins::set::set_shell_option(&mut self.env_vars, "posix", true);
             self.exit_code = 0;
             return Ok(());
         }
@@ -7679,6 +7680,7 @@ impl Executor {
             && cmd.words.get(2).map(String::as_str) == Some("posix")
         {
             self.env_vars.remove("__RUBASH_POSIX_MODE");
+            crate::builtins::set::set_shell_option(&mut self.env_vars, "posix", false);
             self.exit_code = 0;
             return Ok(());
         }
