@@ -2461,6 +2461,63 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_export_assignment_rejects_readonly_variable() {
+        let output_path = target_test_path("rubash-export-readonly-assignment-output.txt");
+        let error_path = target_test_path("rubash-export-readonly-assignment-error.txt");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let input = format!(
+            "readonly RUBASH_EXPORT_READONLY_ASSIGN=1; \
+             export RUBASH_EXPORT_READONLY_ASSIGN=2 2> {shell_error_path}; echo $? > {shell_output_path}; \
+             declare -p RUBASH_EXPORT_READONLY_ASSIGN >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "1\ndeclare -r RUBASH_EXPORT_READONLY_ASSIGN=\"1\"\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains("RUBASH_EXPORT_READONLY_ASSIGN: readonly variable"));
+        std::env::remove_var("RUBASH_EXPORT_READONLY_ASSIGN");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+    }
+
+    #[test]
+    fn test_export_without_assignment_marks_readonly_variable() {
+        let output_path = target_test_path("rubash-export-readonly-unset-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "unset RUBASH_EXPORT_READONLY_UNSET; readonly RUBASH_EXPORT_READONLY_UNSET; \
+             export RUBASH_EXPORT_READONLY_UNSET; declare -p RUBASH_EXPORT_READONLY_UNSET > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -rx RUBASH_EXPORT_READONLY_UNSET\n"
+        );
+        std::env::remove_var("RUBASH_EXPORT_READONLY_UNSET");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_child_environment_contains_only_exported_variables() {
         let output_path = target_test_path("rubash-child-export-env-output.txt");
         let _ = fs::remove_file(&output_path);

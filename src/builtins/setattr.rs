@@ -134,6 +134,11 @@ where
 
     match mode {
         ExportMode::Set => {
+            if value.is_some() && marked_vars(env_vars, READONLY_VARS).contains(name) {
+                writeln!(stderr, "{}{}: readonly variable", diagnostic_prefix(), name)?;
+                return Ok(EXECUTION_FAILURE);
+            }
+
             if value.is_none() && !env_vars.contains_key(name) && env::var(name).is_err() {
                 mark_exported(env_vars, name);
                 return Ok(EXECUTION_SUCCESS);
