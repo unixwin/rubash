@@ -4850,6 +4850,61 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_n_zero_succeeds_with_empty_value() {
+        let output_path = "target/rubash-read-n-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -n 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<>:0");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_upper_n_zero_succeeds_with_empty_value() {
+        let output_path = "target/rubash-read-upper-n-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -N 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<>:0");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_array_n_zero_assigns_empty_array() {
+        let output_path = "target/rubash-read-array-n-zero-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "read -a values -n 0 <<< abc; printf '%s:%s' \"${{#values[@]}}\" \"$?\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0:0");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_n_rejects_negative_count() {
         let output_path = "target/rubash-read-n-negative-output.txt";
         let _ = fs::remove_file(output_path);
