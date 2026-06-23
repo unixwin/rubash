@@ -3052,6 +3052,96 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_declare_assigns_variable() {
+        let output_path = "target/rubash-command-declare-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "command declare RUBASH_COMMAND_DECLARE=value; echo $RUBASH_COMMAND_DECLARE > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_unset_removes_variable() {
+        let output_path = "target/rubash-command-unset-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "RUBASH_COMMAND_UNSET=value; command unset RUBASH_COMMAND_UNSET; echo ${{RUBASH_COMMAND_UNSET:-missing}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "missing\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_shopt_updates_shell_option_state() {
+        let output_path = "target/rubash-command-shopt-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("command shopt -s nullglob; shopt -q nullglob; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_eval_redirects_output() {
+        let output_path = "target/rubash-command-eval-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("command eval 'echo alpha; echo beta' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_exec_redirects_output() {
+        let output_path = "target/rubash-command-exec-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("command exec -a custom sh -c 'echo $0' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "custom\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shift_help_redirects_output_and_returns_usage() {
         let output_path = "target/rubash-shift-help-redirect-output.txt";
         let _ = fs::remove_file(output_path);
