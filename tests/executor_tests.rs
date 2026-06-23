@@ -2596,6 +2596,75 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_disabled_printf_builtin_uses_external_command() {
+        let bin_dir = "target/rubash-disabled-printf-bin";
+        let script_path = format!("{bin_dir}/printf");
+        let output_path = "target/rubash-disabled-printf-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-printf \"$@\"\n").unwrap();
+        let input = format!(
+            "enable -n printf; printf hello > {output_path}; enable printf; printf '%s\\n' builtin >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-printf hello\nbuiltin\n"
+        );
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
+    fn test_command_uses_external_printf_when_builtin_is_disabled() {
+        let bin_dir = "target/rubash-disabled-command-printf-bin";
+        let script_path = format!("{bin_dir}/printf");
+        let output_path = "target/rubash-disabled-command-printf-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-command-printf \"$@\"\n").unwrap();
+        let input =
+            format!("enable -n printf; command printf hello > {output_path}; enable printf");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-command-printf hello\n"
+        );
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
     fn test_enable_appends_output() {
         let output_path = "target/rubash-enable-append-output.txt";
         let _ = fs::remove_file(output_path);

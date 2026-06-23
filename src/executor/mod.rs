@@ -1779,6 +1779,9 @@ impl Executor {
                 }
                 "source" | "." => crate::builtins::source::execute(self, &cmd.words[1..]),
                 "printf" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_printf(cmd)?;
                     Ok(())
                 }
@@ -4242,6 +4245,9 @@ impl Executor {
                 }
             },
             "printf" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_printf(cmd)?;
                 Ok(())
             }
