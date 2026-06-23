@@ -238,10 +238,10 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
         'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
         'c' => value.chars().next().unwrap_or('\0').to_string(),
         'd' | 'i' => format_signed_integer(parse_i64(value), spec),
-        'u' => (parse_i64(value) as u64).to_string(),
-        'x' => format_integer_with_alternate(parse_i64(value), 16, false, spec.alternate_form),
-        'X' => format_integer_with_alternate(parse_i64(value), 16, true, spec.alternate_form),
-        'o' => format_integer_with_alternate(parse_i64(value), 8, false, spec.alternate_form),
+        'u' => format_unsigned_integer(parse_i64(value) as u64, 10, false, spec),
+        'x' => format_unsigned_integer(parse_i64(value) as u64, 16, false, spec),
+        'X' => format_unsigned_integer(parse_i64(value) as u64, 16, true, spec),
+        'o' => format_unsigned_integer(parse_i64(value) as u64, 8, false, spec),
         'f' | 'F' => format_float(value, spec, 'f'),
         'e' => format_float(value, spec, 'e'),
         'E' => format_float(value, spec, 'E'),
@@ -253,7 +253,11 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
         }
     };
 
-    apply_width(rendered, spec)
+    let mut width_spec = spec.clone();
+    if spec.precision.is_some() && matches!(spec.specifier, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
+        width_spec.zero_pad = false;
+    }
+    apply_width(rendered, &width_spec)
 }
 
 fn truncate_precision(value: String, precision: Option<usize>) -> String {
@@ -289,41 +293,55 @@ fn format_float(value: &str, spec: &FormatSpec, mode: char) -> String {
     rendered
 }
 
-fn format_integer_with_alternate(
-    value: i64,
-    radix: u32,
-    uppercase: bool,
-    alternate: bool,
-) -> String {
-    let rendered = match (radix, uppercase) {
+fn format_unsigned_integer(value: u64, radix: u32, uppercase: bool, spec: &FormatSpec) -> String {
+    let mut rendered = match (radix, uppercase) {
+        (10, _) => value.to_string(),
         (8, _) => format!("{value:o}"),
         (16, false) => format!("{value:x}"),
         (16, true) => format!("{value:X}"),
         _ => value.to_string(),
     };
 
-    if !alternate || value == 0 {
+    rendered = apply_integer_precision(rendered, value == 0, spec.precision);
+
+    if !spec.alternate_form {
         return rendered;
     }
 
     match (radix, uppercase) {
-        (8, _) => format!("0{rendered}"),
-        (16, false) => format!("0x{rendered}"),
-        (16, true) => format!("0X{rendered}"),
+        (8, _) if !rendered.starts_with('0') => format!("0{rendered}"),
+        (16, false) if value != 0 => format!("0x{rendered}"),
+        (16, true) if value != 0 => format!("0X{rendered}"),
         _ => rendered,
     }
 }
 
 fn format_signed_integer(value: i64, spec: &FormatSpec) -> String {
+    let mut rendered =
+        apply_integer_precision(value.unsigned_abs().to_string(), value == 0, spec.precision);
     if value < 0 {
-        value.to_string()
+        rendered.insert(0, '-');
     } else if spec.explicit_sign {
-        format!("+{value}")
+        rendered.insert(0, '+');
     } else if spec.leading_space_sign {
-        format!(" {value}")
-    } else {
-        value.to_string()
+        rendered.insert(0, ' ');
     }
+    rendered
+}
+
+fn apply_integer_precision(mut digits: String, is_zero: bool, precision: Option<usize>) -> String {
+    let Some(precision) = precision else {
+        return digits;
+    };
+    if precision == 0 && is_zero {
+        return String::new();
+    }
+    let len = digits.chars().count();
+    if len < precision {
+        let padding: String = std::iter::repeat('0').take(precision - len).collect();
+        digits = format!("{padding}{digits}");
+    }
+    digits
 }
 
 fn apply_width(value: String, spec: &FormatSpec) -> String {
@@ -714,6 +732,26 @@ mod tests {
             ])
             .1,
             "26:26:-8:8:16:1a:<       x>"
+        );
+    }
+
+    #[test]
+    fn integer_formats_apply_precision_like_bash() {
+        assert_eq!(
+            run(&[
+                "<%.5d><%8.5d><%08.5d><%.0d><%+.0d><% .0d><%#.5o><%#.5x><%#.0o>",
+                "42",
+                "42",
+                "42",
+                "0",
+                "0",
+                "0",
+                "9",
+                "26",
+                "0"
+            ])
+            .1,
+            "<00042><   00042><   00042><><+>< ><00011><0x0001a><0>"
         );
     }
 }
