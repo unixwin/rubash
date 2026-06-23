@@ -4779,6 +4779,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_n_rejects_negative_count() {
+        let output_path = "target/rubash-read-n-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("read -n -1 value <<< abc; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_compact_n_rejects_non_numeric_count() {
+        let output_path = "target/rubash-read-n-invalid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("read -nabc value <<< abc; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_combined_rn_reads_raw_limited_characters() {
         let output_path = "target/rubash-read-rn-output.txt";
         let _ = fs::remove_file(output_path);
