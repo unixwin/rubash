@@ -106,6 +106,27 @@ fn profile_startup_options_are_accepted_before_command_string() {
 }
 
 #[test]
+fn login_startup_options_are_accepted_before_command_string() {
+    let long_output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("--login")
+        .arg("-c")
+        .arg("printf '%s\\n' long")
+        .output()
+        .expect("run rubash");
+    let short_output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-l")
+        .arg("-c")
+        .arg("printf '%s\\n' short")
+        .output()
+        .expect("run rubash");
+
+    assert!(long_output.status.success());
+    assert_eq!(String::from_utf8_lossy(&long_output.stdout), "long\n");
+    assert!(short_output.status.success());
+    assert_eq!(String::from_utf8_lossy(&short_output.stdout), "short\n");
+}
+
+#[test]
 fn cli_shell_flags_apply_before_command_string() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-u")
