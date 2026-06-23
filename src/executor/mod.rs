@@ -670,6 +670,7 @@ impl Executor {
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
                 .unwrap_or_else(|_| "/".to_string())
         });
+        initialize_shell_level(&mut env_vars);
         mark_initial_exported_vars(&mut env_vars);
         env_vars.insert(
             SHELL_START_EPOCH.to_string(),
@@ -2769,13 +2770,10 @@ impl Executor {
     }
 
     fn execute_declare_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if cmd.words[1..]
-            .iter()
-            .any(|word| {
-                (word.starts_with('-') || word.starts_with('+'))
-                    && (word.contains('f') || word.contains('F'))
-            })
-        {
+        if cmd.words[1..].iter().any(|word| {
+            (word.starts_with('-') || word.starts_with('+'))
+                && (word.contains('f') || word.contains('F'))
+        }) {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
             self.exit_code =
@@ -13354,15 +13352,22 @@ fn mark_initial_exported_vars(env_vars: &mut HashMap<String, String>) {
     env_vars.insert(EXPORTED_VARS.to_string(), names.join("\x1f"));
 }
 
+fn initialize_shell_level(env_vars: &mut HashMap<String, String>) {
+    let next_level = env_vars
+        .get("SHLVL")
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|level| *level >= 0)
+        .map(|level| level.saturating_add(1))
+        .unwrap_or(1);
+    env_vars.insert("SHLVL".to_string(), next_level.to_string());
+}
+
 fn is_initial_export_candidate(name: &str) -> bool {
     // Test runs share one process environment; ignore shell-local names that
     // previous Executor instances may have written there.
     !name.starts_with("__RUBASH_")
         && name.len() > 1
-        && name
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_uppercase)
+        && name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
         && !is_bash_managed_shell_var(name)
 }
 
@@ -13437,9 +13442,7 @@ fn import_exported_functions_from_env(
 }
 
 fn imported_function_name(env_name: &str) -> Option<&str> {
-    let name = env_name
-        .strip_prefix("BASH_FUNC_")?
-        .strip_suffix("%%")?;
+    let name = env_name.strip_prefix("BASH_FUNC_")?.strip_suffix("%%")?;
     if is_imported_function_name(name) {
         Some(name)
     } else {
