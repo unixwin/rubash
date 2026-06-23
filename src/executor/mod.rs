@@ -1840,14 +1840,7 @@ impl Executor {
                     self.exit_code = self.execute_alias(cmd)?;
                     Ok(())
                 }
-                "declare" | "typeset" => {
-                    if cmd.words.iter().any(|word| word == "-f") {
-                        self.exit_code = self.execute_declare_functions(&cmd.words[1..]);
-                        return Ok(());
-                    }
-                    self.exit_code = self.execute_declare(cmd)?;
-                    Ok(())
-                }
+                "declare" | "typeset" => self.execute_declare_command(cmd),
                 "unalias" => {
                     self.exit_code = self.execute_unalias(cmd)?;
                     Ok(())
@@ -2203,6 +2196,15 @@ impl Executor {
             &args,
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_declare_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if cmd.words.iter().any(|word| word == "-f") {
+            self.exit_code = self.execute_declare_functions(&cmd.words[1..]);
+            return Ok(());
+        }
+        self.exit_code = self.execute_declare(cmd)?;
+        Ok(())
     }
 
     fn execute_export(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -4276,6 +4278,11 @@ impl Executor {
                 self.exit_code = self.execute_readonly(&builtin_cmd)?;
                 Ok(())
             }
+            "declare" | "typeset" => self.execute_declare_command(&builtin_cmd),
+            "unset" => {
+                self.exit_code = self.execute_unset(&builtin_cmd)?;
+                Ok(())
+            }
             "set" => self.execute_set_command(&builtin_cmd),
             "shopt" => {
                 self.exit_code = self.execute_shopt(&builtin_cmd)?;
@@ -4403,6 +4410,17 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_readonly(&command)?;
+                Ok(())
+            }
+            "declare" | "typeset" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.execute_declare_command(&command)
+            }
+            "unset" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_unset(&command)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),

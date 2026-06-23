@@ -859,6 +859,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_declare_assigns_variable() {
+        let output_path = "target/rubash-builtin-declare-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin declare RUBASH_BUILTIN_DECLARE=value; echo $RUBASH_BUILTIN_DECLARE > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_typeset_assigns_variable() {
+        let output_path = "target/rubash-builtin-typeset-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin typeset RUBASH_BUILTIN_TYPESET=value; echo $RUBASH_BUILTIN_TYPESET > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_export_p_redirects_output() {
         let output_path = "target/rubash-export-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
@@ -2303,6 +2337,23 @@ mod command_chaining {
         assert!(error.starts_with("before\n"));
         assert!(error.contains("rubash: unset: `1BAD`: not a valid identifier"));
         let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_builtin_unset_removes_variable() {
+        let output_path = "target/rubash-builtin-unset-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("RUBASH_BUILTIN_UNSET=value; builtin unset RUBASH_BUILTIN_UNSET; echo ${{RUBASH_BUILTIN_UNSET:-missing}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "missing\n");
+        let _ = fs::remove_file(output_path);
     }
 
     #[test]
