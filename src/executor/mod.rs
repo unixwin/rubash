@@ -6183,6 +6183,9 @@ impl Executor {
                     exact_char_limit = true;
                     index += 2;
                 }
+                "-i" | "-t" | "-u" => {
+                    index += 2;
+                }
                 "-p" => {
                     index += 2;
                 }
@@ -6202,6 +6205,12 @@ impl Executor {
                 word if word.starts_with("-N") && word.len() > 2 => {
                     char_limit = word[2..].parse::<usize>().ok();
                     exact_char_limit = true;
+                    index += 1;
+                }
+                word if word.starts_with('-')
+                    && matches!(word.as_bytes().get(1).copied(), Some(b'i' | b't' | b'u'))
+                    && word.len() > 2 =>
+                {
                     index += 1;
                 }
                 word if word.starts_with("-p") && word.len() > 2 => {
