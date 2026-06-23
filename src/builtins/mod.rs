@@ -14,6 +14,7 @@ pub mod exit;
 pub mod fg_bg;
 pub mod hash;
 pub mod help;
+pub mod history;
 pub mod jobs;
 pub mod kill;
 pub mod printf;

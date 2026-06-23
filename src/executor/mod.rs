@@ -2064,6 +2064,10 @@ impl Executor {
                     self.exit_code = self.execute_suspend(cmd)?;
                     Ok(())
                 }
+                "history" => {
+                    self.exit_code = self.execute_history(cmd)?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4628,6 +4632,10 @@ impl Executor {
                 self.exit_code = self.execute_suspend(cmd)?;
                 Ok(())
             }
+            "history" => {
+                self.exit_code = self.execute_history(cmd)?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4859,6 +4867,10 @@ impl Executor {
             }
             "suspend" => {
                 self.exit_code = self.execute_suspend(&builtin_cmd)?;
+                Ok(())
+            }
+            "history" => {
+                self.exit_code = self.execute_history(&builtin_cmd)?;
                 Ok(())
             }
             "time" => {
@@ -5186,6 +5198,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_suspend(&command)?;
+                Ok(())
+            }
+            "history" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_history(&command)?;
                 Ok(())
             }
             "time" => {
@@ -7225,6 +7243,17 @@ impl Executor {
     fn execute_suspend(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
         let status = crate::builtins::suspend::execute_with_io(
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_history(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = crate::builtins::history::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
