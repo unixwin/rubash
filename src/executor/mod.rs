@@ -4192,7 +4192,24 @@ impl Executor {
                 self.exit_code = self.execute_pwd(cmd)?;
                 Ok(())
             }
+            "exec" => {
+                self.exit_code = self.execute_exec(cmd)?;
+                Ok(())
+            }
+            "eval" => self.execute_eval(cmd),
+            "set" => self.execute_set_command(cmd),
+            "shopt" => {
+                self.exit_code = self.execute_shopt(cmd)?;
+                Ok(())
+            }
+            "enable" => {
+                self.exit_code = self.execute_enable(cmd)?;
+                Ok(())
+            }
             "." | "source" => self.execute_source_from_command_builtin(cmd),
+            "return" => self.execute_return(&cmd.words[1..]),
+            "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
+            "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
             "recho" => {
                 self.execute_recho(&cmd.words[1..]);
                 self.exit_code = 0;
@@ -4222,6 +4239,42 @@ impl Executor {
             }
             "help" => {
                 self.exit_code = self.execute_help(cmd)?;
+                Ok(())
+            }
+            "alias" => {
+                self.exit_code = self.execute_alias(cmd)?;
+                Ok(())
+            }
+            "unalias" => {
+                self.exit_code = self.execute_unalias(cmd)?;
+                Ok(())
+            }
+            "export" => {
+                self.exit_code = self.execute_export(cmd)?;
+                Ok(())
+            }
+            "readonly" => {
+                self.exit_code = self.execute_readonly(cmd)?;
+                Ok(())
+            }
+            "declare" | "typeset" => self.execute_declare_command(cmd),
+            "unset" => {
+                self.exit_code = self.execute_unset(cmd)?;
+                Ok(())
+            }
+            "pushd" => {
+                self.exit_code =
+                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
+                Ok(())
+            }
+            "popd" => {
+                self.exit_code =
+                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
+                Ok(())
+            }
+            "dirs" => {
+                self.exit_code =
+                    self.execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
                 Ok(())
             }
             "kill" => {
