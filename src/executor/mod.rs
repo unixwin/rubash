@@ -6208,6 +6208,15 @@ impl Executor {
                     raw = true;
                     index += 1;
                 }
+                word if word.starts_with('-')
+                    && word.len() > 2
+                    && word[1..]
+                        .chars()
+                        .all(|ch| matches!(ch, 'e' | 'E' | 'r' | 's')) =>
+                {
+                    raw |= word[1..].contains('r');
+                    index += 1;
+                }
                 word if word.starts_with("-d") && word.len() > 2 => {
                     delimiter = word[2..].chars().next().unwrap_or('\0');
                     index += 1;
