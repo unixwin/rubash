@@ -14,7 +14,9 @@ struct FormatSpec {
     left_adjust: bool,
     zero_pad: bool,
     width: Option<usize>,
+    width_from_arg: bool,
     precision: Option<usize>,
+    precision_from_arg: bool,
     specifier: char,
 }
 
@@ -122,10 +124,11 @@ fn render_one_pass(
                     continue;
                 }
 
-                let Some(spec) = parse_format_spec(&mut chars) else {
+                let Some(mut spec) = parse_format_spec(&mut chars) else {
                     output.push('%');
                     continue;
                 };
+                resolve_dynamic_format_args(&mut spec, args, arg_index);
 
                 if spec.specifier == 'n' {
                     let name = next_arg(args, arg_index);
@@ -164,10 +167,20 @@ where
         chars.next();
     }
 
-    spec.width = read_usize(chars);
+    if chars.peek() == Some(&'*') {
+        chars.next();
+        spec.width_from_arg = true;
+    } else {
+        spec.width = read_usize(chars);
+    }
     if chars.peek() == Some(&'.') {
         chars.next();
-        spec.precision = Some(read_usize(chars).unwrap_or(0));
+        if chars.peek() == Some(&'*') {
+            chars.next();
+            spec.precision_from_arg = true;
+        } else {
+            spec.precision = Some(read_usize(chars).unwrap_or(0));
+        }
     }
 
     while matches!(chars.peek(), Some('h' | 'j' | 'l' | 'L' | 't' | 'z')) {
@@ -176,6 +189,23 @@ where
 
     spec.specifier = chars.next()?;
     Some(spec)
+}
+
+fn resolve_dynamic_format_args(spec: &mut FormatSpec, args: &[&str], arg_index: &mut usize) {
+    if spec.width_from_arg {
+        let width = parse_i64(next_arg(args, arg_index));
+        if width < 0 {
+            spec.left_adjust = true;
+            spec.width = Some(width.unsigned_abs() as usize);
+        } else {
+            spec.width = Some(width as usize);
+        }
+    }
+
+    if spec.precision_from_arg {
+        let precision = parse_i64(next_arg(args, arg_index));
+        spec.precision = (precision >= 0).then_some(precision as usize);
+    }
 }
 
 fn read_usize<I>(chars: &mut std::iter::Peekable<I>) -> Option<usize>
@@ -411,5 +441,12 @@ mod tests {
         assert!(stdout.is_empty());
         assert_eq!(env_vars.get("OUT"), Some(&"abcd".to_string()));
         assert_eq!(env_vars.get("COUNT"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn supports_dynamic_width_and_precision() {
+        assert_eq!(run(&["<%*.*s>", "10", "4", "abcdef"]).1, "<      abcd>");
+        assert_eq!(run(&["<%*s>", "-6", "ab"]).1, "<ab    >");
+        assert_eq!(run(&["<%.*s>", "-1", "abcdef"]).1, "<abcdef>");
     }
 }
