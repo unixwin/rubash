@@ -8649,6 +8649,51 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_func_environment_import_defines_function() {
+        let output_path = "target/rubash-imported-function-output.txt";
+        let _ = fs::remove_file(output_path);
+        let old_value = std::env::var("BASH_FUNC_rubash_imported%%").ok();
+        std::env::set_var("BASH_FUNC_rubash_imported%%", "() { echo imported; }");
+        let input = format!("declare -F rubash_imported > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        match old_value {
+            Some(value) => std::env::set_var("BASH_FUNC_rubash_imported%%", value),
+            None => std::env::remove_var("BASH_FUNC_rubash_imported%%"),
+        }
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "rubash_imported\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_export_f_makes_function_available_to_child_rubash() {
+        let output_path = target_test_path("rubash-exported-function-child-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "rubash_child_func() {{ echo child; }}; export -f rubash_child_func; \
+             {rubash} -c rubash_child_func > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "child\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_local_outside_function_reports_error() {
         let error_path = "target/rubash-local-outside-error.txt";
         let status_path = "target/rubash-local-outside-status.txt";
