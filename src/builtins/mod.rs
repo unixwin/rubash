@@ -6,6 +6,7 @@ pub mod caller;
 pub mod cd;
 pub mod colon;
 pub mod command;
+pub mod complete;
 pub mod declare;
 pub mod echo;
 pub mod enable;

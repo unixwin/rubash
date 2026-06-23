@@ -2076,6 +2076,27 @@ impl Executor {
                     self.exit_code = self.execute_fc(cmd)?;
                     Ok(())
                 }
+                "complete" => {
+                    self.exit_code = self.execute_completion_builtin(
+                        cmd,
+                        crate::builtins::complete::CompletionBuiltin::Complete,
+                    )?;
+                    Ok(())
+                }
+                "compgen" => {
+                    self.exit_code = self.execute_completion_builtin(
+                        cmd,
+                        crate::builtins::complete::CompletionBuiltin::Compgen,
+                    )?;
+                    Ok(())
+                }
+                "compopt" => {
+                    self.exit_code = self.execute_completion_builtin(
+                        cmd,
+                        crate::builtins::complete::CompletionBuiltin::Compopt,
+                    )?;
+                    Ok(())
+                }
                 "time" => {
                     self.execute_time_command(&cmd.words[1..])?;
                     Ok(())
@@ -4652,6 +4673,27 @@ impl Executor {
                 self.exit_code = self.execute_fc(cmd)?;
                 Ok(())
             }
+            "complete" => {
+                self.exit_code = self.execute_completion_builtin(
+                    cmd,
+                    crate::builtins::complete::CompletionBuiltin::Complete,
+                )?;
+                Ok(())
+            }
+            "compgen" => {
+                self.exit_code = self.execute_completion_builtin(
+                    cmd,
+                    crate::builtins::complete::CompletionBuiltin::Compgen,
+                )?;
+                Ok(())
+            }
+            "compopt" => {
+                self.exit_code = self.execute_completion_builtin(
+                    cmd,
+                    crate::builtins::complete::CompletionBuiltin::Compopt,
+                )?;
+                Ok(())
+            }
             "trap" => {
                 self.exit_code = self.execute_trap(cmd)?;
                 Ok(())
@@ -4895,6 +4937,27 @@ impl Executor {
             }
             "fc" => {
                 self.exit_code = self.execute_fc(&builtin_cmd)?;
+                Ok(())
+            }
+            "complete" => {
+                self.exit_code = self.execute_completion_builtin(
+                    &builtin_cmd,
+                    crate::builtins::complete::CompletionBuiltin::Complete,
+                )?;
+                Ok(())
+            }
+            "compgen" => {
+                self.exit_code = self.execute_completion_builtin(
+                    &builtin_cmd,
+                    crate::builtins::complete::CompletionBuiltin::Compgen,
+                )?;
+                Ok(())
+            }
+            "compopt" => {
+                self.exit_code = self.execute_completion_builtin(
+                    &builtin_cmd,
+                    crate::builtins::complete::CompletionBuiltin::Compopt,
+                )?;
                 Ok(())
             }
             "time" => {
@@ -5240,6 +5303,33 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.exit_code = self.execute_fc(&command)?;
+                Ok(())
+            }
+            "complete" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_completion_builtin(
+                    &command,
+                    crate::builtins::complete::CompletionBuiltin::Complete,
+                )?;
+                Ok(())
+            }
+            "compgen" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_completion_builtin(
+                    &command,
+                    crate::builtins::complete::CompletionBuiltin::Compgen,
+                )?;
+                Ok(())
+            }
+            "compopt" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_completion_builtin(
+                    &command,
+                    crate::builtins::complete::CompletionBuiltin::Compopt,
+                )?;
                 Ok(())
             }
             "time" => {
@@ -7317,6 +7407,24 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_completion_builtin(
+        &mut self,
+        cmd: &CommandNode,
+        builtin: crate::builtins::complete::CompletionBuiltin,
+    ) -> Result<i32, ExecuteError> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = crate::builtins::complete::execute_with_io(
+            builtin,
+            &cmd.words[1..],
+            &self.diagnostic_prefix(),
+            &mut stdout,
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
 
