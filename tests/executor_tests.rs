@@ -8558,6 +8558,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_local_plus_attributes_clear_conversion_and_integer_flags() {
+        let output_path = "target/rubash-local-plus-attrs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function f {{ local -u up=abc; local +u up; up=def; echo up:$up > {output_path}; \
+             local -i n=2+3; local +i n; n=2+3; echo n:$n >> {output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "up:def\nn:2+3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_getopts_parses_explicit_option_argument() {
         let output_path = "target/rubash-getopts-explicit-output.txt";
         let _ = fs::remove_file(output_path);
@@ -10657,6 +10677,30 @@ mod command_chaining {
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
             "ABC\nDEF\nabc\nxyz\ndeclare -u U=\"DEF\"\ndeclare -l L=\"xyz\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_plus_attributes_clear_variable_flags() {
+        let output_path = "target/rubash-declare-plus-attrs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -u U=abc; declare +u U; U=ghi; echo $U > {output_path}; declare -p U >> {output_path}; \
+             declare -l L=ABC; declare +l L; L=XYZ; echo $L >> {output_path}; declare -p L >> {output_path}; \
+             declare -i n=2+3; declare +i n; n=2+3; echo $n >> {output_path}; declare -p n >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "ghi\ndeclare -- U=\"ghi\"\nXYZ\ndeclare -- L=\"XYZ\"\n2+3\ndeclare -- n=\"2+3\"\n"
         );
         let _ = fs::remove_file(output_path);
     }

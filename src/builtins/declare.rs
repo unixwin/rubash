@@ -42,26 +42,46 @@ where
     let mut uppercase = false;
     let mut lowercase = false;
     let mut readonly = false;
+    let mut unset_export = false;
+    let mut unset_array = false;
+    let mut unset_assoc = false;
+    let mut unset_integer = false;
+    let mut unset_uppercase = false;
+    let mut unset_lowercase = false;
     let mut names = Vec::new();
 
     for arg in args {
-        if arg.starts_with('-') && arg != "-" {
+        if (arg.starts_with('-') || arg.starts_with('+')) && arg != "-" && arg != "+" {
+            let set_attr = arg.starts_with('-');
             for option in arg[1..].chars() {
                 match option {
                     'p' => print = true,
-                    'x' => export = true,
-                    'a' => array = true,
-                    'A' => assoc = true,
-                    'i' => integer = true,
+                    'x' if set_attr => export = true,
+                    'x' => unset_export = true,
+                    'a' if set_attr => array = true,
+                    'a' => unset_array = true,
+                    'A' if set_attr => assoc = true,
+                    'A' => unset_assoc = true,
+                    'i' if set_attr => integer = true,
+                    'i' => unset_integer = true,
                     'u' => {
-                        uppercase = true;
-                        lowercase = false;
+                        if set_attr {
+                            uppercase = true;
+                            lowercase = false;
+                        } else {
+                            unset_uppercase = true;
+                        }
                     }
                     'l' => {
-                        lowercase = true;
-                        uppercase = false;
+                        if set_attr {
+                            lowercase = true;
+                            uppercase = false;
+                        } else {
+                            unset_lowercase = true;
+                        }
                     }
-                    'r' => readonly = true,
+                    'r' if set_attr => readonly = true,
+                    'r' => {}
                     'g' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
@@ -84,6 +104,36 @@ where
     }
 
     assign_declare_names(&names, variables, integer);
+    if unset_export
+        || unset_array
+        || unset_assoc
+        || unset_integer
+        || unset_uppercase
+        || unset_lowercase
+    {
+        for name in &names {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            if unset_export {
+                unmark_typed(variables, EXPORTED_VARS, name);
+            }
+            if unset_array {
+                unmark_typed(variables, ARRAY_VARS, name);
+            }
+            if unset_assoc {
+                unmark_typed(variables, ASSOC_VARS, name);
+            }
+            if unset_integer {
+                unmark_typed(variables, INTEGER_VARS, name);
+            }
+            if unset_uppercase {
+                unmark_typed(variables, UPPERCASE_VARS, name);
+            }
+            if unset_lowercase {
+                unmark_typed(variables, LOWERCASE_VARS, name);
+            }
+        }
+    }
     if array || assoc {
         for name in &names {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
