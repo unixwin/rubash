@@ -25,6 +25,7 @@ const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -650,6 +651,10 @@ impl Executor {
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
                 .unwrap_or_else(|_| "/".to_string())
         });
+        env_vars.insert(
+            SHELL_START_EPOCH.to_string(),
+            current_epoch_seconds().to_string(),
+        );
 
         Self {
             exit_code: 0,
@@ -13205,6 +13210,13 @@ fn shell_display_path(path: &str) -> String {
         return format!("/{}{}", drive.to_ascii_lowercase(), &path[2..]);
     }
     path.to_string()
+}
+
+fn current_epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn strip_shebang(source: &str) -> &str {

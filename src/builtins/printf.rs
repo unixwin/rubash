@@ -454,7 +454,11 @@ fn format_time_value(
         invalid,
     } = parse_i64(value);
     let seconds = match seconds {
-        -1 | -2 => current_epoch_seconds(),
+        -1 => current_epoch_seconds(),
+        -2 => env_vars
+            .get("__RUBASH_SHELL_START_EPOCH")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(current_epoch_seconds),
         other => other,
     };
     let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
