@@ -6183,6 +6183,9 @@ impl Executor {
                     exact_char_limit = true;
                     index += 2;
                 }
+                "-p" => {
+                    index += 2;
+                }
                 "-r" => {
                     raw = true;
                     index += 1;
@@ -6199,6 +6202,9 @@ impl Executor {
                 word if word.starts_with("-N") && word.len() > 2 => {
                     char_limit = word[2..].parse::<usize>().ok();
                     exact_char_limit = true;
+                    index += 1;
+                }
+                word if word.starts_with("-p") && word.len() > 2 => {
                     index += 1;
                 }
                 word if word.starts_with('-') => {
