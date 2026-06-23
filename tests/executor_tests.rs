@@ -8751,6 +8751,36 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_fr_marks_function_readonly() {
+        let output_path = "target/rubash-declare-readonly-function-output.txt";
+        let error_path = "target/rubash-declare-readonly-function-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "foo() {{ echo one; }}; declare -fr foo; echo declare:$? > {output_path}; \
+             unset -f foo 2> {error_path}; echo unset:$? >> {output_path}; \
+             foo() {{ echo two; }}; echo redefine:$? >> {output_path}; foo >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare:0\nunset:1\nredefine:1\none\n"
+        );
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("unset: foo: cannot unset: readonly function"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_export_f_missing_function_reports_error() {
         let error_path = "target/rubash-export-f-missing-error.txt";
         let status_path = "target/rubash-export-f-missing-status.txt";
