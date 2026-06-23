@@ -914,7 +914,7 @@ mod command_chaining {
         let output_path = "target/rubash-bash-version-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "printf '%s\\n%s\\n%s\\n%s:%s:%s\\n' \"$BASH_VERSION\" \"${{BASH_VERSINFO[@]}}\" \"$HOSTNAME\" \"$HOSTTYPE\" \"$OSTYPE\" \"$MACHTYPE\" > {output_path}"
+            "printf '%s\\n%s\\n%s\\n%s\\n%s:%s:%s\\n' \"$BASH\" \"$BASH_VERSION\" \"${{BASH_VERSINFO[@]}}\" \"$HOSTNAME\" \"$HOSTTYPE\" \"$OSTYPE\" \"$MACHTYPE\" > {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -926,14 +926,15 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         let output = fs::read_to_string(output_path).unwrap();
         let lines: Vec<&str> = output.lines().collect();
-        assert!(lines[0].starts_with(env!("CARGO_PKG_VERSION")));
-        assert!(lines[0].ends_with("(1)-release"));
+        assert!(!lines[0].is_empty());
+        assert!(lines[1].starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(lines[1].ends_with("(1)-release"));
         let version_words = env!("CARGO_PKG_VERSION").replace('.', " ");
-        assert!(lines[1].starts_with(&format!("{version_words} 1 release ")));
-        assert_eq!(lines[1].split_whitespace().count(), 6);
-        assert!(!lines[2].is_empty());
-        assert_eq!(lines[3].split(':').count(), 3);
-        assert!(!lines[3].contains("::"));
+        assert!(lines[2].starts_with(&format!("{version_words} 1 release ")));
+        assert_eq!(lines[2].split_whitespace().count(), 6);
+        assert!(!lines[3].is_empty());
+        assert_eq!(lines[4].split(':').count(), 3);
+        assert!(!lines[4].contains("::"));
         let _ = fs::remove_file(output_path);
     }
 
