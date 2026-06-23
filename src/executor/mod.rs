@@ -4262,20 +4262,34 @@ impl Executor {
                 self.exit_code = 0;
                 Ok(())
             }
-            "command" => match crate::builtins::command::execute(&cmd.words[1..])? {
-                crate::builtins::command::CommandAction::Complete(status) => {
-                    self.exit_code = status;
+            "command" => {
+                let described = if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                    self.execute_command_describe_redirected(cmd)?
+                } else {
+                    false
+                };
+                if described || self.execute_command_describe(&cmd.words[1..]) {
                     Ok(())
+                } else {
+                    match crate::builtins::command::execute(&cmd.words[1..])? {
+                        crate::builtins::command::CommandAction::Complete(status) => {
+                            self.exit_code = status;
+                            Ok(())
+                        }
+                        crate::builtins::command::CommandAction::Execute {
+                            words,
+                            use_standard_path,
+                        } => {
+                            let mut command = cmd.clone();
+                            command.words = words;
+                            self.execute_command_without_aliases_with_path(
+                                &command,
+                                use_standard_path,
+                            )
+                        }
+                    }
                 }
-                crate::builtins::command::CommandAction::Execute {
-                    words,
-                    use_standard_path,
-                } => {
-                    let mut command = cmd.clone();
-                    command.words = words;
-                    self.execute_command_without_aliases_with_path(&command, use_standard_path)
-                }
-            },
+            }
             "printf" => {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
                     return self.execute_external(cmd);
