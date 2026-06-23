@@ -2046,6 +2046,47 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_r_marks_readonly_variable() {
+        let output_path = "target/rubash-declare-readonly-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("declare -r RO=1; declare -p RO > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -r RO=\"1\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_rx_marks_exported_readonly_variable() {
+        let output_path = "target/rubash-declare-readonly-export-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("declare -rx REX=2; declare -p REX > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -rx REX=\"2\"\n"
+        );
+        std::env::remove_var("REX");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_redirects_stderr() {
         let error_path = "target/rubash-declare-stderr-output.txt";
         let status_path = "target/rubash-declare-stderr-status.txt";
