@@ -9025,7 +9025,7 @@ impl Executor {
                 )
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
-            "BASHPID" => Some(std::process::id().to_string()),
+            "BASHPID" => Some(self.bashpid_value().to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.get().to_string()),
             "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
@@ -9091,6 +9091,16 @@ impl Executor {
                 .enumerate()
                 .collect(),
         )
+    }
+
+    fn bashpid_value(&self) -> u32 {
+        let pid = std::process::id();
+        let depth = self.subshell_depth.get();
+        if depth == 0 {
+            pid
+        } else {
+            pid.saturating_add(u32::try_from(depth).unwrap_or(u32::MAX))
+        }
     }
 
     fn bash_aliases_storage(&self) -> String {
