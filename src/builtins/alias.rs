@@ -11,6 +11,7 @@ use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
+const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alias {
@@ -53,11 +54,33 @@ where
     W: Write,
     E: Write,
 {
-    let mut args = args;
-    let pflag = args.first().is_some_and(|arg| arg == "-p");
-    if pflag {
-        args = &args[1..];
+    let mut pflag = false;
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        for option in arg[1..].chars() {
+            match option {
+                'p' => pflag = true,
+                other => {
+                    writeln!(
+                        stderr,
+                        "{}alias: -{other}: invalid option",
+                        diagnostic_prefix()
+                    )?;
+                    writeln!(stderr, "alias: usage: alias [-p] [name[=value] ... ]")?;
+                    return Ok(EX_USAGE);
+                }
+            }
+        }
+        index += 1;
     }
+    let args = &args[index..];
 
     if args.is_empty() || pflag {
         print_aliases(aliases, stdout)?;
@@ -103,13 +126,46 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    let mut index = 0;
+    let mut clear_all = false;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            break;
+        }
+        for option in arg[1..].chars() {
+            match option {
+                'a' => clear_all = true,
+                other => {
+                    writeln!(
+                        stderr,
+                        "{}unalias: -{other}: invalid option",
+                        diagnostic_prefix()
+                    )?;
+                    writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
+                    return Ok(EX_USAGE);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if clear_all {
+        aliases.clear();
+        return Ok(EXECUTION_SUCCESS);
+    }
+
+    let args = &args[index..];
+    if args.is_empty() {
+        writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
+        return Ok(EXECUTION_FAILURE);
+    }
+
     let mut status = EXECUTION_SUCCESS;
     for arg in args {
-        if arg == "-a" {
-            aliases.clear();
-            continue;
-        }
-
         if aliases.remove(arg).is_none() {
             writeln!(stderr, "{}unalias: {}: not found", diagnostic_prefix(), arg)?;
             status = EXECUTION_FAILURE;
