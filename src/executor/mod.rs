@@ -8558,6 +8558,9 @@ impl Executor {
                             .unwrap_or_else(|| "0".to_string());
                     }
                 }
+                if let Some(value) = self.dynamic_parameter_value(var_name) {
+                    return value.chars().count().to_string();
+                }
                 return self
                     .env_vars
                     .get(var_name)
