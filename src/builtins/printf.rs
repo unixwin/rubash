@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
+const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, Default)]
@@ -21,6 +22,19 @@ struct FormatSpec {
     precision: Option<usize>,
     precision_from_arg: bool,
     specifier: char,
+}
+
+#[derive(Debug, Clone)]
+struct RenderedPrintf {
+    output: String,
+    status: i32,
+    error: Option<String>,
+    stop_output: bool,
+}
+
+enum ParsedFormat {
+    Spec(FormatSpec),
+    Missing(String),
 }
 
 /// Execute `printf` with arguments after the command name.
@@ -50,8 +64,18 @@ where
     let mut output_var = None;
     let mut index = 0;
 
+    let mut end_options = false;
     if args.get(index) == Some(&"--") {
         index += 1;
+        end_options = true;
+    }
+
+    if !end_options
+        && matches!(args.get(index), Some(option) if option.starts_with('-') && *option != "-v")
+    {
+        writeln!(stderr, "rubash: printf: {}: invalid option", args[index])?;
+        writeln!(stderr, "printf: usage: printf [-v var] format [arguments]")?;
+        return Ok(EX_USAGE);
     }
 
     if args.get(index) == Some(&"-v") {
@@ -69,7 +93,14 @@ where
         index += 2;
         if args.get(index) == Some(&"--") {
             index += 1;
+            end_options = true;
         }
+    }
+
+    if !end_options && matches!(args.get(index), Some(option) if option.starts_with('-')) {
+        writeln!(stderr, "rubash: printf: {}: invalid option", args[index])?;
+        writeln!(stderr, "printf: usage: printf [-v var] format [arguments]")?;
+        return Ok(EX_USAGE);
     }
 
     let Some(format) = args.get(index) else {
@@ -79,44 +110,54 @@ where
 
     let rendered = render(format, &args[index + 1..], env_vars);
     if let Some(name) = output_var {
-        env_vars.insert(name.to_string(), rendered);
+        env_vars.insert(name.to_string(), rendered.output);
     } else {
-        stdout.write_all(rendered.as_bytes())?;
+        stdout.write_all(rendered.output.as_bytes())?;
     }
 
-    Ok(EXECUTION_SUCCESS)
+    if let Some(error) = rendered.error {
+        writeln!(stderr, "{error}")?;
+    }
+
+    Ok(rendered.status)
 }
 
-fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -> String {
+fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -> RenderedPrintf {
     let mut output = String::new();
     let mut arg_index = 0;
 
     if args.is_empty() {
-        render_one_pass(format, args, &mut arg_index, &mut output, env_vars);
-        return output;
+        return render_one_pass(format, args, &mut arg_index, output, env_vars);
     }
 
     while arg_index < args.len() {
         let before_arg = arg_index;
-        if render_one_pass(format, args, &mut arg_index, &mut output, env_vars) {
-            break;
+        let rendered = render_one_pass(format, args, &mut arg_index, output, env_vars);
+        if rendered.status != EXECUTION_SUCCESS || rendered.stop_output {
+            return rendered;
         }
+        output = rendered.output;
 
         if arg_index == before_arg {
             break;
         }
     }
 
-    output
+    RenderedPrintf {
+        output,
+        status: EXECUTION_SUCCESS,
+        error: None,
+        stop_output: false,
+    }
 }
 
 fn render_one_pass(
     format: &str,
     args: &[&str],
     arg_index: &mut usize,
-    output: &mut String,
+    mut output: String,
     env_vars: &mut HashMap<String, String>,
-) -> bool {
+) -> RenderedPrintf {
     let mut chars = format.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -129,9 +170,30 @@ fn render_one_pass(
                     continue;
                 }
 
-                let Some(mut spec) = parse_format_spec(&mut chars) else {
-                    output.push('%');
-                    continue;
+                let mut spec = match parse_format_spec(&mut chars) {
+                    ParsedFormat::Spec(spec) => spec,
+                    ParsedFormat::Missing(format) => {
+                        return RenderedPrintf {
+                            output,
+                            status: EXECUTION_FAILURE,
+                            error: Some(format!(
+                                "rubash: printf: `{format}': missing format character"
+                            )),
+                            stop_output: false,
+                        };
+                    }
+                };
+
+                if !valid_format_specifier(spec.specifier) {
+                    return RenderedPrintf {
+                        output,
+                        status: EXECUTION_FAILURE,
+                        error: Some(format!(
+                            "rubash: printf: `{}': invalid format character",
+                            spec.specifier
+                        )),
+                        stop_output: false,
+                    };
                 };
                 resolve_dynamic_format_args(&mut spec, args, arg_index);
 
@@ -145,14 +207,24 @@ fn render_one_pass(
                     let (rendered, stop_output) = format_value(value, &spec);
                     output.push_str(&rendered);
                     if stop_output {
-                        return true;
+                        return RenderedPrintf {
+                            output,
+                            status: EXECUTION_SUCCESS,
+                            error: None,
+                            stop_output: true,
+                        };
                     }
                 }
             }
             other => output.push(other),
         }
     }
-    false
+    RenderedPrintf {
+        output,
+        status: EXECUTION_SUCCESS,
+        error: None,
+        stop_output: false,
+    }
 }
 
 fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
@@ -161,11 +233,12 @@ fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
     value
 }
 
-fn parse_format_spec<I>(chars: &mut std::iter::Peekable<I>) -> Option<FormatSpec>
+fn parse_format_spec<I>(chars: &mut std::iter::Peekable<I>) -> ParsedFormat
 where
     I: Iterator<Item = char>,
 {
     let mut spec = FormatSpec::default();
+    let mut raw = String::from("%");
 
     while let Some(flag) = chars.peek().copied() {
         match flag {
@@ -177,31 +250,43 @@ where
             '\'' => {}
             _ => break,
         }
+        raw.push(flag);
         chars.next();
     }
 
     if chars.peek() == Some(&'*') {
         chars.next();
+        raw.push('*');
         spec.width_from_arg = true;
     } else {
-        spec.width = read_usize(chars);
+        let (width, digits) = read_usize_with_digits(chars);
+        raw.push_str(&digits);
+        spec.width = width;
     }
     if chars.peek() == Some(&'.') {
         chars.next();
+        raw.push('.');
         if chars.peek() == Some(&'*') {
             chars.next();
+            raw.push('*');
             spec.precision_from_arg = true;
         } else {
-            spec.precision = Some(read_usize(chars).unwrap_or(0));
+            let (precision, digits) = read_usize_with_digits(chars);
+            raw.push_str(&digits);
+            spec.precision = Some(precision.unwrap_or(0));
         }
     }
 
-    while matches!(chars.peek(), Some('h' | 'j' | 'l' | 'L' | 't' | 'z')) {
+    while let Some(length @ ('h' | 'j' | 'l' | 'L' | 't' | 'z')) = chars.peek().copied() {
+        raw.push(length);
         chars.next();
     }
 
-    spec.specifier = chars.next()?;
-    Some(spec)
+    let Some(specifier) = chars.next() else {
+        return ParsedFormat::Missing(raw);
+    };
+    spec.specifier = specifier;
+    ParsedFormat::Spec(spec)
 }
 
 fn resolve_dynamic_format_args(spec: &mut FormatSpec, args: &[&str], arg_index: &mut usize) {
@@ -221,7 +306,7 @@ fn resolve_dynamic_format_args(spec: &mut FormatSpec, args: &[&str], arg_index: 
     }
 }
 
-fn read_usize<I>(chars: &mut std::iter::Peekable<I>) -> Option<usize>
+fn read_usize_with_digits<I>(chars: &mut std::iter::Peekable<I>) -> (Option<usize>, String)
 where
     I: Iterator<Item = char>,
 {
@@ -234,7 +319,30 @@ where
         chars.next();
     }
 
-    digits.parse().ok()
+    (digits.parse().ok(), digits)
+}
+
+fn valid_format_specifier(specifier: char) -> bool {
+    matches!(
+        specifier,
+        's' | 'b'
+            | 'q'
+            | 'Q'
+            | 'c'
+            | 'd'
+            | 'i'
+            | 'u'
+            | 'x'
+            | 'X'
+            | 'o'
+            | 'f'
+            | 'F'
+            | 'e'
+            | 'E'
+            | 'g'
+            | 'G'
+            | 'n'
+    )
 }
 
 fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
@@ -725,6 +833,36 @@ mod tests {
         assert_eq!(run(&["\\045\\x41\\u0042\\101"]).1, "%ABA");
         assert_eq!(run(&["4\\.2 one\\ctwo"]).1, "4\\.2 one\\ctwo");
         assert_eq!(run(&["\\0101"]).1, "A");
+    }
+
+    #[test]
+    fn invalid_format_characters_fail_like_bash() {
+        let (status, stdout, stderr, _) = run(&["ab%Mcd\n"]);
+
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert_eq!(stdout, "ab");
+        assert!(stderr.contains("`M': invalid format character"));
+
+        let (status, stdout, stderr, _) = run(&["%10"]);
+
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("`%10': missing format character"));
+    }
+
+    #[test]
+    fn invalid_options_fail_but_double_dash_allows_dash_format() {
+        let (status, stdout, stderr, _) = run(&["-x"]);
+
+        assert_eq!(status, EX_USAGE);
+        assert!(stdout.is_empty());
+        assert!(stderr.contains("invalid option"));
+
+        let (status, stdout, stderr, _) = run(&["--", "-x"]);
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "-x");
+        assert!(stderr.is_empty());
     }
 
     #[test]
