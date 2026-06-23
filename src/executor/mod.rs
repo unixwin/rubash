@@ -1774,6 +1774,9 @@ impl Executor {
                 "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
                 "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
                 "pwd" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_pwd(cmd)?;
                     Ok(())
                 }
@@ -4204,6 +4207,9 @@ impl Executor {
                 Ok(())
             }
             "pwd" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_pwd(cmd)?;
                 Ok(())
             }
