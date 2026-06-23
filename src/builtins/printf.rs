@@ -257,7 +257,7 @@ fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
         'f' | 'F' => format_float(value, spec, 'f'),
         'e' => format_float(value, spec, 'e'),
         'E' => format_float(value, spec, 'E'),
-        'g' | 'G' => format_float(value, spec, 'g'),
+        'g' | 'G' => format_float(value, spec, spec.specifier),
         other => {
             let mut fallback = String::from('%');
             fallback.push(other);
@@ -281,17 +281,25 @@ fn truncate_precision(value: String, precision: Option<usize>) -> String {
 
 fn format_float(value: &str, spec: &FormatSpec, mode: char) -> String {
     let value = parse_f64(value);
-    let mut rendered = match (mode, spec.precision) {
-        ('e', Some(precision)) => format!("{value:.precision$e}"),
-        ('E', Some(precision)) => format!("{value:.precision$E}"),
-        (_, Some(precision)) => format!("{value:.precision$}"),
-        ('e', None) => format!("{value:e}"),
-        ('E', None) => format!("{value:E}"),
-        _ => format!("{value}"),
+    let mut rendered = match mode {
+        'e' | 'E' => {
+            let precision = spec.precision.unwrap_or(6);
+            let rendered = if mode == 'E' {
+                format!("{value:.precision$E}")
+            } else {
+                format!("{value:.precision$e}")
+            };
+            normalize_float_exponent(rendered, mode == 'E')
+        }
+        'g' | 'G' => format_general_float(value, spec, mode == 'G'),
+        _ => {
+            let precision = spec.precision.unwrap_or(6);
+            format!("{value:.precision$}")
+        }
     };
 
-    if spec.alternate_form && matches!(mode, 'f') && !rendered.contains('.') {
-        rendered.push('.');
+    if spec.alternate_form && matches!(mode, 'f' | 'e' | 'E') {
+        ensure_float_decimal_point(&mut rendered);
     }
 
     if value >= 0.0 {
@@ -303,6 +311,94 @@ fn format_float(value: &str, spec: &FormatSpec, mode: char) -> String {
     }
 
     rendered
+}
+
+fn format_general_float(value: f64, spec: &FormatSpec, uppercase: bool) -> String {
+    let precision = spec.precision.unwrap_or(6).max(1);
+    let exponent = decimal_exponent(value);
+    let use_exponent = exponent < -4 || exponent >= precision as i32;
+
+    let mut rendered = if use_exponent {
+        let exponent_precision = precision.saturating_sub(1);
+        let rendered = if uppercase {
+            format!("{value:.exponent_precision$E}")
+        } else {
+            format!("{value:.exponent_precision$e}")
+        };
+        normalize_float_exponent(rendered, uppercase)
+    } else {
+        let fractional_precision = (precision as i32 - (exponent + 1)).max(0) as usize;
+        format!("{value:.fractional_precision$}")
+    };
+
+    if spec.alternate_form {
+        ensure_general_alternate_form(&mut rendered, precision);
+    } else {
+        trim_general_trailing_zeroes(&mut rendered);
+    }
+
+    rendered
+}
+
+fn decimal_exponent(value: f64) -> i32 {
+    if value == 0.0 {
+        return 0;
+    }
+    value.abs().log10().floor() as i32
+}
+
+fn normalize_float_exponent(mut rendered: String, uppercase: bool) -> String {
+    let marker = if uppercase { 'E' } else { 'e' };
+    let Some(index) = rendered.find(marker) else {
+        return rendered;
+    };
+
+    let mantissa = rendered[..index].to_string();
+    let exponent = &rendered[index + 1..];
+    let value = exponent.parse::<i32>().unwrap_or_default();
+    let sign = if value < 0 { '-' } else { '+' };
+    rendered = format!("{mantissa}{marker}{sign}{:02}", value.unsigned_abs());
+    rendered
+}
+
+fn ensure_float_decimal_point(rendered: &mut String) {
+    let exponent_index = rendered.find(['e', 'E']);
+    let mantissa_end = exponent_index.unwrap_or(rendered.len());
+    if !rendered[..mantissa_end].contains('.') {
+        rendered.insert(mantissa_end, '.');
+    }
+}
+
+fn ensure_general_alternate_form(rendered: &mut String, precision: usize) {
+    ensure_float_decimal_point(rendered);
+
+    let exponent_index = rendered.find(['e', 'E']).unwrap_or(rendered.len());
+    let mantissa = &rendered[..exponent_index];
+    let digits = mantissa.chars().filter(|ch| ch.is_ascii_digit()).count();
+
+    if digits >= precision {
+        return;
+    }
+
+    let padding: String = std::iter::repeat('0').take(precision - digits).collect();
+    rendered.insert_str(exponent_index, &padding);
+}
+
+fn trim_general_trailing_zeroes(rendered: &mut String) {
+    let exponent_index = rendered.find(['e', 'E']).unwrap_or(rendered.len());
+    let exponent = rendered[exponent_index..].to_string();
+    let mut mantissa = rendered[..exponent_index].to_string();
+
+    if mantissa.contains('.') {
+        while mantissa.ends_with('0') {
+            mantissa.pop();
+        }
+        if mantissa.ends_with('.') {
+            mantissa.pop();
+        }
+    }
+
+    *rendered = format!("{mantissa}{exponent}");
 }
 
 fn format_unsigned_integer(value: u64, radix: u32, uppercase: bool, spec: &FormatSpec) -> String {
@@ -729,6 +825,40 @@ mod tests {
             ])
             .1,
             "<+000000123>< 000000123><123.><123.><      +123>"
+        );
+    }
+
+    #[test]
+    fn float_formats_use_bash_default_precision_and_exponents() {
+        assert_eq!(
+            run(&["<%f><%F><%e><%E>", "4", "4", "4", "4"]).1,
+            "<4.000000><4.000000><4.000000e+00><4.000000E+00>"
+        );
+    }
+
+    #[test]
+    fn general_float_formats_match_bash_significant_digits() {
+        assert_eq!(
+            run(&[
+                "<%.4g><%.4g><%.4g><%.4g><%.4G><%6.2g><%6.2G>",
+                "12345",
+                "0.00012345",
+                "123.44",
+                "0",
+                "12345",
+                "4.2",
+                "4.2"
+            ])
+            .1,
+            "<1.234e+04><0.0001234><123.4><0><1.234E+04><   4.2><   4.2>"
+        );
+    }
+
+    #[test]
+    fn alternate_general_float_formats_keep_decimal_zeroes() {
+        assert_eq!(
+            run(&["<%#.0g><%#.4g><%#.4e><%#.0e>", "4", "123.44", "4", "4"]).1,
+            "<4.><123.4><4.0000e+00><4.e+00>"
         );
     }
 
