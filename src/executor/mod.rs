@@ -688,6 +688,8 @@ impl Executor {
         store_indexed_array(&mut env_vars, "BASH_ARGV", Vec::new());
         store_indexed_array(&mut env_vars, "BASH_LINENO", vec!["0".to_string()]);
         store_indexed_array(&mut env_vars, "BASH_SOURCE", Vec::new());
+        env_vars.insert("BASH_CMDS".to_string(), "()".to_string());
+        mark_env_name(&mut env_vars, ASSOC_VARS, "BASH_CMDS");
         env_vars.insert("FUNCNAME".to_string(), String::new());
         mark_env_name(&mut env_vars, ARRAY_VARS, "FUNCNAME");
         env_vars
@@ -2310,6 +2312,7 @@ impl Executor {
     }
 
     fn execute_declare(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        self.sync_dynamic_assoc_vars();
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
@@ -8012,6 +8015,7 @@ impl Executor {
                 .trim_matches('\'')
                 .trim_matches('"');
             crate::builtins::hash::set_hashed_path(&mut self.env_vars, command_name, value);
+            self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
             return true;
         }
@@ -8407,13 +8411,12 @@ impl Executor {
                     .or_else(|| indirect_name.strip_suffix("[*]"))
                 {
                     return self
-                        .env_vars
-                        .get(array_name)
+                        .parameter_array_storage(array_name)
                         .map(|value| {
                             if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                                assoc_keys(value).join(" ")
+                                assoc_keys(&value).join(" ")
                             } else {
-                                array_indices(value).join(" ")
+                                array_indices(&value).join(" ")
                             }
                         })
                         .unwrap_or_default();
@@ -8470,11 +8473,10 @@ impl Executor {
                     return self.groups_words().len().to_string();
                 }
                 return self
-                    .env_vars
-                    .get(array_name)
+                    .parameter_array_storage(array_name)
                     .map(|value| {
                         if is_marked_array_var(&self.env_vars, array_name)
-                            || is_array_storage(value)
+                            || is_array_storage(&value)
                         {
                             self.array_length(array_name)
                         } else {
@@ -8506,9 +8508,8 @@ impl Executor {
                 if let Some((array_name, key)) = parse_array_subscript(var_name) {
                     if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
                         return self
-                            .env_vars
-                            .get(array_name)
-                            .and_then(|value| assoc_value_at(value, key))
+                            .parameter_array_storage(array_name)
+                            .and_then(|value| assoc_value_at(&value, key))
                             .map(|value| value.chars().count().to_string())
                             .unwrap_or_else(|| "0".to_string());
                     }
@@ -8535,9 +8536,8 @@ impl Executor {
                     .or_else(|| var_name.strip_suffix("[*]"))
                 {
                     return self
-                        .env_vars
-                        .get(array_name)
-                        .map(|value| array_parameter_slice(value, offset, length).join(" "))
+                        .parameter_array_storage(array_name)
+                        .map(|value| array_parameter_slice(&value, offset, length).join(" "))
                         .unwrap_or_default();
                 }
                 if is_shell_name(var_name) {
@@ -8617,10 +8617,9 @@ impl Executor {
                 .and_then(|array_name| array_name.split_once('-').map(|_| (array_name, "")))
             {
                 return self
-                    .env_vars
-                    .get(array_name)
+                    .parameter_array_storage(array_name)
                     .filter(|value| !value.is_empty())
-                    .map(|value| array_values(value).join(" "))
+                    .map(|value| array_values(&value).join(" "))
                     .unwrap_or_else(|| default.to_string());
             }
             if let Some((array_expr, default)) = name.split_once('-') {
@@ -8629,10 +8628,9 @@ impl Executor {
                     .or_else(|| array_expr.strip_suffix("[*]"))
                 {
                     return self
-                        .env_vars
-                        .get(array_name)
+                        .parameter_array_storage(array_name)
                         .filter(|value| !value.is_empty())
-                        .map(|value| array_values(value).join(" "))
+                        .map(|value| array_values(&value).join(" "))
                         .unwrap_or_else(|| default.to_string());
                 }
                 return self
@@ -8650,9 +8648,8 @@ impl Executor {
                     return self.groups_words().join(" ");
                 }
                 return self
-                    .env_vars
-                    .get(array_name)
-                    .map(|value| array_values(value).join(" "))
+                    .parameter_array_storage(array_name)
+                    .map(|value| array_values(&value).join(" "))
                     .unwrap_or_default();
             }
             if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
@@ -8660,17 +8657,15 @@ impl Executor {
                     return self.group_value_at(index).unwrap_or_default();
                 }
                 return self
-                    .env_vars
-                    .get(array_name)
-                    .and_then(|value| array_value_at(value, index))
+                    .parameter_array_storage(array_name)
+                    .and_then(|value| array_value_at(&value, index))
                     .unwrap_or_default();
             }
             if let Some((array_name, key)) = parse_array_subscript(name) {
                 if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
                     return self
-                        .env_vars
-                        .get(array_name)
-                        .and_then(|value| assoc_value_at(value, key))
+                        .parameter_array_storage(array_name)
+                        .and_then(|value| assoc_value_at(&value, key))
                         .unwrap_or_default();
                 }
             }
@@ -9057,6 +9052,23 @@ impl Executor {
                 | "BASHOPTS"
                 | "PIPESTATUS"
         )
+    }
+
+    fn parameter_array_storage(&self, name: &str) -> Option<String> {
+        if name == "BASH_CMDS" {
+            return Some(self.bash_cmds_storage());
+        }
+        self.env_vars.get(name).cloned()
+    }
+
+    fn bash_cmds_storage(&self) -> String {
+        format_assoc_storage(crate::builtins::hash::hashed_entries(&self.env_vars))
+    }
+
+    fn sync_dynamic_assoc_vars(&mut self) {
+        self.env_vars
+            .insert("BASH_CMDS".to_string(), self.bash_cmds_storage());
+        mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
 
     fn funcname_stack(&self) -> Vec<String> {
@@ -10138,9 +10150,8 @@ impl Executor {
         if name == "GROUPS" {
             return self.groups_words().len();
         }
-        self.env_vars
-            .get(name)
-            .map(|value| array_values(value).len())
+        self.parameter_array_storage(name)
+            .map(|value| array_values(&value).len())
             .unwrap_or(0)
     }
 
