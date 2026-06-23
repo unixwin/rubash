@@ -13393,7 +13393,6 @@ fn is_bash_managed_shell_var(name: &str) -> bool {
             | "OSTYPE"
             | "PIPESTATUS"
             | "PPID"
-            | "PWD"
             | "RANDOM"
             | "SECONDS"
             | "SHELLOPTS"
