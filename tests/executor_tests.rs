@@ -8608,6 +8608,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_hyphenated_function_name_can_be_called_and_exported() {
+        let output_path = target_test_path("rubash-hyphen-function-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "foo-a() {{ echo local; }}; foo-a > {shell_output_path}; \
+             export -f foo-a; {rubash} -c foo-a >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "local\nlocal\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_export_nf_unmarks_exported_function() {
         let output_path = "target/rubash-export-nf-output.txt";
         let _ = fs::remove_file(output_path);

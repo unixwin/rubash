@@ -1020,12 +1020,13 @@ fn command_accepts_embedded_arithmetic_command(cmd: &CommandNode) -> bool {
 }
 
 fn is_function_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
+    if name.is_empty() || name.contains('=') {
         return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    }
+
+    !name
+        .chars()
+        .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
 #[cfg(test)]
