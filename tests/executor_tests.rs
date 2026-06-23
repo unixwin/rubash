@@ -8440,6 +8440,99 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_local_outside_function_reports_error() {
+        let error_path = "target/rubash-local-outside-error.txt";
+        let status_path = "target/rubash-local-outside-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("local x=1 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("local: can only be used in a function"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_local_assignment_is_restored_after_function() {
+        let output_path = "target/rubash-local-restore-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "x=global; function f {{ local x=local; echo in:$x > {output_path}; }}; \
+             f; echo out:$x >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "in:local\nout:global\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_new_variable_is_unset_after_function() {
+        let output_path = "target/rubash-local-unset-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function f {{ local -x RUBASH_LOCAL_TEMP=2; echo in:$RUBASH_LOCAL_TEMP > {output_path}; }}; \
+             f; echo out:${{RUBASH_LOCAL_TEMP-unset}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "in:2\nout:unset\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_invalid_option_reports_usage() {
+        let error_path = "target/rubash-local-invalid-error.txt";
+        let status_path = "target/rubash-local-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input =
+            format!("function f {{ local -z 2> {error_path}; echo $? > {status_path}; }}; f");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("local: -z: invalid option"));
+        assert!(error.contains("local: usage: local [option] name[=value] ..."));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_getopts_parses_explicit_option_argument() {
         let output_path = "target/rubash-getopts-explicit-output.txt";
         let _ = fs::remove_file(output_path);
