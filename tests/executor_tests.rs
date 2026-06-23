@@ -4522,6 +4522,72 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unset_clears_export_attribute() {
+        let output_path = target_test_path("rubash-unset-export-output.txt");
+        let error_path = target_test_path("rubash-unset-export-error.txt");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let input = format!(
+            "export RUBASH_UNSET_EXPORT=value; unset RUBASH_UNSET_EXPORT; \
+             printf '<%s>\\n' \"${{RUBASH_UNSET_EXPORT-unset}}\" > {shell_output_path}; \
+             export -p >> {shell_output_path}; \
+             declare -p RUBASH_UNSET_EXPORT 2> {shell_error_path}; \
+             echo $? >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("<unset>\n"));
+        assert!(output.ends_with("1\n"));
+        assert!(!output.contains("RUBASH_UNSET_EXPORT"));
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains("declare: RUBASH_UNSET_EXPORT: not found"));
+        std::env::remove_var("RUBASH_UNSET_EXPORT");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+    }
+
+    #[test]
+    fn test_unset_rejects_unset_readonly_variable() {
+        let output_path = target_test_path("rubash-unset-readonly-output.txt");
+        let error_path = target_test_path("rubash-unset-readonly-error.txt");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let input = format!(
+            "unset RUBASH_UNSET_READONLY; readonly RUBASH_UNSET_READONLY; \
+             unset RUBASH_UNSET_READONLY 2> {shell_error_path}; echo $? > {shell_output_path}; \
+             declare -p RUBASH_UNSET_READONLY >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "1\ndeclare -r RUBASH_UNSET_READONLY\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains("unset: RUBASH_UNSET_READONLY: cannot unset: readonly variable"));
+        std::env::remove_var("RUBASH_UNSET_READONLY");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+    }
+
+    #[test]
     fn test_unset_invalid_option_redirects_stderr() {
         let error_path = "target/rubash-unset-invalid-option-stderr-output.txt";
         let status_path = "target/rubash-unset-invalid-option-status.txt";
