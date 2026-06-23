@@ -6241,22 +6241,16 @@ impl Executor {
             scalar_names
         };
         if !scalar_names.is_empty() {
-            let status = if let Some(mut line) =
+            let status = if let Some(line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
-                if !raw {
-                    line = unescape_read_backslashes(&line);
-                }
-                self.assign_read_scalar_names(&scalar_names, &line);
+                self.assign_read_scalar_names(&scalar_names, &line, raw);
                 0
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => 1,
-                    Ok((_, mut line)) => {
-                        if !raw {
-                            line = unescape_read_backslashes(&line);
-                        }
-                        self.assign_read_scalar_names(&scalar_names, &line);
+                    Ok((_, line)) => {
+                        self.assign_read_scalar_names(&scalar_names, &line, raw);
                         0
                     }
                     Err(_) => 1,
@@ -6279,9 +6273,14 @@ impl Executor {
             .map(|line| trim_read_input(line, delimiter, char_limit, exact_char_limit))
     }
 
-    fn assign_read_scalar_names(&mut self, names: &[String], line: &str) {
+    fn assign_read_scalar_names(&mut self, names: &[String], line: &str, raw: bool) {
         if names.len() == 1 {
-            self.env_vars.insert(names[0].clone(), line.to_string());
+            let value = if raw {
+                line.to_string()
+            } else {
+                unescape_read_backslashes(line)
+            };
+            self.env_vars.insert(names[0].clone(), value);
             return;
         }
 
@@ -6290,7 +6289,11 @@ impl Executor {
             .get("IFS")
             .map(String::as_str)
             .unwrap_or(" \t\n");
-        let fields = read_scalar_fields(line, names.len(), ifs);
+        let fields = if raw {
+            read_scalar_fields(line, names.len(), ifs)
+        } else {
+            read_scalar_fields_with_backslashes(line, names.len(), ifs)
+        };
         for (index, name) in names.iter().enumerate() {
             let value = fields.get(index).cloned().unwrap_or_default();
             self.env_vars.insert(name.clone(), value);
@@ -11087,6 +11090,65 @@ fn read_scalar_fields(line: &str, names_len: usize, ifs: &str) -> Vec<String> {
         .splitn(names_len, |ch| ifs.contains(ch))
         .map(str::to_string)
         .collect::<Vec<_>>();
+    while fields.len() < names_len {
+        fields.push(String::new());
+    }
+    fields
+}
+
+fn read_scalar_fields_with_backslashes(line: &str, names_len: usize, ifs: &str) -> Vec<String> {
+    if names_len == 0 {
+        return Vec::new();
+    }
+    if names_len == 1 || ifs.is_empty() {
+        let mut fields = vec![unescape_read_backslashes(line)];
+        while fields.len() < names_len {
+            fields.push(String::new());
+        }
+        return fields;
+    }
+
+    let split_on_ifs_whitespace = ifs.trim().is_empty();
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('\n') => {}
+                Some('\r') if chars.peek() == Some(&'\n') => {
+                    chars.next();
+                }
+                Some(next) => current.push(next),
+                None => {}
+            }
+            continue;
+        }
+
+        if ifs.contains(ch) {
+            if split_on_ifs_whitespace {
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+            } else if fields.len() + 1 < names_len {
+                fields.push(std::mem::take(&mut current));
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    if !split_on_ifs_whitespace || !current.is_empty() {
+        fields.push(current);
+    }
+
+    if split_on_ifs_whitespace && fields.len() > names_len {
+        let rest = fields.split_off(names_len - 1).join(" ");
+        fields.push(rest);
+    }
     while fields.len() < names_len {
         fields.push(String::new());
     }
