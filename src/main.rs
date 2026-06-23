@@ -68,11 +68,43 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 print_usage();
                 return 0;
             }
+            option if apply_cli_shell_flags(executor, option) => {
+                index += 1;
+            }
             script => return run_script_file(executor, script, &args[index + 1..]),
         }
     }
 
     0
+}
+
+fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
+    let Some(flags) = option.strip_prefix('-') else {
+        return false;
+    };
+    if flags.is_empty() || flags.contains('c') || flags.contains('o') || flags.contains('s') {
+        return false;
+    }
+    for flag in flags.chars() {
+        let Some(name) = cli_shell_flag_name(flag) else {
+            return false;
+        };
+        executor.set_shell_option(name, true);
+    }
+    true
+}
+
+fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
+    match flag {
+        'e' => Some("errexit"),
+        'u' => Some("nounset"),
+        'x' => Some("xtrace"),
+        'C' => Some("noclobber"),
+        'f' => Some("noglob"),
+        'h' => Some("hashall"),
+        'B' => Some("braceexpand"),
+        _ => None,
+    }
 }
 
 fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
