@@ -12,6 +12,7 @@ pub mod enable;
 pub mod eval;
 pub mod exec;
 pub mod exit;
+pub mod fc;
 pub mod fg_bg;
 pub mod hash;
 pub mod help;
