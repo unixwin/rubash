@@ -853,6 +853,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_last_background_pid_parameter_tracks_background_command() {
+        let output_path = "target/rubash-last-background-pid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "printf '<%s>\\n' \"$!\" > {output_path}; false & printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            format!("<>\nstatus:0 bang:{}\n", std::process::id())
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_bash_subshell_tracks_command_substitution_depth() {
         let output_path = "target/rubash-bash-subshell-output.txt";
         let _ = fs::remove_file(output_path);
