@@ -1220,6 +1220,24 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_shopt_updates_shell_option_state() {
+        let output_path = "target/rubash-builtin-shopt-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("builtin shopt -s nullglob; shopt -q nullglob; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shopt_redirects_stderr() {
         let error_path = "target/rubash-shopt-stderr-output.txt";
         let status_path = "target/rubash-shopt-stderr-status.txt";
@@ -2271,6 +2289,23 @@ mod command_chaining {
         let output = fs::read_to_string(output_path).unwrap();
         assert!(output.contains("enable break\n"));
         assert!(output.contains("enable times\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_enable_updates_disabled_builtin_state() {
+        let output_path = "target/rubash-builtin-enable-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin enable -n test; type -t test > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "file\n");
         let _ = fs::remove_file(output_path);
     }
 
