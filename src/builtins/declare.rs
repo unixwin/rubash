@@ -113,6 +113,8 @@ where
         || unset_lowercase
         || unset_readonly
     {
+        let arrays = marked_vars(variables, ARRAY_VARS);
+        let assocs = marked_vars(variables, ASSOC_VARS);
         for name in &names {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
@@ -124,6 +126,16 @@ where
                     name
                 )?;
                 attr_status = EXECUTION_FAILURE;
+            }
+            if (unset_array && arrays.contains(name)) || (unset_assoc && assocs.contains(name)) {
+                writeln!(
+                    stderr,
+                    "{}declare: {}: cannot destroy array variables in this way",
+                    diagnostic_prefix(),
+                    name
+                )?;
+                attr_status = EXECUTION_FAILURE;
+                continue;
             }
             if unset_export {
                 unmark_typed(variables, EXPORTED_VARS, name);
