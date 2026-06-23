@@ -3814,6 +3814,35 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_set_noexec_updates_shell_option() {
+        let tokens = tokenize("set -n");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(executor.get_env("__RUBASH_SETOPT_noexec"), Some("1"));
+    }
+
+    #[test]
+    fn test_set_noexec_skips_later_commands_and_redirections() {
+        let output_path = "target/rubash-noexec-skips-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -n; echo should-not-run > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_additional_set_short_flags_update_shell_options() {
         let output_path = "target/rubash-set-extra-flags-output.txt";
         let _ = fs::remove_file(output_path);

@@ -910,6 +910,18 @@ impl Executor {
         let mut index = 0;
         let mut subshell_env: Option<HashMap<String, String>> = None;
         while index < ast.commands.len() {
+            let command = &ast.commands[index];
+            if self.noexec_enabled() {
+                self.exit_code = 0;
+                if command.subshell_end {
+                    if let Some(saved_env) = subshell_env.take() {
+                        self.restore_shell_env(saved_env);
+                    }
+                }
+                index += 1;
+                continue;
+            }
+
             if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
             {
                 index = next_index;
@@ -943,7 +955,6 @@ impl Executor {
                 continue;
             }
 
-            let command = &ast.commands[index];
             if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
                 index = next_index;
                 continue;
@@ -8633,6 +8644,9 @@ impl Executor {
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             flags.push('u');
         }
+        if self.noexec_enabled() {
+            flags.push('n');
+        }
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "noclobber") {
             flags.push('C');
         }
@@ -8640,6 +8654,10 @@ impl Executor {
             flags.push('f');
         }
         flags
+    }
+
+    fn noexec_enabled(&self) -> bool {
+        crate::builtins::set::shell_option_enabled(&self.env_vars, "noexec")
     }
 
     fn create_redirect_output(&self, target: &str, clobber: bool) -> io::Result<File> {
@@ -8703,6 +8721,13 @@ impl Executor {
                         crate::builtins::set::set_shell_option(
                             &mut self.env_vars,
                             "noglob",
+                            enabled,
+                        );
+                    }
+                    ('n', _) => {
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "noexec",
                             enabled,
                         );
                     }
@@ -8820,7 +8845,7 @@ impl Executor {
     }
 
     fn is_supported_short_set_flag(&self, flag: char) -> bool {
-        matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f') || short_set_flag_option(flag).is_some()
+        matches!(flag, 'e' | 'x' | 'u' | 'C' | 'f' | 'n') || short_set_flag_option(flag).is_some()
     }
 
     fn expand_case_word(&self, word: &str) -> String {
