@@ -6322,6 +6322,12 @@ impl Executor {
         }
 
         if let Some(name) = array_name {
+            if char_limit == Some(0) {
+                self.env_vars.insert(name.clone(), read_array_storage(&[]));
+                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                return 0;
+            }
+
             let value = if let Some(line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
@@ -6351,6 +6357,11 @@ impl Executor {
             scalar_names
         };
         if !scalar_names.is_empty() {
+            if char_limit == Some(0) {
+                self.assign_read_scalar_names(&scalar_names, "", raw);
+                return 0;
+            }
+
             let status = if let Some(line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
@@ -11112,6 +11123,10 @@ fn read_stdin_until(
     char_limit: Option<usize>,
     exact_char_limit: bool,
 ) -> std::io::Result<(usize, String)> {
+    if char_limit == Some(0) {
+        return Ok((0, String::new()));
+    }
+
     // TODO(builtins/read.def/input.c): Avoid buffered prefetching so callers
     // that read commands from stdin can let child scripts consume the next
     // physical line, as Bash does for tests/input-line.sh.
