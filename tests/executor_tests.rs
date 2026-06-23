@@ -4761,11 +4761,47 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_combined_rn_reads_raw_limited_characters() {
+        let output_path = "target/rubash-read-rn-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -rn3 value <<< 'a\\bcdef'; printf '<%s>' \"$value\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\b>");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_upper_n_reads_through_newline() {
         let output_path = "target/rubash-read-upper-n-output.txt";
         let _ = fs::remove_file(output_path);
         let input =
             format!("read -N 4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab\nc>");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_combined_r_upper_n_reads_raw_through_newline() {
+        let output_path = "target/rubash-read-r-upper-n-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -rN4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
