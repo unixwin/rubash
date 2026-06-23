@@ -2517,6 +2517,42 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_p_uses_standard_path_for_external_command() {
+        let output_path = "target/rubash-command-p-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("PATH=target/rubash-no-such-bin command -p sh -c 'echo ok' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_without_p_uses_current_path_for_external_command() {
+        let output_path = "target/rubash-command-without-p-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("PATH=target/rubash-no-such-bin command sh -c 'echo bad' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 127);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_type_a_reports_builtin_and_path_matches() {
         let bin_dir = "target/rubash-type-a-bin";
         let echo_path = format!("{bin_dir}/echo");

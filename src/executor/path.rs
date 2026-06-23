@@ -27,6 +27,26 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     None
 }
 
+pub fn standard_path(env_vars: &HashMap<String, String>) -> String {
+    if cfg!(windows) {
+        let mut paths = Vec::new();
+        if let Some(root) = git_bash_root(env_vars) {
+            paths.push(root.join("usr").join("local").join("bin"));
+            paths.push(root.join("usr").join("bin"));
+            paths.push(root.join("bin"));
+        }
+        paths.push(PathBuf::from(r"C:\Windows\System32"));
+        paths.push(PathBuf::from(r"C:\Windows"));
+        return paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(";");
+    }
+
+    "/usr/local/bin:/usr/bin:/bin".to_string()
+}
+
 pub fn find_shell(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     if cfg!(windows) {
         return find_windows_git_bash_from_env(env_vars)
@@ -196,6 +216,29 @@ fn git_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     let exepath = env_vars.get("EXEPATH")?;
     let bin = Path::new(exepath);
     bin.parent().map(Path::to_path_buf)
+}
+
+fn git_bash_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(root) = git_root(env_vars) {
+        return Some(root);
+    }
+
+    for key in ["CLAUDE_CODE_GIT_BASH_PATH", "GIT_BASH_PATH", "SHELL"] {
+        let Some(value) = env_vars.get(key) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if !is_native_windows_shell(&path) {
+            continue;
+        }
+        if let Some(bin) = path.parent() {
+            if let Some(root) = bin.parent() {
+                return Some(root.to_path_buf());
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
