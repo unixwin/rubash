@@ -17,6 +17,10 @@ pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Resul
     execute_with_io(args, env_vars, &mut stdout, &mut stderr)
 }
 
+pub(crate) fn replaces_shell(args: &[String]) -> bool {
+    command_operand_index(args).is_some()
+}
+
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     env_vars: &HashMap<String, String>,
@@ -33,48 +37,9 @@ where
     let mut clean_env = false;
     let mut login = false;
     let mut argv0 = None;
-    let mut index = 0;
-
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        let Some(options) = arg.strip_prefix('-') else {
-            break;
-        };
-        if options.is_empty() {
-            break;
-        }
-
-        for (offset, option) in options.char_indices() {
-            match option {
-                'c' => clean_env = true,
-                'l' => login = true,
-                'a' => {
-                    let rest = &options[offset + option.len_utf8()..];
-                    if !rest.is_empty() {
-                        argv0 = Some(rest.to_string());
-                        break;
-                    }
-                    index += 1;
-                    let Some(name) = args.get(index) else {
-                        writeln!(stderr, "rubash: exec: -a: option requires an argument")?;
-                        write_usage(stderr)?;
-                        return Ok(EX_BADUSAGE);
-                    };
-                    argv0 = Some(name.clone());
-                    break;
-                }
-                _ => {
-                    writeln!(stderr, "rubash: exec: -{option}: invalid option")?;
-                    write_usage(stderr)?;
-                    return Ok(EX_BADUSAGE);
-                }
-            }
-        }
-        index += 1;
-    }
+    let Some(index) = parse_options(args, stderr, &mut clean_env, &mut login, &mut argv0)? else {
+        return Ok(EX_BADUSAGE);
+    };
 
     let command = args.get(index).map(String::as_str);
     let operands = &args[index + usize::from(command.is_some())..];
@@ -106,6 +71,77 @@ where
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+fn command_operand_index(args: &[String]) -> Option<usize> {
+    let mut clean_env = false;
+    let mut login = false;
+    let mut argv0 = None;
+    parse_options(
+        args,
+        &mut io::sink(),
+        &mut clean_env,
+        &mut login,
+        &mut argv0,
+    )
+    .ok()
+    .flatten()
+    .filter(|index| *index < args.len())
+}
+
+fn parse_options<W>(
+    args: &[String],
+    stderr: &mut W,
+    clean_env: &mut bool,
+    login: &mut bool,
+    argv0: &mut Option<String>,
+) -> io::Result<Option<usize>>
+where
+    W: Write,
+{
+    let mut index = 0;
+
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            return Ok(Some(index + 1));
+        }
+        let Some(options) = arg.strip_prefix('-') else {
+            break;
+        };
+        if options.is_empty() {
+            break;
+        }
+
+        for (offset, option) in options.char_indices() {
+            match option {
+                'c' => *clean_env = true,
+                'l' => *login = true,
+                'a' => {
+                    let rest = &options[offset + option.len_utf8()..];
+                    if !rest.is_empty() {
+                        *argv0 = Some(rest.to_string());
+                        break;
+                    }
+                    index += 1;
+                    let Some(name) = args.get(index) else {
+                        writeln!(stderr, "rubash: exec: -a: option requires an argument")?;
+                        write_usage(stderr)?;
+                        return Ok(None);
+                    };
+                    *argv0 = Some(name.clone());
+                    break;
+                }
+                _ => {
+                    writeln!(stderr, "rubash: exec: -{option}: invalid option")?;
+                    write_usage(stderr)?;
+                    return Ok(None);
+                }
+            }
+        }
+        index += 1;
+    }
+
+    Ok(Some(index))
 }
 
 fn run_external_exec<W, E>(

@@ -1855,10 +1855,7 @@ impl Executor {
                     self.exit_code = self.execute_enable(cmd)?;
                     Ok(())
                 }
-                "exec" => {
-                    self.exit_code = self.execute_exec(cmd)?;
-                    Ok(())
-                }
+                "exec" => self.execute_exec_command(cmd),
                 "return" => self.execute_return(&cmd.words[1..]),
                 "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
                 "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
@@ -2330,6 +2327,15 @@ impl Executor {
             &cmd.words[1..],
             &self.env_vars,
         )?)
+    }
+
+    fn execute_exec_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let status = self.execute_exec(cmd)?;
+        self.exit_code = status;
+        if crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
+            return Err(ExecuteError::ExitCode(status));
+        }
+        Ok(())
     }
 
     fn execute_declare_functions(&self, args: &[String]) -> i32 {
@@ -4427,10 +4433,7 @@ impl Executor {
                 self.exit_code = self.execute_pwd(cmd)?;
                 Ok(())
             }
-            "exec" => {
-                self.exit_code = self.execute_exec(cmd)?;
-                Ok(())
-            }
+            "exec" => self.execute_exec_command(cmd),
             "eval" => self.execute_eval(cmd),
             "set" => self.execute_set_command(cmd),
             "shopt" => {
@@ -4738,10 +4741,7 @@ impl Executor {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
                 Ok(())
             }
-            "exec" => {
-                self.exit_code = self.execute_exec(&builtin_cmd)?;
-                Ok(())
-            }
+            "exec" => self.execute_exec_command(&builtin_cmd),
             "eval" => self.execute_eval(&builtin_cmd),
             "command" => self.execute_command_without_aliases(&builtin_cmd),
             "source" | "." => crate::builtins::source::execute(self, &builtin_cmd.words[1..]),
@@ -4905,8 +4905,7 @@ impl Executor {
             "exec" => {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
-                self.exit_code = self.execute_exec(&command)?;
-                Ok(())
+                self.execute_exec_command(&command)
             }
             "source" | "." => crate::builtins::source::execute(self, &args[1..]),
             "return" => self.execute_return(&args[1..]),
