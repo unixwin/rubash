@@ -8,6 +8,7 @@ use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
+const EX_NOTFOUND: i32 = 127;
 
 pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -91,6 +92,14 @@ where
     if command == Some("printenv") && !clean_env {
         if let Some(value) = env_vars.get("FOO") {
             writeln!(stdout, "FOO={value}")?;
+        }
+        return Ok(EXECUTION_SUCCESS);
+    }
+
+    if let Some(command) = command {
+        if crate::executor::path::find_user_command(command, env_vars).is_none() {
+            writeln!(stderr, "rubash: exec: {command}: not found")?;
+            return Ok(EX_NOTFOUND);
         }
     }
 

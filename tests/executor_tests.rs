@@ -4764,6 +4764,24 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exec_missing_command_returns_not_found() {
+        let error_path = "target/rubash-exec-missing-command-error.txt";
+        let _ = fs::remove_file(error_path);
+        let input = format!("exec no_such_rubash_command 2> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 127);
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("exec: no_such_rubash_command: not found"));
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_exec_invalid_option_redirects_stderr() {
         let output_path = "target/rubash-exec-invalid-option-output.txt";
         let error_path = "target/rubash-exec-invalid-option-error.txt";
