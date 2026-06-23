@@ -2754,6 +2754,12 @@ impl Executor {
         if declare_args_request_integer(&args) {
             args = self.evaluate_declare_integer_assignment_args(&args);
         }
+        if self.function_depth > 0
+            && !declare_args_force_global(&args)
+            && !declare_args_request_print(&args)
+        {
+            self.save_local_names(&args);
+        }
 
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
@@ -14841,6 +14847,32 @@ fn validate_local_options(args: &[String]) -> Result<(), char> {
         }
     }
     Ok(())
+}
+
+fn declare_args_force_global(args: &[String]) -> bool {
+    declare_args_contain_option(args, 'g', true)
+}
+
+fn declare_args_request_print(args: &[String]) -> bool {
+    declare_args_contain_option(args, 'p', true)
+}
+
+fn declare_args_contain_option(args: &[String], option: char, set_attr: bool) -> bool {
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if (!arg.starts_with('-') && !arg.starts_with('+')) || arg == "-" || arg == "+" {
+            return false;
+        }
+        if arg.starts_with('-') != set_attr {
+            continue;
+        }
+        if arg[1..].chars().any(|current| current == option) {
+            return true;
+        }
+    }
+    false
 }
 
 fn local_assignment_name(arg: &str) -> Option<&str> {

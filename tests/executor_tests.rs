@@ -9830,6 +9830,56 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_inside_function_is_local_by_default() {
+        let output_path = target_test_path("rubash-function-declare-local-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "unset x n t; \
+             f() {{ declare x=local; declare -i n=2+3; typeset t=value; \
+                    echo in:$x:$n:$t > {shell_output_path}; }}; \
+             f; echo out:${{x-unset}}:${{n-unset}}:${{t-unset}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "in:local:5:value\nout:unset:unset:unset\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_g_inside_function_assigns_global() {
+        let output_path = target_test_path("rubash-function-declare-global-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "unset x; f() {{ declare -g x=global; echo in:$x > {shell_output_path}; }}; \
+             f; echo out:$x >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "in:global\nout:global\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
         let output_path = target_test_path("rubash-function-readonly-attrs-output.txt");
         let shell_output_path = shell_test_path(&output_path);
