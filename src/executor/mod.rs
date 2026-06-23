@@ -643,6 +643,7 @@ pub struct Executor {
     function_depth: usize,
     random_state: Cell<u32>,
     subshell_depth: Cell<usize>,
+    last_background_pid: Option<u32>,
 }
 
 impl Executor {
@@ -729,6 +730,7 @@ impl Executor {
             function_depth: 0,
             random_state: Cell::new(current_epoch_micros() as u32),
             subshell_depth: Cell::new(0),
+            last_background_pid: None,
         }
     }
 
@@ -2088,6 +2090,10 @@ impl Executor {
         } else {
             Ok(())
         };
+        if cmd.background && result.is_ok() {
+            self.last_background_pid = Some(std::process::id());
+            self.exit_code = 0;
+        }
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
         }
@@ -8346,6 +8352,10 @@ impl Executor {
             return std::process::id().to_string();
         }
 
+        if word == "$!" {
+            return self.last_background_pid_value();
+        }
+
         if word == "$@" {
             return self.positional_params.join(" ");
         }
@@ -8418,6 +8428,7 @@ impl Executor {
                 "@" | "*" => return self.positional_params.join(" "),
                 "?" => return self.exit_code.to_string(),
                 "$" => return std::process::id().to_string(),
+                "!" => return self.last_background_pid_value(),
                 "-" => return self.shell_option_flags(),
                 "0" => return self.script_name_value(),
                 _ => {}
@@ -8993,6 +9004,7 @@ impl Executor {
             "@" | "*" => return self.positional_params.join(" "),
             "?" => return self.exit_code.to_string(),
             "$" => return std::process::id().to_string(),
+            "!" => return self.last_background_pid_value(),
             "-" => return self.shell_option_flags(),
             "0" => return self.script_name_value(),
             _ => {}
@@ -9067,6 +9079,12 @@ impl Executor {
                 .or_else(|| Some("0".to_string())),
             _ => None,
         }
+    }
+
+    fn last_background_pid_value(&self) -> String {
+        self.last_background_pid
+            .map(|pid| pid.to_string())
+            .unwrap_or_default()
     }
 
     fn dynamic_parameter_is_set(&self, name: &str) -> bool {
@@ -9493,6 +9511,7 @@ impl Executor {
             "@" | "*" => Some(self.positional_params.join(" ")),
             "?" => Some(self.exit_code.to_string()),
             "$" => Some(std::process::id().to_string()),
+            "!" => Some(self.last_background_pid_value()),
             "-" => Some(self.shell_option_flags()),
             "0" => Some(self.script_name_value()),
             _ => {
@@ -10463,6 +10482,10 @@ impl Executor {
                 Some('$') => {
                     chars.next();
                     output.push_str(&std::process::id().to_string());
+                }
+                Some('!') => {
+                    chars.next();
+                    output.push_str(&self.last_background_pid_value());
                 }
                 Some('@') => {
                     chars.next();
@@ -11514,7 +11537,7 @@ fn is_shell_name_char(ch: char) -> bool {
 }
 
 fn is_special_parameter_name(name: &str) -> bool {
-    matches!(name, "#" | "?" | "$" | "-" | "0")
+    matches!(name, "#" | "?" | "$" | "!" | "-" | "0")
 }
 
 fn bash_version_value() -> String {
