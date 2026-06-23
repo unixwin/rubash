@@ -1379,7 +1379,7 @@ impl Executor {
             command
         };
 
-        self.apply_exported_functions_to_child(&mut process);
+        self.apply_child_environment(&mut process);
         for (var_name, var_value) in &command.assignments {
             process.env(var_name, var_value);
         }
@@ -3170,6 +3170,16 @@ impl Executor {
                 exported_function_env_value(body),
             );
         }
+    }
+
+    fn apply_child_environment(&self, process: &mut Command) {
+        process.env_clear();
+        for name in marked_env_names(&self.env_vars, EXPORTED_VARS) {
+            if let Some(value) = self.env_vars.get(&name) {
+                process.env(&name, value);
+            }
+        }
+        self.apply_exported_functions_to_child(process);
     }
 
     fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
@@ -12432,7 +12442,7 @@ impl Executor {
             command
         };
 
-        self.apply_exported_functions_to_child(&mut process);
+        self.apply_child_environment(&mut process);
         for (var_name, var_value) in &cmd.assignments {
             process.env(var_name, var_value);
         }
