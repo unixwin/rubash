@@ -2217,6 +2217,38 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_plus_r_rejects_readonly_variable() {
+        let output_path = target_test_path("rubash-declare-plus-r-output.txt");
+        let error_path = target_test_path("rubash-declare-plus-r-error.txt");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let input = format!(
+            "declare -r RUBASH_DECLARE_PLUS_R=1; \
+             declare +r RUBASH_DECLARE_PLUS_R 2> {shell_error_path}; echo $? > {shell_output_path}; \
+             declare -p RUBASH_DECLARE_PLUS_R >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "1\ndeclare -r RUBASH_DECLARE_PLUS_R=\"1\"\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains("declare: RUBASH_DECLARE_PLUS_R: readonly variable"));
+        std::env::remove_var("RUBASH_DECLARE_PLUS_R");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+    }
+
+    #[test]
     fn test_declare_redirects_stderr() {
         let error_path = "target/rubash-declare-stderr-output.txt";
         let status_path = "target/rubash-declare-stderr-status.txt";
