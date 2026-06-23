@@ -4320,6 +4320,14 @@ impl Executor {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
                 Ok(())
             }
+            "source" | "." => crate::builtins::source::execute(self, &builtin_cmd.words[1..]),
+            "return" => self.execute_return(&builtin_cmd.words[1..]),
+            "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
+            "continue" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Continue),
+            "kill" => {
+                self.exit_code = self.execute_kill(&builtin_cmd)?;
+                Ok(())
+            }
             "let" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
                 self.exit_code = self.execute_let(&builtin_cmd.words[1..]);
@@ -4461,6 +4469,18 @@ impl Executor {
                 self.exit_code = self.execute_enable(&command)?;
                 Ok(())
             }
+            "source" | "." => crate::builtins::source::execute(self, &args[1..]),
+            "return" => self.execute_return(&args[1..]),
+            "break" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.execute_loop_control(&command, LoopControlKind::Break)
+            }
+            "continue" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.execute_loop_control(&command, LoopControlKind::Continue)
+            }
             "command" => {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
@@ -4495,6 +4515,12 @@ impl Executor {
             }
             "help" => {
                 self.exit_code = crate::builtins::help::execute(&args[1..])?;
+                Ok(())
+            }
+            "kill" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_kill(&command)?;
                 Ok(())
             }
             "alias" => {
