@@ -6205,6 +6205,20 @@ impl Executor {
                     delimiter = word[2..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-rd" => {
+                    raw = true;
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if word.starts_with("-rd") && word.len() > 3 => {
+                    raw = true;
+                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 word if word.starts_with("-rn") && word.len() > 3 => {
                     raw = true;
                     char_limit = word[3..].parse::<usize>().ok();
