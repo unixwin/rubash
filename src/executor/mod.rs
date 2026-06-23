@@ -664,6 +664,7 @@ impl Executor {
             crate::builtins::set::shellopts_value(&env_vars),
         );
         mark_env_name(&mut env_vars, READONLY_VARS, "SHELLOPTS");
+        store_indexed_array(&mut env_vars, "PIPESTATUS", vec!["0".to_string()]);
 
         Self {
             exit_code: 0,
@@ -1005,6 +1006,7 @@ impl Executor {
             if command.inverted {
                 self.exit_code = invert_exit_status(self.exit_code);
             }
+            self.set_pipestatus([self.exit_code]);
 
             if command.subshell_end {
                 if let Some(saved_env) = subshell_env.take() {
@@ -1170,6 +1172,7 @@ impl Executor {
         } else {
             status
         };
+        self.set_pipestatus(statuses);
         Ok(Some(end + 1))
     }
 
@@ -8766,6 +8769,11 @@ impl Executor {
                     .unwrap_or_default(),
             ),
             "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.env_vars)),
+            "PIPESTATUS" => self
+                .env_vars
+                .get("PIPESTATUS")
+                .and_then(|value| array_value_at(value, 0))
+                .or_else(|| Some("0".to_string())),
             _ => None,
         }
     }
@@ -8783,6 +8791,7 @@ impl Executor {
                 | "LINENO"
                 | "BASH_COMMAND"
                 | "SHELLOPTS"
+                | "PIPESTATUS"
         )
     }
 
@@ -11056,6 +11065,17 @@ impl Executor {
         self.env_vars
             .insert("__RUBASH_CURRENT_COMMAND".to_string(), command.clone());
         env::set_var("__RUBASH_CURRENT_COMMAND", command);
+    }
+
+    fn set_pipestatus<I>(&mut self, statuses: I)
+    where
+        I: IntoIterator<Item = i32>,
+    {
+        let values = statuses
+            .into_iter()
+            .map(|status| status.to_string())
+            .collect();
+        store_indexed_array(&mut self.env_vars, "PIPESTATUS", values);
     }
 
     pub(crate) fn diagnostic_prefix(&self) -> String {
@@ -13871,6 +13891,12 @@ fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     format!("\x1d({rendered})")
+}
+
+fn store_indexed_array(env_vars: &mut HashMap<String, String>, name: &str, values: Vec<String>) {
+    let entries = values.into_iter().enumerate().collect();
+    env_vars.insert(name.to_string(), format_indexed_array_storage(entries));
+    mark_env_name(env_vars, ARRAY_VARS, name);
 }
 
 fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: bool) -> Vec<String> {
