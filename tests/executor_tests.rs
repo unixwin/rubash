@@ -6221,6 +6221,66 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_getopts_parses_explicit_option_argument() {
+        let output_path = "target/rubash-getopts-explicit-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("getopts a: store -a aoptval; echo $?:$store:$OPTARG:$OPTIND > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0:a:aoptval:3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_getopts_walks_clustered_options() {
+        let output_path = "target/rubash-getopts-cluster-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "getopts ab opt -ab; echo $opt:$OPTIND:$? > {output_path}; getopts ab opt -ab; echo $opt:$OPTIND:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "a:1:0\nb:2:0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_getopts_reports_missing_argument_modes() {
+        let output_path = "target/rubash-getopts-missing-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "OPTERR=0; getopts a: opt -a; echo $?:$opt:${{OPTARG-unset}}:$OPTIND > {output_path}; \
+             OPTIND=1; getopts :a: opt -a; echo $?:$opt:$OPTARG:$OPTIND >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0:?:unset:2\n0:::a:2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shift_too_many_fails_without_changing_positional_params() {
         let output_path = "target/rubash-shift-too-many-output.txt";
         let _ = fs::remove_file(output_path);
