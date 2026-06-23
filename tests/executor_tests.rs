@@ -410,6 +410,70 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_external_command_appends_stdout() {
+        let bin_dir = "target/rubash-external-append-bin";
+        let script_path = format!("{bin_dir}/emit");
+        let output_path = "target/rubash-external-append-output.txt";
+        let _ = fs::remove_dir_all(bin_dir);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-append\n").unwrap();
+        let input = format!("emit > {output_path}; emit >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-append\nexternal-append\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir_all(bin_dir);
+    }
+
+    #[test]
+    fn test_external_command_appends_stderr() {
+        let bin_dir = "target/rubash-external-stderr-append-bin";
+        let script_path = format!("{bin_dir}/emiterr");
+        let output_path = "target/rubash-external-stderr-append-output.txt";
+        let _ = fs::remove_dir_all(bin_dir);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-error >&2\n").unwrap();
+        let input = format!("emiterr 2> {output_path}; emiterr 2>> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-error\nexternal-error\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir_all(bin_dir);
+    }
+
+    #[test]
     fn test_mapfile_t_reads_here_string_into_array() {
         let output_path = "target/rubash-mapfile-t-output.txt";
         let _ = fs::remove_file(output_path);

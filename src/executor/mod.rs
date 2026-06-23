@@ -13,7 +13,7 @@ use crate::parser::{
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::process::{Command, Stdio};
 
 use self::path::{
@@ -10497,10 +10497,11 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.append {
             let target = self.expand_word(&redirect.target);
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .create(true)
-                .append(true)
+                .write(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.seek(SeekFrom::End(0))?;
             process.stdout(Stdio::from(file));
         }
 
@@ -10512,10 +10513,11 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .create(true)
-                .append(true)
+                .write(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.seek(SeekFrom::End(0))?;
             process.stderr(Stdio::from(file));
         }
 
