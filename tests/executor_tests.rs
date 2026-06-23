@@ -2665,6 +2665,69 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_disabled_pwd_builtin_uses_external_command() {
+        let bin_dir = "target/rubash-disabled-pwd-bin";
+        let script_path = format!("{bin_dir}/pwd");
+        let output_path = "target/rubash-disabled-pwd-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-pwd\n").unwrap();
+        let input = format!("enable -n pwd; pwd > {output_path}; enable pwd");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "external-pwd\n");
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
+    fn test_command_uses_external_pwd_when_builtin_is_disabled() {
+        let bin_dir = "target/rubash-disabled-command-pwd-bin";
+        let script_path = format!("{bin_dir}/pwd");
+        let output_path = "target/rubash-disabled-command-pwd-output.txt";
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-command-pwd\n").unwrap();
+        let input = format!("enable -n pwd; command pwd > {output_path}; enable pwd");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "external-command-pwd\n"
+        );
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir(bin_dir);
+    }
+
+    #[test]
     fn test_enable_appends_output() {
         let output_path = "target/rubash-enable-append-output.txt";
         let _ = fs::remove_file(output_path);
