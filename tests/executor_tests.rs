@@ -2900,6 +2900,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_dirstack_expands_as_dynamic_array() {
+        let output_path = "target/rubash-dirstack-array-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "PWD=/tmp/rubash-dirstack; \
+             printf '%s:%s:%s\\n' \"${{!DIRSTACK[@]}}\" \"${{#DIRSTACK[@]}}\" \"${{DIRSTACK[0]}}\" > {output_path}; \
+             DIRSTACK[0]=/tmp/rubash-dirstack-updated; \
+             printf '%s:%s:%s\\n' \"${{!DIRSTACK[@]}}\" \"${{#DIRSTACK[@]}}\" \"${{DIRSTACK[0]}}\" >> {output_path}; \
+             declare -p DIRSTACK >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0:1:/tmp/rubash-dirstack\n0:1:/tmp/rubash-dirstack-updated\ndeclare -a DIRSTACK=([0]=\"/tmp/rubash-dirstack-updated\")\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_dirs_redirects_stderr() {
         let error_path = "target/rubash-dirs-stderr-output.txt";
         let status_path = "target/rubash-dirs-stderr-status.txt";

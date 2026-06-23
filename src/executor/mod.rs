@@ -692,6 +692,8 @@ impl Executor {
         mark_env_name(&mut env_vars, ASSOC_VARS, "BASH_CMDS");
         env_vars.insert("BASH_ALIASES".to_string(), "()".to_string());
         mark_env_name(&mut env_vars, ASSOC_VARS, "BASH_ALIASES");
+        env_vars.insert("DIRSTACK".to_string(), String::new());
+        mark_env_name(&mut env_vars, ARRAY_VARS, "DIRSTACK");
         env_vars.insert("FUNCNAME".to_string(), String::new());
         mark_env_name(&mut env_vars, ARRAY_VARS, "FUNCNAME");
         env_vars
@@ -9070,6 +9072,9 @@ impl Executor {
     }
 
     fn parameter_array_storage(&self, name: &str) -> Option<String> {
+        if name == "DIRSTACK" {
+            return Some(self.dirstack_storage());
+        }
         if name == "BASH_ALIASES" {
             return Some(self.bash_aliases_storage());
         }
@@ -9077,6 +9082,15 @@ impl Executor {
             return Some(self.bash_cmds_storage());
         }
         self.env_vars.get(name).cloned()
+    }
+
+    fn dirstack_storage(&self) -> String {
+        format_indexed_array_storage(
+            crate::builtins::pushd::load_stack(&self.env_vars)
+                .into_iter()
+                .enumerate()
+                .collect(),
+        )
     }
 
     fn bash_aliases_storage(&self) -> String {
@@ -9094,6 +9108,9 @@ impl Executor {
     }
 
     fn sync_dynamic_assoc_vars(&mut self) {
+        self.env_vars
+            .insert("DIRSTACK".to_string(), self.dirstack_storage());
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, "DIRSTACK");
         self.env_vars
             .insert("BASH_ALIASES".to_string(), self.bash_aliases_storage());
         mark_env_name(&mut self.env_vars, ASSOC_VARS, "BASH_ALIASES");
