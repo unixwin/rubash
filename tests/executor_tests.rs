@@ -2184,6 +2184,39 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_rx_without_assignment_marks_unset_variable() {
+        let output_path = target_test_path("rubash-declare-rx-unset-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "unset RUBASH_DECLARE_RX_UNSET; declare -rx RUBASH_DECLARE_RX_UNSET; \
+             printf '<%s>\\n' \"${{RUBASH_DECLARE_RX_UNSET-unset}}\" > {shell_output_path}; \
+             declare -p RUBASH_DECLARE_RX_UNSET >> {shell_output_path}; \
+             export -p >> {shell_output_path}; \
+             readonly -p >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("<unset>\ndeclare -rx RUBASH_DECLARE_RX_UNSET\n"));
+        assert_eq!(
+            output
+                .matches("declare -rx RUBASH_DECLARE_RX_UNSET\n")
+                .count(),
+            3
+        );
+        assert!(!output.contains("RUBASH_DECLARE_RX_UNSET=\"\""));
+        std::env::remove_var("RUBASH_DECLARE_RX_UNSET");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_declare_redirects_stderr() {
         let error_path = "target/rubash-declare-stderr-output.txt";
         let status_path = "target/rubash-declare-stderr-status.txt";
