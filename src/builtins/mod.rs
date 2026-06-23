@@ -21,6 +21,7 @@ pub mod help;
 pub mod history;
 pub mod jobs;
 pub mod kill;
+pub mod logout;
 pub mod printf;
 pub mod pushd;
 pub mod pwd;

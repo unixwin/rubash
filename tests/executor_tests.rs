@@ -5494,6 +5494,65 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_logout_non_login_shell_reports_error_and_continues() {
+        let error_path = "target/rubash-logout-error.txt";
+        let output_path = "target/rubash-logout-output.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "logout 2> {error_path}; echo status:$? > {output_path}; echo after >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "status:1\nafter\n"
+        );
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("logout: not login shell: use `exit'"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_and_command_logout_use_shell_builtin() {
+        let error_path = "target/rubash-logout-builtin-error.txt";
+        let output_path = "target/rubash-logout-builtin-output.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "builtin logout 2> {error_path}; echo builtin:$? > {output_path}; \
+             command logout 2>> {error_path}; echo command:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "builtin:1\ncommand:1\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert_eq!(
+            error.matches("logout: not login shell: use `exit'").count(),
+            2
+        );
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_wait_without_operands_returns_success() {
         let status_path = "target/rubash-wait-empty-status.txt";
         let _ = fs::remove_file(status_path);
