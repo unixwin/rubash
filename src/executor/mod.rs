@@ -664,6 +664,11 @@ impl Executor {
             crate::builtins::set::shellopts_value(&env_vars),
         );
         mark_env_name(&mut env_vars, READONLY_VARS, "SHELLOPTS");
+        env_vars.insert(
+            "BASHOPTS".to_string(),
+            crate::builtins::shopt::bashopts_value(&env_vars),
+        );
+        mark_env_name(&mut env_vars, READONLY_VARS, "BASHOPTS");
         store_indexed_array(&mut env_vars, "PIPESTATUS", vec!["0".to_string()]);
         env_vars.insert("OPTIND".to_string(), "1".to_string());
         env_vars.remove("OPTARG");
@@ -8955,6 +8960,7 @@ impl Executor {
                     .unwrap_or_default(),
             ),
             "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.env_vars)),
+            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(&self.env_vars)),
             "PIPESTATUS" => self
                 .env_vars
                 .get("PIPESTATUS")
@@ -8977,6 +8983,7 @@ impl Executor {
                 | "LINENO"
                 | "BASH_COMMAND"
                 | "SHELLOPTS"
+                | "BASHOPTS"
                 | "PIPESTATUS"
         )
     }

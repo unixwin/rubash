@@ -6601,6 +6601,55 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bashopts_reflects_shopt_options() {
+        let output_path = "target/rubash-bashopts-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $BASHOPTS > {output_path}; \
+             shopt -s checkhash; echo $BASHOPTS >> {output_path}; \
+             shopt -u checkwinsize; echo $BASHOPTS >> {output_path}; \
+             shopt -u checkhash; \
+             readonly -p >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines[0].contains("checkwinsize"));
+        assert!(lines[0].contains("cmdhist"));
+        assert!(!lines[0].contains("checkhash"));
+        assert!(lines[1].contains("checkhash"));
+        assert!(lines[1].contains("checkwinsize"));
+        assert!(lines[2].contains("checkhash"));
+        assert!(!lines[2].contains("checkwinsize"));
+        assert!(output.contains("declare -r BASHOPTS=\""));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bashopts_assignment_reports_readonly() {
+        let status_path = "target/rubash-bashopts-readonly-status.txt";
+        let _ = fs::remove_file(status_path);
+        let input = format!("BASHOPTS=$BASHOPTS; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_set_noclobber_updates_shell_flags() {
         let output_path = "target/rubash-set-noclobber-flags-output.txt";
         let _ = fs::remove_file(output_path);
