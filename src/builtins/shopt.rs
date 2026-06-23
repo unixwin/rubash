@@ -333,7 +333,7 @@ where
     }
 }
 
-fn is_supported_option(name: &str) -> bool {
+pub(crate) fn is_supported_option(name: &str) -> bool {
     SHOPT_OPTIONS.contains(&name)
 }
 
