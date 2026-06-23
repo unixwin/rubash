@@ -11,7 +11,7 @@ use crate::parser::{
     FunctionCommand, Redirect,
 };
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -2323,14 +2323,34 @@ impl Executor {
         self.function_depth += 1;
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
-        self.restore_function_locals();
-        restore_optional_env_var(&mut self.env_vars, EXPORTED_VARS, old_exported_vars);
-        restore_optional_env_var(&mut self.env_vars, READONLY_VARS, old_readonly_vars);
+        let restored_local_names = self.restore_function_locals();
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            EXPORTED_VARS,
+            old_exported_vars,
+            &restored_local_names,
+        );
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            READONLY_VARS,
+            old_readonly_vars,
+            &restored_local_names,
+        );
         restore_optional_env_var(&mut self.env_vars, INTEGER_VARS, old_integer_vars);
         restore_optional_env_var(&mut self.env_vars, UPPERCASE_VARS, old_uppercase_vars);
         restore_optional_env_var(&mut self.env_vars, LOWERCASE_VARS, old_lowercase_vars);
-        restore_optional_env_var(&mut self.env_vars, ARRAY_VARS, old_array_vars);
-        restore_optional_env_var(&mut self.env_vars, ASSOC_VARS, old_assoc_vars);
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            ARRAY_VARS,
+            old_array_vars,
+            &restored_local_names,
+        );
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            ASSOC_VARS,
+            old_assoc_vars,
+            &restored_local_names,
+        );
         self.positional_params = old_positional_params;
         match old_funcname {
             Some(value) => {
@@ -2463,11 +2483,13 @@ impl Executor {
         }
     }
 
-    fn restore_function_locals(&mut self) {
+    fn restore_function_locals(&mut self) -> HashSet<String> {
         let Some(scope) = self.local_var_scopes.pop() else {
-            return;
+            return HashSet::new();
         };
+        let mut names = HashSet::new();
         for (name, value) in scope {
+            names.insert(name.clone());
             match value {
                 Some(value) => {
                     self.env_vars.insert(name.clone(), value.clone());
@@ -2479,6 +2501,7 @@ impl Executor {
                 }
             }
         }
+        names
     }
 
     fn execute_eval(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
@@ -14820,6 +14843,35 @@ fn restore_optional_env_var(
         None => {
             env_vars.remove(name);
         }
+    }
+}
+
+fn restore_merged_marked_env_names(
+    env_vars: &mut HashMap<String, String>,
+    key: &str,
+    old_value: Option<String>,
+    restored_local_names: &HashSet<String>,
+) {
+    let mut names: HashSet<String> = old_value
+        .as_deref()
+        .unwrap_or_default()
+        .split('\x1f')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    for name in marked_env_names(env_vars, key) {
+        if !restored_local_names.contains(&name) {
+            names.insert(name);
+        }
+    }
+
+    if names.is_empty() {
+        env_vars.remove(key);
+    } else {
+        let mut names: Vec<_> = names.into_iter().collect();
+        names.sort();
+        env_vars.insert(key.to_string(), names.join("\x1f"));
     }
 }
 

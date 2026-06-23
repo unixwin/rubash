@@ -9801,6 +9801,32 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
+        let output_path = target_test_path("rubash-function-readonly-attrs-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "a=(outside); n=1; \
+             f() {{ readonly a=(1); readonly n=4; local -x temp=local; }}; \
+             f; declare -p a n > {shell_output_path}; \
+             declare -p temp 2>/dev/null || echo temp-unset >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -ar a=([0]=\"1\")\ndeclare -r n=\"4\"\ntemp-unset\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_getopts_parses_explicit_option_argument() {
         let output_path = "target/rubash-getopts-explicit-output.txt";
         let _ = fs::remove_file(output_path);
