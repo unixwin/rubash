@@ -254,10 +254,10 @@ EOF
   grep -v -x \
     -e 'declare -r SHELLOPTS="braceexpand:hashall:interactive-comments"' \
     -e "Testing $shell_wrapper" \
-    -e 'version: ' \
-    -e 'HOSTTYPE = ' \
-    -e 'OSTYPE = ' \
-    -e 'MACHTYPE = ' \
+    -e 'version: .*' \
+    -e 'HOSTTYPE = .*' \
+    -e 'OSTYPE = .*' \
+    -e 'MACHTYPE = .*' \
     -e 'Any output from any test, unless otherwise noted, indicates a possible anomaly' \
     -e 'run-comsub-eof' \
     -e 'run-comsub-posix' \

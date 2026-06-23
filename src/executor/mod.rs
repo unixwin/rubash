@@ -3188,21 +3188,28 @@ impl Executor {
         }
         writeln!(stdout, "{name} () ")?;
         writeln!(stdout, "{{ ")?;
-        for command in body {
+        let printable_commands = body
+            .iter()
+            .filter(|command| !command.words.is_empty())
+            .collect::<Vec<_>>();
+        let last_index = printable_commands.len().saturating_sub(1);
+        for (index, command) in printable_commands.iter().enumerate() {
             if command.words.is_empty() {
                 continue;
             }
+            let terminator = if index < last_index { ";" } else { "" };
             if let Some(here_string) = &command.here_string {
                 writeln!(
                     stdout,
-                    "    {} <<< {}",
+                    "    {} <<< {}{}",
                     command.words.join(" "),
-                    here_string
+                    function_here_string_text(here_string, printable_commands.len() > 1),
+                    terminator
                 )?;
             } else if command.words == ["time"] {
-                writeln!(stdout, "    time ")?;
+                writeln!(stdout, "    time {terminator}")?;
             } else {
-                writeln!(stdout, "    {}", command.words.join(" "))?;
+                writeln!(stdout, "    {}{terminator}", command.words.join(" "))?;
             }
         }
         writeln!(stdout, "}}")
@@ -14700,6 +14707,22 @@ fn bash_command_text(cmd: &CommandNode) -> String {
     }
 
     parts.join(" ")
+}
+
+fn function_here_string_text(value: &str, multi_command_body: bool) -> String {
+    if value.contains('$') {
+        return format!("\"{}\"", value.replace('"', "\\\""));
+    }
+
+    if value.contains(char::is_whitespace) || value.contains('"') {
+        return shell_single_quote_assignment_value(value);
+    }
+
+    if multi_command_body {
+        return format!("\"{}\"", value.replace('"', "\\\""));
+    }
+
+    value.to_string()
 }
 
 fn format_redirect(operator: &str, redirect: &Redirect) -> String {
