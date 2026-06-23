@@ -356,14 +356,16 @@ fn shell_quote(value: &str) -> String {
         return "\\~".to_string();
     }
 
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
+    let mut quoted = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | ':') {
+            quoted.push(ch);
+        } else {
+            quoted.push('\\');
+            quoted.push(ch);
+        }
     }
+    quoted
 }
 
 fn valid_identifier(name: &str) -> bool {
@@ -448,5 +450,13 @@ mod tests {
         assert_eq!(run(&["<%*.*s>", "10", "4", "abcdef"]).1, "<      abcd>");
         assert_eq!(run(&["<%*s>", "-6", "ab"]).1, "<ab    >");
         assert_eq!(run(&["<%.*s>", "-1", "abcdef"]).1, "<abcdef>");
+    }
+
+    #[test]
+    fn percent_q_uses_backslash_quoting_for_printable_shell_metacharacters() {
+        assert_eq!(
+            run(&["<%q><%q><%q>", "a b", "this&that", "~"]).1,
+            "<a\\ b><this\\&that><\\~>"
+        );
     }
 }
