@@ -643,6 +643,24 @@ impl From<std::io::Error> for ExecuteError {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct VarAttrs {
+    exported: bool,
+    readonly: bool,
+    integer: bool,
+    uppercase: bool,
+    lowercase: bool,
+    array: bool,
+    assoc: bool,
+}
+
+#[derive(Debug)]
+struct SavedGlobalDeclareLocal {
+    name: String,
+    local_value: Option<String>,
+    local_attrs: VarAttrs,
+}
+
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
@@ -652,6 +670,7 @@ pub struct Executor {
     functions: HashMap<String, Vec<CommandNode>>,
     positional_params: Vec<String>,
     local_var_scopes: Vec<HashMap<String, Option<String>>>,
+    local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
     expanding_aliases: Vec<String>,
     loop_depth: usize,
     function_depth: usize,
@@ -745,6 +764,7 @@ impl Executor {
             functions: imported_functions,
             positional_params: Vec::new(),
             local_var_scopes: Vec::new(),
+            local_attr_scopes: Vec::new(),
             expanding_aliases: Vec::new(),
             loop_depth: 0,
             function_depth: 0,
@@ -2320,6 +2340,7 @@ impl Executor {
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
         self.local_var_scopes.push(HashMap::new());
+        self.local_attr_scopes.push(HashMap::new());
         self.function_depth += 1;
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
@@ -2336,9 +2357,24 @@ impl Executor {
             old_readonly_vars,
             &restored_local_names,
         );
-        restore_optional_env_var(&mut self.env_vars, INTEGER_VARS, old_integer_vars);
-        restore_optional_env_var(&mut self.env_vars, UPPERCASE_VARS, old_uppercase_vars);
-        restore_optional_env_var(&mut self.env_vars, LOWERCASE_VARS, old_lowercase_vars);
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            INTEGER_VARS,
+            old_integer_vars,
+            &restored_local_names,
+        );
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            UPPERCASE_VARS,
+            old_uppercase_vars,
+            &restored_local_names,
+        );
+        restore_merged_marked_env_names(
+            &mut self.env_vars,
+            LOWERCASE_VARS,
+            old_lowercase_vars,
+            &restored_local_names,
+        );
         restore_merged_marked_env_names(
             &mut self.env_vars,
             ARRAY_VARS,
@@ -2475,11 +2511,16 @@ impl Executor {
         let Some(scope) = self.local_var_scopes.last_mut() else {
             return;
         };
+        let Some(attr_scope_index) = self.local_attr_scopes.len().checked_sub(1) else {
+            return;
+        };
         for name in names {
             if scope.contains_key(&name) {
                 continue;
             }
             scope.insert(name.clone(), self.env_vars.get(&name).cloned());
+            let attrs = capture_var_attrs(&self.env_vars, &name);
+            self.local_attr_scopes[attr_scope_index].insert(name, attrs);
         }
     }
 
@@ -2487,19 +2528,25 @@ impl Executor {
         let Some(scope) = self.local_var_scopes.pop() else {
             return HashSet::new();
         };
+        let attr_scope = self.local_attr_scopes.pop().unwrap_or_default();
         let mut names = HashSet::new();
         for (name, value) in scope {
             names.insert(name.clone());
             match value {
                 Some(value) => {
                     self.env_vars.insert(name.clone(), value.clone());
-                    env::set_var(name, value);
+                    env::set_var(&name, value);
                 }
                 None => {
                     self.env_vars.remove(&name);
-                    env::remove_var(name);
+                    env::remove_var(&name);
                 }
             }
+            set_var_attrs(
+                &mut self.env_vars,
+                &name,
+                attr_scope.get(&name).copied().unwrap_or_default(),
+            );
         }
         names
     }
@@ -2507,12 +2554,15 @@ impl Executor {
     fn begin_global_declare_for_local_names(
         &mut self,
         args: &[String],
-    ) -> Vec<(String, Option<String>)> {
+    ) -> Vec<SavedGlobalDeclareLocal> {
         if self.function_depth == 0 || !declare_args_force_global(args) {
             return Vec::new();
         }
 
         let Some(scope) = self.local_var_scopes.last() else {
+            return Vec::new();
+        };
+        let Some(attr_scope) = self.local_attr_scopes.last() else {
             return Vec::new();
         };
 
@@ -2531,11 +2581,24 @@ impl Executor {
             if !seen.insert(name.to_string()) || !scope.contains_key(name) {
                 continue;
             }
-            saved_locals.push((name.to_string(), self.env_vars.get(name).cloned()));
+            saved_locals.push(SavedGlobalDeclareLocal {
+                name: name.to_string(),
+                local_value: self.env_vars.get(name).cloned(),
+                local_attrs: capture_var_attrs(&self.env_vars, name),
+            });
         }
 
-        for (name, _) in &saved_locals {
-            restore_optional_env_var(&mut self.env_vars, name, scope.get(name).cloned().flatten());
+        for saved in &saved_locals {
+            restore_optional_env_var(
+                &mut self.env_vars,
+                &saved.name,
+                scope.get(&saved.name).cloned().flatten(),
+            );
+            set_var_attrs(
+                &mut self.env_vars,
+                &saved.name,
+                attr_scope.get(&saved.name).copied().unwrap_or_default(),
+            );
         }
 
         saved_locals
@@ -2543,7 +2606,7 @@ impl Executor {
 
     fn finish_global_declare_for_local_names(
         &mut self,
-        saved_locals: Vec<(String, Option<String>)>,
+        saved_locals: Vec<SavedGlobalDeclareLocal>,
     ) {
         if saved_locals.is_empty() {
             return;
@@ -2552,10 +2615,18 @@ impl Executor {
         let Some(scope) = self.local_var_scopes.last_mut() else {
             return;
         };
+        let Some(attr_scope) = self.local_attr_scopes.last_mut() else {
+            return;
+        };
 
-        for (name, local_value) in saved_locals {
-            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
-            restore_optional_env_var(&mut self.env_vars, &name, local_value);
+        for saved in saved_locals {
+            scope.insert(saved.name.clone(), self.env_vars.get(&saved.name).cloned());
+            attr_scope.insert(
+                saved.name.clone(),
+                capture_var_attrs(&self.env_vars, &saved.name),
+            );
+            restore_optional_env_var(&mut self.env_vars, &saved.name, saved.local_value);
+            set_var_attrs(&mut self.env_vars, &saved.name, saved.local_attrs);
         }
     }
 
@@ -14961,11 +15032,41 @@ fn restore_optional_env_var(
     }
 }
 
+fn capture_var_attrs(env_vars: &HashMap<String, String>, name: &str) -> VarAttrs {
+    VarAttrs {
+        exported: is_marked_var(env_vars, EXPORTED_VARS, name),
+        readonly: is_marked_var(env_vars, READONLY_VARS, name),
+        integer: is_marked_var(env_vars, INTEGER_VARS, name),
+        uppercase: is_marked_var(env_vars, UPPERCASE_VARS, name),
+        lowercase: is_marked_var(env_vars, LOWERCASE_VARS, name),
+        array: is_marked_var(env_vars, ARRAY_VARS, name),
+        assoc: is_marked_var(env_vars, ASSOC_VARS, name),
+    }
+}
+
+fn set_var_attrs(env_vars: &mut HashMap<String, String>, name: &str, attrs: VarAttrs) {
+    set_marked_var(env_vars, EXPORTED_VARS, name, attrs.exported);
+    set_marked_var(env_vars, READONLY_VARS, name, attrs.readonly);
+    set_marked_var(env_vars, INTEGER_VARS, name, attrs.integer);
+    set_marked_var(env_vars, UPPERCASE_VARS, name, attrs.uppercase);
+    set_marked_var(env_vars, LOWERCASE_VARS, name, attrs.lowercase);
+    set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
+    set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
+}
+
+fn set_marked_var(env_vars: &mut HashMap<String, String>, key: &str, name: &str, marked: bool) {
+    if marked {
+        mark_env_name(env_vars, key, name);
+    } else {
+        unmark_env_name(env_vars, key, name);
+    }
+}
+
 fn restore_merged_marked_env_names(
     env_vars: &mut HashMap<String, String>,
     key: &str,
     old_value: Option<String>,
-    restored_local_names: &HashSet<String>,
+    _restored_local_names: &HashSet<String>,
 ) {
     let mut names: HashSet<String> = old_value
         .as_deref()
@@ -14976,9 +15077,7 @@ fn restore_merged_marked_env_names(
         .collect();
 
     for name in marked_env_names(env_vars, key) {
-        if !restored_local_names.contains(&name) {
-            names.insert(name);
-        }
+        names.insert(name);
     }
 
     if names.is_empty() {
