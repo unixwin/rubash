@@ -682,6 +682,9 @@ impl Executor {
         env_vars
             .entry("BASH_VERSION".to_string())
             .or_insert_with(bash_version_value);
+        env_vars
+            .entry("BASH".to_string())
+            .or_insert_with(bash_path_value);
         store_indexed_array(&mut env_vars, "BASH_VERSINFO", bash_versinfo_values());
         mark_env_name(&mut env_vars, READONLY_VARS, "BASH_VERSINFO");
         store_indexed_array(&mut env_vars, "BASH_ARGC", Vec::new());
@@ -11514,6 +11517,12 @@ fn is_special_parameter_name(name: &str) -> bool {
 
 fn bash_version_value() -> String {
     format!("{}(1)-release", env!("CARGO_PKG_VERSION"))
+}
+
+fn bash_path_value() -> String {
+    std::env::current_exe()
+        .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+        .unwrap_or_else(|_| "rubash".to_string())
 }
 
 fn bash_versinfo_values() -> Vec<String> {
