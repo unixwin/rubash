@@ -441,6 +441,27 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_printf_time_format_minus_two_uses_shell_start_time() {
+        let output_path = "target/rubash-printf-time-shell-start-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("TZ=UTC printf '%(%s)T' -2 > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let shell_start = executor
+            .get_env("__RUBASH_SHELL_START_EPOCH")
+            .unwrap()
+            .to_string();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), shell_start);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_printf_invalid_time_format_warns_and_outputs_raw_format() {
         let output_path = "target/rubash-printf-invalid-time-output.txt";
         let status_path = "target/rubash-printf-invalid-time-status.txt";
