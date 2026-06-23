@@ -11456,6 +11456,10 @@ impl Executor {
         self.env_vars.get(name).map(|s| s.as_str())
     }
 
+    pub fn set_shell_option(&mut self, name: &str, enabled: bool) {
+        crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
+    }
+
     fn restore_shell_env(&mut self, saved_env: HashMap<String, String>) {
         let old_names: Vec<String> = self.env_vars.keys().cloned().collect();
         for name in old_names {
