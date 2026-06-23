@@ -5491,6 +5491,95 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_fg_without_job_control_returns_failure() {
+        let error_path = "target/rubash-fg-error.txt";
+        let status_path = "target/rubash-fg-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("fg 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("fg: no job control"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_bg_without_job_control_returns_failure() {
+        let error_path = "target/rubash-bg-error.txt";
+        let status_path = "target/rubash-bg-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("bg 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("bg: no job control"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_suspend_without_job_control_returns_failure() {
+        let error_path = "target/rubash-suspend-error.txt";
+        let status_path = "target/rubash-suspend-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("suspend 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("suspend: cannot suspend: no job control"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_suspend_invalid_option_returns_usage() {
+        let error_path = "target/rubash-suspend-invalid-error.txt";
+        let status_path = "target/rubash-suspend-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("suspend -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("suspend: -x: invalid option"));
+        assert!(error.contains("suspend: usage: suspend [-f]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_builtin_break_breaks_loop() {
         let output_path = "target/rubash-builtin-break-output.txt";
         let _ = fs::remove_file(output_path);
