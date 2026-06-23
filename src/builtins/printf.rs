@@ -385,6 +385,8 @@ fn valid_format_specifier(specifier: char) -> bool {
             | 'E'
             | 'g'
             | 'G'
+            | 'a'
+            | 'A'
             | 'n'
     )
 }
@@ -447,6 +449,11 @@ fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Option<String>
             invalid_number = parsed.invalid;
             format_float(parsed.value, spec, spec.specifier)
         }
+        'a' | 'A' => {
+            let parsed = parse_f64(value);
+            invalid_number = parsed.invalid;
+            format_float(parsed.value, spec, spec.specifier)
+        }
         other => {
             let mut fallback = String::from('%');
             fallback.push(other);
@@ -484,6 +491,7 @@ fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String {
             normalize_float_exponent(rendered, mode == 'E')
         }
         'g' | 'G' => format_general_float(value, spec, mode == 'G'),
+        'a' | 'A' => format_hex_float(value, spec, mode == 'A'),
         _ => {
             let precision = spec.precision.unwrap_or(6);
             format!("{value:.precision$}")
@@ -494,7 +502,7 @@ fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String {
         ensure_float_decimal_point(&mut rendered);
     }
 
-    if value >= 0.0 {
+    if !rendered.starts_with('-') {
         if spec.explicit_sign {
             rendered.insert(0, '+');
         } else if spec.leading_space_sign {
@@ -503,6 +511,129 @@ fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String {
     }
 
     rendered
+}
+
+fn format_hex_float(value: f64, spec: &FormatSpec, uppercase: bool) -> String {
+    let bits = value.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let fraction_bits = bits & ((1_u64 << 52) - 1);
+
+    let (prefix, exponent_marker) = if uppercase { ("0X", 'P') } else { ("0x", 'p') };
+    let digit_case = if uppercase {
+        HexCase::Upper
+    } else {
+        HexCase::Lower
+    };
+
+    if exponent_bits == 0 && fraction_bits == 0 {
+        let mut rendered = format!("{prefix}0");
+        if spec.alternate_form {
+            rendered.push('.');
+        }
+        rendered.push(exponent_marker);
+        rendered.push_str("+0");
+        if negative {
+            rendered.insert(0, '-');
+        }
+        return rendered;
+    }
+
+    let mut exponent = if exponent_bits == 0 {
+        -1022
+    } else {
+        exponent_bits - 1023
+    };
+    let mantissa = if exponent_bits == 0 {
+        fraction_bits
+    } else {
+        (1_u64 << 52) | fraction_bits
+    };
+
+    let precision = spec.precision;
+    let (leading, mut fraction) =
+        rounded_hex_mantissa(mantissa, precision, &mut exponent, digit_case);
+
+    if precision.is_none() {
+        while fraction.ends_with('0') {
+            fraction.pop();
+        }
+    }
+
+    let mut rendered = format!("{prefix}{leading}");
+    if !fraction.is_empty() || spec.alternate_form || precision.unwrap_or(0) > 0 {
+        rendered.push('.');
+        rendered.push_str(&fraction);
+    }
+    rendered.push(exponent_marker);
+    if exponent >= 0 {
+        rendered.push('+');
+    }
+    rendered.push_str(&exponent.to_string());
+
+    if negative {
+        rendered.insert(0, '-');
+    }
+    rendered
+}
+
+#[derive(Clone, Copy)]
+enum HexCase {
+    Lower,
+    Upper,
+}
+
+fn rounded_hex_mantissa(
+    mantissa: u64,
+    precision: Option<usize>,
+    exponent: &mut i32,
+    digit_case: HexCase,
+) -> (char, String) {
+    let precision = precision.unwrap_or(13);
+
+    if precision <= 13 {
+        let shift = 52 - precision * 4;
+        let mut rounded = if shift == 0 {
+            mantissa
+        } else {
+            (mantissa + (1_u64 << (shift - 1))) >> shift
+        };
+        let overflow = 1_u64 << (precision * 4 + 1);
+        if rounded == overflow {
+            rounded >>= 1;
+            *exponent += 1;
+        }
+
+        let leading = hex_digit((rounded >> (precision * 4)) as u8, digit_case);
+        let fraction_value = rounded & ((1_u64 << (precision * 4)) - 1);
+        let fraction = if precision == 0 {
+            String::new()
+        } else {
+            format_hex_fraction(fraction_value, precision, digit_case)
+        };
+        return (leading, fraction);
+    }
+
+    let leading = hex_digit((mantissa >> 52) as u8, digit_case);
+    let mut fraction = format_hex_fraction(mantissa & ((1_u64 << 52) - 1), 13, digit_case);
+    fraction.extend(std::iter::repeat('0').take(precision - 13));
+    (leading, fraction)
+}
+
+fn format_hex_fraction(value: u64, width: usize, digit_case: HexCase) -> String {
+    let raw = match digit_case {
+        HexCase::Lower => format!("{value:0width$x}"),
+        HexCase::Upper => format!("{value:0width$X}"),
+    };
+    raw
+}
+
+fn hex_digit(value: u8, digit_case: HexCase) -> char {
+    let digits = match digit_case {
+        HexCase::Lower => b"0123456789abcdef",
+        HexCase::Upper => b"0123456789ABCDEF",
+    };
+    digits[value as usize] as char
 }
 
 fn format_general_float(value: f64, spec: &FormatSpec, uppercase: bool) -> String {
@@ -1180,6 +1311,31 @@ mod tests {
         assert_eq!(
             run(&["<%#.0g><%#.4g><%#.4e><%#.0e>", "4", "123.44", "4", "4"]).1,
             "<4.><123.4><4.0000e+00><4.e+00>"
+        );
+    }
+
+    #[test]
+    fn hex_float_formats_match_bash_precision_and_flags() {
+        assert_eq!(
+            run(&[
+                "<%.0a><%.2a><%10.2a><%+.2a><% .2a><%.2A>",
+                "4.2",
+                "4.2",
+                "4.2",
+                "4.2",
+                "4.2",
+                "4.2"
+            ])
+            .1,
+            "<0x1p+2><0x1.0dp+2>< 0x1.0dp+2><+0x1.0dp+2>< 0x1.0dp+2><0X1.0DP+2>"
+        );
+    }
+
+    #[test]
+    fn hex_float_formats_handle_zero_integer_and_alternate_form() {
+        assert_eq!(
+            run(&["<%a><%a><%a><%#a>", "0", "-0", "1", "4"]).1,
+            "<0x0p+0><-0x0p+0><0x1p+0><0x1.p+2>"
         );
     }
 
