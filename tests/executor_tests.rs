@@ -2499,6 +2499,49 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_hash_p_requires_pathname_argument() {
+        let error_path = "target/rubash-hash-p-missing-stderr-output.txt";
+        let status_path = "target/rubash-hash-p-missing-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("hash -p 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("hash: -p: option requires an argument"));
+        assert!(error.contains("hash: usage:"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_hash_p_without_name_prints_table() {
+        let output_path = "target/rubash-hash-p-without-name-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("hash -p /tmp/rubash-cat cat; hash -p /tmp/ignored > {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("hits\tcommand\n"));
+        assert!(output.contains("/tmp/rubash-cat\n"));
+        assert!(output.ends_with("0\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_hash_redirects_stderr() {
         let error_path = "target/rubash-hash-stderr-output.txt";
         let status_path = "target/rubash-hash-stderr-status.txt";
