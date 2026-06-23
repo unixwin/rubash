@@ -2476,6 +2476,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_hash_empty_table_reports_success() {
+        let error_path = "target/rubash-hash-empty-stderr-output.txt";
+        let status_path = "target/rubash-hash-empty-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("hash 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("hash: hash table empty"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_hash_redirects_stderr() {
         let error_path = "target/rubash-hash-stderr-output.txt";
         let status_path = "target/rubash-hash-stderr-status.txt";

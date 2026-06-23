@@ -131,7 +131,7 @@ where
             return Ok(EXECUTION_SUCCESS);
         }
         writeln!(stderr, "hash: hash table empty")?;
-        return Ok(EXECUTION_FAILURE);
+        return Ok(EXECUTION_SUCCESS);
     }
 
     Ok(EXECUTION_SUCCESS)
