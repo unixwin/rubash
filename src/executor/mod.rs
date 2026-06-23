@@ -4225,7 +4225,11 @@ impl Executor {
 
     fn execute_builtin_direct_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         let args = &cmd.words[1..];
-        if cmd.redirect_out.is_none() && cmd.append.is_none() && cmd.redirect_err.is_none() {
+        if cmd.redirect_out.is_none()
+            && cmd.append.is_none()
+            && cmd.redirect_err.is_none()
+            && cmd.redirect_err_append.is_none()
+        {
             return self.execute_builtin_direct(args);
         }
 
@@ -4313,9 +4317,57 @@ impl Executor {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
                 Ok(())
             }
+            "type" => {
+                self.exit_code = self.execute_type_redirected(&builtin_cmd)?;
+                Ok(())
+            }
+            "test" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code =
+                    crate::builtins::test::execute(&builtin_cmd.words[1..], false, &self.env_vars)?;
+                Ok(())
+            }
+            "[" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code =
+                    crate::builtins::test::execute(&builtin_cmd.words[1..], true, &self.env_vars)?;
+                Ok(())
+            }
             "shift" => self.execute_shift_command(&builtin_cmd),
             _ => self.execute_builtin_direct(args),
         }
+    }
+
+    fn apply_no_output_builtin_redirects(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            self.create_redirect_output(&target, redirect.clobber)?;
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+        }
+
+        Ok(())
     }
 
     fn execute_builtin_direct(&mut self, args: &[String]) -> Result<(), ExecuteError> {
@@ -4463,6 +4515,21 @@ impl Executor {
                 command.words = args.to_vec();
                 self.exit_code = self
                     .execute_stack_builtin(&command, crate::builtins::pushd::StackBuiltin::Dirs)?;
+                Ok(())
+            }
+            "type" => {
+                if self.execute_type_with_disabled_builtin_state(&args[1..])? {
+                    return Ok(());
+                }
+                self.exit_code = self.execute_type(&args[1..]);
+                Ok(())
+            }
+            "test" => {
+                self.exit_code = crate::builtins::test::execute(&args[1..], false, &self.env_vars)?;
+                Ok(())
+            }
+            "[" => {
+                self.exit_code = crate::builtins::test::execute(&args[1..], true, &self.env_vars)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),

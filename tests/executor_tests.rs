@@ -2554,6 +2554,77 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_type_invokes_type_builtin() {
+        let output_path = "target/rubash-builtin-type-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function type {{ echo function-type; }}; builtin type -t echo > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "builtin\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_test_invokes_test_builtin() {
+        let output_path = "target/rubash-builtin-test-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin test 3 -eq 3; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_bracket_invokes_test_builtin() {
+        let output_path = "target/rubash-builtin-bracket-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin [ 3 -eq 4 ]; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_test_redirect_truncates_output_file() {
+        let output_path = "target/rubash-builtin-test-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("builtin test 3 -eq 3 > {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_command_echo_redirects_output() {
         let output_path = "target/rubash-command-echo-redirect-output.txt";
         let _ = fs::remove_file(output_path);
