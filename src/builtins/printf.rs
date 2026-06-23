@@ -121,7 +121,7 @@ fn render_one_pass(
 
     while let Some(ch) = chars.next() {
         match ch {
-            '\\' => output.push(expand_format_escape(&mut chars)),
+            '\\' => output.push_str(&expand_format_escape(&mut chars)),
             '%' => {
                 if chars.peek() == Some(&'%') {
                     chars.next();
@@ -525,23 +525,37 @@ fn parse_integer_literal(value: &str) -> Option<i64> {
     Some(sign * parsed)
 }
 
-fn expand_format_escape<I>(chars: &mut std::iter::Peekable<I>) -> char
+fn expand_format_escape<I>(chars: &mut std::iter::Peekable<I>) -> String
 where
     I: Iterator<Item = char>,
 {
     match chars.next() {
-        Some('a') => '\x07',
-        Some('b') => '\x08',
-        Some('e') | Some('E') => '\x1b',
-        Some('f') => '\x0c',
-        Some('n') => '\n',
-        Some('r') => '\r',
-        Some('t') => '\t',
-        Some('v') => '\x0b',
-        Some('\\') => '\\',
-        Some(other) => other,
-        None => '\\',
+        Some('a') => "\x07".to_string(),
+        Some('b') => "\x08".to_string(),
+        Some('e') | Some('E') => "\x1b".to_string(),
+        Some('f') => "\x0c".to_string(),
+        Some('n') => "\n".to_string(),
+        Some('r') => "\r".to_string(),
+        Some('t') => "\t".to_string(),
+        Some('v') => "\x0b".to_string(),
+        Some('\\') => "\\".to_string(),
+        Some('x') => format_escape_codepoint(read_escape_digits(chars, 16, 2), "\\x"),
+        Some('u') => format_escape_codepoint(read_escape_digits(chars, 16, 4), "\\u"),
+        Some('U') => format_escape_codepoint(read_escape_digits(chars, 16, 8), "\\U"),
+        Some('0') => format_escape_codepoint(read_escape_digits(chars, 8, 3).or(Some(0)), ""),
+        Some(octal @ '1'..='7') => {
+            format_escape_codepoint(read_prefixed_escape_digits(chars, octal, 8, 3), "")
+        }
+        Some(other) => format!("\\{other}"),
+        None => "\\".to_string(),
     }
+}
+
+fn format_escape_codepoint(value: Option<u32>, fallback: &str) -> String {
+    value
+        .and_then(char::from_u32)
+        .map(|ch| ch.to_string())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn expand_percent_b(value: &str) -> (String, bool) {
@@ -704,6 +718,13 @@ mod tests {
     #[test]
     fn prints_plain_and_escaped_format() {
         assert_eq!(run(&["a\\nb"]).1, "a\nb");
+    }
+
+    #[test]
+    fn format_string_escapes_match_bash() {
+        assert_eq!(run(&["\\045\\x41\\u0042\\101"]).1, "%ABA");
+        assert_eq!(run(&["4\\.2 one\\ctwo"]).1, "4\\.2 one\\ctwo");
+        assert_eq!(run(&["\\0101"]).1, "A");
     }
 
     #[test]
