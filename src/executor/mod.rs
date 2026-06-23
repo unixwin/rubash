@@ -668,6 +668,20 @@ impl Executor {
         env_vars.insert("OPTIND".to_string(), "1".to_string());
         env_vars.remove("OPTARG");
         env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+        env_vars
+            .entry("BASH_VERSION".to_string())
+            .or_insert_with(bash_version_value);
+        store_indexed_array(&mut env_vars, "BASH_VERSINFO", bash_versinfo_values());
+        mark_env_name(&mut env_vars, READONLY_VARS, "BASH_VERSINFO");
+        env_vars
+            .entry("HOSTTYPE".to_string())
+            .or_insert_with(hosttype_value);
+        env_vars
+            .entry("OSTYPE".to_string())
+            .or_insert_with(ostype_value);
+        env_vars
+            .entry("MACHTYPE".to_string())
+            .or_insert_with(machtype_value);
 
         Self {
             exit_code: 0,
@@ -7910,6 +7924,11 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+            eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
+            self.exit_code = 1;
+            return true;
+        }
         if name == "BASH_CMDS" {
             let command_name = index
                 .trim_end_matches(']')
@@ -11278,6 +11297,49 @@ fn is_shell_name_char(ch: char) -> bool {
 
 fn is_special_parameter_name(name: &str) -> bool {
     matches!(name, "#" | "?" | "$" | "-" | "0")
+}
+
+fn bash_version_value() -> String {
+    format!("{}(1)-release", env!("CARGO_PKG_VERSION"))
+}
+
+fn bash_versinfo_values() -> Vec<String> {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    vec![
+        parts.next().unwrap_or("0").to_string(),
+        parts.next().unwrap_or("0").to_string(),
+        parts.next().unwrap_or("0").to_string(),
+        "1".to_string(),
+        "release".to_string(),
+        machtype_value(),
+    ]
+}
+
+fn hosttype_value() -> String {
+    std::env::consts::ARCH.to_string()
+}
+
+fn ostype_value() -> String {
+    if cfg!(windows) {
+        "msys".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
+fn machtype_value() -> String {
+    if cfg!(windows) {
+        format!("{}-pc-msys", std::env::consts::ARCH)
+    } else if cfg!(target_env = "gnu") {
+        format!("{}-pc-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
+    } else {
+        format!(
+            "{}-pc-{}-{}",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            std::env::consts::FAMILY
+        )
+    }
 }
 
 fn declare_args_request_integer(args: &[String]) -> bool {
