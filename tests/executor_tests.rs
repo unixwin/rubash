@@ -596,6 +596,51 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_random_expands_to_15_bit_values_and_advances() {
+        let output_path = "target/rubash-random-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s\\n' \"$RANDOM\" \"$RANDOM\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let values = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(|line| line.parse::<u32>().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(|value| *value <= 32767));
+        assert_ne!(values[0], values[1]);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_random_assignment_reseeds_sequence() {
+        let output_path = "target/rubash-random-seed-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "RANDOM=42; first=$RANDOM; RANDOM=42; second=$RANDOM; printf '%s:%s\\n' \"$first\" \"$second\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let (first, second) = output.trim_end().split_once(':').unwrap();
+        assert_eq!(first, second);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = target_test_path("rubash-pipeline-external-output.txt");
         #[cfg(windows)]
