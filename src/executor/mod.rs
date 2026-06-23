@@ -9043,6 +9043,7 @@ impl Executor {
             "RANDOM" => Some(self.next_random_value().to_string()),
             "BASHPID" => Some(self.bashpid_value().to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.get().to_string()),
+            "BASH_ARGV0" => Some(self.script_name_value()),
             "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
@@ -9077,6 +9078,7 @@ impl Executor {
                 | "RANDOM"
                 | "BASHPID"
                 | "BASH_SUBSHELL"
+                | "BASH_ARGV0"
                 | "FUNCNAME"
                 | "GROUPS"
                 | "LINENO"
@@ -9187,7 +9189,7 @@ impl Executor {
             .get("BASH_ARGV0")
             .or_else(|| self.env_vars.get("__RUBASH_SCRIPT_NAME"))
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_else(|| "rubash".to_string())
     }
 
     fn groups_words(&self) -> Vec<String> {

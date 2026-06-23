@@ -645,6 +645,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_argv0_defaults_to_shell_name() {
+        let output_path = "target/rubash-bash-argv0-default-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s:%s\\n' \"$0\" \"$BASH_ARGV0\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "rubash:rubash\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_argv0_reflects_script_name() {
+        let output_path = "target/rubash-bash-argv0-script-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s:%s\\n' \"$0\" \"$BASH_ARGV0\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./script.sh");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "./script.sh:./script.sh\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_bash_argv0_assignment_inside_function_updates_zero_parameter() {
         let output_path = "target/rubash-bash-argv0-function-output.txt";
         let _ = fs::remove_file(output_path);
