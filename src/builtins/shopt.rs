@@ -216,7 +216,7 @@ fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
     }
 }
 
-fn set_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
     match name {
         "xpg_echo" => XPG_ECHO.store(enabled, Ordering::Relaxed),
         "sourcepath" => SOURCEPATH.store(enabled, Ordering::Relaxed),
