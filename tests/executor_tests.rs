@@ -1052,6 +1052,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_lineno_and_source_track_function_stack() {
+        let output_path = "target/rubash-bash-lineno-source-stack-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "outer() {{ inner; }}; \
+             inner() {{ printf '%s|%s|%s|%s|%s\\n' \"${{BASH_LINENO[0]}}\" \"${{BASH_LINENO[1]}}\" \"${{BASH_SOURCE[0]}}\" \"${{BASH_SOURCE[1]}}\" \"${{#BASH_SOURCE[@]}}\" > {output_path}; }}; \
+             outer"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./stack-source.tests");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1|1|./stack-source.tests|./stack-source.tests|3\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_assignment_does_not_change_stack() {
         let output_path = "target/rubash-funcname-noassign-output.txt";
         let _ = fs::remove_file(output_path);
