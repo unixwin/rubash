@@ -4891,6 +4891,24 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_compact_a_uses_attached_array_name() {
+        let output_path = "target/rubash-read-a-attached-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("read -aarr <<< 'alpha beta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_read_a_processes_backslash_escaped_whitespace() {
         let output_path = "target/rubash-read-a-backslash-output.txt";
         let _ = fs::remove_file(output_path);
