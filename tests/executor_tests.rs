@@ -1077,6 +1077,27 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_argc_and_argv_track_function_arguments() {
+        let output_path = "target/rubash-bash-argc-argv-stack-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "outer() {{ inner c; }}; \
+             inner() {{ printf '%s|%s|%s|%s|%s\\n' \"${{BASH_ARGC[0]}}\" \"${{BASH_ARGC[1]}}\" \"${{BASH_ARGV[0]}}\" \"${{BASH_ARGV[1]}}\" \"${{BASH_ARGV[@]}}\" > {output_path}; }}; \
+             outer a b"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1|2|c|b|c b a\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_assignment_does_not_change_stack() {
         let output_path = "target/rubash-funcname-noassign-output.txt";
         let _ = fs::remove_file(output_path);

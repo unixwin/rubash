@@ -2107,6 +2107,8 @@ impl Executor {
         }
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_funcname = self.env_vars.get("FUNCNAME").cloned();
+        let old_bash_argc = self.env_vars.get("BASH_ARGC").cloned();
+        let old_bash_argv = self.env_vars.get("BASH_ARGV").cloned();
         let old_bash_lineno = self.env_vars.get("BASH_LINENO").cloned();
         let old_bash_source = self.env_vars.get("BASH_SOURCE").cloned();
         let old_positional_params = self.positional_params.clone();
@@ -2122,6 +2124,14 @@ impl Executor {
         let mut source_stack = self.indexed_array_stack("BASH_SOURCE");
         source_stack.insert(0, self.current_bash_source());
         store_indexed_array(&mut self.env_vars, "BASH_SOURCE", source_stack);
+        let mut argc_stack = self.indexed_array_stack("BASH_ARGC");
+        argc_stack.insert(0, args.len().to_string());
+        store_indexed_array(&mut self.env_vars, "BASH_ARGC", argc_stack);
+        let mut argv_stack = self.indexed_array_stack("BASH_ARGV");
+        for arg in args {
+            argv_stack.insert(0, arg.clone());
+        }
+        store_indexed_array(&mut self.env_vars, "BASH_ARGV", argv_stack);
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
         self.function_depth += 1;
@@ -2138,6 +2148,8 @@ impl Executor {
                 mark_env_name(&mut self.env_vars, ARRAY_VARS, "FUNCNAME");
             }
         }
+        self.restore_indexed_array("BASH_ARGC", old_bash_argc);
+        self.restore_indexed_array("BASH_ARGV", old_bash_argv);
         self.restore_indexed_array("BASH_LINENO", old_bash_lineno);
         self.restore_indexed_array("BASH_SOURCE", old_bash_source);
         match old_function {
