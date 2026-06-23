@@ -13,6 +13,7 @@ const EX_USAGE: i32 = 2;
 struct FormatSpec {
     left_adjust: bool,
     zero_pad: bool,
+    alternate_form: bool,
     width: Option<usize>,
     width_from_arg: bool,
     precision: Option<usize>,
@@ -161,7 +162,8 @@ where
         match flag {
             '-' => spec.left_adjust = true,
             '0' => spec.zero_pad = true,
-            '+' | ' ' | '#' | '\'' => {}
+            '#' => spec.alternate_form = true,
+            '+' | ' ' | '\'' => {}
             _ => break,
         }
         chars.next();
@@ -233,9 +235,9 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
         'c' => value.chars().next().unwrap_or('\0').to_string(),
         'd' | 'i' => parse_i64(value).to_string(),
         'u' => (parse_i64(value) as u64).to_string(),
-        'x' => format!("{:x}", parse_i64(value)),
-        'X' => format!("{:X}", parse_i64(value)),
-        'o' => format!("{:o}", parse_i64(value)),
+        'x' => format_integer_with_alternate(parse_i64(value), 16, false, spec.alternate_form),
+        'X' => format_integer_with_alternate(parse_i64(value), 16, true, spec.alternate_form),
+        'o' => format_integer_with_alternate(parse_i64(value), 8, false, spec.alternate_form),
         'f' | 'F' => format_float(value, spec.precision, 'f'),
         'e' => format_float(value, spec.precision, 'e'),
         'E' => format_float(value, spec.precision, 'E'),
@@ -266,6 +268,31 @@ fn format_float(value: &str, precision: Option<usize>, mode: char) -> String {
         ('e', None) => format!("{value:e}"),
         ('E', None) => format!("{value:E}"),
         _ => format!("{value}"),
+    }
+}
+
+fn format_integer_with_alternate(
+    value: i64,
+    radix: u32,
+    uppercase: bool,
+    alternate: bool,
+) -> String {
+    let rendered = match (radix, uppercase) {
+        (8, _) => format!("{value:o}"),
+        (16, false) => format!("{value:x}"),
+        (16, true) => format!("{value:X}"),
+        _ => value.to_string(),
+    };
+
+    if !alternate || value == 0 {
+        return rendered;
+    }
+
+    match (radix, uppercase) {
+        (8, _) => format!("0{rendered}"),
+        (16, false) => format!("0x{rendered}"),
+        (16, true) => format!("0X{rendered}"),
+        _ => rendered,
     }
 }
 
@@ -572,6 +599,14 @@ mod tests {
             ])
             .1,
             "115:163:73:115.00:0"
+        );
+    }
+
+    #[test]
+    fn alternate_integer_formats_add_bash_prefixes() {
+        assert_eq!(
+            run(&["%#o:%#x:%#X:%#o:%#x", "115", "115", "115", "0", "0"]).1,
+            "0163:0x73:0X73:0:0"
         );
     }
 }
