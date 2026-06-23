@@ -4224,7 +4224,63 @@ impl Executor {
                 self.exit_code = self.execute_help(cmd)?;
                 Ok(())
             }
+            "kill" => {
+                self.exit_code = self.execute_kill(cmd)?;
+                Ok(())
+            }
+            "let" => {
+                self.apply_no_output_builtin_redirects(cmd)?;
+                self.exit_code = self.execute_let(&cmd.words[1..]);
+                Ok(())
+            }
+            "umask" => {
+                self.exit_code = self.execute_umask(cmd)?;
+                Ok(())
+            }
+            "ulimit" => {
+                self.exit_code = self.execute_ulimit(cmd)?;
+                Ok(())
+            }
+            "read" => {
+                self.exit_code = self.execute_read(cmd);
+                Ok(())
+            }
+            "mapfile" | "readarray" => {
+                self.exit_code = self.execute_mapfile(cmd);
+                Ok(())
+            }
             "shift" => self.execute_shift_command(cmd),
+            "times" => {
+                self.exit_code = self.execute_times(cmd)?;
+                Ok(())
+            }
+            "trap" => {
+                self.exit_code = self.execute_trap(cmd)?;
+                Ok(())
+            }
+            "type" => {
+                if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                    self.exit_code = self.execute_type_redirected(cmd)?;
+                    return Ok(());
+                }
+                if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
+                    return Ok(());
+                }
+                self.exit_code = self.execute_type(&cmd.words[1..]);
+                Ok(())
+            }
+            "test" => {
+                self.apply_no_output_builtin_redirects(cmd)?;
+                self.exit_code =
+                    crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
+                Ok(())
+            }
+            "[" => {
+                self.apply_no_output_builtin_redirects(cmd)?;
+                self.exit_code =
+                    crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
+                Ok(())
+            }
             _ => self.execute_external(cmd),
         }
     }

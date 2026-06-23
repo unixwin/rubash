@@ -2979,6 +2979,79 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_type_invokes_type_builtin() {
+        let output_path = "target/rubash-command-type-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function type {{ echo function-type; }}; command type -t echo > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "builtin\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_test_invokes_test_builtin() {
+        let output_path = "target/rubash-command-test-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("command test 3 -eq 4; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_trap_redirects_output() {
+        let output_path = "target/rubash-command-trap-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("trap 'echo bye' EXIT; command trap -p EXIT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trap -- 'echo bye' EXIT\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_kill_redirects_output() {
+        let output_path = "target/rubash-command-kill-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("command kill -l HUP > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shift_help_redirects_output_and_returns_usage() {
         let output_path = "target/rubash-shift-help-redirect-output.txt";
         let _ = fs::remove_file(output_path);
