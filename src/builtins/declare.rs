@@ -262,17 +262,19 @@ where
             .collect()
     };
     for name in names_to_print {
+        let attrs = DeclarationAttrs {
+            exported: exported.contains(&name),
+            readonly: readonly.contains(&name),
+            array: arrays.contains(&name),
+            assoc: assocs.contains(&name),
+            integer: integers.contains(&name),
+            uppercase: uppercase.contains(&name),
+            lowercase: lowercase.contains(&name),
+        };
         if let Some(value) = variables.get(&name) {
-            let attrs = DeclarationAttrs {
-                exported: exported.contains(&name),
-                readonly: readonly.contains(&name),
-                array: arrays.contains(&name),
-                assoc: assocs.contains(&name),
-                integer: integers.contains(&name),
-                uppercase: uppercase.contains(&name),
-                lowercase: lowercase.contains(&name),
-            };
             print_declaration(&name, value, attrs, stdout)?;
+        } else if attrs.has_scalar_attribute() {
+            print_unset_declaration(&name, attrs, stdout)?;
         } else {
             writeln!(
                 stderr,
@@ -322,6 +324,25 @@ fn declaration_names_to_print(
         })
         .cloned()
         .collect();
+    for name in exported.iter().chain(readonly_vars.iter()) {
+        if name.starts_with("__RUBASH_") {
+            continue;
+        }
+        if filter_by_attr
+            && !((!export || exported.contains(name))
+                && (!readonly || readonly_vars.contains(name))
+                && (!array || arrays.contains(name))
+                && (!assoc || assocs.contains(name))
+                && (!integer || integers.contains(name))
+                && (!uppercase || uppercase_vars.contains(name))
+                && (!lowercase || lowercase_vars.contains(name)))
+        {
+            continue;
+        }
+        if !names.iter().any(|current| current == name) {
+            names.push(name.clone());
+        }
+    }
     names.sort();
     names
 }
@@ -389,6 +410,12 @@ struct DeclarationAttrs {
     lowercase: bool,
 }
 
+impl DeclarationAttrs {
+    fn has_scalar_attribute(self) -> bool {
+        self.exported || self.readonly || self.integer || self.uppercase || self.lowercase
+    }
+}
+
 fn print_declaration<W>(
     name: &str,
     value: &str,
@@ -433,6 +460,17 @@ where
         )
     } else {
         writeln!(stdout, "declare -- {}=\"{}\"", name, quote_double(value))
+    }
+}
+
+fn print_unset_declaration<W>(name: &str, attrs: DeclarationAttrs, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    if let Some(attrs) = declaration_scalar_attrs(attrs) {
+        writeln!(stdout, "declare {attrs} {name}")
+    } else {
+        writeln!(stdout, "declare -- {name}")
     }
 }
 
