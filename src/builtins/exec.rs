@@ -56,11 +56,8 @@ where
         return Ok(EXECUTION_SUCCESS);
     }
 
-    if command == Some("printenv") && !clean_env {
-        if let Some(value) = env_vars.get("FOO") {
-            writeln!(stdout, "FOO={value}")?;
-        }
-        return Ok(EXECUTION_SUCCESS);
+    if command == Some("printenv") {
+        return run_printenv_fallback(operands, env_vars, clean_env, stdout);
     }
 
     if let Some(command) = command {
@@ -197,6 +194,49 @@ fn apply_exported_environment(process: &mut Command, env_vars: &HashMap<String, 
             process.env(&name, value);
         }
     }
+}
+
+fn run_printenv_fallback<W>(
+    names: &[String],
+    env_vars: &HashMap<String, String>,
+    clean_env: bool,
+    stdout: &mut W,
+) -> io::Result<i32>
+where
+    W: Write,
+{
+    if clean_env {
+        return Ok(if names.is_empty() {
+            EXECUTION_SUCCESS
+        } else {
+            1
+        });
+    }
+
+    let exported = marked_vars(env_vars, EXPORTED_VARS);
+    if names.is_empty() {
+        let mut exported = exported;
+        exported.sort();
+        for name in exported {
+            if let Some(value) = env_vars.get(&name) {
+                writeln!(stdout, "{name}={value}")?;
+            }
+        }
+        return Ok(EXECUTION_SUCCESS);
+    }
+
+    let mut found_all = true;
+    for name in names {
+        if exported.iter().any(|exported_name| exported_name == name) {
+            if let Some(value) = env_vars.get(name) {
+                writeln!(stdout, "{value}")?;
+                continue;
+            }
+        }
+        found_all = false;
+    }
+
+    Ok(if found_all { EXECUTION_SUCCESS } else { 1 })
 }
 
 fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {

@@ -6387,6 +6387,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exec_printenv_ignores_unexported_variable() {
+        let output_path = target_test_path("rubash-exec-printenv-local-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!("RUBASH_EXEC_PRINTENV_LOCAL=local; exec printenv RUBASH_EXEC_PRINTENV_LOCAL > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "");
+        std::env::remove_var("RUBASH_EXEC_PRINTENV_LOCAL");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_exec_printenv_reads_exported_variable() {
+        let output_path = target_test_path("rubash-exec-printenv-exported-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!("export RUBASH_EXEC_PRINTENV_EXPORTED=exported; exec printenv RUBASH_EXEC_PRINTENV_EXPORTED > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(0))));
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "exported\n");
+        std::env::remove_var("RUBASH_EXEC_PRINTENV_EXPORTED");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_exec_runs_external_command() {
         let output_path = target_test_path("rubash-exec-runs-external-output.txt");
         #[cfg(windows)]
