@@ -2525,6 +2525,35 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_readonly_without_assignment_marks_unset_variable() {
+        let output_path = target_test_path("rubash-readonly-unset-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "unset RUBASH_READONLY_UNSET; readonly RUBASH_READONLY_UNSET; \
+             printf '<%s>\\n' \"${{RUBASH_READONLY_UNSET-unset}}\" > {shell_output_path}; \
+             readonly -p >> {shell_output_path}; \
+             printf '%s\\n' --- >> {shell_output_path}; \
+             declare -p RUBASH_READONLY_UNSET >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("<unset>\n"));
+        assert!(output.contains("declare -r RUBASH_READONLY_UNSET\n"));
+        assert!(output.ends_with("---\ndeclare -r RUBASH_READONLY_UNSET\n"));
+        assert!(!output.contains("RUBASH_READONLY_UNSET=\"\""));
+        std::env::remove_var("RUBASH_READONLY_UNSET");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_builtin_export_assigns_variable() {
         let output_path = "target/rubash-builtin-export-output.txt";
         let _ = fs::remove_file(output_path);
