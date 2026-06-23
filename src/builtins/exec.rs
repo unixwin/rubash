@@ -34,6 +34,10 @@ where
     let mut index = 0;
 
     while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
         let Some(options) = arg.strip_prefix('-') else {
             break;
         };
