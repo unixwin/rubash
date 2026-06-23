@@ -4283,6 +4283,10 @@ impl Executor {
                 self.exit_code = self.execute_pwd(&builtin_cmd)?;
                 Ok(())
             }
+            "cd" => {
+                self.exit_code = self.execute_cd(&builtin_cmd)?;
+                Ok(())
+            }
             "hash" => {
                 self.exit_code = self.execute_hash(&builtin_cmd)?;
                 Ok(())
@@ -4338,6 +4342,12 @@ impl Executor {
                     }
                 }
                 self.exit_code = crate::builtins::pwd::execute(&args[1..])?;
+                Ok(())
+            }
+            "cd" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_cd(&command)?;
                 Ok(())
             }
             "command" => {
