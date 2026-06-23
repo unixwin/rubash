@@ -6311,6 +6311,8 @@ impl Executor {
         let mut delimiter = None;
         let mut origin = None;
         let mut skip = 0;
+        let mut callback = None;
+        let mut callback_quantum = 5000usize;
         let mut array_name = None;
         let mut index = 1;
         while index < cmd.words.len() {
@@ -6348,6 +6350,19 @@ impl Executor {
                         .unwrap_or(0);
                     index += 2;
                 }
+                "-C" => {
+                    callback = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                "-c" => {
+                    callback_quantum = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.parse::<usize>().ok())
+                        .filter(|quantum| *quantum > 0)
+                        .unwrap_or(callback_quantum);
+                    index += 2;
+                }
                 word if word.starts_with("-d") && word.len() > 2 => {
                     delimiter = Some(word[2..].chars().next().unwrap_or('\0'));
                     index += 1;
@@ -6362,6 +6377,18 @@ impl Executor {
                 }
                 word if word.starts_with("-s") && word.len() > 2 => {
                     skip = word[2..].parse::<usize>().unwrap_or(0);
+                    index += 1;
+                }
+                word if word.starts_with("-C") && word.len() > 2 => {
+                    callback = Some(word[2..].to_string());
+                    index += 1;
+                }
+                word if word.starts_with("-c") && word.len() > 2 => {
+                    callback_quantum = word[2..]
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|quantum| *quantum > 0)
+                        .unwrap_or(callback_quantum);
                     index += 1;
                 }
                 word if word.starts_with('-') => {
@@ -6396,7 +6423,18 @@ impl Executor {
                 BTreeMap::new()
             };
             for (offset, value) in values.into_iter().enumerate() {
-                entries.insert(start + offset, value);
+                let target_index = start + offset;
+                if let Some(callback) = callback.as_deref() {
+                    if (offset + 1) % callback_quantum == 0 {
+                        if self
+                            .execute_mapfile_callback(callback, target_index, &value)
+                            .is_err()
+                        {
+                            return 1;
+                        }
+                    }
+                }
+                entries.insert(target_index, value);
             }
             self.env_vars
                 .insert(name.clone(), format_indexed_array_storage(entries));
@@ -6416,6 +6454,27 @@ impl Executor {
         );
         mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
         0
+    }
+
+    fn execute_mapfile_callback(
+        &mut self,
+        callback: &str,
+        index: usize,
+        value: &str,
+    ) -> Result<(), ExecuteError> {
+        let mut words = callback
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if words.is_empty() {
+            return Ok(());
+        }
+        words.push(index.to_string());
+        words.push(value.to_string());
+
+        let mut callback_cmd = CommandNode::new();
+        callback_cmd.words = words;
+        self.execute_command(&callback_cmd)
     }
 
     fn execute_hash(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
