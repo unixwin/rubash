@@ -653,6 +653,7 @@ pub struct Executor {
 impl Executor {
     pub fn new() -> Self {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        let imported_functions = import_exported_functions_from_env(&env_vars);
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
         env_vars.remove("__RUBASH_SCRIPT_NAME");
@@ -727,7 +728,7 @@ impl Executor {
             exit_code: 0,
             env_vars,
             aliases: HashMap::new(),
-            functions: HashMap::new(),
+            functions: imported_functions,
             positional_params: Vec::new(),
             local_var_scopes: Vec::new(),
             expanding_aliases: Vec::new(),
@@ -1374,6 +1375,7 @@ impl Executor {
             command
         };
 
+        self.apply_exported_functions_to_child(&mut process);
         for (var_name, var_value) in &command.assignments {
             process.env(var_name, var_value);
         }
@@ -2913,6 +2915,18 @@ impl Executor {
             }
         }
         writeln!(stdout, "}}")
+    }
+
+    fn apply_exported_functions_to_child(&self, process: &mut Command) {
+        for name in marked_env_names(&self.env_vars, EXPORTED_FUNCTIONS) {
+            let Some(body) = self.functions.get(&name) else {
+                continue;
+            };
+            process.env(
+                exported_function_env_name(&name),
+                exported_function_env_value(body),
+            );
+        }
     }
 
     fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
@@ -12095,6 +12109,7 @@ impl Executor {
             command
         };
 
+        self.apply_exported_functions_to_child(&mut process);
         for (var_name, var_value) in &cmd.assignments {
             process.env(var_name, var_value);
         }
@@ -13013,6 +13028,71 @@ fn marked_env_names(env_vars: &HashMap<String, String>, key: &str) -> Vec<String
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn import_exported_functions_from_env(
+    env_vars: &HashMap<String, String>,
+) -> HashMap<String, Vec<CommandNode>> {
+    let mut functions = HashMap::new();
+    for (env_name, value) in env_vars {
+        let Some(name) = imported_function_name(env_name) else {
+            continue;
+        };
+        let Some(body) = parse_exported_function_body(value) else {
+            continue;
+        };
+        functions.insert(name.to_string(), body);
+    }
+    functions
+}
+
+fn imported_function_name(env_name: &str) -> Option<&str> {
+    let name = env_name
+        .strip_prefix("BASH_FUNC_")?
+        .strip_suffix("%%")?;
+    if is_shell_name(name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn parse_exported_function_body(value: &str) -> Option<Vec<CommandNode>> {
+    let value = value.trim();
+    let rest = value.strip_prefix("()")?.trim_start();
+    if !rest.starts_with('{') || !rest.ends_with('}') {
+        return None;
+    }
+    let body = rest[1..rest.len() - 1].trim();
+    let tokens = crate::lexer::tokenize(body);
+    Some(crate::parser::parse(&tokens).commands)
+}
+
+fn exported_function_env_name(name: &str) -> String {
+    format!("BASH_FUNC_{name}%%")
+}
+
+fn exported_function_env_value(body: &[CommandNode]) -> String {
+    let commands: Vec<String> = body
+        .iter()
+        .filter_map(exported_function_command_text)
+        .collect();
+    if commands.is_empty() {
+        "() { :; }".to_string()
+    } else {
+        format!("() {{ {}; }}", commands.join("; "))
+    }
+}
+
+fn exported_function_command_text(command: &CommandNode) -> Option<String> {
+    if command.words.is_empty() {
+        return None;
+    }
+    if let Some(here_string) = &command.here_string {
+        Some(format!("{} <<< {}", command.words.join(" "), here_string))
+    } else {
+        Some(command.words.join(" "))
+    }
 }
 
 fn export_args_request_functions(args: &[String]) -> bool {
