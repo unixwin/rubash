@@ -216,9 +216,21 @@ where
         }
     }
 
+    if names.is_empty() {
+        print = true;
+    }
+
     if !print {
         return Ok(EXECUTION_SUCCESS);
     }
+
+    let filter_exported = export;
+    let filter_readonly = readonly;
+    let filter_array = array;
+    let filter_assoc = assoc;
+    let filter_integer = integer;
+    let filter_uppercase = uppercase;
+    let filter_lowercase = lowercase;
 
     let mut status = EXECUTION_SUCCESS;
     let exported = exported_vars(variables);
@@ -228,20 +240,39 @@ where
     let integers = marked_vars(variables, INTEGER_VARS);
     let uppercase = marked_vars(variables, UPPERCASE_VARS);
     let lowercase = marked_vars(variables, LOWERCASE_VARS);
-    for name in names {
-        let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
-        let name = name.strip_suffix('+').unwrap_or(name);
-        if let Some(value) = variables.get(name) {
+    let names_to_print = if names.is_empty() {
+        declaration_names_to_print(
+            variables,
+            filter_exported,
+            filter_readonly,
+            filter_array,
+            filter_assoc,
+            filter_integer,
+            filter_uppercase,
+            filter_lowercase,
+            &uppercase,
+            &lowercase,
+        )
+    } else {
+        names
+            .into_iter()
+            .map(|name| name.split_once('=').map(|(name, _)| name).unwrap_or(name))
+            .map(|name| name.strip_suffix('+').unwrap_or(name))
+            .map(str::to_string)
+            .collect()
+    };
+    for name in names_to_print {
+        if let Some(value) = variables.get(&name) {
             let attrs = DeclarationAttrs {
-                exported: exported.contains(name),
-                readonly: readonly.contains(name),
-                array: arrays.contains(name),
-                assoc: assocs.contains(name),
-                integer: integers.contains(name),
-                uppercase: uppercase.contains(name),
-                lowercase: lowercase.contains(name),
+                exported: exported.contains(&name),
+                readonly: readonly.contains(&name),
+                array: arrays.contains(&name),
+                assoc: assocs.contains(&name),
+                integer: integers.contains(&name),
+                uppercase: uppercase.contains(&name),
+                lowercase: lowercase.contains(&name),
             };
-            print_declaration(name, value, attrs, stdout)?;
+            print_declaration(&name, value, attrs, stdout)?;
         } else {
             writeln!(
                 stderr,
@@ -254,6 +285,45 @@ where
     }
 
     Ok(status)
+}
+
+fn declaration_names_to_print(
+    variables: &HashMap<String, String>,
+    export: bool,
+    readonly: bool,
+    array: bool,
+    assoc: bool,
+    integer: bool,
+    uppercase: bool,
+    lowercase: bool,
+    uppercase_vars: &HashSet<String>,
+    lowercase_vars: &HashSet<String>,
+) -> Vec<String> {
+    let exported = exported_vars(variables);
+    let readonly_vars = marked_vars(variables, READONLY_VARS);
+    let arrays = marked_vars(variables, ARRAY_VARS);
+    let assocs = marked_vars(variables, ASSOC_VARS);
+    let integers = marked_vars(variables, INTEGER_VARS);
+    let filter_by_attr = export || readonly || array || assoc || integer || uppercase || lowercase;
+    let mut names: Vec<String> = variables
+        .keys()
+        .filter(|name| !name.starts_with("__RUBASH_"))
+        .filter(|name| {
+            if !filter_by_attr {
+                return true;
+            }
+            (!export || exported.contains(*name))
+                && (!readonly || readonly_vars.contains(*name))
+                && (!array || arrays.contains(*name))
+                && (!assoc || assocs.contains(*name))
+                && (!integer || integers.contains(*name))
+                && (!uppercase || uppercase_vars.contains(*name))
+                && (!lowercase || lowercase_vars.contains(*name))
+        })
+        .cloned()
+        .collect();
+    names.sort();
+    names
 }
 
 fn assign_declare_names(names: &[&str], variables: &mut HashMap<String, String>, integer: bool) {
