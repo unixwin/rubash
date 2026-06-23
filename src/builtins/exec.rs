@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::process::{Command, Stdio};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
@@ -97,13 +98,59 @@ where
     }
 
     if let Some(command) = command {
-        if crate::executor::path::find_user_command(command, env_vars).is_none() {
+        let Some(program) = crate::executor::path::find_user_command(command, env_vars) else {
             writeln!(stderr, "rubash: exec: {command}: not found")?;
             return Ok(EX_NOTFOUND);
-        }
+        };
+        return run_external_exec(&program, operands, env_vars, clean_env, stdout, stderr);
     }
 
     Ok(EXECUTION_SUCCESS)
+}
+
+fn run_external_exec<W, E>(
+    program: &std::path::Path,
+    operands: &[String],
+    env_vars: &HashMap<String, String>,
+    clean_env: bool,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    let mut process = if crate::executor::path::should_run_with_shell(program) {
+        if let Some(shell) = crate::executor::path::find_shell(env_vars) {
+            let mut command = Command::new(shell);
+            command.arg(program);
+            command
+        } else {
+            Command::new(program)
+        }
+    } else {
+        Command::new(program)
+    };
+
+    if clean_env {
+        process.env_clear();
+    } else {
+        process.envs(env_vars);
+    }
+    process.args(operands);
+    process.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    match process.output() {
+        Ok(output) => {
+            stdout.write_all(&output.stdout)?;
+            stderr.write_all(&output.stderr)?;
+            Ok(output.status.code().unwrap_or(1))
+        }
+        Err(error) => {
+            writeln!(stderr, "rubash: exec: {}: {}", program.display(), error)?;
+            Ok(126)
+        }
+    }
 }
 
 fn write_usage<W>(stderr: &mut W) -> io::Result<()>

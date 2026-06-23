@@ -4764,6 +4764,48 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exec_runs_external_command() {
+        let output_path = target_test_path("rubash-exec-runs-external-output.txt");
+        #[cfg(windows)]
+        let script_path = target_test_path("rubash-exec-runs-external.cmd");
+        #[cfg(not(windows))]
+        let script_path = target_test_path("rubash-exec-runs-external.sh");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_script_path = shell_test_path(&script_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
+        #[cfg(windows)]
+        fs::write(&script_path, "@echo off\r\necho exec-ran\r\n").unwrap();
+        #[cfg(not(windows))]
+        fs::write(&script_path, "#!/bin/sh\nprintf '%s\\n' exec-ran\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+        let input = format!("exec {shell_script_path} > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path)
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "exec-ran\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(script_path);
+    }
+
+    #[test]
     fn test_exec_missing_command_returns_not_found() {
         let error_path = "target/rubash-exec-missing-command-error.txt";
         let _ = fs::remove_file(error_path);
