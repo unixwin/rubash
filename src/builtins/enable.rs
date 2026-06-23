@@ -10,6 +10,42 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
+const ALL_BUILTINS: &[&str] = &[
+    ".",
+    ":",
+    "[",
+    "alias",
+    "break",
+    "builtin",
+    "cd",
+    "command",
+    "continue",
+    "echo",
+    "enable",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "false",
+    "hash",
+    "mapfile",
+    "printf",
+    "pwd",
+    "read",
+    "readarray",
+    "readonly",
+    "return",
+    "set",
+    "shift",
+    "source",
+    "test",
+    "times",
+    "trap",
+    "true",
+    "type",
+    "umask",
+    "unset",
+];
 const SPECIAL_BUILTINS: &[&str] = &[
     ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
     "shift", "source", "times", "trap", "unset",
@@ -99,6 +135,17 @@ where
             for name in disabled_builtins(env_vars) {
                 writeln!(stdout, "enable -n {name}")?;
             }
+        } else {
+            let disabled = disabled_builtins(env_vars);
+            for name in ALL_BUILTINS {
+                if disabled.iter().any(|disabled| disabled == name) {
+                    if list_all {
+                        writeln!(stdout, "enable -n {name}")?;
+                    }
+                } else {
+                    writeln!(stdout, "enable {name}")?;
+                }
+            }
         }
         return Ok(EXECUTION_SUCCESS);
     }
@@ -156,27 +203,7 @@ fn set_disabled_builtins(env_vars: &mut HashMap<String, String>, disabled: &[Str
 }
 
 fn is_builtin(name: &str) -> bool {
-    SPECIAL_BUILTINS.contains(&name)
-        || matches!(
-            name,
-            "[" | "alias"
-                | "builtin"
-                | "cd"
-                | "command"
-                | "echo"
-                | "enable"
-                | "false"
-                | "hash"
-                | "printf"
-                | "pwd"
-                | "read"
-                | "readarray"
-                | "mapfile"
-                | "test"
-                | "true"
-                | "type"
-                | "umask"
-        )
+    ALL_BUILTINS.contains(&name)
 }
 
 fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {

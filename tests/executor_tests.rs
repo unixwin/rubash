@@ -3964,6 +3964,45 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_enable_p_lists_enabled_builtins() {
+        let output_path = "target/rubash-enable-p-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("enable -p > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("enable echo\n"));
+        assert!(output.contains("enable test\n"));
+        assert!(output.contains("enable source\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_enable_a_marks_disabled_builtins() {
+        let output_path = "target/rubash-enable-a-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("enable -n echo; enable -a > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("enable -n echo\n"));
+        assert!(output.contains("enable test\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_builtin_enable_updates_disabled_builtin_state() {
         let bin_dir = target_test_path("rubash-builtin-enable-bin");
         #[cfg(windows)]
