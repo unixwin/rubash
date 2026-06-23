@@ -6147,6 +6147,7 @@ impl Executor {
         let mut delimiter = '\n';
         let mut char_limit = None;
         let mut exact_char_limit = false;
+        let mut raw = false;
         let mut scalar_names = Vec::new();
         let mut index = 1;
         while index < cmd.words.len() {
@@ -6183,6 +6184,7 @@ impl Executor {
                     index += 2;
                 }
                 "-r" => {
+                    raw = true;
                     index += 1;
                 }
                 word if word.starts_with("-d") && word.len() > 2 => {
@@ -6213,9 +6215,12 @@ impl Executor {
         }
 
         if let Some(name) = array_name {
-            let value = if let Some(line) =
+            let value = if let Some(mut line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
+                if !raw {
+                    line = unescape_read_backslashes(&line);
+                }
                 let values =
                     split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str));
                 read_array_storage(&values)
@@ -6236,15 +6241,21 @@ impl Executor {
             scalar_names
         };
         if !scalar_names.is_empty() {
-            let status = if let Some(line) =
+            let status = if let Some(mut line) =
                 self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
             {
+                if !raw {
+                    line = unescape_read_backslashes(&line);
+                }
                 self.assign_read_scalar_names(&scalar_names, &line);
                 0
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => 1,
-                    Ok((_, line)) => {
+                    Ok((_, mut line)) => {
+                        if !raw {
+                            line = unescape_read_backslashes(&line);
+                        }
                         self.assign_read_scalar_names(&scalar_names, &line);
                         0
                     }
@@ -10972,6 +10983,27 @@ fn trim_read_input(
     }
 
     input
+}
+
+fn unescape_read_backslashes(input: &str) -> String {
+    let mut output = String::new();
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+
+        match chars.next() {
+            Some('\n') => {}
+            Some('\r') if chars.peek() == Some(&'\n') => {
+                chars.next();
+            }
+            Some(next) => output.push(next),
+            None => {}
+        }
+    }
+    output
 }
 
 fn split_read_array_words(line: &str, ifs: Option<&str>) -> Vec<String> {
