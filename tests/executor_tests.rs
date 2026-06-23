@@ -683,6 +683,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_dynamic_bash_parameter_lengths_use_current_values() {
+        let output_path = "target/rubash-dynamic-param-length-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("printf '%s:%s:%s\\n' \"${{#BASH_ARGV0}}\" \"${{#BASHPID}}\" \"${{#BASH_SUBSHELL}}\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./script.sh");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            format!("11:{}:1\n", std::process::id().to_string().chars().count())
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_bash_argv0_assignment_inside_function_updates_zero_parameter() {
         let output_path = "target/rubash-bash-argv0-function-output.txt";
         let _ = fs::remove_file(output_path);
