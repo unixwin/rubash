@@ -3490,6 +3490,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_ulimit_all_lists_resource_limits() {
+        let output_path = "target/rubash-ulimit-all-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("ulimit -n 2048; ulimit -a > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("core file size"));
+        assert!(output.contains("(blocks, -f) unlimited"));
+        assert!(output.contains("open files"));
+        assert!(output.contains("(-n) 2048"));
+        assert!(output.contains("virtual memory"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_ulimit_redirects_stderr() {
         let error_path = "target/rubash-ulimit-stderr-output.txt";
         let status_path = "target/rubash-ulimit-stderr-status.txt";
