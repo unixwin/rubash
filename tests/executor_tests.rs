@@ -2335,6 +2335,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_child_environment_contains_only_exported_variables() {
+        let output_path = target_test_path("rubash-child-export-env-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "RUBASH_CHILD_LOCAL=local; export RUBASH_CHILD_EXPORTED=exported; \
+             {rubash} -c 'printf \"%s/%s\\n\" \"${{RUBASH_CHILD_LOCAL-unset}}\" \"$RUBASH_CHILD_EXPORTED\"' > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "unset/exported\n");
+        std::env::remove_var("RUBASH_CHILD_LOCAL");
+        std::env::remove_var("RUBASH_CHILD_EXPORTED");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_temporary_assignment_reaches_external_command_environment() {
+        let output_path = target_test_path("rubash-temp-assignment-env-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "RUBASH_TEMP_ENV=command {rubash} -c 'printf \"%s\\n\" \"$RUBASH_TEMP_ENV\"' > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "command\n");
+        std::env::remove_var("RUBASH_TEMP_ENV");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_readonly_p_redirects_output() {
         let output_path = "target/rubash-readonly-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
