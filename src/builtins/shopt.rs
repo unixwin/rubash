@@ -32,6 +32,15 @@ pub(crate) fn cdable_vars_enabled(env_vars: &HashMap<String, String>) -> bool {
     option_enabled(env_vars, "cdable_vars")
 }
 
+pub(crate) fn bashopts_value(env_vars: &HashMap<String, String>) -> String {
+    SHOPT_OPTIONS
+        .iter()
+        .copied()
+        .filter(|name| option_enabled(env_vars, name))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 pub fn execute(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
@@ -203,7 +212,7 @@ fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
         "sourcepath" => sourcepath_enabled(),
-        _ => state(env_vars).contains(name) || default_enabled(name),
+        _ => state(env_vars).contains(name),
     }
 }
 
@@ -261,6 +270,7 @@ fn default_enabled(name: &str) -> bool {
     matches!(
         name,
         "cmdhist"
+            | "checkwinsize"
             | "complete_fullquote"
             | "extquote"
             | "force_fignore"
