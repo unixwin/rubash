@@ -2292,7 +2292,7 @@ impl Executor {
             if arg == "--" {
                 continue;
             }
-            if arg.starts_with('-') && arg != "-" {
+            if (arg.starts_with('-') || arg.starts_with('+')) && arg != "-" && arg != "+" {
                 continue;
             }
             let Some(name) = local_assignment_name(arg) else {
@@ -14093,7 +14093,7 @@ fn validate_local_options(args: &[String]) -> Result<(), char> {
         if arg == "--" {
             return Ok(());
         }
-        if !arg.starts_with('-') || arg == "-" {
+        if (!arg.starts_with('-') && !arg.starts_with('+')) || arg == "-" || arg == "+" {
             return Ok(());
         }
         for option in arg[1..].chars() {
