@@ -2504,6 +2504,61 @@ impl Executor {
         names
     }
 
+    fn begin_global_declare_for_local_names(
+        &mut self,
+        args: &[String],
+    ) -> Vec<(String, Option<String>)> {
+        if self.function_depth == 0 || !declare_args_force_global(args) {
+            return Vec::new();
+        }
+
+        let Some(scope) = self.local_var_scopes.last() else {
+            return Vec::new();
+        };
+
+        let mut saved_locals = Vec::new();
+        let mut seen = HashSet::new();
+        for arg in args {
+            if arg == "--" {
+                continue;
+            }
+            if (arg.starts_with('-') || arg.starts_with('+')) && arg != "-" && arg != "+" {
+                continue;
+            }
+            let Some(name) = local_assignment_name(arg) else {
+                continue;
+            };
+            if !seen.insert(name.to_string()) || !scope.contains_key(name) {
+                continue;
+            }
+            saved_locals.push((name.to_string(), self.env_vars.get(name).cloned()));
+        }
+
+        for (name, _) in &saved_locals {
+            restore_optional_env_var(&mut self.env_vars, name, scope.get(name).cloned().flatten());
+        }
+
+        saved_locals
+    }
+
+    fn finish_global_declare_for_local_names(
+        &mut self,
+        saved_locals: Vec<(String, Option<String>)>,
+    ) {
+        if saved_locals.is_empty() {
+            return;
+        }
+
+        let Some(scope) = self.local_var_scopes.last_mut() else {
+            return;
+        };
+
+        for (name, local_value) in saved_locals {
+            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
+            restore_optional_env_var(&mut self.env_vars, &name, local_value);
+        }
+    }
+
     fn execute_eval(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         match crate::builtins::eval::execute(&cmd.words[1..])? {
             crate::builtins::eval::EvalAction::Complete(status) => {
@@ -2760,69 +2815,74 @@ impl Executor {
         {
             self.save_local_names(&args);
         }
+        let global_local_values = self.begin_global_declare_for_local_names(&args);
 
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::declare::execute_with_io(
-                &args,
-                &mut self.env_vars,
-                &mut file,
-                &mut std::io::stderr().lock(),
-            )?);
-        }
+        let result = (|| -> Result<i32, ExecuteError> {
+            if let Some(redirect) = &cmd.redirect_out {
+                let target = self.expand_word(&redirect.target);
+                let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
+                return Ok(crate::builtins::declare::execute_with_io(
+                    &args,
+                    &mut self.env_vars,
+                    &mut file,
+                    &mut std::io::stderr().lock(),
+                )?);
+            }
 
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::declare::execute_with_io(
-                &args,
-                &mut self.env_vars,
-                &mut file,
-                &mut std::io::stderr().lock(),
-            )?);
-        }
+            if let Some(redirect) = &cmd.append {
+                let target = self.expand_word(&redirect.target);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                return Ok(crate::builtins::declare::execute_with_io(
+                    &args,
+                    &mut self.env_vars,
+                    &mut file,
+                    &mut std::io::stderr().lock(),
+                )?);
+            }
 
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
-            if is_null_device(&target) {
+            if let Some(redirect) = &cmd.redirect_err {
+                let target = self.expand_word(&redirect.target);
+                if is_null_device(&target) {
+                    return Ok(crate::builtins::declare::execute_with_io(
+                        &args,
+                        &mut self.env_vars,
+                        &mut std::io::stdout().lock(),
+                        &mut std::io::sink(),
+                    )?);
+                }
+                let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
                 return Ok(crate::builtins::declare::execute_with_io(
                     &args,
                     &mut self.env_vars,
                     &mut std::io::stdout().lock(),
-                    &mut std::io::sink(),
+                    &mut file,
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::declare::execute_with_io(
+
+            if let Some(redirect) = &cmd.redirect_err_append {
+                let target = self.expand_word(&redirect.target);
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                return Ok(crate::builtins::declare::execute_with_io(
+                    &args,
+                    &mut self.env_vars,
+                    &mut std::io::stdout().lock(),
+                    &mut file,
+                )?);
+            }
+
+            Ok(crate::builtins::declare::execute(
                 &args,
                 &mut self.env_vars,
-                &mut std::io::stdout().lock(),
-                &mut file,
-            )?);
-        }
-
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::declare::execute_with_io(
-                &args,
-                &mut self.env_vars,
-                &mut std::io::stdout().lock(),
-                &mut file,
-            )?);
-        }
-
-        Ok(crate::builtins::declare::execute(
-            &args,
-            &mut self.env_vars,
-        )?)
+            )?)
+        })();
+        self.finish_global_declare_for_local_names(global_local_values);
+        result
     }
 
     fn execute_declare_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
