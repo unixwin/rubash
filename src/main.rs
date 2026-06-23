@@ -57,6 +57,9 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_positional_params(args[index + 1..].to_vec());
                 return run_stdin_script(executor);
             }
+            "--" => {
+                index += 1;
+            }
             "--help" | "-h" => {
                 print_usage();
                 return 0;
