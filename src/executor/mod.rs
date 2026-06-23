@@ -24,6 +24,7 @@ use self::path::{
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const EXPORTED_FUNCTIONS: &str = "__RUBASH_EXPORTED_FUNCTIONS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
+const READONLY_FUNCTIONS: &str = "__RUBASH_READONLY_FUNCTIONS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
@@ -2202,6 +2203,18 @@ impl Executor {
         // TODO(parse.y/execute_cmd.c): Bash stores a COMMAND tree plus source
         // metadata and function attributes. Keep the parsed body in a small
         // function table until the command representation is complete.
+        if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
+            .iter()
+            .any(|name| name == &function.name)
+        {
+            eprintln!(
+                "{}{}: readonly function",
+                self.diagnostic_prefix(),
+                function.name
+            );
+            self.exit_code = 1;
+            return Ok(());
+        }
         self.functions
             .insert(function.name.clone(), function.body.clone());
         self.exit_code = 0;
@@ -2928,6 +2941,15 @@ impl Executor {
     }
 
     fn execute_readonly(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if readonly_args_request_functions(&cmd.words[1..]) {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let status =
+                self.execute_readonly_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(status);
+        }
+
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
@@ -2990,6 +3012,81 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn execute_readonly_functions<W, E>(
+        &mut self,
+        args: &[String],
+        stdout: &mut W,
+        stderr: &mut E,
+    ) -> io::Result<i32>
+    where
+        W: Write,
+        E: Write,
+    {
+        let mut print = false;
+        let mut index = 0;
+        while let Some(arg) = args.get(index) {
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+            if !arg.starts_with('-') || arg == "-" {
+                break;
+            }
+            for option in arg[1..].chars() {
+                match option {
+                    'f' => {}
+                    'p' => print = true,
+                    'a' | 'A' => {}
+                    other => {
+                        writeln!(
+                            stderr,
+                            "{}readonly: -{other}: invalid option",
+                            self.diagnostic_prefix()
+                        )?;
+                        writeln!(
+                            stderr,
+                            "readonly: usage: readonly [-aAf] [name[=value] ...] or readonly -p"
+                        )?;
+                        return Ok(2);
+                    }
+                }
+            }
+            index += 1;
+        }
+
+        if print && index >= args.len() {
+            let mut names = marked_env_names(&self.env_vars, READONLY_FUNCTIONS);
+            names.sort();
+            for name in names {
+                if let Some(body) = self.functions.get(&name) {
+                    self.write_function_definition(&name, body, false, stdout)?;
+                    writeln!(stdout, "declare -fr {name}")?;
+                }
+            }
+            return Ok(0);
+        }
+
+        let mut status = 0;
+        for name in &args[index..] {
+            let Some(body) = self.functions.get(name) else {
+                writeln!(
+                    stderr,
+                    "{}readonly: {name}: not a function",
+                    self.diagnostic_prefix()
+                )?;
+                status = 1;
+                continue;
+            };
+            if print {
+                self.write_function_definition(name, body, false, stdout)?;
+                writeln!(stdout, "declare -fr {name}")?;
+            }
+            mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
+        }
+
+        Ok(status)
     }
 
     fn write_function_definition<W>(
@@ -3167,15 +3264,28 @@ impl Executor {
             .cloned()
             .collect();
 
+        let mut function_status = 0;
         if !variable_only {
             for name in &names {
+                if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
+                    .iter()
+                    .any(|readonly| readonly == name)
+                {
+                    writeln!(
+                        stderr,
+                        "{}unset: {name}: cannot unset: readonly function",
+                        self.diagnostic_prefix()
+                    )?;
+                    function_status = 1;
+                    continue;
+                }
                 self.functions.remove(name);
                 unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
 
         if function_only {
-            return Ok(0);
+            return Ok(function_status);
         }
 
         let mut variable_names = Vec::new();
@@ -3186,12 +3296,17 @@ impl Executor {
             variable_names.push(name);
         }
 
-        crate::builtins::set::unset_with_stderr(
+        let variable_status = crate::builtins::set::unset_with_stderr(
             variable_names.iter().map(String::as_str),
             &mut self.env_vars,
             stderr,
         )
-        .map_err(ExecuteError::from)
+        .map_err(ExecuteError::from)?;
+        Ok(if function_status != 0 {
+            function_status
+        } else {
+            variable_status
+        })
     }
 
     fn unset_array_element(&mut self, name: &str) -> bool {
@@ -13280,6 +13395,21 @@ fn exported_function_command_text(command: &CommandNode) -> Option<String> {
 }
 
 fn export_args_request_functions(args: &[String]) -> bool {
+    for arg in args {
+        if arg == "--" {
+            return false;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            return false;
+        }
+        if arg[1..].contains('f') {
+            return true;
+        }
+    }
+    false
+}
+
+fn readonly_args_request_functions(args: &[String]) -> bool {
     for arg in args {
         if arg == "--" {
             return false;
