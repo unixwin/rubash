@@ -7319,6 +7319,60 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_shift_invalid_counts_redirect_stderr() {
+        let error_path = "target/rubash-shift-invalid-stderr.txt";
+        let output_path = "target/rubash-shift-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function s {{ shift x 2> {error_path}; echo nonnumeric:$?:$#:$1 > {output_path}; \
+             shift -1 2>> {error_path}; echo negative:$?:$#:$1 >> {output_path}; }}; s one two"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "nonnumeric:1:2:one\nnegative:1:2:one\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("shift: x: numeric argument required"));
+        assert!(error.contains("shift: -1: shift count out of range"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_shift_too_many_arguments_fails_without_changing_positional_params() {
+        let error_path = "target/rubash-shift-too-many-args-stderr.txt";
+        let output_path = "target/rubash-shift-too-many-args-output.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function s {{ shift 1 2 2> {error_path}; echo $? $# $1 > {output_path}; }}; s one two"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1 2 one\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("shift: too many arguments"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_return_sets_status_and_skips_rest() {
         let output_path = "target/rubash-function-return-output.txt";
         let _ = fs::remove_file(output_path);
