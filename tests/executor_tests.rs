@@ -12347,6 +12347,50 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_export_and_readonly_nameref_apply_to_targets() {
+        let output_path = target_test_path("rubash-nameref-setattr-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        for name in [
+            "RUBASH_NAMEREF_EXPORT_TARGET",
+            "RUBASH_NAMEREF_EXPORT_REF",
+            "RUBASH_NAMEREF_READONLY_TARGET",
+            "RUBASH_NAMEREF_READONLY_REF",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_NAMEREF_EXPORT_TARGET=value; RUBASH_NAMEREF_READONLY_TARGET=value; \
+             declare -n RUBASH_NAMEREF_EXPORT_REF=RUBASH_NAMEREF_EXPORT_TARGET; \
+             declare -n RUBASH_NAMEREF_READONLY_REF=RUBASH_NAMEREF_READONLY_TARGET; \
+             export RUBASH_NAMEREF_EXPORT_REF=changed; readonly RUBASH_NAMEREF_READONLY_REF=locked; \
+             declare -p RUBASH_NAMEREF_EXPORT_REF RUBASH_NAMEREF_EXPORT_TARGET RUBASH_NAMEREF_READONLY_REF RUBASH_NAMEREF_READONLY_TARGET > {shell_output_path}; \
+             export -n RUBASH_NAMEREF_EXPORT_REF; declare -p RUBASH_NAMEREF_EXPORT_TARGET >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -n RUBASH_NAMEREF_EXPORT_REF=\"RUBASH_NAMEREF_EXPORT_TARGET\"\ndeclare -x RUBASH_NAMEREF_EXPORT_TARGET=\"changed\"\ndeclare -n RUBASH_NAMEREF_READONLY_REF=\"RUBASH_NAMEREF_READONLY_TARGET\"\ndeclare -r RUBASH_NAMEREF_READONLY_TARGET=\"locked\"\ndeclare -- RUBASH_NAMEREF_EXPORT_TARGET=\"changed\"\n"
+        );
+        for name in [
+            "RUBASH_NAMEREF_EXPORT_TARGET",
+            "RUBASH_NAMEREF_EXPORT_REF",
+            "RUBASH_NAMEREF_READONLY_TARGET",
+            "RUBASH_NAMEREF_READONLY_REF",
+        ] {
+            std::env::remove_var(name);
+        }
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);

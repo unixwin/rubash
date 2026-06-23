@@ -16,6 +16,7 @@ const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
+const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,6 +134,8 @@ where
         writeln!(stderr, "rubash: export: `{}`: not a valid identifier", arg)?;
         return Ok(EXECUTION_FAILURE);
     }
+    let resolved_name = nameref_target_name(env_vars, name).unwrap_or_else(|| name.to_string());
+    let name = resolved_name.as_str();
 
     match mode {
         ExportMode::Set => {
@@ -260,6 +263,8 @@ where
         )?;
         return Ok(EXECUTION_FAILURE);
     }
+    let resolved_name = nameref_target_name(env_vars, name).unwrap_or_else(|| name.to_string());
+    let name = resolved_name.as_str();
 
     let readonly = marked_vars(env_vars, READONLY_VARS);
     if readonly.contains(name) && value.is_some() {
@@ -516,6 +521,27 @@ fn marked_vars(env_vars: &HashMap<String, String>, key: &str) -> HashSet<String>
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn nameref_target_name(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
+    let mut current = name;
+    let mut seen = HashSet::new();
+    for _ in 0..16 {
+        if !seen.insert(current.to_string())
+            || !marked_vars(env_vars, NAMEREF_VARS).contains(current)
+        {
+            return None;
+        }
+        let target = env_vars.get(current)?;
+        if !valid_identifier(target) {
+            return None;
+        }
+        if !marked_vars(env_vars, NAMEREF_VARS).contains(target) {
+            return Some(target.clone());
+        }
+        current = target;
+    }
+    None
 }
 
 fn is_array_value(value: &str) -> bool {
