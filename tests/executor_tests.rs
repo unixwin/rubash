@@ -766,6 +766,61 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_subshell_tracks_command_substitution_depth() {
+        let output_path = "target/rubash-bash-subshell-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "printf '%s:%s:%s\\n' \"$BASH_SUBSHELL\" \"$(echo $BASH_SUBSHELL)\" \"$BASH_SUBSHELL\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0:1:0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_subshell_tracks_parenthesized_subshell() {
+        let output_path = "target/rubash-bash-subshell-parenthesized-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "( printf '%s\\n' \"$BASH_SUBSHELL\" > {output_path} ); printf '%s\\n' \"$BASH_SUBSHELL\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_subshell_assignment_does_not_override_dynamic_value() {
+        let output_path = "target/rubash-bash-subshell-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("BASH_SUBSHELL=9; printf '%s\\n' \"$BASH_SUBSHELL\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_bash_command_expands_to_current_command() {
         let output_path = "target/rubash-bash-command-output.txt";
         let _ = fs::remove_file(output_path);
