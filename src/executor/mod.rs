@@ -4260,6 +4260,22 @@ impl Executor {
                 self.exit_code = self.execute_help(&builtin_cmd)?;
                 Ok(())
             }
+            "alias" => {
+                self.exit_code = self.execute_alias(&builtin_cmd)?;
+                Ok(())
+            }
+            "unalias" => {
+                self.exit_code = self.execute_unalias(&builtin_cmd)?;
+                Ok(())
+            }
+            "export" => {
+                self.exit_code = self.execute_export(&builtin_cmd)?;
+                Ok(())
+            }
+            "readonly" => {
+                self.exit_code = self.execute_readonly(&builtin_cmd)?;
+                Ok(())
+            }
             "set" => self.execute_set_command(&builtin_cmd),
             "shopt" => {
                 self.exit_code = self.execute_shopt(&builtin_cmd)?;
@@ -4363,6 +4379,30 @@ impl Executor {
             }
             "help" => {
                 self.exit_code = crate::builtins::help::execute(&args[1..])?;
+                Ok(())
+            }
+            "alias" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_alias(&command)?;
+                Ok(())
+            }
+            "unalias" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_unalias(&command)?;
+                Ok(())
+            }
+            "export" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_export(&command)?;
+                Ok(())
+            }
+            "readonly" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_readonly(&command)?;
                 Ok(())
             }
             "shift" => self.execute_shift(&args[1..]),

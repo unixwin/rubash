@@ -900,6 +900,42 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_builtin_export_assigns_variable() {
+        let output_path = "target/rubash-builtin-export-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin export RUBASH_BUILTIN_EXPORT=value; echo $RUBASH_BUILTIN_EXPORT > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        std::env::remove_var("RUBASH_BUILTIN_EXPORT");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_readonly_assigns_variable() {
+        let output_path = "target/rubash-builtin-readonly-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin readonly RUBASH_BUILTIN_READONLY=value; echo $RUBASH_BUILTIN_READONLY > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "value\n");
+        std::env::remove_var("RUBASH_BUILTIN_READONLY");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_export_redirects_stderr() {
         let error_path = "target/rubash-export-stderr-output.txt";
         let status_path = "target/rubash-export-stderr-status.txt";
@@ -2019,6 +2055,45 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "before\nalias ll='ls -l'\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_alias_updates_alias_table() {
+        let output_path = "target/rubash-builtin-alias-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("builtin alias ll='ls -l'; builtin alias -p > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "alias ll='ls -l'\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_builtin_unalias_updates_alias_table() {
+        let output_path = "target/rubash-builtin-unalias-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "builtin alias gone='echo bad'; builtin unalias gone; alias -p > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
         let _ = fs::remove_file(output_path);
     }
 
