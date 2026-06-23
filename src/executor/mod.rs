@@ -1860,6 +1860,10 @@ impl Executor {
                     Ok(())
                 }
                 "exec" => self.execute_exec_command(cmd),
+                "logout" => {
+                    self.exit_code = self.execute_logout(cmd)?;
+                    Ok(())
+                }
                 "return" => self.execute_return(&cmd.words[1..]),
                 "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
                 "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
@@ -4598,6 +4602,10 @@ impl Executor {
                 Ok(())
             }
             "exec" => self.execute_exec_command(cmd),
+            "logout" => {
+                self.exit_code = self.execute_logout(cmd)?;
+                Ok(())
+            }
             "eval" => self.execute_eval(cmd),
             "set" => self.execute_set_command(cmd),
             "getopts" => {
@@ -4985,6 +4993,10 @@ impl Executor {
                 Ok(())
             }
             "exec" => self.execute_exec_command(&builtin_cmd),
+            "logout" => {
+                self.exit_code = self.execute_logout(&builtin_cmd)?;
+                Ok(())
+            }
             "eval" => self.execute_eval(&builtin_cmd),
             "command" => self.execute_command_without_aliases(&builtin_cmd),
             "source" | "." => crate::builtins::source::execute_named(
@@ -5222,6 +5234,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.execute_exec_command(&command)
+            }
+            "logout" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_logout(&command)?;
+                Ok(())
             }
             "source" | "." => crate::builtins::source::execute_named(self, &args[0], &args[1..]),
             "return" => self.execute_return(&args[1..]),
@@ -6511,6 +6529,14 @@ impl Executor {
             &cmd.words[1..],
             self.exit_code,
         )?)
+    }
+
+    fn execute_logout(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status =
+            crate::builtins::logout::execute_with_io(&self.diagnostic_prefix(), &mut stderr)?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
     }
 
     fn execute_cd(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
