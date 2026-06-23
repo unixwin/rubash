@@ -98,7 +98,9 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
 
     while arg_index < args.len() {
         let before_arg = arg_index;
-        render_one_pass(format, args, &mut arg_index, &mut output, env_vars);
+        if render_one_pass(format, args, &mut arg_index, &mut output, env_vars) {
+            break;
+        }
 
         if arg_index == before_arg {
             break;
@@ -114,7 +116,7 @@ fn render_one_pass(
     arg_index: &mut usize,
     output: &mut String,
     env_vars: &mut HashMap<String, String>,
-) {
+) -> bool {
     let mut chars = format.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -140,12 +142,17 @@ fn render_one_pass(
                     }
                 } else {
                     let value = next_arg(args, arg_index);
-                    output.push_str(&format_value(value, &spec));
+                    let (rendered, stop_output) = format_value(value, &spec);
+                    output.push_str(&rendered);
+                    if stop_output {
+                        return true;
+                    }
                 }
             }
             other => output.push(other),
         }
     }
+    false
 }
 
 fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
@@ -230,10 +237,15 @@ where
     digits.parse().ok()
 }
 
-fn format_value(value: &str, spec: &FormatSpec) -> String {
+fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
+    let mut stop_output = false;
     let rendered = match spec.specifier {
         's' => truncate_precision(value.to_string(), spec.precision),
-        'b' => truncate_precision(expand_percent_b(value), spec.precision),
+        'b' => {
+            let (expanded, stop) = expand_percent_b(value);
+            stop_output = stop;
+            truncate_precision(expanded, spec.precision)
+        }
         'q' => truncate_precision(shell_quote(value), spec.precision),
         'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
         'c' => value.chars().next().unwrap_or('\0').to_string(),
@@ -257,7 +269,7 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
     if spec.precision.is_some() && matches!(spec.specifier, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
         width_spec.zero_pad = false;
     }
-    apply_width(rendered, &width_spec)
+    (apply_width(rendered, &width_spec), stop_output)
 }
 
 fn truncate_precision(value: String, precision: Option<usize>) -> String {
@@ -436,9 +448,10 @@ where
     }
 }
 
-fn expand_percent_b(value: &str) -> String {
+fn expand_percent_b(value: &str) -> (String, bool) {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
+    let mut stop_output = false;
 
     while let Some(ch) = chars.next() {
         if ch != '\\' {
@@ -447,7 +460,10 @@ fn expand_percent_b(value: &str) -> String {
         }
 
         match chars.next() {
-            Some('c') => break,
+            Some('c') => {
+                stop_output = true;
+                break;
+            }
             Some('a') => output.push('\x07'),
             Some('b') => output.push('\x08'),
             Some('e') | Some('E') => output.push('\x1b'),
@@ -479,7 +495,7 @@ fn expand_percent_b(value: &str) -> String {
         }
     }
 
-    output
+    (output, stop_output)
 }
 
 fn read_prefixed_escape_digits<I>(
@@ -753,5 +769,11 @@ mod tests {
             .1,
             "<00042><   00042><   00042><><+>< ><00011><0x0001a><0>"
         );
+    }
+
+    #[test]
+    fn percent_b_backslash_c_stops_all_output() {
+        assert_eq!(run(&["<%b>tail\n", "a\\cB"]).1, "<a");
+        assert_eq!(run(&["X%bY%sZ\n", "a\\c", "later"]).1, "Xa");
     }
 }
