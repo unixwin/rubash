@@ -2282,6 +2282,7 @@ impl Executor {
                 &cmd.words[1..],
                 &self.env_vars,
                 &mut file,
+                &mut std::io::stderr().lock(),
             )?);
         }
 
@@ -2294,6 +2295,32 @@ impl Executor {
             return Ok(crate::builtins::exec::execute_with_io(
                 &cmd.words[1..],
                 &self.env_vars,
+                &mut file,
+                &mut std::io::stderr().lock(),
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+            return Ok(crate::builtins::exec::execute_with_io(
+                &cmd.words[1..],
+                &self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut file,
+            )?);
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            return Ok(crate::builtins::exec::execute_with_io(
+                &cmd.words[1..],
+                &self.env_vars,
+                &mut std::io::stdout().lock(),
                 &mut file,
             )?);
         }
