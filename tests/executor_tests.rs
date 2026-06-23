@@ -8781,6 +8781,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_fx_exports_function_to_child_rubash() {
+        let output_path = target_test_path("rubash-declare-export-function-child-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "foo() {{ echo child; }}; declare -fx foo; {rubash} -c foo > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "child\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_declare_plus_fx_clears_exported_function_attribute() {
+        let output_path = "target/rubash-declare-clear-export-function-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "foo() {{ :; }}; export -f foo; declare +fx foo; declare -xF > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_export_f_missing_function_reports_error() {
         let error_path = "target/rubash-export-f-missing-error.txt";
         let status_path = "target/rubash-export-f-missing-status.txt";
