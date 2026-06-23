@@ -5369,6 +5369,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_jobs_x_executes_command() {
+        let output_path = "target/rubash-jobs-x-output.txt";
+        let status_path = "target/rubash-jobs-x-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("jobs -x echo hi there > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi there\n");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_jobs_x_uses_command_status() {
+        let status_path = "target/rubash-jobs-x-status-output.txt";
+        let _ = fs::remove_file(status_path);
+        let input = format!("jobs -x false; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_wait_without_operands_returns_success() {
         let status_path = "target/rubash-wait-empty-status.txt";
         let _ = fs::remove_file(status_path);
