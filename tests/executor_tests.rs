@@ -3246,6 +3246,30 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_kill_translates_quit_and_kill_signals() {
+        let output_path = "target/rubash-kill-quit-kill-signals-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "kill -l 3 > {output_path}; kill -l 131 >> {output_path}; \
+             kill -l QUIT >> {output_path}; kill -l 9 >> {output_path}; \
+             kill -l 137 >> {output_path}; kill -l KILL >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "QUIT\nQUIT\n3\nKILL\nKILL\n9\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_kill_redirects_stderr() {
         let error_path = "target/rubash-kill-stderr-output.txt";
         let status_path = "target/rubash-kill-stderr-status.txt";
