@@ -8623,8 +8623,14 @@ impl Executor {
         for (flag, option) in [
             ('a', "allexport"),
             ('b', "notify"),
+            ('B', "braceexpand"),
+            ('E', "errtrace"),
+            ('H', "histexpand"),
             ('k', "keyword"),
             ('P', "physical"),
+            ('p', "privileged"),
+            ('t', "onecmd"),
+            ('T', "functrace"),
             ('v', "verbose"),
         ] {
             if crate::builtins::set::shell_option_enabled(&self.env_vars, option) {
@@ -10177,9 +10183,15 @@ fn short_set_flag_option(flag: char) -> Option<&'static str> {
     match flag {
         'a' => Some("allexport"),
         'b' => Some("notify"),
+        'B' => Some("braceexpand"),
+        'E' => Some("errtrace"),
         'h' => Some("hashall"),
+        'H' => Some("histexpand"),
         'k' => Some("keyword"),
         'P' => Some("physical"),
+        'p' => Some("privileged"),
+        't' => Some("onecmd"),
+        'T' => Some("functrace"),
         'v' => Some("verbose"),
         _ => None,
     }

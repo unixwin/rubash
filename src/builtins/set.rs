@@ -241,7 +241,7 @@ const SHELL_OPTIONS: &[ShellOption] = &[
     },
     ShellOption {
         name: "histexpand",
-        default_enabled: true,
+        default_enabled: false,
     },
     ShellOption {
         name: "history",
@@ -261,7 +261,7 @@ const SHELL_OPTIONS: &[ShellOption] = &[
     },
     ShellOption {
         name: "monitor",
-        default_enabled: true,
+        default_enabled: false,
     },
     ShellOption {
         name: "noclobber",
@@ -305,7 +305,7 @@ const SHELL_OPTIONS: &[ShellOption] = &[
     },
     ShellOption {
         name: "privileged",
-        default_enabled: true,
+        default_enabled: false,
     },
     ShellOption {
         name: "verbose",
