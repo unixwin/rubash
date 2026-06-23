@@ -26,16 +26,12 @@ where
     E: Write,
 {
     if let Some(arg) = args.into_iter().next() {
-        if arg.starts_with('-') {
+        if arg != "--" && arg.starts_with('-') {
             let option = arg.chars().nth(1).unwrap_or('-');
             writeln!(stderr, "rubash: times: -{}: invalid option", option)?;
             writeln!(stderr, "times: usage: times")?;
             return Ok(EX_USAGE);
         }
-
-        writeln!(stderr, "rubash: times: too many arguments")?;
-        writeln!(stderr, "times: usage: times")?;
-        return Ok(EX_USAGE);
     }
 
     writeln!(stdout, "0m0.000s 0m0.000s")?;
@@ -78,5 +74,14 @@ mod tests {
         assert_eq!(status, EX_USAGE);
         assert!(stdout.is_empty());
         assert!(stderr.contains("invalid option"));
+    }
+
+    #[test]
+    fn ignores_non_option_arguments() {
+        let (status, stdout, stderr) = run(&["extra"]);
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        assert!(stderr.is_empty());
     }
 }
