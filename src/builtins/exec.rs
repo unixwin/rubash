@@ -13,7 +13,7 @@ pub fn execute(args: &[String], env_vars: &HashMap<String, String>) -> io::Resul
     execute_with_io(args, env_vars, &mut stdout)
 }
 
-fn execute_with_io<W>(
+pub(crate) fn execute_with_io<W>(
     args: &[String],
     env_vars: &HashMap<String, String>,
     stdout: &mut W,
