@@ -5325,6 +5325,134 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_jobs_without_jobs_returns_success() {
+        let output_path = "target/rubash-jobs-empty-output.txt";
+        let status_path = "target/rubash-jobs-empty-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("jobs > {output_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_jobs_invalid_option_returns_usage() {
+        let error_path = "target/rubash-jobs-invalid-error.txt";
+        let status_path = "target/rubash-jobs-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("jobs -z 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("jobs: -z: invalid option"));
+        assert!(error.contains("jobs: usage: jobs [-lnprs]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_wait_without_operands_returns_success() {
+        let status_path = "target/rubash-wait-empty-status.txt";
+        let _ = fs::remove_file(status_path);
+        let input = format!("wait; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_wait_for_unknown_pid_returns_notfound() {
+        let error_path = "target/rubash-wait-pid-error.txt";
+        let status_path = "target/rubash-wait-pid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("wait 999999 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "127\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("wait: pid 999999 is not a child of this shell"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_wait_invalid_operand_returns_failure() {
+        let error_path = "target/rubash-wait-invalid-error.txt";
+        let status_path = "target/rubash-wait-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("wait abc 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("wait: `abc': not a pid or valid job spec"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_wait_invalid_option_returns_usage() {
+        let error_path = "target/rubash-wait-invalid-option-error.txt";
+        let status_path = "target/rubash-wait-invalid-option-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("wait -x 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("wait: -x: invalid option"));
+        assert!(error.contains("wait: usage: wait [-fn] [-p var] [id ...]"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_builtin_break_breaks_loop() {
         let output_path = "target/rubash-builtin-break-output.txt";
         let _ = fs::remove_file(output_path);
