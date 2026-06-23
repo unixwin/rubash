@@ -7879,6 +7879,9 @@ impl Executor {
             env::set_var(base_name, value);
             return;
         }
+        if base_name == "BASHPID" && !append {
+            return;
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8713,6 +8716,7 @@ impl Executor {
                 )
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
+            "BASHPID" => Some(std::process::id().to_string()),
             _ => None,
         }
     }
@@ -8720,7 +8724,7 @@ impl Executor {
     fn dynamic_parameter_is_set(&self, name: &str) -> bool {
         matches!(
             name,
-            "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS" | "RANDOM"
+            "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS" | "RANDOM" | "BASHPID"
         )
     }
 

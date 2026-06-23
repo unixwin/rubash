@@ -684,6 +684,46 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bashpid_expands_to_current_shell_pid() {
+        let output_path = "target/rubash-bashpid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s:%s\\n' \"$BASHPID\" \"$$\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let (bashpid, shell_pid) = output.trim_end().split_once(':').unwrap();
+        assert_eq!(bashpid, shell_pid);
+        assert_eq!(bashpid.parse::<u32>().unwrap(), std::process::id());
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bashpid_assignment_does_not_override_dynamic_value() {
+        let output_path = "target/rubash-bashpid-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("BASHPID=1; printf '%s\\n' \"$BASHPID\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap().trim_end(),
+            std::process::id().to_string()
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipeline_feeds_external_stage_stdin() {
         let output_path = target_test_path("rubash-pipeline-external-output.txt");
         #[cfg(windows)]
