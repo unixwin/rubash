@@ -305,22 +305,42 @@ where
     W: Write,
 {
     let readonly = marked_vars(env_vars, READONLY_VARS);
+    let exported = marked_vars(env_vars, EXPORTED_VARS);
     let arrays = marked_vars(env_vars, ARRAY_VARS);
     let mut names: Vec<_> = readonly.into_iter().collect();
     names.sort();
     for name in names {
         if let Some(value) = env_vars.get(&name) {
             if arrays.contains(&name) || is_array_value(value) {
-                writeln!(stdout, "declare -ar {name}={}", format_array_value(value))?;
-            } else {
+                let attrs = if exported.contains(&name) {
+                    "-arx"
+                } else {
+                    "-ar"
+                };
                 writeln!(
                     stdout,
-                    "declare -r {name}=\"{}\"",
+                    "declare {attrs} {name}={}",
+                    format_array_value(value)
+                )?;
+            } else {
+                let attrs = if exported.contains(&name) {
+                    "-rx"
+                } else {
+                    "-r"
+                };
+                writeln!(
+                    stdout,
+                    "declare {attrs} {name}=\"{}\"",
                     quote_export_value(value)
                 )?;
             }
         } else {
-            writeln!(stdout, "declare -r {name}")?;
+            let attrs = if exported.contains(&name) {
+                "-rx"
+            } else {
+                "-r"
+            };
+            writeln!(stdout, "declare {attrs} {name}")?;
         }
     }
     Ok(())
@@ -330,6 +350,7 @@ fn print_exported<W>(env_vars: &HashMap<String, String>, stdout: &mut W) -> io::
 where
     W: Write,
 {
+    let readonly = marked_vars(env_vars, READONLY_VARS);
     let mut names: Vec<_> = marked_vars(env_vars, EXPORTED_VARS).into_iter().collect();
     names.sort();
 
@@ -337,15 +358,20 @@ where
         if name.starts_with("__RUBASH_") {
             continue;
         }
+        let attrs = if readonly.contains(&name) {
+            "-rx"
+        } else {
+            "-x"
+        };
         if let Some(value) = env_vars.get(&name) {
             writeln!(
                 stdout,
-                "declare -x {}=\"{}\"",
+                "declare {attrs} {}=\"{}\"",
                 name,
                 quote_export_value(value)
             )?;
         } else {
-            writeln!(stdout, "declare -x {name}")?;
+            writeln!(stdout, "declare {attrs} {name}")?;
         }
     }
 

@@ -195,23 +195,31 @@ where
 
     if export {
         for name in &names {
+            let has_assignment = name.contains('=');
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             if let Some(value) = variables.get(name).cloned().or_else(|| env::var(name).ok()) {
                 variables.insert(name.to_string(), value.clone());
                 env::set_var(name, value);
                 mark_exported(variables, name);
-            } else {
+            } else if has_assignment {
                 variables.insert((*name).to_string(), String::new());
                 env::set_var(name, "");
+                mark_exported(variables, name);
+            } else {
                 mark_exported(variables, name);
             }
         }
     }
     if readonly {
         for name in &names {
+            let has_assignment = name.contains('=');
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
-            variables.entry(name.to_string()).or_default();
+            if let Some(value) = variables.get(name).cloned().or_else(|| env::var(name).ok()) {
+                variables.insert(name.to_string(), value);
+            } else if has_assignment {
+                variables.entry(name.to_string()).or_default();
+            }
             mark_typed(variables, READONLY_VARS, name);
         }
     }
