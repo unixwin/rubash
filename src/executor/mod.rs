@@ -2305,13 +2305,6 @@ impl Executor {
         let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
         let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         let old_positional_params = self.positional_params.clone();
-        let old_exported_vars = self.env_vars.get(EXPORTED_VARS).cloned();
-        let old_readonly_vars = self.env_vars.get(READONLY_VARS).cloned();
-        let old_integer_vars = self.env_vars.get(INTEGER_VARS).cloned();
-        let old_uppercase_vars = self.env_vars.get(UPPERCASE_VARS).cloned();
-        let old_lowercase_vars = self.env_vars.get(LOWERCASE_VARS).cloned();
-        let old_array_vars = self.env_vars.get(ARRAY_VARS).cloned();
-        let old_assoc_vars = self.env_vars.get(ASSOC_VARS).cloned();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
@@ -2344,49 +2337,7 @@ impl Executor {
         self.function_depth += 1;
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
-        let restored_local_names = self.restore_function_locals();
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            EXPORTED_VARS,
-            old_exported_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            READONLY_VARS,
-            old_readonly_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            INTEGER_VARS,
-            old_integer_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            UPPERCASE_VARS,
-            old_uppercase_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            LOWERCASE_VARS,
-            old_lowercase_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            ARRAY_VARS,
-            old_array_vars,
-            &restored_local_names,
-        );
-        restore_merged_marked_env_names(
-            &mut self.env_vars,
-            ASSOC_VARS,
-            old_assoc_vars,
-            &restored_local_names,
-        );
+        self.restore_function_locals();
         self.positional_params = old_positional_params;
         match old_funcname {
             Some(value) => {
@@ -15059,33 +15010,6 @@ fn set_marked_var(env_vars: &mut HashMap<String, String>, key: &str, name: &str,
         mark_env_name(env_vars, key, name);
     } else {
         unmark_env_name(env_vars, key, name);
-    }
-}
-
-fn restore_merged_marked_env_names(
-    env_vars: &mut HashMap<String, String>,
-    key: &str,
-    old_value: Option<String>,
-    _restored_local_names: &HashSet<String>,
-) {
-    let mut names: HashSet<String> = old_value
-        .as_deref()
-        .unwrap_or_default()
-        .split('\x1f')
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .collect();
-
-    for name in marked_env_names(env_vars, key) {
-        names.insert(name);
-    }
-
-    if names.is_empty() {
-        env_vars.remove(key);
-    } else {
-        let mut names: Vec<_> = names.into_iter().collect();
-        names.sort();
-        env_vars.insert(key.to_string(), names.join("\x1f"));
     }
 }
 

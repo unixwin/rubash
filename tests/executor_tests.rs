@@ -9933,6 +9933,31 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_g_inside_function_unsets_global_attributes() {
+        let output_path = target_test_path("rubash-function-declare-global-unset-attrs-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "declare -i n=5; declare -u x=ABC; declare -x y=exported; \
+             f() {{ declare -g +i n; n=2+3; declare -g +u x; x=MiXeD; declare -g +x y; }}; \
+             f; declare -p n x y > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -- n=\"2+3\"\ndeclare -- x=\"MiXeD\"\ndeclare -- y=\"exported\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_function_readonly_attributes_persist_but_local_attrs_restore() {
         let output_path = target_test_path("rubash-function-readonly-attrs-output.txt");
         let shell_output_path = shell_test_path(&output_path);
