@@ -9,6 +9,72 @@ use std::io::{self, Write};
 const TRAP_LIST: &str = "__RUBASH_TRAPS";
 const TRAP_PREFIX: &str = "__RUBASH_TRAP_";
 const EX_USAGE: i32 = 2;
+const SIGNALS: [&str; 64] = [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGEMT",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGBUS",
+    "SIGSEGV",
+    "SIGSYS",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGURG",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGCONT",
+    "SIGCHLD",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGIO",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGPWR",
+    "SIGUSR1",
+    "SIGUSR2",
+    "SIGRTMIN",
+    "SIGRTMIN+1",
+    "SIGRTMIN+2",
+    "SIGRTMIN+3",
+    "SIGRTMIN+4",
+    "SIGRTMIN+5",
+    "SIGRTMIN+6",
+    "SIGRTMIN+7",
+    "SIGRTMIN+8",
+    "SIGRTMIN+9",
+    "SIGRTMIN+10",
+    "SIGRTMIN+11",
+    "SIGRTMIN+12",
+    "SIGRTMIN+13",
+    "SIGRTMIN+14",
+    "SIGRTMIN+15",
+    "SIGRTMIN+16",
+    "SIGRTMAX-15",
+    "SIGRTMAX-14",
+    "SIGRTMAX-13",
+    "SIGRTMAX-12",
+    "SIGRTMAX-11",
+    "SIGRTMAX-10",
+    "SIGRTMAX-9",
+    "SIGRTMAX-8",
+    "SIGRTMAX-7",
+    "SIGRTMAX-6",
+    "SIGRTMAX-5",
+    "SIGRTMAX-4",
+    "SIGRTMAX-3",
+    "SIGRTMAX-2",
+    "SIGRTMAX-1",
+    "SIGRTMAX",
+];
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut env_vars = HashMap::new();
@@ -124,73 +190,6 @@ fn print_signal_list<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    const SIGNALS: [&str; 64] = [
-        "SIGHUP",
-        "SIGINT",
-        "SIGQUIT",
-        "SIGILL",
-        "SIGTRAP",
-        "SIGABRT",
-        "SIGEMT",
-        "SIGFPE",
-        "SIGKILL",
-        "SIGBUS",
-        "SIGSEGV",
-        "SIGSYS",
-        "SIGPIPE",
-        "SIGALRM",
-        "SIGTERM",
-        "SIGURG",
-        "SIGSTOP",
-        "SIGTSTP",
-        "SIGCONT",
-        "SIGCHLD",
-        "SIGTTIN",
-        "SIGTTOU",
-        "SIGIO",
-        "SIGXCPU",
-        "SIGXFSZ",
-        "SIGVTALRM",
-        "SIGPROF",
-        "SIGWINCH",
-        "SIGPWR",
-        "SIGUSR1",
-        "SIGUSR2",
-        "SIGRTMIN",
-        "SIGRTMIN+1",
-        "SIGRTMIN+2",
-        "SIGRTMIN+3",
-        "SIGRTMIN+4",
-        "SIGRTMIN+5",
-        "SIGRTMIN+6",
-        "SIGRTMIN+7",
-        "SIGRTMIN+8",
-        "SIGRTMIN+9",
-        "SIGRTMIN+10",
-        "SIGRTMIN+11",
-        "SIGRTMIN+12",
-        "SIGRTMIN+13",
-        "SIGRTMIN+14",
-        "SIGRTMIN+15",
-        "SIGRTMIN+16",
-        "SIGRTMAX-15",
-        "SIGRTMAX-14",
-        "SIGRTMAX-13",
-        "SIGRTMAX-12",
-        "SIGRTMAX-11",
-        "SIGRTMAX-10",
-        "SIGRTMAX-9",
-        "SIGRTMAX-8",
-        "SIGRTMAX-7",
-        "SIGRTMAX-6",
-        "SIGRTMAX-5",
-        "SIGRTMAX-4",
-        "SIGRTMAX-3",
-        "SIGRTMAX-2",
-        "SIGRTMAX-1",
-        "SIGRTMAX",
-    ];
-
     for (index, signal) in SIGNALS.iter().enumerate() {
         write!(stdout, "{:>2}) {:<10}", index + 1, signal)?;
         if (index + 1) % 5 == 0 || index + 1 == SIGNALS.len() {
@@ -203,21 +202,26 @@ where
 }
 
 fn normalize_signal(signal: &str) -> Option<&'static str> {
-    match signal.to_ascii_uppercase().as_str() {
-        "0" | "EXIT" => Some("EXIT"),
-        "1" | "HUP" | "SIGHUP" => Some("SIGHUP"),
-        "2" | "INT" | "SIGINT" => Some("SIGINT"),
-        "3" | "QUIT" | "SIGQUIT" => Some("SIGQUIT"),
-        "6" | "ABRT" | "SIGABRT" => Some("SIGABRT"),
-        "15" | "TERM" | "SIGTERM" => Some("SIGTERM"),
-        "USR1" | "SIGUSR1" => Some("SIGUSR1"),
-        "USR2" | "SIGUSR2" => Some("SIGUSR2"),
-        "CHLD" | "SIGCHLD" => Some("SIGCHLD"),
-        "DEBUG" => Some("DEBUG"),
-        "ERR" => Some("ERR"),
-        "RETURN" => Some("RETURN"),
-        _ => None,
+    let signal = signal.to_ascii_uppercase();
+    match signal.as_str() {
+        "0" | "EXIT" => return Some("EXIT"),
+        "DEBUG" => return Some("DEBUG"),
+        "ERR" => return Some("ERR"),
+        "RETURN" => return Some("RETURN"),
+        _ => {}
     }
+
+    if let Ok(number) = signal.parse::<usize>() {
+        return number
+            .checked_sub(1)
+            .and_then(|index| SIGNALS.get(index).copied());
+    }
+
+    let name = signal.strip_prefix("SIG").unwrap_or(&signal);
+    SIGNALS
+        .iter()
+        .copied()
+        .find(|candidate| candidate.strip_prefix("SIG") == Some(name))
 }
 
 fn set_trap(env_vars: &mut HashMap<String, String>, signal: &str, action: &str) {
