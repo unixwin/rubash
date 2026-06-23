@@ -6159,6 +6159,14 @@ impl Executor {
                     }
                     index += 2;
                 }
+                "-ar" | "-ra" => {
+                    raw = true;
+                    if let Some(name) = cmd.words.get(index + 1).filter(|name| is_shell_name(name))
+                    {
+                        array_name = Some(name.clone());
+                    }
+                    index += 2;
+                }
                 "-d" => {
                     delimiter = cmd
                         .words
