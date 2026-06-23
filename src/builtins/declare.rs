@@ -37,6 +37,7 @@ where
     let mut array = false;
     let mut assoc = false;
     let mut integer = false;
+    let mut readonly = false;
     let mut names = Vec::new();
 
     for arg in args {
@@ -48,6 +49,7 @@ where
                     'a' => array = true,
                     'A' => assoc = true,
                     'i' => integer = true,
+                    'r' => readonly = true,
                     'g' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
@@ -118,6 +120,14 @@ where
                 env::set_var(name, "");
                 mark_exported(variables, name);
             }
+        }
+    }
+    if readonly {
+        for name in &names {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            variables.entry(name.to_string()).or_default();
+            mark_typed(variables, READONLY_VARS, name);
         }
     }
 
