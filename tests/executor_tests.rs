@@ -4736,6 +4736,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_exec_a_requires_argument() {
+        let output_path = "target/rubash-exec-a-requires-argument-output.txt";
+        let error_path = "target/rubash-exec-a-requires-argument-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("exec -a 2> {error_path}; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("exec: -a: option requires an argument"));
+        assert!(error.contains("exec: usage:"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_builtin_exec_redirects_output() {
         let output_path = "target/rubash-builtin-exec-output.txt";
         let _ = fs::remove_file(output_path);
