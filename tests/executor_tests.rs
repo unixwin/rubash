@@ -4763,6 +4763,53 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_source_p_empty_path_uses_current_directory() {
+        let script_path = "rubash-source-p-empty-temp.sh";
+        let output_path = "target/rubash-source-p-empty-output.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        fs::write(script_path, "RUBASH_SOURCE_P_EMPTY=ok\n").unwrap();
+        let input = format!(
+            "PATH=/no/such/path; source -p '' {script_path}; echo $RUBASH_SOURCE_P_EMPTY > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_source_option_errors_return_usage_status() {
+        let output_path = "target/rubash-source-option-errors-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "source; echo nofile:$? > {output_path}; \
+             source -p; echo missingpath:$? >> {output_path}; \
+             . -i; echo invalid:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "nofile:2\nmissingpath:2\ninvalid:2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_builtin_return_returns_from_function() {
         let output_path = "target/rubash-builtin-return-output.txt";
         let _ = fs::remove_file(output_path);

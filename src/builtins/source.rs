@@ -13,13 +13,43 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteError> {
-    // TODO(builtins/source.def): GNU Bash `source_builtin` searches PATH,
-    // handles `-p`, temporarily replaces positional parameters, and uses
-    // unwind/trap machinery around `source_file`.
-    let Some(invocation) = SourceInvocation::parse(args) else {
-        eprintln!("rubash: source: filename argument required");
-        executor.set_exit_code(2);
-        return Ok(());
+    execute_named(executor, "source", args)
+}
+
+pub fn execute_named(
+    executor: &mut Executor,
+    command_name: &str,
+    args: &[String],
+) -> Result<(), ExecuteError> {
+    // TODO(builtins/source.def): GNU Bash `source_builtin` uses unwind/trap
+    // machinery around `source_file`.
+    let invocation = match SourceInvocation::parse(args) {
+        Ok(invocation) => invocation,
+        Err(error) => {
+            match error {
+                SourceParseError::MissingFilename => {
+                    eprintln!(
+                        "{}{command_name}: filename argument required",
+                        executor.diagnostic_prefix()
+                    );
+                }
+                SourceParseError::MissingPathArgument => {
+                    eprintln!(
+                        "{}{command_name}: -p: option requires an argument",
+                        executor.diagnostic_prefix()
+                    );
+                }
+                SourceParseError::InvalidOption(option) => {
+                    eprintln!(
+                        "{}{command_name}: -{option}: invalid option",
+                        executor.diagnostic_prefix()
+                    );
+                }
+            }
+            eprintln!("{command_name}: usage: {command_name} [-p path] filename [arguments]");
+            executor.set_exit_code(2);
+            return Ok(());
+        }
     };
     let filename = invocation.filename;
 
@@ -335,28 +365,59 @@ fn execute_command_if_condition(
 struct SourceInvocation<'a> {
     filename: &'a str,
     args: &'a [String],
-    path: Option<&'a str>,
+    path: Option<String>,
+}
+
+enum SourceParseError {
+    MissingFilename,
+    MissingPathArgument,
+    InvalidOption(char),
 }
 
 impl<'a> SourceInvocation<'a> {
-    fn parse(args: &'a [String]) -> Option<Self> {
-        match args {
-            [flag, path, filename, rest @ ..] if flag == "-p" => Some(Self {
-                filename,
-                args: rest,
-                path: Some(path),
-            }),
-            [filename, rest @ ..] => Some(Self {
-                filename,
-                args: rest,
-                path: None,
-            }),
-            [] => None,
+    fn parse(args: &'a [String]) -> Result<Self, SourceParseError> {
+        let mut index = 0;
+        let mut path = None;
+
+        while let Some(arg) = args.get(index) {
+            if arg == "--" {
+                index += 1;
+                break;
+            }
+
+            if arg == "-p" {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(SourceParseError::MissingPathArgument);
+                };
+                path = Some(if value.is_empty() {
+                    ".".to_string()
+                } else {
+                    value.clone()
+                });
+                index += 2;
+                continue;
+            }
+
+            if let Some(option) = invalid_option(arg) {
+                return Err(SourceParseError::InvalidOption(option));
+            }
+
+            break;
         }
+
+        let Some(filename) = args.get(index).map(String::as_str) else {
+            return Err(SourceParseError::MissingFilename);
+        };
+
+        Ok(Self {
+            filename,
+            args: &args[index + 1..],
+            path,
+        })
     }
 
     fn resolve_path(&self, executor: &Executor) -> Option<PathBuf> {
-        if let Some(path) = self.path {
+        if let Some(path) = &self.path {
             return source_path_search(path, self.filename, executor);
         }
 
@@ -372,6 +433,14 @@ impl<'a> SourceInvocation<'a> {
         let source_path = shell_path_to_windows(self.filename, executor.env_vars());
         source_path.exists().then_some(source_path)
     }
+}
+
+fn invalid_option(arg: &str) -> Option<char> {
+    let option = arg.strip_prefix('-')?;
+    if option.is_empty() {
+        return None;
+    }
+    option.chars().next()
 }
 
 fn should_search_source_path(executor: &Executor, filename: &str) -> bool {
