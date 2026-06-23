@@ -228,7 +228,8 @@ fn format_value(value: &str, spec: &FormatSpec) -> String {
     let rendered = match spec.specifier {
         's' => truncate_precision(value.to_string(), spec.precision),
         'b' => truncate_precision(expand_percent_b(value), spec.precision),
-        'q' | 'Q' => shell_quote(value),
+        'q' => truncate_precision(shell_quote(value), spec.precision),
+        'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
         'c' => value.chars().next().unwrap_or('\0').to_string(),
         'd' | 'i' => parse_i64(value).to_string(),
         'u' => (parse_i64(value) as u64).to_string(),
@@ -458,5 +459,10 @@ mod tests {
             run(&["<%q><%q><%q>", "a b", "this&that", "~"]).1,
             "<a\\ b><this\\&that><\\~>"
         );
+    }
+
+    #[test]
+    fn percent_q_and_upper_q_apply_precision_like_bash() {
+        assert_eq!(run(&["<%.2q><%.2Q>", "a b", "a b"]).1, "<a\\><a\\ >");
     }
 }
