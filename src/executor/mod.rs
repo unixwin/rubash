@@ -647,6 +647,7 @@ impl Executor {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
+        env_vars.remove("BASH_ARGV0");
         env_vars.entry("PWD".to_string()).or_insert_with(|| {
             std::env::current_dir()
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
@@ -7865,6 +7866,10 @@ impl Executor {
             env::set_var(base_name, assigned.to_string());
             return;
         }
+        if base_name == "BASH_ARGV0" && !append {
+            self.env_vars
+                .insert("__RUBASH_SCRIPT_NAME".to_string(), value.clone());
+        }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
@@ -8077,13 +8082,7 @@ impl Executor {
                 "?" => return self.exit_code.to_string(),
                 "$" => return std::process::id().to_string(),
                 "-" => return self.shell_option_flags(),
-                "0" => {
-                    return self
-                        .env_vars
-                        .get("__RUBASH_SCRIPT_NAME")
-                        .cloned()
-                        .unwrap_or_default();
-                }
+                "0" => return self.script_name_value(),
                 _ => {}
             }
             if let Ok(index) = name.parse::<usize>() {
@@ -8658,13 +8657,7 @@ impl Executor {
             "?" => return self.exit_code.to_string(),
             "$" => return std::process::id().to_string(),
             "-" => return self.shell_option_flags(),
-            "0" => {
-                return self
-                    .env_vars
-                    .get("__RUBASH_SCRIPT_NAME")
-                    .cloned()
-                    .unwrap_or_default();
-            }
+            "0" => return self.script_name_value(),
             _ => {}
         }
 
@@ -8716,6 +8709,14 @@ impl Executor {
 
     fn dynamic_parameter_is_set(&self, name: &str) -> bool {
         matches!(name, "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS")
+    }
+
+    fn script_name_value(&self) -> String {
+        self.env_vars
+            .get("BASH_ARGV0")
+            .or_else(|| self.env_vars.get("__RUBASH_SCRIPT_NAME"))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
@@ -9012,7 +9013,7 @@ impl Executor {
             "?" => Some(self.exit_code.to_string()),
             "$" => Some(std::process::id().to_string()),
             "-" => Some(self.shell_option_flags()),
-            "0" => self.env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+            "0" => Some(self.script_name_value()),
             _ => {
                 if let Some(value) = self.dynamic_parameter_value(name) {
                     return Some(value);
@@ -10065,12 +10066,7 @@ impl Executor {
                     chars.next();
                     let index = first.to_digit(10).unwrap_or(0) as usize;
                     if index == 0 {
-                        output.push_str(
-                            self.env_vars
-                                .get("__RUBASH_SCRIPT_NAME")
-                                .map(String::as_str)
-                                .unwrap_or(""),
-                        );
+                        output.push_str(&self.script_name_value());
                     } else {
                         output.push_str(
                             self.positional_params
