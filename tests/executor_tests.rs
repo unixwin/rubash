@@ -8499,6 +8499,88 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_capital_f_prints_function_names() {
+        let output_path = "target/rubash-declare-F-output.txt";
+        let status_path = "target/rubash-declare-F-status.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!(
+            "foo() {{ echo hi; }}; bar() {{ :; }}; \
+             declare -F foo missing bar > {output_path}; echo $? > {status_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "foo\nbar\n");
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_declare_capital_f_lists_all_functions() {
+        let output_path = "target/rubash-declare-F-all-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("foo() {{ :; }}; bar() {{ :; }}; declare -F > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -f bar\ndeclare -f foo\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_lower_f_redirects_function_definition() {
+        let output_path = "target/rubash-declare-f-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("foo() {{ echo hi; }}; declare -f foo > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "foo () \n{ \n    echo hi\n}\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_exported_functions_are_empty_without_function_exports() {
+        let output_path = "target/rubash-declare-exported-functions-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("foo() {{ :; }}; declare -xF > {output_path}; declare -xf >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_local_outside_function_reports_error() {
         let error_path = "target/rubash-local-outside-error.txt";
         let status_path = "target/rubash-local-outside-status.txt";

@@ -2475,7 +2475,12 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_declare_functions(&self, args: &[String]) -> i32 {
+    fn execute_declare_functions(
+        &self,
+        args: &[String],
+        stdout: &mut impl Write,
+        stderr: &mut impl Write,
+    ) -> io::Result<i32> {
         // TODO(builtins/declare.def/execute_cmd.c): Bash prints the stored
         // function COMMAND tree. Rubash currently stores only parsed command
         // bodies, so render the simple function form used by builtins6.sub.
@@ -2485,26 +2490,47 @@ impl Executor {
             .map(String::as_str)
             .collect();
         let print_not_found = args.iter().any(|arg| arg == "-p");
+        let function_names_only = args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('F'));
+        let exported_functions = args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('x'));
+        if exported_functions {
+            return Ok(0);
+        }
         if names.is_empty() {
             let mut functions: Vec<_> = self.functions.iter().collect();
             functions.sort_by(|(left, _), (right, _)| left.cmp(right));
             for (name, body) in functions {
-                self.print_function_definition(name, body);
+                if function_names_only {
+                    writeln!(stdout, "declare -f {name}")?;
+                } else {
+                    self.write_function_definition(name, body, stdout)?;
+                }
             }
-            return 0;
+            return Ok(0);
         }
         let mut status = 0;
         for name in names {
             let Some(body) = self.functions.get(name) else {
                 if print_not_found {
-                    eprintln!("{}declare: {name}: not found", self.diagnostic_prefix());
+                    writeln!(
+                        stderr,
+                        "{}declare: {name}: not found",
+                        self.diagnostic_prefix()
+                    )?;
                 }
                 status = 1;
                 continue;
             };
-            self.print_function_definition(name, body);
+            if function_names_only {
+                writeln!(stdout, "{name}")?;
+            } else {
+                self.write_function_definition(name, body, stdout)?;
+            }
         }
-        status
+        Ok(status)
     }
 
     fn execute_declare(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -2579,8 +2605,15 @@ impl Executor {
     }
 
     fn execute_declare_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        if cmd.words.iter().any(|word| word == "-f") {
-            self.exit_code = self.execute_declare_functions(&cmd.words[1..]);
+        if cmd.words[1..]
+            .iter()
+            .any(|word| word.starts_with('-') && (word.contains('f') || word.contains('F')))
+        {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            self.exit_code =
+                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(());
         }
         self.exit_code = self.execute_declare(cmd)?;
@@ -2748,73 +2781,35 @@ impl Executor {
         )?)
     }
 
-    fn print_function_definition(&self, name: &str, body: &[CommandNode]) {
-        if self.print_upstream_type_function(name, body) {
-            return;
-        }
-        if self.print_upstream_herestr_function(name) {
-            return;
-        }
-        if self.print_upstream_posixpipe_function(name) {
-            return;
-        }
-        if self.print_upstream_cprint_function(name) {
-            return;
-        }
-        println!("{name} () ");
-        println!("{{ ");
+    fn write_function_definition<W>(
+        &self,
+        name: &str,
+        body: &[CommandNode],
+        stdout: &mut W,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        writeln!(stdout, "{name} () ")?;
+        writeln!(stdout, "{{ ")?;
         for command in body {
             if command.words.is_empty() {
                 continue;
             }
             if let Some(here_string) = &command.here_string {
-                println!("    {} <<< {}", command.words.join(" "), here_string);
+                writeln!(
+                    stdout,
+                    "    {} <<< {}",
+                    command.words.join(" "),
+                    here_string
+                )?;
             } else if command.words == ["time"] {
-                println!("    time ");
+                writeln!(stdout, "    time ")?;
             } else {
-                println!("    {}", command.words.join(" "));
+                writeln!(stdout, "    {}", command.words.join(" "))?;
             }
         }
-        println!("}}");
-    }
-
-    fn print_upstream_herestr_function(&self, name: &str) -> bool {
-        if !self
-            .env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .is_some_and(|script| script.ends_with("herestr.tests"))
-        {
-            return false;
-        }
-
-        match name {
-            "f1" => {
-                println!("f1 () ");
-                println!("{{ ");
-                println!("    cat <<< \"abcde\";");
-                println!("    cat <<< \"yo\";");
-                println!("    cat <<< \"$a $b\";");
-                println!("    cat <<< 'what a fabulous window treatment';");
-                println!("    cat <<< 'double\"quote'");
-                println!("}}");
-                true
-            }
-            "f2" => {
-                println!("f2 () ");
-                println!("{{ ");
-                println!("    cat <<< onetwothree");
-                println!("}}");
-                true
-            }
-            "f3" => {
-                println!("f3 () ");
-                println!("{{ ");
-                println!("    cat <<< \"$@\"");
-                println!("}}");
-                true
-            }
-            _ => false,
-        }
+        writeln!(stdout, "}}")
     }
 
     fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
