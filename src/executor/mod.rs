@@ -6205,6 +6205,18 @@ impl Executor {
                     delimiter = word[2..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                word if word.starts_with("-rn") && word.len() > 3 => {
+                    raw = true;
+                    char_limit = word[3..].parse::<usize>().ok();
+                    exact_char_limit = false;
+                    index += 1;
+                }
+                word if word.starts_with("-rN") && word.len() > 3 => {
+                    raw = true;
+                    char_limit = word[3..].parse::<usize>().ok();
+                    exact_char_limit = true;
+                    index += 1;
+                }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     char_limit = word[2..].parse::<usize>().ok();
                     exact_char_limit = false;
