@@ -4799,6 +4799,89 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_unset_nameref_removes_target_unless_n_option_is_used() {
+        let output_path = target_test_path("rubash-unset-nameref-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        for name in [
+            "RUBASH_UNSET_NAMEREF_TARGET",
+            "RUBASH_UNSET_NAMEREF_REF",
+            "RUBASH_UNSET_NAMEREF_TARGET2",
+            "RUBASH_UNSET_NAMEREF_REF2",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_UNSET_NAMEREF_TARGET=value; declare -n RUBASH_UNSET_NAMEREF_REF=RUBASH_UNSET_NAMEREF_TARGET; \
+             unset RUBASH_UNSET_NAMEREF_REF; \
+             declare -p RUBASH_UNSET_NAMEREF_TARGET 2>/dev/null || echo target-unset > {shell_output_path}; \
+             declare -p RUBASH_UNSET_NAMEREF_REF >> {shell_output_path}; \
+             RUBASH_UNSET_NAMEREF_TARGET2=value; declare -n RUBASH_UNSET_NAMEREF_REF2=RUBASH_UNSET_NAMEREF_TARGET2; \
+             unset -n RUBASH_UNSET_NAMEREF_REF2; \
+             declare -p RUBASH_UNSET_NAMEREF_TARGET2 >> {shell_output_path}; \
+             declare -p RUBASH_UNSET_NAMEREF_REF2 2>/dev/null || echo ref-unset >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "target-unset\ndeclare -n RUBASH_UNSET_NAMEREF_REF=\"RUBASH_UNSET_NAMEREF_TARGET\"\ndeclare -- RUBASH_UNSET_NAMEREF_TARGET2=\"value\"\nref-unset\n"
+        );
+        for name in [
+            "RUBASH_UNSET_NAMEREF_TARGET",
+            "RUBASH_UNSET_NAMEREF_REF",
+            "RUBASH_UNSET_NAMEREF_TARGET2",
+            "RUBASH_UNSET_NAMEREF_REF2",
+        ] {
+            std::env::remove_var(name);
+        }
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unset_nameref_target_reports_readonly_target() {
+        let output_path = target_test_path("rubash-unset-nameref-readonly-output.txt");
+        let error_path = target_test_path("rubash-unset-nameref-readonly-error.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        std::env::remove_var("RUBASH_UNSET_NAMEREF_RO_TARGET");
+        std::env::remove_var("RUBASH_UNSET_NAMEREF_RO_REF");
+        let input = format!(
+            "readonly RUBASH_UNSET_NAMEREF_RO_TARGET=value; \
+             declare -n RUBASH_UNSET_NAMEREF_RO_REF=RUBASH_UNSET_NAMEREF_RO_TARGET; \
+             unset RUBASH_UNSET_NAMEREF_RO_REF 2> {shell_error_path}; echo $? > {shell_output_path}; \
+             declare -p RUBASH_UNSET_NAMEREF_RO_TARGET RUBASH_UNSET_NAMEREF_RO_REF >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "1\ndeclare -r RUBASH_UNSET_NAMEREF_RO_TARGET=\"value\"\ndeclare -n RUBASH_UNSET_NAMEREF_RO_REF=\"RUBASH_UNSET_NAMEREF_RO_TARGET\"\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error
+            .contains("unset: RUBASH_UNSET_NAMEREF_RO_TARGET: cannot unset: readonly variable"));
+        std::env::remove_var("RUBASH_UNSET_NAMEREF_RO_TARGET");
+        std::env::remove_var("RUBASH_UNSET_NAMEREF_RO_REF");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_unset_invalid_option_redirects_stderr() {
         let error_path = "target/rubash-unset-invalid-option-stderr-output.txt";
         let status_path = "target/rubash-unset-invalid-option-status.txt";
