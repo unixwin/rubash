@@ -7093,6 +7093,33 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_set_posix_updates_visible_option_state() {
+        let output_path = "target/rubash-set-posix-option-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -o posix; type break > {output_path}; set -o >> {output_path}; \
+             set +o posix; type break >> {output_path}; set -o >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("break is a special shell builtin\n"));
+        assert!(output.contains("break is a shell builtin\n"));
+        let posix_lines: Vec<_> = output
+            .lines()
+            .filter(|line| line.starts_with("posix"))
+            .collect();
+        assert_eq!(posix_lines, ["posix          \ton", "posix          \toff"]);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shellopts_assignment_reports_readonly() {
         let status_path = "target/rubash-shellopts-readonly-status.txt";
         let _ = fs::remove_file(status_path);
