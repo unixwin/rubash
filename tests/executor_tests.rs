@@ -12260,9 +12260,13 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         let _ = fs::remove_file(&output_path);
         std::env::remove_var("RUBASH_NAMEREF_TARGET");
         std::env::remove_var("RUBASH_NAMEREF_REF");
+        std::env::remove_var("RUBASH_NAMEREF_REF2");
         let input = format!(
             "RUBASH_NAMEREF_TARGET=value; declare -n RUBASH_NAMEREF_REF=RUBASH_NAMEREF_TARGET; \
              echo read:$RUBASH_NAMEREF_REF > {shell_output_path}; \
+             echo bang:${{!RUBASH_NAMEREF_REF}} >> {shell_output_path}; \
+             declare -n RUBASH_NAMEREF_REF2=RUBASH_NAMEREF_REF; \
+             echo chain:$RUBASH_NAMEREF_REF2 bang2:${{!RUBASH_NAMEREF_REF2}} >> {shell_output_path}; \
              RUBASH_NAMEREF_REF=changed; echo target:$RUBASH_NAMEREF_TARGET >> {shell_output_path}; \
              declare -p RUBASH_NAMEREF_REF >> {shell_output_path}"
         );
@@ -12276,10 +12280,11 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(&output_path).unwrap(),
-            "read:value\ntarget:changed\ndeclare -n RUBASH_NAMEREF_REF=\"RUBASH_NAMEREF_TARGET\"\n"
+            "read:value\nbang:RUBASH_NAMEREF_TARGET\nchain:value bang2:RUBASH_NAMEREF_TARGET\ntarget:changed\ndeclare -n RUBASH_NAMEREF_REF=\"RUBASH_NAMEREF_TARGET\"\n"
         );
         std::env::remove_var("RUBASH_NAMEREF_TARGET");
         std::env::remove_var("RUBASH_NAMEREF_REF");
+        std::env::remove_var("RUBASH_NAMEREF_REF2");
         let _ = fs::remove_file(output_path);
     }
 
