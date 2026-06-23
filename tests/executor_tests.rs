@@ -2046,6 +2046,74 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_p_without_names_lists_variables() {
+        let output_path = "target/rubash-declare-p-all-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("RUBASH_DECLARE_ALL=value; declare -p > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("declare -- RUBASH_DECLARE_ALL=\"value\"\n"));
+        assert!(!output.contains("__RUBASH_EXPORTED_VARS"));
+        std::env::remove_var("RUBASH_DECLARE_ALL");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_without_names_lists_variables() {
+        let output_path = "target/rubash-declare-all-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("RUBASH_DECLARE_BARE=value; declare > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert!(fs::read_to_string(output_path)
+            .unwrap()
+            .contains("declare -- RUBASH_DECLARE_BARE=\"value\"\n"));
+        std::env::remove_var("RUBASH_DECLARE_BARE");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_attribute_filters_without_names() {
+        let output_path = "target/rubash-declare-attr-filter-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "plain=value; declare -i RUBASH_DECLARE_INT=7; \
+             declare -u RUBASH_DECLARE_UP=abc; readonly RUBASH_DECLARE_RO=1; \
+             declare -i > {output_path}; declare -u >> {output_path}; declare -r >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("declare -i RUBASH_DECLARE_INT=\"7\"\n"));
+        assert!(output.contains("declare -u RUBASH_DECLARE_UP=\"ABC\"\n"));
+        assert!(output.contains("declare -r RUBASH_DECLARE_RO=\"1\"\n"));
+        assert!(!output.contains("plain=\"value\""));
+        std::env::remove_var("RUBASH_DECLARE_INT");
+        std::env::remove_var("RUBASH_DECLARE_UP");
+        std::env::remove_var("RUBASH_DECLARE_RO");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_r_marks_readonly_variable() {
         let output_path = "target/rubash-declare-readonly-output.txt";
         let _ = fs::remove_file(output_path);
@@ -8805,9 +8873,8 @@ mod command_chaining {
     fn test_declare_plus_fx_clears_exported_function_attribute() {
         let output_path = "target/rubash-declare-clear-export-function-output.txt";
         let _ = fs::remove_file(output_path);
-        let input = format!(
-            "foo() {{ :; }}; export -f foo; declare +fx foo; declare -xF > {output_path}"
-        );
+        let input =
+            format!("foo() {{ :; }}; export -f foo; declare +fx foo; declare -xF > {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -8862,7 +8929,10 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "rubash_imported\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "rubash_imported\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 
