@@ -2381,6 +2381,49 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_child_environment_includes_exported_pwd() {
+        let output_path = target_test_path("rubash-child-pwd-env-output.txt");
+        #[cfg(windows)]
+        let script_path = target_test_path("rubash-child-pwd-env.cmd");
+        #[cfg(not(windows))]
+        let script_path = target_test_path("rubash-child-pwd-env.sh");
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_script_path = shell_test_path(&script_path);
+        #[cfg(windows)]
+        fs::write(
+            &script_path,
+            "@echo off\r\nif \"%PWD%\"==\"\" (echo unset) else echo %PWD%\r\n",
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        fs::write(&script_path, "#!/bin/sh\nprintf '%s\\n' \"${PWD-unset}\"\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+        let input = format!("{shell_script_path} > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap().replace("\r\n", "\n");
+        assert_ne!(output, "unset\n");
+        assert!(!output.trim().is_empty());
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
+    }
+
+    #[test]
     fn test_readonly_p_redirects_output() {
         let output_path = "target/rubash-readonly-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
