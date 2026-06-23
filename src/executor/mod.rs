@@ -2634,19 +2634,18 @@ impl Executor {
                 status = 1;
                 continue;
             };
+            let is_exported = exported_functions.iter().any(|exported| exported == name);
+            if exported_only && !is_exported {
+                continue;
+            }
             if function_names_only {
-                if exported_only && exported_functions.iter().any(|exported| exported == name) {
+                if exported_only {
                     writeln!(stdout, "declare -fx {name}")?;
                 } else {
                     writeln!(stdout, "{name}")?;
                 }
             } else {
-                self.write_function_definition(
-                    name,
-                    body,
-                    exported_only && exported_functions.iter().any(|exported| exported == name),
-                    stdout,
-                )?;
+                self.write_function_definition(name, body, exported_only && is_exported, stdout)?;
             }
         }
         Ok(status)
@@ -3171,6 +3170,7 @@ impl Executor {
         if !variable_only {
             for name in &names {
                 self.functions.remove(name);
+                unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
 
