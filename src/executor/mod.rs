@@ -638,6 +638,7 @@ pub struct Executor {
     aliases: HashMap<String, Alias>,
     functions: HashMap<String, Vec<CommandNode>>,
     positional_params: Vec<String>,
+    local_var_scopes: Vec<HashMap<String, Option<String>>>,
     expanding_aliases: Vec<String>,
     loop_depth: usize,
     function_depth: usize,
@@ -725,6 +726,7 @@ impl Executor {
             aliases: HashMap::new(),
             functions: HashMap::new(),
             positional_params: Vec::new(),
+            local_var_scopes: Vec::new(),
             expanding_aliases: Vec::new(),
             loop_depth: 0,
             function_depth: 0,
@@ -1937,6 +1939,10 @@ impl Executor {
                     Ok(())
                 }
                 "declare" | "typeset" => self.execute_declare_command(cmd),
+                "local" => {
+                    self.exit_code = self.execute_local(cmd)?;
+                    Ok(())
+                }
                 "unalias" => {
                     self.exit_code = self.execute_unalias(cmd)?;
                     Ok(())
@@ -2224,9 +2230,11 @@ impl Executor {
         store_indexed_array(&mut self.env_vars, "BASH_ARGV", argv_stack);
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
+        self.local_var_scopes.push(HashMap::new());
         self.function_depth += 1;
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
+        self.restore_function_locals();
         self.positional_params = old_positional_params;
         match old_funcname {
             Some(value) => {
@@ -2259,6 +2267,50 @@ impl Executor {
                 Ok(())
             }
             other => other,
+        }
+    }
+
+    fn save_local_names(&mut self, args: &[String]) {
+        let mut names = Vec::new();
+        for arg in args {
+            if arg == "--" {
+                continue;
+            }
+            if arg.starts_with('-') && arg != "-" {
+                continue;
+            }
+            let Some(name) = local_assignment_name(arg) else {
+                continue;
+            };
+            names.push(name.to_string());
+        }
+
+        let Some(scope) = self.local_var_scopes.last_mut() else {
+            return;
+        };
+        for name in names {
+            if scope.contains_key(&name) {
+                continue;
+            }
+            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
+        }
+    }
+
+    fn restore_function_locals(&mut self) {
+        let Some(scope) = self.local_var_scopes.pop() else {
+            return;
+        };
+        for (name, value) in scope {
+            match value {
+                Some(value) => {
+                    self.env_vars.insert(name.clone(), value.clone());
+                    env::set_var(name, value);
+                }
+                None => {
+                    self.env_vars.remove(&name);
+                    env::remove_var(name);
+                }
+            }
         }
     }
 
@@ -2513,6 +2565,37 @@ impl Executor {
         }
         self.exit_code = self.execute_declare(cmd)?;
         Ok(())
+    }
+
+    fn execute_local(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = if self.function_depth == 0 {
+            writeln!(
+                stderr,
+                "{}local: can only be used in a function",
+                self.diagnostic_prefix()
+            )?;
+            1
+        } else if let Err(option) = validate_local_options(&cmd.words[1..]) {
+            writeln!(
+                stderr,
+                "{}local: -{option}: invalid option",
+                self.diagnostic_prefix()
+            )?;
+            writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
+            2
+        } else {
+            self.save_local_names(&cmd.words[1..]);
+            crate::builtins::declare::execute_with_io(
+                &cmd.words[1..],
+                &mut self.env_vars,
+                &mut stdout,
+                &mut stderr,
+            )?
+        };
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
     }
 
     fn execute_export(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -4585,6 +4668,10 @@ impl Executor {
                 Ok(())
             }
             "declare" | "typeset" => self.execute_declare_command(cmd),
+            "local" => {
+                self.exit_code = self.execute_local(cmd)?;
+                Ok(())
+            }
             "unset" => {
                 self.exit_code = self.execute_unset(cmd)?;
                 Ok(())
@@ -4839,6 +4926,10 @@ impl Executor {
                 Ok(())
             }
             "declare" | "typeset" => self.execute_declare_command(&builtin_cmd),
+            "local" => {
+                self.exit_code = self.execute_local(&builtin_cmd)?;
+                Ok(())
+            }
             "unset" => {
                 self.exit_code = self.execute_unset(&builtin_cmd)?;
                 Ok(())
@@ -5198,6 +5289,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.execute_declare_command(&command)
+            }
+            "local" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_local(&command)?;
+                Ok(())
             }
             "unset" => {
                 let mut command = CommandNode::new();
@@ -13949,6 +14046,35 @@ fn is_shell_builtin_name(name: &str) -> bool {
             | "unset"
             | "wait"
     )
+}
+
+fn validate_local_options(args: &[String]) -> Result<(), char> {
+    for arg in args {
+        if arg == "--" {
+            return Ok(());
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            return Ok(());
+        }
+        for option in arg[1..].chars() {
+            match option {
+                'a' | 'A' | 'f' | 'F' | 'g' | 'i' | 'l' | 'n' | 'p' | 'r' | 't' | 'u' | 'x' => {}
+                other => return Err(other),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn local_assignment_name(arg: &str) -> Option<&str> {
+    let name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
+    if is_shell_name(name) {
+        Some(name)
+    } else {
+        None
+    }
 }
 
 fn normalize_single_element_array_assignment(value: &str) -> Option<String> {
