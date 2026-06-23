@@ -1866,10 +1866,16 @@ impl Executor {
                     Ok(())
                 }
                 "true" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = crate::builtins::colon::true_builtin();
                     Ok(())
                 }
                 "false" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = crate::builtins::colon::false_builtin();
                     Ok(())
                 }
@@ -1883,6 +1889,9 @@ impl Executor {
                     Ok(())
                 }
                 "hash" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_hash(cmd)?;
                     Ok(())
                 }
@@ -1899,6 +1908,9 @@ impl Executor {
                     Ok(())
                 }
                 "umask" => {
+                    if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
+                        return self.execute_external(cmd);
+                    }
                     self.exit_code = self.execute_umask(cmd)?;
                     Ok(())
                 }
@@ -4187,10 +4199,16 @@ impl Executor {
                 Ok(())
             }
             "true" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = crate::builtins::colon::true_builtin();
                 Ok(())
             }
             "false" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = crate::builtins::colon::false_builtin();
                 Ok(())
             }
@@ -4258,6 +4276,9 @@ impl Executor {
                 Ok(())
             }
             "hash" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_hash(cmd)?;
                 Ok(())
             }
@@ -4311,6 +4332,9 @@ impl Executor {
                 Ok(())
             }
             "umask" => {
+                if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
+                    return self.execute_external(cmd);
+                }
                 self.exit_code = self.execute_umask(cmd)?;
                 Ok(())
             }
@@ -4411,6 +4435,15 @@ impl Executor {
         };
         let mut builtin_cmd = cmd.clone();
         builtin_cmd.words = args.to_vec();
+
+        if crate::builtins::enable::is_disabled(&self.env_vars, name) {
+            eprintln!(
+                "{}builtin: {name}: not a shell builtin",
+                self.diagnostic_prefix()
+            );
+            self.exit_code = 1;
+            return Ok(());
+        }
 
         match name {
             "echo" => {
@@ -4597,6 +4630,15 @@ impl Executor {
             self.exit_code = 0;
             return Ok(());
         };
+
+        if crate::builtins::enable::is_disabled(&self.env_vars, name) {
+            eprintln!(
+                "{}builtin: {name}: not a shell builtin",
+                self.diagnostic_prefix()
+            );
+            self.exit_code = 1;
+            return Ok(());
+        }
 
         match name.as_str() {
             "echo" => {
