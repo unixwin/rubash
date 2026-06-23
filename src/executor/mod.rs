@@ -2067,7 +2067,7 @@ impl Executor {
                     Ok(())
                 }
                 _ if self.functions.contains_key(word.as_str()) => {
-                    self.execute_function(word, &cmd.words[1..])
+                    self.execute_function(word, &cmd.words[1..], cmd.line)
                 }
                 _ => self.execute_external(cmd),
             }
@@ -2093,7 +2093,12 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_function(&mut self, name: &str, args: &[String]) -> Result<(), ExecuteError> {
+    fn execute_function(
+        &mut self,
+        name: &str,
+        args: &[String],
+        call_line: Option<usize>,
+    ) -> Result<(), ExecuteError> {
         let Some(body) = self.functions.get(name).cloned() else {
             return Ok(());
         };
@@ -2102,6 +2107,8 @@ impl Executor {
         }
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_funcname = self.env_vars.get("FUNCNAME").cloned();
+        let old_bash_lineno = self.env_vars.get("BASH_LINENO").cloned();
+        let old_bash_source = self.env_vars.get("BASH_SOURCE").cloned();
         let old_positional_params = self.positional_params.clone();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
@@ -2109,6 +2116,12 @@ impl Executor {
         let mut funcname_stack = self.funcname_stack();
         funcname_stack.insert(0, name.to_string());
         store_indexed_array(&mut self.env_vars, "FUNCNAME", funcname_stack);
+        let mut lineno_stack = self.indexed_array_stack("BASH_LINENO");
+        lineno_stack.insert(0, call_line.unwrap_or(0).to_string());
+        store_indexed_array(&mut self.env_vars, "BASH_LINENO", lineno_stack);
+        let mut source_stack = self.indexed_array_stack("BASH_SOURCE");
+        source_stack.insert(0, self.current_bash_source());
+        store_indexed_array(&mut self.env_vars, "BASH_SOURCE", source_stack);
         self.positional_params = args.to_vec();
         let ast = Ast { commands: body };
         self.function_depth += 1;
@@ -2125,6 +2138,8 @@ impl Executor {
                 mark_env_name(&mut self.env_vars, ARRAY_VARS, "FUNCNAME");
             }
         }
+        self.restore_indexed_array("BASH_LINENO", old_bash_lineno);
+        self.restore_indexed_array("BASH_SOURCE", old_bash_source);
         match old_function {
             Some(value) => {
                 self.env_vars
@@ -9036,6 +9051,32 @@ impl Executor {
         self.env_vars
             .get("FUNCNAME")
             .map(|value| array_values(value))
+            .unwrap_or_default()
+    }
+
+    fn indexed_array_stack(&self, name: &str) -> Vec<String> {
+        self.env_vars
+            .get(name)
+            .map(|value| array_values(value))
+            .unwrap_or_default()
+    }
+
+    fn restore_indexed_array(&mut self, name: &str, value: Option<String>) {
+        match value {
+            Some(value) => {
+                self.env_vars.insert(name.to_string(), value);
+            }
+            None => {
+                self.env_vars.insert(name.to_string(), String::new());
+            }
+        }
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, name);
+    }
+
+    fn current_bash_source(&self) -> String {
+        self.env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .cloned()
             .unwrap_or_default()
     }
 
