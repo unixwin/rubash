@@ -8714,6 +8714,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_function_call_redirects_stdin_to_body_reads() {
+        let input_path = target_test_path("rubash-function-call-stdin-input.txt");
+        let output_path = target_test_path("rubash-function-call-stdin-output.txt");
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+        fs::write(&input_path, "alpha\nbeta\n").unwrap();
+        let shell_input_path = shell_test_path(&input_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "rubash_stdin_func() {{ read first; read second; echo $first/$second; }}; \
+             rubash_stdin_func < {shell_input_path} > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "alpha/beta\n");
+        let _ = fs::remove_file(&input_path);
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_local_outside_function_reports_error() {
         let error_path = "target/rubash-local-outside-error.txt";
         let status_path = "target/rubash-local-outside-status.txt";

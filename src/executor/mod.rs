@@ -31,6 +31,8 @@ const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
 const SECONDS_OFFSET: &str = "__RUBASH_SECONDS_OFFSET";
+const FUNCTION_STDIN: &str = "__RUBASH_FUNCTION_STDIN";
+const FUNCTION_STDIN_OFFSET: &str = "__RUBASH_FUNCTION_STDIN_OFFSET";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -2211,12 +2213,15 @@ impl Executor {
             return Ok(());
         }
         self.apply_function_call_redirects(&mut body, call_cmd)?;
+        let call_stdin = self.function_call_stdin(call_cmd)?;
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_funcname = self.env_vars.get("FUNCNAME").cloned();
         let old_bash_argc = self.env_vars.get("BASH_ARGC").cloned();
         let old_bash_argv = self.env_vars.get("BASH_ARGV").cloned();
         let old_bash_lineno = self.env_vars.get("BASH_LINENO").cloned();
         let old_bash_source = self.env_vars.get("BASH_SOURCE").cloned();
+        let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         let old_positional_params = self.positional_params.clone();
         let old_exported_vars = self.env_vars.get(EXPORTED_VARS).cloned();
         let old_readonly_vars = self.env_vars.get(READONLY_VARS).cloned();
@@ -2228,6 +2233,11 @@ impl Executor {
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
+        if let Some(input) = call_stdin {
+            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
         let mut funcname_stack = self.funcname_stack();
         funcname_stack.insert(0, name.to_string());
         store_indexed_array(&mut self.env_vars, "FUNCNAME", funcname_stack);
@@ -2274,6 +2284,12 @@ impl Executor {
         self.restore_indexed_array("BASH_ARGV", old_bash_argv);
         self.restore_indexed_array("BASH_LINENO", old_bash_lineno);
         self.restore_indexed_array("BASH_SOURCE", old_bash_source);
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
+        restore_optional_env_var(
+            &mut self.env_vars,
+            FUNCTION_STDIN_OFFSET,
+            old_function_stdin_offset,
+        );
         match old_function {
             Some(value) => {
                 self.env_vars
@@ -2342,6 +2358,21 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    fn function_call_stdin(&self, call_cmd: &CommandNode) -> Result<Option<String>, ExecuteError> {
+        if let Some(input) = self.stdin_string_for_command(call_cmd) {
+            return Ok(Some(input));
+        }
+
+        let Some(redirect) = &call_cmd.redirect_in else {
+            return Ok(None);
+        };
+        let target = self.expand_word(&redirect.target);
+        Ok(Some(fs::read_to_string(shell_path_to_windows(
+            &target,
+            &self.env_vars,
+        ))?))
     }
 
     fn save_local_names(&mut self, args: &[String]) {
@@ -7165,14 +7196,75 @@ impl Executor {
     }
 
     fn read_input_for_command(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
-        self.stdin_string_for_command(cmd)
-            .map(|line| trim_read_input(line, delimiter, char_limit, exact_char_limit))
+        if let Some(line) = self.stdin_string_for_command(cmd) {
+            return Some(trim_read_input(
+                line,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+            ));
+        }
+
+        self.read_function_stdin(delimiter, char_limit, exact_char_limit)
+    }
+
+    fn read_function_stdin(
+        &mut self,
+        delimiter: char,
+        char_limit: Option<usize>,
+        exact_char_limit: bool,
+    ) -> Option<String> {
+        let input = self.env_vars.get(FUNCTION_STDIN)?.clone();
+        let offset = self
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if offset >= input.len() {
+            return None;
+        }
+        if char_limit == Some(0) {
+            return Some(String::new());
+        }
+
+        let slice = &input[offset..];
+        let mut output = String::new();
+        let mut consumed = 0usize;
+        let mut took_any = false;
+        for (index, ch) in slice.char_indices() {
+            if !exact_char_limit && ch == delimiter {
+                consumed = index + ch.len_utf8();
+                took_any = true;
+                break;
+            }
+
+            output.push(ch);
+            consumed = index + ch.len_utf8();
+            took_any = true;
+            if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
+                break;
+            }
+        }
+        if !took_any {
+            return None;
+        }
+
+        self.env_vars.insert(
+            FUNCTION_STDIN_OFFSET.to_string(),
+            (offset + consumed).to_string(),
+        );
+        Some(trim_read_input(
+            output,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+        ))
     }
 
     fn assign_read_scalar_names(&mut self, names: &[String], line: &str, raw: bool) {
