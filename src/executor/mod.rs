@@ -1973,7 +1973,7 @@ impl Executor {
                 }
                 "set" => self.execute_set_command(cmd),
                 "getopts" => {
-                    self.exit_code = self.execute_getopts(cmd);
+                    self.exit_code = self.execute_getopts_command(cmd)?;
                     Ok(())
                 }
                 "shopt" => {
@@ -4497,6 +4497,10 @@ impl Executor {
             "exec" => self.execute_exec_command(cmd),
             "eval" => self.execute_eval(cmd),
             "set" => self.execute_set_command(cmd),
+            "getopts" => {
+                self.exit_code = self.execute_getopts_command(cmd)?;
+                Ok(())
+            }
             "shopt" => {
                 self.exit_code = self.execute_shopt(cmd)?;
                 Ok(())
@@ -4853,6 +4857,10 @@ impl Executor {
                 Ok(())
             }
             "set" => self.execute_set_command(&builtin_cmd),
+            "getopts" => {
+                self.exit_code = self.execute_getopts_command(&builtin_cmd)?;
+                Ok(())
+            }
             "shopt" => {
                 self.exit_code = self.execute_shopt(&builtin_cmd)?;
                 Ok(())
@@ -5072,6 +5080,12 @@ impl Executor {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
                 self.execute_set_command(&command)
+            }
+            "getopts" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.exit_code = self.execute_getopts_command(&command)?;
+                Ok(())
             }
             "shopt" => {
                 let mut command = CommandNode::new();
@@ -8195,14 +8209,38 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_getopts(&mut self, cmd: &CommandNode) -> i32 {
-        let mut stderr = std::io::stderr().lock();
+    fn execute_getopts_command(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        let mut stderr = Vec::new();
+        let status = self.execute_getopts(cmd, &mut stderr);
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn execute_getopts<W>(&mut self, cmd: &CommandNode, stderr: &mut W) -> i32
+    where
+        W: Write,
+    {
         if cmd.words.len() < 3 {
             let _ = writeln!(stderr, "getopts: usage: getopts optstring name [arg ...]");
             return 2;
         }
 
         let optstring = &cmd.words[1];
+        if optstring == "--" {
+            let _ = writeln!(stderr, "getopts: usage: getopts optstring name [arg ...]");
+            return 2;
+        }
+        if optstring.starts_with('-') && optstring.len() > 1 {
+            let option = optstring.chars().nth(1).unwrap_or('-');
+            let _ = writeln!(
+                stderr,
+                "{}getopts: -{option}: invalid option",
+                self.diagnostic_prefix()
+            );
+            let _ = writeln!(stderr, "getopts: usage: getopts optstring name [arg ...]");
+            return 2;
+        }
+
         let variable = &cmd.words[2];
         if !is_shell_name(variable) {
             let _ = writeln!(

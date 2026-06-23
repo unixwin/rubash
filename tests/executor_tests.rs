@@ -8413,6 +8413,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_getopts_invalid_builtin_option_redirects_stderr() {
+        let error_path = "target/rubash-getopts-invalid-error.txt";
+        let status_path = "target/rubash-getopts-invalid-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("getopts -a opts name 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("getopts: -a: invalid option\n"));
+        assert!(error.contains("getopts: usage: getopts optstring name [arg ...]\n"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_builtin_and_command_getopts_update_shell_state() {
+        let output_path = "target/rubash-getopts-command-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "builtin getopts a opt -a; echo builtin:$?:$opt:$OPTIND > {output_path}; \
+             OPTIND=1; command getopts a opt -a; echo command:$?:$opt:$OPTIND >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "builtin:0:a:2\ncommand:0:a:2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shift_too_many_fails_without_changing_positional_params() {
         let output_path = "target/rubash-shift-too-many-output.txt";
         let _ = fs::remove_file(output_path);
