@@ -319,19 +319,21 @@ fn print_exported<W>(env_vars: &HashMap<String, String>, stdout: &mut W) -> io::
 where
     W: Write,
 {
-    let mut vars: Vec<(&String, &String)> = env_vars.iter().collect();
-    vars.sort_by(|left, right| left.0.cmp(right.0));
+    let mut names: Vec<_> = marked_vars(env_vars, EXPORTED_VARS).into_iter().collect();
+    names.sort();
 
-    for (name, value) in vars {
+    for name in names {
         if name.starts_with("__RUBASH_") {
             continue;
         }
-        writeln!(
-            stdout,
-            "declare -x {}=\"{}\"",
-            name,
-            quote_export_value(value)
-        )?;
+        if let Some(value) = env_vars.get(&name) {
+            writeln!(
+                stdout,
+                "declare -x {}=\"{}\"",
+                name,
+                quote_export_value(value)
+            )?;
+        }
     }
 
     Ok(())
@@ -534,6 +536,7 @@ mod tests {
     fn prints_exported_variables() {
         let mut vars = env_map();
         vars.insert("NAME".to_string(), "value".to_string());
+        vars.insert(EXPORTED_VARS.to_string(), "NAME".to_string());
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
 
