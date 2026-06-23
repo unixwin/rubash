@@ -3324,6 +3324,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_pushd_n_accepts_double_dash_before_directory() {
+        let output_path = "target/rubash-pushd-n-double-dash-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("PWD=/; pushd -n -- /tmp > {output_path}; dirs -p >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "/ /tmp\n/\n/tmp\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_popd_appends_stderr() {
         let error_path = "target/rubash-popd-stderr-append-output.txt";
         let _ = fs::remove_file(error_path);
@@ -3341,6 +3361,50 @@ mod command_chaining {
         assert!(error.starts_with("before\n"));
         assert!(error.contains("popd: +9: directory stack index out of range"));
         let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_popd_n_removes_next_directory_without_cd() {
+        let output_path = "target/rubash-popd-n-output.txt";
+        let scratch_path = "target/rubash-popd-n-scratch.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(scratch_path);
+        let input = format!(
+            "PWD=/; pushd -n /tmp > {scratch_path}; popd -n -- > {output_path}; dirs -p >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "/\n/\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(scratch_path);
+    }
+
+    #[test]
+    fn test_popd_n_empty_stack_returns_failure() {
+        let error_path = "target/rubash-popd-n-empty-error.txt";
+        let status_path = "target/rubash-popd-n-empty-status.txt";
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        let input = format!("PWD=/; popd -n 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("popd: directory stack empty"));
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
     }
 
     #[test]
