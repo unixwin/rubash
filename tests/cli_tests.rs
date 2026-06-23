@@ -76,6 +76,22 @@ fn double_dash_allows_script_file_after_options() {
 }
 
 #[test]
+fn posix_long_option_enables_posix_mode() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("--posix")
+        .arg("-c")
+        .arg("type break")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "break is a special shell builtin\n"
+    );
+}
+
+#[test]
 fn stdin_script_uses_s_positional_arguments() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")

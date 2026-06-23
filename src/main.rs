@@ -41,6 +41,10 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
                 index += 2;
             }
+            "--posix" => {
+                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                index += 1;
+            }
             "-c" => {
                 if let Some(command) = args.get(index + 1) {
                     executor.set_env("BASH_EXECUTION_STRING", command);
