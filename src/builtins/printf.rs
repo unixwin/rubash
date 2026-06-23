@@ -28,13 +28,18 @@ struct FormatSpec {
 struct RenderedPrintf {
     output: String,
     status: i32,
-    error: Option<String>,
+    errors: Vec<String>,
     stop_output: bool,
 }
 
 enum ParsedFormat {
     Spec(FormatSpec),
     Missing(String),
+}
+
+struct ParsedNumber<T> {
+    value: T,
+    invalid: Option<String>,
 }
 
 /// Execute `printf` with arguments after the command name.
@@ -115,7 +120,7 @@ where
         stdout.write_all(rendered.output.as_bytes())?;
     }
 
-    if let Some(error) = rendered.error {
+    for error in rendered.errors {
         writeln!(stderr, "{error}")?;
     }
 
@@ -125,6 +130,7 @@ where
 fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -> RenderedPrintf {
     let mut output = String::new();
     let mut arg_index = 0;
+    let mut errors = Vec::new();
 
     if args.is_empty() {
         return render_one_pass(format, args, &mut arg_index, output, env_vars);
@@ -133,10 +139,16 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
     while arg_index < args.len() {
         let before_arg = arg_index;
         let rendered = render_one_pass(format, args, &mut arg_index, output, env_vars);
-        if rendered.status != EXECUTION_SUCCESS || rendered.stop_output {
-            return rendered;
-        }
         output = rendered.output;
+        errors.extend(rendered.errors);
+        if rendered.stop_output {
+            return RenderedPrintf {
+                output,
+                status: status_from_errors(&errors),
+                errors,
+                stop_output: true,
+            };
+        }
 
         if arg_index == before_arg {
             break;
@@ -145,8 +157,8 @@ fn render(format: &str, args: &[&str], env_vars: &mut HashMap<String, String>) -
 
     RenderedPrintf {
         output,
-        status: EXECUTION_SUCCESS,
-        error: None,
+        status: status_from_errors(&errors),
+        errors,
         stop_output: false,
     }
 }
@@ -159,6 +171,7 @@ fn render_one_pass(
     env_vars: &mut HashMap<String, String>,
 ) -> RenderedPrintf {
     let mut chars = format.chars().peekable();
+    let mut errors = Vec::new();
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -176,10 +189,10 @@ fn render_one_pass(
                         return RenderedPrintf {
                             output,
                             status: EXECUTION_FAILURE,
-                            error: Some(format!(
+                            errors: vec![format!(
                                 "rubash: printf: `{format}': missing format character"
-                            )),
-                            stop_output: false,
+                            )],
+                            stop_output: true,
                         };
                     }
                 };
@@ -188,14 +201,14 @@ fn render_one_pass(
                     return RenderedPrintf {
                         output,
                         status: EXECUTION_FAILURE,
-                        error: Some(format!(
+                        errors: vec![format!(
                             "rubash: printf: `{}': invalid format character",
                             spec.specifier
-                        )),
-                        stop_output: false,
+                        )],
+                        stop_output: true,
                     };
                 };
-                resolve_dynamic_format_args(&mut spec, args, arg_index);
+                errors.extend(resolve_dynamic_format_args(&mut spec, args, arg_index));
 
                 if spec.specifier == 'n' {
                     let name = next_arg(args, arg_index);
@@ -204,13 +217,16 @@ fn render_one_pass(
                     }
                 } else {
                     let value = next_arg(args, arg_index);
-                    let (rendered, stop_output) = format_value(value, &spec);
+                    let (rendered, stop_output, error) = format_value(value, &spec);
+                    if let Some(error) = error {
+                        errors.push(error);
+                    }
                     output.push_str(&rendered);
                     if stop_output {
                         return RenderedPrintf {
                             output,
-                            status: EXECUTION_SUCCESS,
-                            error: None,
+                            status: status_from_errors(&errors),
+                            errors,
                             stop_output: true,
                         };
                     }
@@ -221,9 +237,17 @@ fn render_one_pass(
     }
     RenderedPrintf {
         output,
-        status: EXECUTION_SUCCESS,
-        error: None,
+        status: status_from_errors(&errors),
+        errors,
         stop_output: false,
+    }
+}
+
+fn status_from_errors(errors: &[String]) -> i32 {
+    if errors.is_empty() {
+        EXECUTION_SUCCESS
+    } else {
+        EXECUTION_FAILURE
     }
 }
 
@@ -289,9 +313,21 @@ where
     ParsedFormat::Spec(spec)
 }
 
-fn resolve_dynamic_format_args(spec: &mut FormatSpec, args: &[&str], arg_index: &mut usize) {
+fn resolve_dynamic_format_args(
+    spec: &mut FormatSpec,
+    args: &[&str],
+    arg_index: &mut usize,
+) -> Vec<String> {
+    let mut errors = Vec::new();
     if spec.width_from_arg {
-        let width = parse_i64(next_arg(args, arg_index));
+        let raw = next_arg(args, arg_index);
+        let ParsedNumber {
+            value: width,
+            invalid,
+        } = parse_i64(raw);
+        if let Some(invalid) = invalid {
+            errors.push(invalid_number_error(&invalid));
+        }
         if width < 0 {
             spec.left_adjust = true;
             spec.width = Some(width.unsigned_abs() as usize);
@@ -301,9 +337,17 @@ fn resolve_dynamic_format_args(spec: &mut FormatSpec, args: &[&str], arg_index: 
     }
 
     if spec.precision_from_arg {
-        let precision = parse_i64(next_arg(args, arg_index));
+        let raw = next_arg(args, arg_index);
+        let ParsedNumber {
+            value: precision,
+            invalid,
+        } = parse_i64(raw);
+        if let Some(invalid) = invalid {
+            errors.push(invalid_number_error(&invalid));
+        }
         spec.precision = (precision >= 0).then_some(precision as usize);
     }
+    errors
 }
 
 fn read_usize_with_digits<I>(chars: &mut std::iter::Peekable<I>) -> (Option<usize>, String)
@@ -345,8 +389,9 @@ fn valid_format_specifier(specifier: char) -> bool {
     )
 }
 
-fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
+fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Option<String>) {
     let mut stop_output = false;
+    let mut invalid_number = None;
     let rendered = match spec.specifier {
         's' => truncate_precision(value.to_string(), spec.precision),
         'b' => {
@@ -357,15 +402,51 @@ fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
         'q' => truncate_precision(shell_quote(value), spec.precision),
         'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
         'c' => value.chars().next().unwrap_or('\0').to_string(),
-        'd' | 'i' => format_signed_integer(parse_i64(value), spec),
-        'u' => format_unsigned_integer(parse_i64(value) as u64, 10, false, spec),
-        'x' => format_unsigned_integer(parse_i64(value) as u64, 16, false, spec),
-        'X' => format_unsigned_integer(parse_i64(value) as u64, 16, true, spec),
-        'o' => format_unsigned_integer(parse_i64(value) as u64, 8, false, spec),
-        'f' | 'F' => format_float(value, spec, 'f'),
-        'e' => format_float(value, spec, 'e'),
-        'E' => format_float(value, spec, 'E'),
-        'g' | 'G' => format_float(value, spec, spec.specifier),
+        'd' | 'i' => {
+            let parsed = parse_i64(value);
+            invalid_number = parsed.invalid;
+            format_signed_integer(parsed.value, spec)
+        }
+        'u' => {
+            let parsed = parse_i64(value);
+            invalid_number = parsed.invalid;
+            format_unsigned_integer(parsed.value as u64, 10, false, spec)
+        }
+        'x' => {
+            let parsed = parse_i64(value);
+            invalid_number = parsed.invalid;
+            format_unsigned_integer(parsed.value as u64, 16, false, spec)
+        }
+        'X' => {
+            let parsed = parse_i64(value);
+            invalid_number = parsed.invalid;
+            format_unsigned_integer(parsed.value as u64, 16, true, spec)
+        }
+        'o' => {
+            let parsed = parse_i64(value);
+            invalid_number = parsed.invalid;
+            format_unsigned_integer(parsed.value as u64, 8, false, spec)
+        }
+        'f' | 'F' => {
+            let parsed = parse_f64(value);
+            invalid_number = parsed.invalid;
+            format_float(parsed.value, spec, 'f')
+        }
+        'e' => {
+            let parsed = parse_f64(value);
+            invalid_number = parsed.invalid;
+            format_float(parsed.value, spec, 'e')
+        }
+        'E' => {
+            let parsed = parse_f64(value);
+            invalid_number = parsed.invalid;
+            format_float(parsed.value, spec, 'E')
+        }
+        'g' | 'G' => {
+            let parsed = parse_f64(value);
+            invalid_number = parsed.invalid;
+            format_float(parsed.value, spec, spec.specifier)
+        }
         other => {
             let mut fallback = String::from('%');
             fallback.push(other);
@@ -377,7 +458,11 @@ fn format_value(value: &str, spec: &FormatSpec) -> (String, bool) {
     if spec.precision.is_some() && matches!(spec.specifier, 'd' | 'i' | 'u' | 'x' | 'X' | 'o') {
         width_spec.zero_pad = false;
     }
-    (apply_width(rendered, &width_spec), stop_output)
+    (
+        apply_width(rendered, &width_spec),
+        stop_output,
+        invalid_number.map(|value| invalid_number_error(&value)),
+    )
 }
 
 fn truncate_precision(value: String, precision: Option<usize>) -> String {
@@ -387,8 +472,7 @@ fn truncate_precision(value: String, precision: Option<usize>) -> String {
     value.chars().take(precision).collect()
 }
 
-fn format_float(value: &str, spec: &FormatSpec, mode: char) -> String {
-    let value = parse_f64(value);
+fn format_float(value: f64, spec: &FormatSpec, mode: char) -> String {
     let mut rendered = match mode {
         'e' | 'E' => {
             let precision = spec.precision.unwrap_or(6);
@@ -590,18 +674,58 @@ fn apply_width(value: String, spec: &FormatSpec) -> String {
     }
 }
 
-fn parse_i64(value: &str) -> i64 {
+fn parse_i64(value: &str) -> ParsedNumber<i64> {
     if let Some(ch) = printf_char_constant(value) {
-        return ch as i64;
+        return ParsedNumber {
+            value: ch as i64,
+            invalid: None,
+        };
     }
-    parse_integer_literal(value).unwrap_or_default()
+    if value.is_empty() {
+        return ParsedNumber {
+            value: 0,
+            invalid: None,
+        };
+    }
+    match parse_integer_literal(value) {
+        Some(value) => ParsedNumber {
+            value,
+            invalid: None,
+        },
+        None => ParsedNumber {
+            value: 0,
+            invalid: Some(value.to_string()),
+        },
+    }
 }
 
-fn parse_f64(value: &str) -> f64 {
+fn parse_f64(value: &str) -> ParsedNumber<f64> {
     if let Some(ch) = printf_char_constant(value) {
-        return ch as u32 as f64;
+        return ParsedNumber {
+            value: ch as u32 as f64,
+            invalid: None,
+        };
     }
-    value.parse::<f64>().unwrap_or_default()
+    if value.is_empty() {
+        return ParsedNumber {
+            value: 0.0,
+            invalid: None,
+        };
+    }
+    match value.parse::<f64>() {
+        Ok(value) => ParsedNumber {
+            value,
+            invalid: None,
+        },
+        Err(_) => ParsedNumber {
+            value: 0.0,
+            invalid: Some(value.to_string()),
+        },
+    }
+}
+
+fn invalid_number_error(value: &str) -> String {
+    format!("rubash: printf: {value}: invalid number")
 }
 
 fn printf_char_constant(value: &str) -> Option<char> {
@@ -862,6 +986,44 @@ mod tests {
 
         assert_eq!(status, EXECUTION_SUCCESS);
         assert_eq!(stdout, "-x");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn invalid_numeric_arguments_render_zero_and_fail() {
+        let (status, stdout, stderr, _) = run(&[
+            "%d|%o|%x|%.2f|%*s|%.*s",
+            "z",
+            "+",
+            "GNU",
+            "nope",
+            "bad",
+            "x",
+            "bad",
+            "abc",
+        ]);
+
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert_eq!(stdout, "0|0|0|0.00|x|");
+        assert!(stderr.contains("z: invalid number"));
+        assert!(stderr.contains("+: invalid number"));
+        assert!(stderr.contains("GNU: invalid number"));
+        assert!(stderr.contains("nope: invalid number"));
+        assert_eq!(stderr.matches("bad: invalid number").count(), 2);
+    }
+
+    #[test]
+    fn numeric_errors_do_not_stop_reused_formats() {
+        let (status, stdout, stderr, _) = run(&["%d ", "z", "1"]);
+
+        assert_eq!(status, EXECUTION_FAILURE);
+        assert_eq!(stdout, "0 1 ");
+        assert!(stderr.contains("z: invalid number"));
+
+        let (status, stdout, stderr, _) = run(&["%d", ""]);
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "0");
         assert!(stderr.is_empty());
     }
 
