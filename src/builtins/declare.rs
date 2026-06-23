@@ -48,6 +48,7 @@ where
     let mut unset_integer = false;
     let mut unset_uppercase = false;
     let mut unset_lowercase = false;
+    let mut unset_readonly = false;
     let mut names = Vec::new();
 
     for arg in args {
@@ -81,7 +82,7 @@ where
                         }
                     }
                     'r' if set_attr => readonly = true,
-                    'r' => {}
+                    'r' => unset_readonly = true,
                     'g' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
@@ -104,16 +105,27 @@ where
     }
 
     assign_declare_names(&names, variables, integer);
+    let mut attr_status = EXECUTION_SUCCESS;
     if unset_export
         || unset_array
         || unset_assoc
         || unset_integer
         || unset_uppercase
         || unset_lowercase
+        || unset_readonly
     {
         for name in &names {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
+            if unset_readonly && marked_vars(variables, READONLY_VARS).contains(name) {
+                writeln!(
+                    stderr,
+                    "{}declare: {}: readonly variable",
+                    diagnostic_prefix(),
+                    name
+                )?;
+                attr_status = EXECUTION_FAILURE;
+            }
             if unset_export {
                 unmark_typed(variables, EXPORTED_VARS, name);
             }
@@ -229,7 +241,7 @@ where
     }
 
     if !print {
-        return Ok(EXECUTION_SUCCESS);
+        return Ok(attr_status);
     }
 
     let filter_exported = export;
@@ -240,7 +252,7 @@ where
     let filter_uppercase = uppercase;
     let filter_lowercase = lowercase;
 
-    let mut status = EXECUTION_SUCCESS;
+    let mut status = attr_status;
     let exported = exported_vars(variables);
     let readonly = marked_vars(variables, READONLY_VARS);
     let arrays = marked_vars(variables, ARRAY_VARS);
