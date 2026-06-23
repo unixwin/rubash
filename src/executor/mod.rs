@@ -642,6 +642,7 @@ pub struct Executor {
     loop_depth: usize,
     function_depth: usize,
     random_state: Cell<u32>,
+    subshell_depth: Cell<usize>,
 }
 
 impl Executor {
@@ -713,6 +714,7 @@ impl Executor {
             loop_depth: 0,
             function_depth: 0,
             random_state: Cell::new(current_epoch_micros() as u32),
+            subshell_depth: Cell::new(0),
         }
     }
 
@@ -964,6 +966,7 @@ impl Executor {
 
         let mut index = 0;
         let mut subshell_env: Option<HashMap<String, String>> = None;
+        let mut subshell_depth: Option<usize> = None;
         while index < ast.commands.len() {
             let command = &ast.commands[index];
             if self.noexec_enabled() {
@@ -971,6 +974,9 @@ impl Executor {
                 if command.subshell_end {
                     if let Some(saved_env) = subshell_env.take() {
                         self.restore_shell_env(saved_env);
+                    }
+                    if let Some(saved_depth) = subshell_depth.take() {
+                        self.subshell_depth.set(saved_depth);
                     }
                 }
                 index += 1;
@@ -1031,6 +1037,9 @@ impl Executor {
 
             if command.subshell && subshell_env.is_none() {
                 subshell_env = Some(self.env_vars.clone());
+                let old_depth = self.subshell_depth.get();
+                subshell_depth = Some(old_depth);
+                self.subshell_depth.set(old_depth + 1);
             }
 
             match self.execute_command(command) {
@@ -1048,6 +1057,9 @@ impl Executor {
             if command.subshell_end {
                 if let Some(saved_env) = subshell_env.take() {
                     self.restore_shell_env(saved_env);
+                }
+                if let Some(saved_depth) = subshell_depth.take() {
+                    self.subshell_depth.set(saved_depth);
                 }
             }
 
@@ -8116,6 +8128,9 @@ impl Executor {
         if base_name == "BASHPID" && !append {
             return;
         }
+        if base_name == "BASH_SUBSHELL" && !append {
+            return;
+        }
         if base_name == "FUNCNAME" && !append {
             return;
         }
@@ -8972,6 +8987,7 @@ impl Executor {
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
             "BASHPID" => Some(std::process::id().to_string()),
+            "BASH_SUBSHELL" => Some(self.subshell_depth.get().to_string()),
             "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
@@ -9005,6 +9021,7 @@ impl Executor {
                 | "SECONDS"
                 | "RANDOM"
                 | "BASHPID"
+                | "BASH_SUBSHELL"
                 | "FUNCNAME"
                 | "GROUPS"
                 | "LINENO"
@@ -10086,6 +10103,14 @@ impl Executor {
     }
 
     fn expand_command_substitution(&self, source: &str) -> String {
+        let old_depth = self.subshell_depth.get();
+        self.subshell_depth.set(old_depth + 1);
+        let result = self.expand_command_substitution_inner(source);
+        self.subshell_depth.set(old_depth);
+        result
+    }
+
+    fn expand_command_substitution_inner(&self, source: &str) -> String {
         // TODO(subst.c/parse.y/execute_cmd.c): Bash command substitution runs a
         // subshell, captures stdout, removes trailing newlines, and performs
         // full parsing/execution. This handles the alias4.sub form
@@ -10133,7 +10158,12 @@ impl Executor {
         let words = self.expand_aliases(&words);
 
         if words.first().map(String::as_str) == Some("echo") {
-            return command_substitution_word_split(&words[1..].join(" "));
+            let expanded = words[1..]
+                .iter()
+                .map(|word| self.expand_word(word))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return command_substitution_word_split(&expanded);
         }
 
         if words.first().map(String::as_str) == Some("umask") {
