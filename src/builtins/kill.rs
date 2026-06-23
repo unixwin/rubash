@@ -36,6 +36,14 @@ where
             writeln!(stdout, "HUP")?;
             Ok(0)
         }
+        Some("2") | Some("130") => {
+            writeln!(stdout, "INT")?;
+            Ok(0)
+        }
+        Some("15") | Some("143") => {
+            writeln!(stdout, "TERM")?;
+            Ok(0)
+        }
         Some("EXIT") | Some("SIGEXIT") => {
             writeln!(stdout, "0")?;
             Ok(0)
@@ -46,6 +54,10 @@ where
         }
         Some("INT") | Some("SIGINT") => {
             writeln!(stdout, "2")?;
+            Ok(0)
+        }
+        Some("TERM") | Some("SIGTERM") => {
+            writeln!(stdout, "15")?;
             Ok(0)
         }
         Some(value) => {
@@ -67,9 +79,12 @@ pub fn translate_signal(value: &str) -> Option<&'static str> {
     match value {
         "0" => Some("EXIT"),
         "1" | "129" => Some("HUP"),
+        "2" | "130" => Some("INT"),
+        "15" | "143" => Some("TERM"),
         "EXIT" | "SIGEXIT" => Some("0"),
         "HUP" | "SIGHUP" => Some("1"),
         "INT" | "SIGINT" => Some("2"),
+        "TERM" | "SIGTERM" => Some("15"),
         _ => None,
     }
 }
