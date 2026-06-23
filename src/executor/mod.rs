@@ -682,6 +682,10 @@ impl Executor {
         env_vars
             .entry("MACHTYPE".to_string())
             .or_insert_with(machtype_value);
+        env_vars.insert("UID".to_string(), uid_value());
+        env_vars.insert("EUID".to_string(), euid_value());
+        mark_env_name(&mut env_vars, READONLY_VARS, "UID");
+        mark_env_name(&mut env_vars, READONLY_VARS, "EUID");
 
         Self {
             exit_code: 0,
@@ -11340,6 +11344,17 @@ fn machtype_value() -> String {
             std::env::consts::FAMILY
         )
     }
+}
+
+fn uid_value() -> String {
+    std::env::var("UID")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "1000".to_string())
+}
+
+fn euid_value() -> String {
+    std::env::var("EUID").unwrap_or_else(|_| uid_value())
 }
 
 fn declare_args_request_integer(args: &[String]) -> bool {

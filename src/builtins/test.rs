@@ -15,6 +15,7 @@ const EXECUTION_FAILURE: i32 = 1;
 const EX_BADUSAGE: i32 = 2;
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
+const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 
 /// Execute `test` or `[` with arguments after the command name.
 pub fn execute(
@@ -176,7 +177,9 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-o" => Ok(crate::builtins::set::is_shell_option(operand)
             && crate::builtins::set::shell_option_enabled(env_vars, operand)),
         "-v" => Ok(variable_is_set(operand, env_vars)),
-        "-R" => Ok(false),
+        "-R" => Ok(marked_vars(env_vars, READONLY_VARS)
+            .iter()
+            .any(|name| name == operand)),
         "-a" | "-e" => Ok(test_path(operand, env_vars).exists()),
         "-d" => Ok(test_path(operand, env_vars).is_dir()),
         "-f" => Ok(test_path(operand, env_vars).is_file()),

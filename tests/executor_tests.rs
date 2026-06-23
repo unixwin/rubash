@@ -850,6 +850,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_uid_and_euid_are_readonly_nonzero_ids() {
+        let output_path = "target/rubash-uid-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $UID:$EUID > {output_path}; if (( UID == 0 )); then echo root >> {output_path}; else echo user >> {output_path}; fi; test -R UID; echo readonly:$? >> {output_path}; UID=0; echo assign:$?:$UID >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        let (uid, euid) = lines[0].split_once(':').unwrap();
+        assert!(!uid.is_empty());
+        assert!(!euid.is_empty());
+        assert_eq!(lines[1], if uid == "0" { "root" } else { "user" });
+        assert_eq!(lines[2], "readonly:0");
+        assert_eq!(lines[3], format!("assign:1:{uid}"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_expands_inside_function() {
         let output_path = "target/rubash-funcname-output.txt";
         let _ = fs::remove_file(output_path);
