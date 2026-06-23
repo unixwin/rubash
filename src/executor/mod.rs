@@ -1697,7 +1697,7 @@ impl Executor {
 
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
         let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
-        if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1") {
+        if self.xtrace_enabled() {
             println!("+ {}", cmd.words.join(" "));
         }
         if self
@@ -2004,9 +2004,7 @@ impl Executor {
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
         }
-        if self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
-            && self.exit_code != 0
-        {
+        if self.errexit_enabled() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
         }
         result
@@ -8637,14 +8635,10 @@ impl Executor {
                 flags.push(flag);
             }
         }
-        if self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
-        {
+        if self.errexit_enabled() {
             flags.push('e');
         }
-        if self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
-            || crate::builtins::set::shell_option_enabled(&self.env_vars, "xtrace")
-        {
+        if self.xtrace_enabled() {
             flags.push('x');
         }
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
@@ -8664,6 +8658,16 @@ impl Executor {
 
     fn noexec_enabled(&self) -> bool {
         crate::builtins::set::shell_option_enabled(&self.env_vars, "noexec")
+    }
+
+    fn errexit_enabled(&self) -> bool {
+        self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+    }
+
+    fn xtrace_enabled(&self) -> bool {
+        self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
+            || crate::builtins::set::shell_option_enabled(&self.env_vars, "xtrace")
     }
 
     fn create_redirect_output(&self, target: &str, clobber: bool) -> io::Result<File> {
@@ -8698,16 +8702,24 @@ impl Executor {
                     ('e', true) => {
                         self.env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", true);
                     }
                     ('e', false) => {
                         self.env_vars.remove("__RUBASH_ERREXIT");
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "errexit",
+                            false,
+                        );
                     }
                     ('x', true) => {
                         self.env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", true);
                     }
                     ('x', false) => {
                         self.env_vars.remove("__RUBASH_XTRACE");
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(
@@ -8769,6 +8781,7 @@ impl Executor {
             if arg == "-" {
                 self.apply_set_flag_updates(&flag_updates);
                 self.env_vars.remove("__RUBASH_XTRACE");
+                crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
                 if index + 1 < args.len() {
                     self.positional_params = args[index + 1..].to_vec();
                 }
@@ -8804,16 +8817,24 @@ impl Executor {
                     ('e', true) => {
                         self.env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "errexit", true);
                     }
                     ('e', false) => {
                         self.env_vars.remove("__RUBASH_ERREXIT");
+                        crate::builtins::set::set_shell_option(
+                            &mut self.env_vars,
+                            "errexit",
+                            false,
+                        );
                     }
                     ('x', true) => {
                         self.env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", true);
                     }
                     ('x', false) => {
                         self.env_vars.remove("__RUBASH_XTRACE");
+                        crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(

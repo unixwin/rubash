@@ -5013,6 +5013,41 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_short_errexit_updates_shell_option() {
+        let output_path = "target/rubash-short-errexit-option-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -e; [[ -o errexit ]]; echo $? > {output_path}; set +e; [[ -o errexit ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_set_o_errexit_exits_on_failed_command() {
+        let output_path = "target/rubash-set-o-errexit-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -o errexit; false; echo after > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_test_shell_option_unary() {
         let output_path = "target/rubash-test-shell-option-output.txt";
         let _ = fs::remove_file(output_path);
