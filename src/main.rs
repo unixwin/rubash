@@ -46,6 +46,7 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                     executor.set_env("BASH_EXECUTION_STRING", command);
                     if let Some(command_name) = args.get(index + 2) {
                         executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
+                        executor.set_positional_params(args[index + 3..].to_vec());
                     }
                     return run_command_string(executor, command);
                 }
