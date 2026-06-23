@@ -270,6 +270,11 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
+    if value.is_none() && !env_vars.contains_key(name) && env::var(name).is_err() {
+        mark_readonly(env_vars, name);
+        return Ok(EXECUTION_SUCCESS);
+    }
+
     let value = value
         .map(|value| array_attribute_assignment_value(value, array, env_vars, name))
         .or_else(|| env_vars.get(name).cloned())
@@ -314,6 +319,8 @@ where
                     quote_export_value(value)
                 )?;
             }
+        } else {
+            writeln!(stdout, "declare -r {name}")?;
         }
     }
     Ok(())
