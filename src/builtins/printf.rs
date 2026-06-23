@@ -12,6 +12,7 @@ const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, Default)]
 struct FormatSpec {
+    raw: String,
     left_adjust: bool,
     zero_pad: bool,
     alternate_form: bool,
@@ -21,6 +22,7 @@ struct FormatSpec {
     width_from_arg: bool,
     precision: Option<usize>,
     precision_from_arg: bool,
+    time_format: Option<String>,
     specifier: char,
 }
 
@@ -197,6 +199,15 @@ fn render_one_pass(
                     }
                 };
 
+                if spec.time_format.is_some() && spec.specifier != 'T' {
+                    errors.push(format!(
+                        "rubash: printf: warning: `{}': invalid time format specification",
+                        spec.specifier
+                    ));
+                    output.push_str(&spec.raw);
+                    continue;
+                }
+
                 if !valid_format_specifier(spec.specifier) {
                     return RenderedPrintf {
                         output,
@@ -215,6 +226,17 @@ fn render_one_pass(
                     if valid_identifier(name) {
                         env_vars.insert(name.to_string(), output.chars().count().to_string());
                     }
+                } else if spec.specifier == 'T' {
+                    let value = if *arg_index < args.len() {
+                        next_arg(args, arg_index)
+                    } else {
+                        "-1"
+                    };
+                    let (rendered, error) = format_time_value(value, &spec, env_vars);
+                    if let Some(error) = error {
+                        errors.push(error);
+                    }
+                    output.push_str(&rendered);
                 } else {
                     let value = next_arg(args, arg_index);
                     let (rendered, stop_output, error) = format_value(value, &spec);
@@ -301,6 +323,34 @@ where
         }
     }
 
+    if chars.peek() == Some(&'(') {
+        chars.next();
+        raw.push('(');
+        let mut time_format = String::new();
+        let mut depth = 1;
+        for ch in chars.by_ref() {
+            raw.push(ch);
+            match ch {
+                '(' => {
+                    depth += 1;
+                    time_format.push(ch);
+                }
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                    time_format.push(ch);
+                }
+                _ => time_format.push(ch),
+            }
+        }
+        if depth != 0 {
+            return ParsedFormat::Missing(raw);
+        }
+        spec.time_format = Some(time_format);
+    }
+
     while let Some(length @ ('h' | 'j' | 'l' | 'L' | 't' | 'z')) = chars.peek().copied() {
         raw.push(length);
         chars.next();
@@ -309,7 +359,9 @@ where
     let Some(specifier) = chars.next() else {
         return ParsedFormat::Missing(raw);
     };
+    raw.push(specifier);
     spec.specifier = specifier;
+    spec.raw = raw;
     ParsedFormat::Spec(spec)
 }
 
@@ -388,8 +440,438 @@ fn valid_format_specifier(specifier: char) -> bool {
             | 'a'
             | 'A'
             | 'n'
+            | 'T'
     )
 }
+
+fn format_time_value(
+    value: &str,
+    spec: &FormatSpec,
+    env_vars: &HashMap<String, String>,
+) -> (String, Option<String>) {
+    let ParsedNumber {
+        value: seconds,
+        invalid,
+    } = parse_i64(value);
+    let seconds = match seconds {
+        -1 | -2 => current_epoch_seconds(),
+        other => other,
+    };
+    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let local = timezone.local_time(seconds);
+    let format = spec.time_format.as_deref().unwrap_or_default();
+    let format = if format.is_empty() { "%X" } else { format };
+    let rendered = strftime_subset(format, &local);
+
+    let mut width_spec = spec.clone();
+    width_spec.zero_pad = false;
+    (
+        apply_width(truncate_precision(rendered, spec.precision), &width_spec),
+        invalid.map(|value| invalid_number_error(&value)),
+    )
+}
+
+fn current_epoch_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone)]
+struct TimeZoneRule {
+    standard_name: String,
+    daylight_name: Option<String>,
+    standard_offset: i32,
+    daylight_offset: i32,
+    start_rule: Option<MonthWeekdayRule>,
+    end_rule: Option<MonthWeekdayRule>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MonthWeekdayRule {
+    month: u8,
+    week: u8,
+    weekday: u8,
+    seconds: i32,
+}
+
+#[derive(Debug, Clone)]
+struct LocalTimeParts {
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    weekday: u8,
+    zone_name: String,
+    offset: i32,
+    epoch: i64,
+}
+
+impl TimeZoneRule {
+    fn from_env(tz: Option<&str>) -> Self {
+        tz.and_then(parse_posix_timezone).unwrap_or_else(|| Self {
+            standard_name: "UTC".to_string(),
+            daylight_name: None,
+            standard_offset: 0,
+            daylight_offset: 0,
+            start_rule: None,
+            end_rule: None,
+        })
+    }
+
+    fn local_time(&self, epoch: i64) -> LocalTimeParts {
+        let daylight = self.is_daylight_time(epoch);
+        let offset = if daylight {
+            self.daylight_offset
+        } else {
+            self.standard_offset
+        };
+        let mut parts = epoch_to_parts(epoch + i64::from(offset));
+        parts.zone_name = if daylight {
+            self.daylight_name
+                .clone()
+                .unwrap_or_else(|| self.standard_name.clone())
+        } else {
+            self.standard_name.clone()
+        };
+        parts.offset = offset;
+        parts.epoch = epoch;
+        parts
+    }
+
+    fn is_daylight_time(&self, epoch: i64) -> bool {
+        let (Some(start), Some(end), Some(_)) =
+            (self.start_rule, self.end_rule, self.daylight_name.as_ref())
+        else {
+            return false;
+        };
+
+        let standard_parts = epoch_to_parts(epoch + i64::from(self.standard_offset));
+        let year = standard_parts.year;
+        let start_epoch = transition_epoch(year, start, self.standard_offset);
+        let end_epoch = transition_epoch(year, end, self.daylight_offset);
+        if start_epoch <= end_epoch {
+            epoch >= start_epoch && epoch < end_epoch
+        } else {
+            epoch >= start_epoch || epoch < end_epoch
+        }
+    }
+}
+
+fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
+    if matches!(value, "UTC" | "GMT") {
+        return Some(TimeZoneRule {
+            standard_name: value.to_string(),
+            daylight_name: None,
+            standard_offset: 0,
+            daylight_offset: 0,
+            start_rule: None,
+            end_rule: None,
+        });
+    }
+
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    let standard_name = read_tz_name(value, &mut index)?;
+    let standard_offset = -parse_tz_offset(value, &mut index)?;
+    let daylight_name = read_tz_name(value, &mut index);
+    let daylight_offset = if daylight_name.is_some() {
+        if index < bytes.len() && bytes[index] != b',' {
+            -parse_tz_offset(value, &mut index)?
+        } else {
+            standard_offset + 3600
+        }
+    } else {
+        standard_offset
+    };
+
+    let mut start_rule = None;
+    let mut end_rule = None;
+    if index < bytes.len() && bytes[index] == b',' {
+        index += 1;
+        start_rule = parse_month_weekday_rule(value, &mut index);
+        if index < bytes.len() && bytes[index] == b',' {
+            index += 1;
+            end_rule = parse_month_weekday_rule(value, &mut index);
+        }
+    }
+
+    Some(TimeZoneRule {
+        standard_name,
+        daylight_name,
+        standard_offset,
+        daylight_offset,
+        start_rule,
+        end_rule,
+    })
+}
+
+fn read_tz_name(value: &str, index: &mut usize) -> Option<String> {
+    let start = *index;
+    while let Some(ch) = value[*index..].chars().next() {
+        if !ch.is_ascii_alphabetic() {
+            break;
+        }
+        *index += ch.len_utf8();
+    }
+    (*index > start).then(|| value[start..*index].to_string())
+}
+
+fn parse_tz_offset(value: &str, index: &mut usize) -> Option<i32> {
+    let mut sign = 1;
+    if let Some(ch) = value[*index..].chars().next() {
+        if ch == '-' {
+            sign = -1;
+            *index += 1;
+        } else if ch == '+' {
+            *index += 1;
+        }
+    }
+    let hours = parse_number(value, index)? as i32;
+    let mut minutes = 0;
+    let mut seconds = 0;
+    if value.as_bytes().get(*index) == Some(&b':') {
+        *index += 1;
+        minutes = parse_number(value, index)? as i32;
+        if value.as_bytes().get(*index) == Some(&b':') {
+            *index += 1;
+            seconds = parse_number(value, index)? as i32;
+        }
+    }
+    Some(sign * (hours * 3600 + minutes * 60 + seconds))
+}
+
+fn parse_month_weekday_rule(value: &str, index: &mut usize) -> Option<MonthWeekdayRule> {
+    if value.as_bytes().get(*index) != Some(&b'M') {
+        return None;
+    }
+    *index += 1;
+    let month = parse_number(value, index)? as u8;
+    if value.as_bytes().get(*index) != Some(&b'.') {
+        return None;
+    }
+    *index += 1;
+    let week = parse_number(value, index)? as u8;
+    if value.as_bytes().get(*index) != Some(&b'.') {
+        return None;
+    }
+    *index += 1;
+    let weekday = parse_number(value, index)? as u8;
+    let mut seconds = 2 * 3600;
+    if value.as_bytes().get(*index) == Some(&b'/') {
+        *index += 1;
+        seconds = parse_tz_offset(value, index)?;
+    }
+    Some(MonthWeekdayRule {
+        month,
+        week,
+        weekday,
+        seconds,
+    })
+}
+
+fn parse_number(value: &str, index: &mut usize) -> Option<u32> {
+    let start = *index;
+    while value.as_bytes().get(*index).is_some_and(u8::is_ascii_digit) {
+        *index += 1;
+    }
+    (*index > start)
+        .then(|| value[start..*index].parse().ok())
+        .flatten()
+}
+
+fn transition_epoch(year: i32, rule: MonthWeekdayRule, offset_before: i32) -> i64 {
+    let day = nth_weekday_of_month(year, rule.month, rule.week, rule.weekday);
+    let days = days_from_civil(year, u32::from(rule.month), u32::from(day));
+    days * 86_400 + i64::from(rule.seconds) - i64::from(offset_before)
+}
+
+fn nth_weekday_of_month(year: i32, month: u8, week: u8, weekday: u8) -> u8 {
+    let first_weekday = weekday_from_date(year, month, 1);
+    let mut day = 1 + ((7 + weekday as i32 - first_weekday as i32) % 7) as u8;
+    if week < 5 {
+        day += 7 * (week - 1);
+    } else {
+        while day + 7 <= days_in_month(year, month) {
+            day += 7;
+        }
+    }
+    day
+}
+
+fn weekday_from_date(year: i32, month: u8, day: u8) -> u8 {
+    let days = days_from_civil(year, u32::from(month), u32::from(day));
+    (days + 4).rem_euclid(7) as u8
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 30,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+fn epoch_to_parts(epoch: i64) -> LocalTimeParts {
+    let days = epoch.div_euclid(86_400);
+    let seconds_of_day = epoch.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    LocalTimeParts {
+        year,
+        month: month as u8,
+        day: day as u8,
+        hour: (seconds_of_day / 3600) as u8,
+        minute: ((seconds_of_day % 3600) / 60) as u8,
+        second: (seconds_of_day % 60) as u8,
+        weekday: (days + 4).rem_euclid(7) as u8,
+        zone_name: "UTC".to_string(),
+        offset: 0,
+        epoch,
+    }
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let year = year - (month <= 2) as i32;
+    let era = (if year >= 0 { year } else { year - 399 }) / 400;
+    let year_of_era = (year - era * 400) as u32;
+    let month_prime = month as i32 + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime as u32 + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    i64::from(era) * 146_097 + i64::from(day_of_era) - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let days = days + 719_468;
+    let era = (if days >= 0 { days } else { days - 146_096 }) / 146_097;
+    let day_of_era = (days - era * 146_097) as u32;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era as i32 + era as i32 * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    year += (month <= 2) as i32;
+    (year, month, day)
+}
+
+fn strftime_subset(format: &str, time: &LocalTimeParts) -> String {
+    let mut output = String::new();
+    let mut chars = format.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            output.push(ch);
+            continue;
+        }
+        let Some(specifier) = chars.next() else {
+            output.push('%');
+            break;
+        };
+        match specifier {
+            '%' => output.push('%'),
+            'a' => output.push_str(WEEKDAYS_ABBR[time.weekday as usize]),
+            'A' => output.push_str(WEEKDAYS_FULL[time.weekday as usize]),
+            'b' | 'h' => output.push_str(MONTHS_ABBR[time.month as usize - 1]),
+            'B' => output.push_str(MONTHS_FULL[time.month as usize - 1]),
+            'd' => output.push_str(&format!("{:02}", time.day)),
+            'e' => output.push_str(&format!("{:2}", time.day)),
+            'H' => output.push_str(&format!("{:02}", time.hour)),
+            'I' => output.push_str(&format!("{:02}", twelve_hour(time.hour))),
+            'M' => output.push_str(&format!("{:02}", time.minute)),
+            'S' => output.push_str(&format!("{:02}", time.second)),
+            'Y' => output.push_str(&format!("{:04}", time.year)),
+            'y' => output.push_str(&format!("{:02}", time.year.rem_euclid(100))),
+            'F' => output.push_str(&format!(
+                "{:04}-{:02}-{:02}",
+                time.year, time.month, time.day
+            )),
+            'T' => output.push_str(&format!(
+                "{:02}:{:02}:{:02}",
+                time.hour, time.minute, time.second
+            )),
+            'r' => output.push_str(&format!(
+                "{:02}:{:02}:{:02} {}",
+                twelve_hour(time.hour),
+                time.minute,
+                time.second,
+                if time.hour < 12 { "AM" } else { "PM" }
+            )),
+            'p' => output.push_str(if time.hour < 12 { "AM" } else { "PM" }),
+            'z' => output.push_str(&format_offset(time.offset)),
+            'Z' => output.push_str(&time.zone_name),
+            's' => output.push_str(&time.epoch.to_string()),
+            'x' => output.push_str(&format!(
+                "{:02}/{:02}/{:02}",
+                time.month,
+                time.day,
+                time.year.rem_euclid(100)
+            )),
+            'X' => output.push_str(&format!(
+                "{:02}:{:02}:{:02}",
+                time.hour, time.minute, time.second
+            )),
+            other => {
+                output.push('%');
+                output.push(other);
+            }
+        }
+    }
+    output
+}
+
+fn twelve_hour(hour: u8) -> u8 {
+    match hour % 12 {
+        0 => 12,
+        other => other,
+    }
+}
+
+fn format_offset(offset: i32) -> String {
+    let sign = if offset < 0 { '-' } else { '+' };
+    let abs = offset.abs();
+    format!("{sign}{:02}{:02}", abs / 3600, (abs % 3600) / 60)
+}
+
+const WEEKDAYS_ABBR: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAYS_FULL: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const MONTHS_ABBR: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const MONTHS_FULL: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Option<String>) {
     let mut stop_output = false;
