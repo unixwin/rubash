@@ -5298,7 +5298,7 @@ impl Executor {
                 return true;
             }
 
-            if is_shell_builtin_name(name) {
+            if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
                         if name == "break"
@@ -5402,7 +5402,7 @@ impl Executor {
                 return Ok(true);
             }
 
-            if is_shell_builtin_name(name) {
+            if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
                         if name == "break"
@@ -5505,7 +5505,7 @@ impl Executor {
                 found = true;
             }
 
-            if is_shell_builtin_name(name) {
+            if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
                         if name == "break"
@@ -5731,6 +5731,10 @@ impl Executor {
         }
         find_user_command(name, &self.env_vars)
             .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
+    }
+
+    fn is_enabled_shell_builtin_name(&self, name: &str) -> bool {
+        is_shell_builtin_name(name) && !crate::builtins::enable::is_disabled(&self.env_vars, name)
     }
 
     fn command_paths(&self, name: &str, force_path: bool) -> Vec<String> {

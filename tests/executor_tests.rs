@@ -3937,6 +3937,68 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_describe_disabled_builtin_uses_path_command() {
+        let bin_dir = "target/rubash-disabled-describe-bin";
+        let script_path = format!("{bin_dir}/echo");
+        let command_v_path = "target/rubash-disabled-command-v-output.txt";
+        let command_v_verbose_path = "target/rubash-disabled-command-v-verbose-output.txt";
+        let type_t_path = "target/rubash-disabled-type-t-output.txt";
+        let type_verbose_path = "target/rubash-disabled-type-verbose-output.txt";
+        let _ = fs::remove_dir_all(bin_dir);
+        for path in [
+            command_v_path,
+            command_v_verbose_path,
+            type_t_path,
+            type_verbose_path,
+        ] {
+            let _ = fs::remove_file(path);
+        }
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo external-echo\n").unwrap();
+        let input = format!(
+            "enable -n echo; \
+             command -v echo > {command_v_path}; \
+             command -V echo > {command_v_verbose_path}; \
+             type -t echo > {type_t_path}; \
+             type echo > {type_verbose_path}; \
+             enable echo"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let old_path = std::env::var("PATH").ok();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let command_v = fs::read_to_string(command_v_path).unwrap();
+        let command_v_verbose = fs::read_to_string(command_v_verbose_path).unwrap();
+        let type_verbose = fs::read_to_string(type_verbose_path).unwrap();
+        assert!(command_v.contains("rubash-disabled-describe-bin"));
+        assert!(command_v.trim_end().ends_with("echo"));
+        assert!(command_v_verbose.contains("echo is "));
+        assert!(command_v_verbose.contains("rubash-disabled-describe-bin"));
+        assert_eq!(fs::read_to_string(type_t_path).unwrap(), "file\n");
+        assert!(type_verbose.contains("echo is "));
+        assert!(type_verbose.contains("rubash-disabled-describe-bin"));
+        let _ = fs::remove_dir_all(bin_dir);
+        for path in [
+            command_v_path,
+            command_v_verbose_path,
+            type_t_path,
+            type_verbose_path,
+        ] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
     fn test_command_without_p_uses_current_path_for_external_command() {
         let output_path = "target/rubash-command-without-p-output.txt";
         let _ = fs::remove_file(output_path);
