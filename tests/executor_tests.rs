@@ -2114,6 +2114,35 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_marks_inherited_environment_as_exported() {
+        let output_path = "target/rubash-declare-inherited-export-output.txt";
+        let _ = fs::remove_file(output_path);
+        let old_value = std::env::var("RUBASH_INHERITED_EXPORT").ok();
+        std::env::set_var("RUBASH_INHERITED_EXPORT", "from-env");
+        let input = format!(
+            "RUBASH_NOT_EXPORTED=local; \
+             declare -p RUBASH_INHERITED_EXPORT > {output_path}; \
+             declare -x >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        match old_value {
+            Some(value) => std::env::set_var("RUBASH_INHERITED_EXPORT", value),
+            None => std::env::remove_var("RUBASH_INHERITED_EXPORT"),
+        }
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("declare -x RUBASH_INHERITED_EXPORT=\"from-env\"\n"));
+        assert!(!output.contains("RUBASH_NOT_EXPORTED"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_r_marks_readonly_variable() {
         let output_path = "target/rubash-declare-readonly-output.txt";
         let _ = fs::remove_file(output_path);
