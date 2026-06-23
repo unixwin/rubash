@@ -3879,6 +3879,51 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_remaining_stateful_set_short_flags_update_shell_options() {
+        let output_path = "target/rubash-set-remaining-flags-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $- > {output_path}; \
+             [[ -o privileged ]]; echo $? >> {output_path}; \
+             set -EHTpt; echo $- >> {output_path}; \
+             [[ -o errtrace ]]; echo $? >> {output_path}; \
+             [[ -o histexpand ]]; echo $? >> {output_path}; \
+             [[ -o functrace ]]; echo $? >> {output_path}; \
+             [[ -o privileged ]]; echo $? >> {output_path}; \
+             [[ -o onecmd ]]; echo $? >> {output_path}; \
+             set +BEHTpt; echo $- >> {output_path}; \
+             [[ -o braceexpand ]]; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let lines: Vec<String> = fs::read_to_string(output_path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(lines[0].contains('B'));
+        for flag in ['E', 'H', 'T', 'p', 't'] {
+            assert!(!lines[0].contains(flag));
+        }
+        assert_eq!(lines[1], "1");
+        for flag in ['E', 'H', 'T', 'p', 't'] {
+            assert!(lines[2].contains(flag));
+        }
+        assert_eq!(lines[3..8], ["0", "0", "0", "0", "0"].map(str::to_string));
+        for flag in ['B', 'E', 'H', 'T', 'p', 't'] {
+            assert!(!lines[8].contains(flag));
+        }
+        assert_eq!(lines[9], "1");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_noclobber_prevents_output_overwrite() {
         let output_path = "target/rubash-noclobber-output.txt";
         let _ = fs::remove_file(output_path);
