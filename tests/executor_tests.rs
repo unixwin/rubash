@@ -6944,6 +6944,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_shell_flags_expand_inside_words() {
+        let output_path = "target/rubash-shell-flags-embedded-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("set -u; printf '%s\\n' \"flags:$-\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("flags:"));
+        assert!(output.trim_end().contains('u'));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_set_operands_replace_positional_params_after_expansion() {
         let output_path = "target/rubash-set-operands-output.txt";
         let _ = fs::remove_file(output_path);
