@@ -2915,6 +2915,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_times_ignores_non_option_arguments() {
+        let output_path = "target/rubash-times-extra-args-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("times ignored > {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_times_redirects_stderr() {
         let error_path = "target/rubash-times-stderr-output.txt";
         let status_path = "target/rubash-times-stderr-status.txt";
