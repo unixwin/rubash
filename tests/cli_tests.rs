@@ -92,6 +92,20 @@ fn posix_long_option_enables_posix_mode() {
 }
 
 #[test]
+fn profile_startup_options_are_accepted_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("--noprofile")
+        .arg("--norc")
+        .arg("-c")
+        .arg("printf '%s\\n' ok")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
+#[test]
 fn cli_shell_flags_apply_before_command_string() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-u")

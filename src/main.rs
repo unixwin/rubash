@@ -45,6 +45,9 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
                 index += 1;
             }
+            "--noprofile" | "--norc" => {
+                index += 1;
+            }
             "-O" | "+O" => {
                 if let Some(option) = args.get(index + 1) {
                     if !executor.set_shopt_option(option, args[index] == "-O") {
