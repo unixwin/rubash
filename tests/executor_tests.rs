@@ -8533,6 +8533,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_local_case_conversion_attributes_apply_to_assignments() {
+        let output_path = "target/rubash-local-case-attrs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function f {{ local -u up=abc; echo up1:$up > {output_path}; up=def; echo up2:$up >> {output_path}; \
+             local -l low=ABC; echo low1:$low >> {output_path}; low=XYZ; echo low2:$low >> {output_path}; }}; \
+             f; echo out:${{up-unset}}:${{low-unset}} >> {output_path}; \
+             up=abc; low=XYZ; echo after:$up:$low >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "up1:ABC\nup2:DEF\nlow1:abc\nlow2:xyz\nout:unset:unset\nafter:abc:XYZ\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_getopts_parses_explicit_option_argument() {
         let output_path = "target/rubash-getopts-explicit-output.txt";
         let _ = fs::remove_file(output_path);
@@ -10608,6 +10633,30 @@ mod command_chaining {
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
             "14\n8\n18\ndeclare -i n=\"18\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_case_conversion_variables_transform_assignments() {
+        let output_path = "target/rubash-case-conversion-vars-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -u U=abc; echo $U > {output_path}; U=def; echo $U >> {output_path}; \
+             declare -l L=ABC; echo $L >> {output_path}; L=XYZ; echo $L >> {output_path}; \
+             declare -p U L >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "ABC\nDEF\nabc\nxyz\ndeclare -u U=\"DEF\"\ndeclare -l L=\"xyz\"\n"
         );
         let _ = fs::remove_file(output_path);
     }
