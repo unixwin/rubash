@@ -14,6 +14,8 @@ const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
+const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -37,6 +39,8 @@ where
     let mut array = false;
     let mut assoc = false;
     let mut integer = false;
+    let mut uppercase = false;
+    let mut lowercase = false;
     let mut readonly = false;
     let mut names = Vec::new();
 
@@ -49,6 +53,14 @@ where
                     'a' => array = true,
                     'A' => assoc = true,
                     'i' => integer = true,
+                    'u' => {
+                        uppercase = true;
+                        lowercase = false;
+                    }
+                    'l' => {
+                        lowercase = true;
+                        uppercase = false;
+                    }
                     'r' => readonly = true,
                     'g' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
@@ -107,6 +119,29 @@ where
             }
         }
     }
+    if uppercase || lowercase {
+        for name in &names {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            let name = name.strip_suffix('+').unwrap_or(name);
+            if uppercase {
+                mark_typed(variables, UPPERCASE_VARS, name);
+                unmark_typed(variables, LOWERCASE_VARS, name);
+            }
+            if lowercase {
+                mark_typed(variables, LOWERCASE_VARS, name);
+                unmark_typed(variables, UPPERCASE_VARS, name);
+            }
+            if let Some(value) = variables.get(name).cloned() {
+                let value = if uppercase {
+                    value.to_uppercase()
+                } else {
+                    value.to_lowercase()
+                };
+                variables.insert(name.to_string(), value.clone());
+                env::set_var(name, value);
+            }
+        }
+    }
 
     if export {
         for name in &names {
@@ -141,6 +176,8 @@ where
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
     let integers = marked_vars(variables, INTEGER_VARS);
+    let uppercase = marked_vars(variables, UPPERCASE_VARS);
+    let lowercase = marked_vars(variables, LOWERCASE_VARS);
     for name in names {
         let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
         let name = name.strip_suffix('+').unwrap_or(name);
@@ -151,6 +188,8 @@ where
                 array: arrays.contains(name),
                 assoc: assocs.contains(name),
                 integer: integers.contains(name),
+                uppercase: uppercase.contains(name),
+                lowercase: lowercase.contains(name),
             };
             print_declaration(name, value, attrs, stdout)?;
         } else {
@@ -226,6 +265,8 @@ struct DeclarationAttrs {
     array: bool,
     assoc: bool,
     integer: bool,
+    uppercase: bool,
+    lowercase: bool,
 }
 
 fn print_declaration<W>(
@@ -263,30 +304,56 @@ where
             name,
             quote_double(array_value)
         )
-    } else if attrs.integer {
-        writeln!(stdout, "declare -i {}=\"{}\"", name, quote_double(value))
-    } else if attrs.readonly && attrs.exported {
-        writeln!(stdout, "declare -rx {}=\"{}\"", name, quote_double(value))
-    } else if attrs.readonly {
-        writeln!(stdout, "declare -r {}=\"{}\"", name, quote_double(value))
-    } else if attrs.exported {
-        writeln!(stdout, "declare -x {}=\"{}\"", name, quote_double(value))
+    } else if let Some(attrs) = declaration_scalar_attrs(attrs) {
+        writeln!(
+            stdout,
+            "declare {attrs} {}=\"{}\"",
+            name,
+            quote_double(value)
+        )
     } else {
         writeln!(stdout, "declare -- {}=\"{}\"", name, quote_double(value))
     }
 }
 
-fn declaration_array_attrs(attrs: DeclarationAttrs) -> &'static str {
-    match (attrs.readonly, attrs.exported, attrs.integer) {
-        (true, true, true) => "-airx",
-        (true, false, true) => "-air",
-        (false, true, true) => "-aix",
-        (false, false, true) => "-ai",
-        (true, true, false) => "-arx",
-        (true, false, false) => "-ar",
-        (false, true, false) => "-ax",
-        (false, false, false) => "-a",
+fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
+    let mut flags = String::from("-");
+    if attrs.integer {
+        flags.push('i');
     }
+    if attrs.lowercase {
+        flags.push('l');
+    }
+    if attrs.readonly {
+        flags.push('r');
+    }
+    if attrs.uppercase {
+        flags.push('u');
+    }
+    if attrs.exported {
+        flags.push('x');
+    }
+    (flags.len() > 1).then_some(flags)
+}
+
+fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
+    let mut flags = String::from("-a");
+    if attrs.integer {
+        flags.push('i');
+    }
+    if attrs.lowercase {
+        flags.push('l');
+    }
+    if attrs.readonly {
+        flags.push('r');
+    }
+    if attrs.uppercase {
+        flags.push('u');
+    }
+    if attrs.exported {
+        flags.push('x');
+    }
+    flags
 }
 
 fn diagnostic_prefix() -> String {

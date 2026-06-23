@@ -24,6 +24,8 @@ use self::path::{
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
+const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
+const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
@@ -2208,6 +2210,13 @@ impl Executor {
         let old_bash_lineno = self.env_vars.get("BASH_LINENO").cloned();
         let old_bash_source = self.env_vars.get("BASH_SOURCE").cloned();
         let old_positional_params = self.positional_params.clone();
+        let old_exported_vars = self.env_vars.get(EXPORTED_VARS).cloned();
+        let old_readonly_vars = self.env_vars.get(READONLY_VARS).cloned();
+        let old_integer_vars = self.env_vars.get(INTEGER_VARS).cloned();
+        let old_uppercase_vars = self.env_vars.get(UPPERCASE_VARS).cloned();
+        let old_lowercase_vars = self.env_vars.get(LOWERCASE_VARS).cloned();
+        let old_array_vars = self.env_vars.get(ARRAY_VARS).cloned();
+        let old_assoc_vars = self.env_vars.get(ASSOC_VARS).cloned();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
         env::set_var("__RUBASH_CURRENT_FUNCTION", name);
@@ -2235,6 +2244,13 @@ impl Executor {
         let result = self.execute_ast(&ast);
         self.function_depth -= 1;
         self.restore_function_locals();
+        restore_optional_env_var(&mut self.env_vars, EXPORTED_VARS, old_exported_vars);
+        restore_optional_env_var(&mut self.env_vars, READONLY_VARS, old_readonly_vars);
+        restore_optional_env_var(&mut self.env_vars, INTEGER_VARS, old_integer_vars);
+        restore_optional_env_var(&mut self.env_vars, UPPERCASE_VARS, old_uppercase_vars);
+        restore_optional_env_var(&mut self.env_vars, LOWERCASE_VARS, old_lowercase_vars);
+        restore_optional_env_var(&mut self.env_vars, ARRAY_VARS, old_array_vars);
+        restore_optional_env_var(&mut self.env_vars, ASSOC_VARS, old_assoc_vars);
         self.positional_params = old_positional_params;
         match old_funcname {
             Some(value) => {
@@ -8895,8 +8911,19 @@ impl Executor {
         } else {
             value
         };
+        let value = self.apply_case_assignment_attributes(base_name, value);
         self.env_vars.insert(base_name.to_string(), value.clone());
         env::set_var(base_name, value);
+    }
+
+    fn apply_case_assignment_attributes(&self, name: &str, value: String) -> String {
+        if is_marked_var(&self.env_vars, UPPERCASE_VARS, name) {
+            value.to_uppercase()
+        } else if is_marked_var(&self.env_vars, LOWERCASE_VARS, name) {
+            value.to_lowercase()
+        } else {
+            value
+        }
     }
 
     fn eval_integer_assignment_value(&self, value: &str) -> i128 {
@@ -10265,16 +10292,29 @@ impl Executor {
         let readonly = is_marked_var(&self.env_vars, READONLY_VARS, name);
         let exported = is_marked_var(&self.env_vars, EXPORTED_VARS, name);
         let integer = is_marked_var(&self.env_vars, INTEGER_VARS, name);
+        let uppercase = is_marked_var(&self.env_vars, UPPERCASE_VARS, name);
+        let lowercase = is_marked_var(&self.env_vars, LOWERCASE_VARS, name);
 
-        match (readonly, exported, integer) {
-            (false, false, false) => format!("{name}={rendered}"),
-            (true, true, true) => format!("declare -irx {name}={rendered}"),
-            (true, false, true) => format!("declare -ir {name}={rendered}"),
-            (false, true, true) => format!("declare -ix {name}={rendered}"),
-            (false, false, true) => format!("declare -i {name}={rendered}"),
-            (true, true, false) => format!("declare -rx {name}={rendered}"),
-            (true, false, false) => format!("declare -r {name}={rendered}"),
-            (false, true, false) => format!("declare -x {name}={rendered}"),
+        let mut flags = String::from("-");
+        if integer {
+            flags.push('i');
+        }
+        if lowercase {
+            flags.push('l');
+        }
+        if readonly {
+            flags.push('r');
+        }
+        if uppercase {
+            flags.push('u');
+        }
+        if exported {
+            flags.push('x');
+        }
+        if flags.len() > 1 {
+            format!("declare {flags} {name}={rendered}")
+        } else {
+            format!("{name}={rendered}")
         }
     }
 
@@ -14074,6 +14114,21 @@ fn local_assignment_name(arg: &str) -> Option<&str> {
         Some(name)
     } else {
         None
+    }
+}
+
+fn restore_optional_env_var(
+    env_vars: &mut HashMap<String, String>,
+    name: &str,
+    value: Option<String>,
+) {
+    match value {
+        Some(value) => {
+            env_vars.insert(name.to_string(), value);
+        }
+        None => {
+            env_vars.remove(name);
+        }
     }
 }
 
