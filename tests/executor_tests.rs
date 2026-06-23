@@ -806,6 +806,50 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_bash_version_and_versinfo_are_initialized() {
+        let output_path = "target/rubash-bash-version-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "printf '%s\\n%s\\n%s:%s:%s\\n' \"$BASH_VERSION\" \"${{BASH_VERSINFO[@]}}\" \"$HOSTTYPE\" \"$OSTYPE\" \"$MACHTYPE\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines[0].starts_with(env!("CARGO_PKG_VERSION")));
+        assert!(lines[0].ends_with("(1)-release"));
+        let version_words = env!("CARGO_PKG_VERSION").replace('.', " ");
+        assert!(lines[1].starts_with(&format!("{version_words} 1 release ")));
+        assert_eq!(lines[1].split_whitespace().count(), 6);
+        assert_eq!(lines[2].split(':').count(), 3);
+        assert!(!lines[2].contains("::"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_bash_versinfo_assignment_reports_readonly() {
+        let output_path = "target/rubash-bash-versinfo-readonly-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("BASH_VERSINFO[0]=9; echo $? ${{BASH_VERSINFO[0]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1 0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_funcname_expands_inside_function() {
         let output_path = "target/rubash-funcname-output.txt";
         let _ = fs::remove_file(output_path);
