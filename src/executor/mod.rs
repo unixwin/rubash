@@ -7736,6 +7736,10 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
+        if name == "GROUPS" {
+            self.exit_code = 0;
+            return true;
+        }
         if name == "BASH_CMDS" {
             let command_name = index
                 .trim_end_matches(']')
@@ -8181,6 +8185,9 @@ impl Executor {
                 name.strip_suffix("[@]")
                     .or_else(|| name.strip_suffix("[*]"))
             }) {
+                if array_name == "GROUPS" {
+                    return self.groups_words().len().to_string();
+                }
                 return self
                     .env_vars
                     .get(array_name)
@@ -8358,6 +8365,9 @@ impl Executor {
                 .strip_suffix("[@]")
                 .or_else(|| name.strip_suffix("[*]"))
             {
+                if array_name == "GROUPS" {
+                    return self.groups_words().join(" ");
+                }
                 return self
                     .env_vars
                     .get(array_name)
@@ -8365,6 +8375,9 @@ impl Executor {
                     .unwrap_or_default();
             }
             if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
+                if array_name == "GROUPS" {
+                    return self.group_value_at(index).unwrap_or_default();
+                }
                 return self
                     .env_vars
                     .get(array_name)
@@ -8726,6 +8739,7 @@ impl Executor {
                     .cloned()
                     .unwrap_or_default(),
             ),
+            "GROUPS" => self.group_value_at(0),
             _ => None,
         }
     }
@@ -8733,7 +8747,13 @@ impl Executor {
     fn dynamic_parameter_is_set(&self, name: &str) -> bool {
         matches!(
             name,
-            "EPOCHSECONDS" | "EPOCHREALTIME" | "SECONDS" | "RANDOM" | "BASHPID" | "FUNCNAME"
+            "EPOCHSECONDS"
+                | "EPOCHREALTIME"
+                | "SECONDS"
+                | "RANDOM"
+                | "BASHPID"
+                | "FUNCNAME"
+                | "GROUPS"
         )
     }
 
@@ -8747,6 +8767,14 @@ impl Executor {
             .or_else(|| self.env_vars.get("__RUBASH_SCRIPT_NAME"))
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn groups_words(&self) -> Vec<String> {
+        vec!["0".to_string()]
+    }
+
+    fn group_value_at(&self, index: usize) -> Option<String> {
+        self.groups_words().get(index).cloned()
     }
 
     fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
@@ -9772,6 +9800,9 @@ impl Executor {
     }
 
     fn array_length(&self, name: &str) -> usize {
+        if name == "GROUPS" {
+            return self.groups_words().len();
+        }
         self.env_vars
             .get(name)
             .map(|value| array_values(value).len())
