@@ -10341,6 +10341,8 @@ impl Executor {
     }
 
     fn expand_word_mut(&mut self, word: &str) -> String {
+        self.apply_parameter_assignment_expansions_in_word(word);
+
         if let Some(word) = word.strip_prefix('\x1b') {
             return self.expand_embedded_parameters_mut(word);
         }
@@ -10700,36 +10702,43 @@ impl Executor {
         // expansion. Rubash's word expansion is still immutable, so apply the
         // simple shell-name side effects before command dispatch.
         for word in &cmd.words[1..] {
-            let Some(inner) = word
-                .strip_prefix("${")
-                .and_then(|word| word.strip_suffix('}'))
-            else {
-                continue;
+            self.apply_parameter_assignment_expansions_in_word(word);
+        }
+    }
+
+    fn apply_parameter_assignment_expansions_in_word(&mut self, word: &str) {
+        let mut rest = word;
+        while let Some(start) = rest.find("${") {
+            rest = &rest[start + 2..];
+            let Some(end) = rest.find('}') else {
+                break;
             };
+            let inner = &rest[..end];
+            self.apply_parameter_assignment_expansion(inner);
+            rest = &rest[end + 1..];
+        }
+    }
 
-            if let Some((name, value)) = inner.split_once(":=") {
-                if !is_shell_name(name)
-                    || self
-                        .env_vars
-                        .get(name)
-                        .is_some_and(|value| !value.is_empty())
-                {
-                    continue;
-                }
-                let value = self.expand_parameter_word(value);
-                self.env_vars.insert(name.to_string(), value.clone());
-                env::set_var(name, value);
-                continue;
+    fn apply_parameter_assignment_expansion(&mut self, inner: &str) {
+        if let Some((name, value)) = inner.split_once(":=") {
+            if !is_shell_name(name)
+                || self
+                    .shell_variable_value(name)
+                    .is_some_and(|value| !value.is_empty())
+            {
+                return;
             }
+            let value = self.expand_parameter_word(value);
+            self.apply_shell_assignment(name, value);
+            return;
+        }
 
-            if let Some((name, value)) = inner.split_once('=') {
-                if !is_shell_name(name) || self.env_vars.contains_key(name) {
-                    continue;
-                }
-                let value = self.expand_parameter_word(value);
-                self.env_vars.insert(name.to_string(), value.clone());
-                env::set_var(name, value);
+        if let Some((name, value)) = inner.split_once('=') {
+            if !is_shell_name(name) || self.shell_variable_value(name).is_some() {
+                return;
             }
+            let value = self.expand_parameter_word(value);
+            self.apply_shell_assignment(name, value);
         }
     }
 
