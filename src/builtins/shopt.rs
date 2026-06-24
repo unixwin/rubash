@@ -132,7 +132,12 @@ where
             ShoptMode::Query if !option_enabled(env_vars, name) => status = EXECUTION_FAILURE,
             ShoptMode::Query => {}
             ShoptMode::List if print => print_shopt(env_vars, name, true, stdout)?,
-            ShoptMode::List => print_shopt(env_vars, name, false, stdout)?,
+            ShoptMode::List => {
+                if !option_enabled(env_vars, name) {
+                    status = EXECUTION_FAILURE;
+                }
+                print_shopt(env_vars, name, false, stdout)?;
+            }
         }
     }
 
@@ -329,7 +334,7 @@ where
     if reusable {
         writeln!(stdout, "shopt -{} {name}", if enabled { "s" } else { "u" })
     } else {
-        writeln!(stdout, "{name:<20}\t{}", if enabled { "on" } else { "off" })
+        writeln!(stdout, "{name:<15}\t{}", if enabled { "on" } else { "off" })
     }
 }
 
