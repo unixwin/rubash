@@ -3505,6 +3505,57 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_compound_array_assignment_expands_glob_matches_as_values() {
+        let dir_path = target_test_path("rubash-array-glob-values");
+        let output_path = target_test_path("rubash-array-glob-values-output.txt");
+        let shell_dir_path = shell_test_path(&dir_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_dir_all(&dir_path);
+        let _ = fs::remove_file(&output_path);
+        fs::create_dir_all(&dir_path).unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        let input = format!(
+            "cd {shell_dir_path}; touch '[3]=abcde' r s t u v; \
+             x=(*); echo \"${{x[3]}}\" > {shell_output_path}; echo \"${{x[@]}}\" >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "t\n[3]=abcde r s t u v\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir_all(dir_path);
+    }
+
+    #[test]
+    fn test_indexed_array_quoted_variable_subscript_evaluates_arithmetic() {
+        let output_path = target_test_path("rubash-array-quoted-var-subscript-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "TOOLKIT=(1 2 3); ARRAY=1; echo ${{TOOLKIT[\"$ARRAY\"]}} > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_indexed_array_assignment_preserves_explicit_indices() {
         let output_path = "target/rubash-declare-indexed-array-sparse-output.txt";
         let _ = fs::remove_file(output_path);
