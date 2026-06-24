@@ -1921,14 +1921,19 @@ impl Executor {
             .iter()
             .enumerate()
             .flat_map(|(index, word)| {
+                if let Some(values) = self.array_at_word_values(word) {
+                    return values;
+                }
+                if let Some(values) =
+                    self.quoted_positional_at_word_values(word, cmd.word_kinds.get(index))
+                {
+                    return values;
+                }
                 let expanded = self.expand_word_mut(word);
                 if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
                     Vec::new()
                 } else if self.splits_unquoted_expanded_word(cmd, index, &expanded) {
-                    expanded
-                        .split_whitespace()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
+                    self.field_split_values(&expanded)
                 } else {
                     vec![expanded]
                 }
@@ -2463,6 +2468,10 @@ impl Executor {
             return expanded.split_whitespace().map(str::to_string).collect();
         }
         vec![expanded]
+    }
+
+    fn field_split_values(&self, value: &str) -> Vec<String> {
+        field_split_values_with_ifs(value, self.env_vars.get("IFS").map(String::as_str))
     }
 
     fn expand_escaped_indirect_parameter_literal(&self, value: &str) -> Option<String> {
@@ -10180,6 +10189,7 @@ impl Executor {
                     &current,
                     &value,
                     is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
+                    self.env_vars.get("IFS").map(String::as_str),
                 )
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
                 let current = self.eval_integer_assignment_value(&current);
@@ -10203,6 +10213,7 @@ impl Executor {
                 "()",
                 &value,
                 is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
+                self.env_vars.get("IFS").map(String::as_str),
             )
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
             self.eval_integer_assignment_value(&value).to_string()
@@ -10348,6 +10359,12 @@ impl Executor {
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
         self.apply_parameter_assignment_expansions_in_word(value);
+        if let Some(expanded) = self.expand_compound_positional_at_assignment(value) {
+            if compound_assignment {
+                return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
+            }
+            return expanded;
+        }
 
         if let Some(expanded) = self.expand_backtick_substitution(value) {
             return expanded;
@@ -10373,6 +10390,26 @@ impl Executor {
         // path positions. Keep it centralized here until Rubash ports the
         // `expand_string_assignment`/SHELL_VAR path more directly.
         self.expand_assignment_tilde(&expanded)
+    }
+
+    fn expand_compound_positional_at_assignment(&self, value: &str) -> Option<String> {
+        let inner = value.strip_prefix('(')?.strip_suffix(')')?;
+        let mut changed = false;
+        let mut values = Vec::new();
+        for token in split_storage_words(inner) {
+            let token = unquote_storage_value(&token);
+            if token.strip_prefix('\x1d') == Some("${@}") || token == "$@" {
+                changed = true;
+                values.extend(
+                    self.positional_params
+                        .iter()
+                        .map(|value| quote_array_value(value)),
+                );
+            } else {
+                values.push(quote_array_value(&token));
+            }
+        }
+        changed.then(|| format!("({})", values.join(" ")))
     }
 
     fn expand_assignment_value_with_status(&mut self, value: &str) -> (String, Option<i32>) {
@@ -11268,6 +11305,15 @@ impl Executor {
 
         if word.contains("$((") {
             return self.expand_embedded_parameters_mut(word);
+        }
+
+        if let Some(source) = word
+            .strip_prefix("$(")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            if command_substitution_spans_whole_word(word) {
+                return self.expand_command_substitution_mut(source);
+            }
         }
 
         self.expand_word(word)
@@ -13332,10 +13378,27 @@ impl Executor {
     }
 
     fn expand_command_substitution_arg_values(&self, word: &str) -> Vec<String> {
+        if let Some(values) = self.quoted_positional_at_word_values(word, None) {
+            return values;
+        }
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
         vec![strip_matching_quotes(&self.expand_word(word)).to_string()]
+    }
+
+    fn quoted_positional_at_word_values(
+        &self,
+        word: &str,
+        kind: Option<&TokenKind>,
+    ) -> Option<Vec<String>> {
+        if word.strip_prefix('\x1d') == Some("${@}") {
+            return Some(self.positional_params.clone());
+        }
+        if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
+            return Some(self.positional_params.clone());
+        }
+        None
     }
 
     fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
@@ -13343,7 +13406,13 @@ impl Executor {
             .strip_prefix('"')
             .and_then(|word| word.strip_suffix('"'))
             .unwrap_or(word);
+        let word = word.strip_prefix('\x1d').unwrap_or(word);
         let name = word.strip_prefix("${")?.strip_suffix("[@]}")?;
+        if is_noassign_bash_array(name)
+            || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
+        {
+            return None;
+        }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value))
     }
@@ -13821,7 +13890,7 @@ impl Executor {
 
         let args = words[1..]
             .iter()
-            .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+            .flat_map(|word| self.expand_command_substitution_arg_values(word))
             .collect::<Vec<_>>();
         let mut call = CommandNode::new();
         call.words = words.to_vec();
@@ -15844,7 +15913,22 @@ fn append_scalar_value(current: &str, value: &str) -> String {
     output
 }
 
-fn append_array_value(current: &str, value: &str, integer: bool) -> String {
+fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
+    let Some(ifs) = ifs else {
+        return value.split_whitespace().map(str::to_string).collect();
+    };
+    if ifs.is_empty() {
+        return vec![value.to_string()];
+    }
+
+    value
+        .split(|ch| ifs.contains(ch))
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn append_array_value(current: &str, value: &str, integer: bool, ifs: Option<&str>) -> String {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
         .keys()
@@ -15884,14 +15968,14 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
         let quoted_token = token.starts_with('"') && token.ends_with('"') && !command_subst_token;
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
-            for value in expanded_array.split_whitespace() {
+            for value in field_split_values_with_ifs(expanded_array, ifs) {
                 entries.insert(next_index, value.to_string());
                 next_index += 1;
             }
             continue;
         }
         if token.contains('\n') || (token.contains(char::is_whitespace) && !quoted_token) {
-            for value in token.split_whitespace() {
+            for value in field_split_values_with_ifs(&token, ifs) {
                 entries.insert(next_index, value.to_string());
                 next_index += 1;
             }
