@@ -1503,6 +1503,8 @@ fn remove_shell_quotes(raw: &str) -> String {
                 if let Some(escaped) = chars.next() {
                     if escaped == '$' {
                         out.push('\x1f');
+                    } else if escaped == '\'' {
+                        out.push('\x17');
                     } else {
                         out.push(escaped);
                     }
@@ -1587,7 +1589,11 @@ fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
             }
             '\\' => {
                 if let Some(escaped) = chars.next() {
-                    out.push(escaped);
+                    if escaped == '\'' {
+                        out.push('\x17');
+                    } else {
+                        out.push(escaped);
+                    }
                 }
             }
             _ => out.push(ch),

@@ -3059,10 +3059,12 @@ impl Executor {
 
     fn execute_eval(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        match crate::builtins::eval::execute_with_io(
-            cmd.words[1..].iter().map(String::as_str),
-            &mut stderr,
-        )? {
+        let args = cmd.words[1..]
+            .iter()
+            .map(|word| unescape_remaining_shell_escapes(word))
+            .collect::<Vec<_>>();
+        match crate::builtins::eval::execute_with_io(args.iter().map(String::as_str), &mut stderr)?
+        {
             crate::builtins::eval::EvalAction::Complete(status) => {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = status;
@@ -11390,8 +11392,9 @@ impl Executor {
                 parse_parameter_replacement(name)
             {
                 let pattern = self.expand_parameter_pattern_word(pattern);
-                let replacement =
-                    decode_parameter_pattern_quotes(&self.expand_embedded_parameters(replacement));
+                let replacement = decode_parameter_replacement_quotes(
+                    &self.expand_embedded_parameters_preserving_escaped_single_quotes(replacement),
+                );
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -11800,8 +11803,9 @@ impl Executor {
                 parse_parameter_replacement(name)
             {
                 let pattern = self.expand_parameter_pattern_word(pattern);
-                let replacement =
-                    decode_parameter_pattern_quotes(&self.expand_embedded_parameters(replacement));
+                let replacement = decode_parameter_replacement_quotes(
+                    &self.expand_embedded_parameters_preserving_escaped_single_quotes(replacement),
+                );
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -11877,9 +11881,11 @@ impl Executor {
 
         let expanded = self.expand_embedded_parameters(word);
         if word.contains("$(") || word.contains('`') {
-            unescape_remaining_shell_escapes(&expanded)
+            restore_protected_replacement_quotes(&unescape_remaining_shell_escapes(&expanded))
+                .replace("\\\\'", "'")
+                .replace("\\'", "'")
         } else {
-            expanded
+            restore_protected_replacement_quotes(&expanded)
         }
     }
 
@@ -13143,7 +13149,7 @@ impl Executor {
     }
 
     fn expand_parameter_pattern_word(&self, pattern: &str) -> String {
-        let pattern = self.expand_embedded_parameters(pattern);
+        let pattern = self.expand_embedded_parameters_preserving_escaped_single_quotes(pattern);
         decode_parameter_pattern_quotes(&pattern)
     }
 
@@ -14566,11 +14572,26 @@ impl Executor {
         output
     }
 
+    fn expand_embedded_parameters_preserving_escaped_single_quotes(&self, word: &str) -> String {
+        const PROTECTED_ESCAPED_SINGLE_QUOTE: char = '\x16';
+        let protected = word.replace('\x17', "\x16");
+        self.expand_embedded_parameters(&protected)
+            .replace(PROTECTED_ESCAPED_SINGLE_QUOTE, "\x17")
+    }
+
     fn expand_embedded_parameters_mut(&mut self, word: &str) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let word = self.expand_embedded_arithmetic_mut(word);
         let word = self.expand_embedded_command_substitutions_mut(&word);
-        unescape_remaining_shell_escapes(&self.expand_embedded_parameters(&word))
+        let expanded = self.expand_embedded_parameters(&word);
+        let expanded = if word.contains("$(") || word.contains('`') {
+            unescape_remaining_shell_escapes(&expanded)
+                .replace("\\\\'", "'")
+                .replace("\\'", "'")
+        } else {
+            expanded
+        };
+        restore_protected_replacement_quotes(&expanded)
     }
 
     fn expand_embedded_command_substitutions_mut(&mut self, word: &str) -> String {
@@ -19034,14 +19055,15 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
                 index += 1;
             }
             '\'' => {
-                index += 1;
-                while index < chars.len() {
-                    let ch = chars[index];
-                    index += 1;
-                    if ch == '\'' {
-                        break;
+                if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
+                    let close = index + 1 + close_offset;
+                    for ch in &chars[index + 1..close] {
+                        output.push(*ch);
                     }
-                    output.push(ch);
+                    index = close + 1;
+                } else {
+                    output.push('\'');
+                    index += 1;
                 }
             }
             '"' => {
@@ -19123,6 +19145,27 @@ fn decode_parameter_word_quotes(word: &str) -> String {
         }
     }
     output
+}
+
+fn decode_parameter_replacement_quotes(replacement: &str) -> String {
+    const PROTECTED_BACKSLASH_QUOTE: char = '\x16';
+    let mut protected = String::new();
+    let chars = replacement.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '\\' && chars.get(index + 1) == Some(&'\x17') {
+            protected.push(PROTECTED_BACKSLASH_QUOTE);
+            index += 2;
+            continue;
+        }
+        protected.push(chars[index]);
+        index += 1;
+    }
+    decode_parameter_pattern_quotes(&protected)
+}
+
+fn restore_protected_replacement_quotes(value: &str) -> String {
+    value.replace('\x16', "\\'")
 }
 
 fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
@@ -20136,6 +20179,13 @@ fn unescape_remaining_shell_escapes(value: &str) -> String {
     let mut chars = value.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
+            let mut lookahead = chars.clone();
+            if lookahead.next() == Some('\\') && lookahead.next() == Some('\'') {
+                chars.next();
+                chars.next();
+                output.push('\'');
+                continue;
+            }
             if let Some(
                 next @ ('\'' | '"' | '\\' | '$' | '`' | '(' | ')' | '{' | '}' | ';' | '&' | '|'
                 | '<' | '>' | '!' | '*' | '?' | '#'),
