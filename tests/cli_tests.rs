@@ -485,3 +485,23 @@ fn script_escaped_backtick_in_quotes_is_literal() {
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
+
+#[test]
+fn script_bash_source_pattern_removal_uses_first_element() {
+    let script_path = Path::new("target").join("rubash-cli-bash-source-pattern.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(&script_path, "printf '%s\\n' \"${BASH_SOURCE##*/}\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(script_path.to_string_lossy().replace('\\', "/"))
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(&script_path);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "rubash-cli-bash-source-pattern.sh\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}

@@ -10727,8 +10727,8 @@ impl Executor {
             }
             if let Some((var_name, _pattern)) = name.split_once("##*/") {
                 return self
-                    .env_vars
-                    .get(var_name)
+                    .parameter_pattern_scalar_value(var_name)
+                    .as_deref()
                     .and_then(|value| value.rsplit('/').next())
                     .map(|basename| {
                         if var_name == "THIS_SH" && basename == "rubash-wrapper" {
@@ -10750,8 +10750,8 @@ impl Executor {
                 }
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
+                        .parameter_pattern_scalar_value(var_name)
+                        .as_deref()
                         .map(|value| {
                             remove_matching_prefix(
                                 value,
@@ -10772,8 +10772,8 @@ impl Executor {
                 }
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
+                        .parameter_pattern_scalar_value(var_name)
+                        .as_deref()
                         .map(|value| {
                             remove_matching_prefix(
                                 value,
@@ -10794,8 +10794,8 @@ impl Executor {
                 }
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
+                        .parameter_pattern_scalar_value(var_name)
+                        .as_deref()
                         .map(|value| {
                             remove_matching_suffix(
                                 value,
@@ -10816,8 +10816,8 @@ impl Executor {
                 }
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
+                        .parameter_pattern_scalar_value(var_name)
+                        .as_deref()
                         .map(|value| {
                             remove_matching_suffix(
                                 value,
@@ -12127,16 +12127,32 @@ impl Executor {
         }
 
         if is_shell_name(var_name) {
-            let resolved = self.resolved_variable_name(var_name)?;
             return Some(
-                self.env_vars
-                    .get(&resolved)
-                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                self.parameter_pattern_scalar_value(var_name)
+                    .map(|value| remove_parameter_pattern(&value, &pattern, operation))
                     .unwrap_or_default(),
             );
         }
 
         None
+    }
+
+    fn parameter_pattern_scalar_value(&self, name: &str) -> Option<String> {
+        if let Some(value) = self.dynamic_parameter_value(name) {
+            return Some(value);
+        }
+
+        let resolved = self.resolved_variable_name(name)?;
+        let value = self.env_vars.get(&resolved)?;
+        if is_marked_var(&self.env_vars, ARRAY_VARS, &resolved) {
+            return Some(
+                array_value_at(value, 0)
+                    .or_else(|| assoc_value_at(value, "0"))
+                    .unwrap_or_default(),
+            );
+        }
+
+        Some(value.clone())
     }
 
     fn expand_parameter_pattern_word(&self, pattern: &str) -> String {
