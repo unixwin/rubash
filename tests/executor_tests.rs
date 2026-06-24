@@ -1186,6 +1186,37 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_cp_copies_file_to_mktemp_directory() {
+        let source_path = target_test_path("rubash-cp-source.txt");
+        let output_path = target_test_path("rubash-cp-mktemp-directory-output.txt");
+        let shell_source_path = shell_test_path(&source_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&source_path);
+        let _ = fs::remove_file(&output_path);
+        fs::write(&source_path, "copied\n").unwrap();
+        let input = format!(
+            "tmp=$(mktemp -d) || exit 1\n\
+             cp {shell_source_path} \"$tmp\"\n\
+             test -f \"$tmp/rubash-cp-source.txt\"\n\
+             echo status:$?:$tmp > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("status:0:"));
+        let temp_path = output.trim_end().trim_start_matches("status:0:");
+        let _ = fs::remove_dir_all(shell_output_path_to_host(temp_path));
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_command_substitution_output_is_not_reexpanded() {
         let output_path = "target/rubash-command-substitution-no-reexpand-output.txt";
         let _ = fs::remove_file(output_path);
