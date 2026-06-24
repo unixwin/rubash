@@ -875,6 +875,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_printf_command_substitution_strips_trailing_newlines() {
+        let output_path = "target/rubash-printf-command-substitution-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "v=$(printf 'a\\n\\n'); printf 'trail:<%s> len:%s\\n' \"$v\" \"${{#v}}\" > {output_path}; \
+             w=$(printf 'a\\nb\\n'); printf 'mid:<%s> len:%s\\n' \"$w\" \"${{#w}}\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "trail:<a> len:1\nmid:<a\nb> len:3\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_last_background_pid_parameter_tracks_background_command() {
         let output_path = "target/rubash-last-background-pid-output.txt";
         let _ = fs::remove_file(output_path);
