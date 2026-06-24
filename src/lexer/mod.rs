@@ -480,6 +480,14 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
             index += 2;
             continue;
         }
+        if depth > 0
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
+        }
         if depth > 0 && ch == '<' && chars.get(index + 1) == Some(&'<') {
             index = skip_heredoc_in_chars(&chars, index);
             continue;
@@ -610,6 +618,14 @@ impl<'a> Lexer<'a> {
         } else {
             from_utf8(&self.input[self.position..]).ok()?.chars().next()
         }
+    }
+
+    #[inline]
+    fn peek_after(&self, offset: usize) -> Option<char> {
+        from_utf8(&self.input[self.position..])
+            .ok()?
+            .chars()
+            .nth(offset)
     }
 
     #[inline]
@@ -927,7 +943,13 @@ impl<'a> Lexer<'a> {
                 }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),
-                '<' if self.peek() == Some('<') => self.skip_heredoc_in_command_substitution(),
+                '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
+                    self.advance();
+                    self.advance();
+                }
+                '<' if self.peek() == Some('<') => {
+                    self.skip_heredoc_in_command_substitution()
+                }
                 _ => {}
             }
         }
@@ -1151,6 +1173,30 @@ mod unit_tests {
     #[test]
     fn test_tokenize_empty() {
         assert!(tokenize("").is_empty());
+    }
+
+    #[test]
+    fn test_empty_quoted_heredoc_delimiter_reads_until_eof() {
+        let tokens = tokenize("cat <<''\nhi\nthere\n''");
+
+        assert!(tokens.iter().any(|token| token.kind == TokenKind::HereDoc));
+        let body = tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::HereDocBody)
+            .map(|token| token.value.as_str());
+        assert_eq!(body, Some("\x1e\x1fhi\nthere\n''\n"));
+    }
+
+    #[test]
+    fn test_command_substitution_here_string_does_not_swallow_following_heredoc() {
+        let tokens = tokenize("echo $(\ncat <<< \"comsub here-string\"\n)\ncat <<''\nhi\nthere\n''");
+
+        let bodies = tokens
+            .iter()
+            .filter(|token| token.kind == TokenKind::HereDocBody)
+            .map(|token| token.value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies, vec!["\x1e\x1fhi\nthere\n''\n"]);
     }
 
     #[test]
