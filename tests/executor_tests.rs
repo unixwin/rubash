@@ -1913,6 +1913,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_adjacent_braced_parameter_expansions_stay_in_one_word() {
+        let output_path = "target/rubash-adjacent-braced-param-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); left=alpha; right=beta; echo ${{arr[1]}}:${{arr[2]}} > {output_path}; echo ${{left}}:${{right}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "one:two\nalpha:beta\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_sparse_array_numeric_subscript_expands_element() {
         let output_path = "target/rubash-sparse-array-subscript-output.txt";
         let _ = fs::remove_file(output_path);

@@ -468,6 +468,9 @@ impl<'a> Lexer<'a> {
                 Some('{') => {
                     self.advance();
                     self.skip_braced();
+                    if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
+                        return Some(self.finish_word_token(start, false));
+                    }
                     Some(Token::new(TokenKind::Variable, self.slice(start), start))
                 }
                 _ => {
@@ -699,6 +702,10 @@ impl<'a> Lexer<'a> {
             }
         }
     }
+}
+
+fn is_word_delimiter(ch: char) -> bool {
+    " \t\n|&;<>(){}".contains(ch)
 }
 
 fn assignment_value_is_quoted(raw: &str) -> bool {
