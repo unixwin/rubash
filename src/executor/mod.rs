@@ -12803,12 +12803,11 @@ impl Executor {
         let words = self.expand_aliases(&words);
 
         if words.first().map(String::as_str) == Some("echo") {
-            let expanded = words[1..]
+            let expanded_args = words[1..]
                 .iter()
                 .map(|word| self.expand_word(word))
-                .collect::<Vec<_>>()
-                .join(" ");
-            return command_substitution_word_split(&expanded);
+                .collect::<Vec<_>>();
+            return echo_command_substitution_output(&expanded_args);
         }
 
         if words.first().map(String::as_str) == Some("printf") {
@@ -12840,6 +12839,26 @@ impl Executor {
                 }
             }
             return output.trim_end_matches('\n').to_string();
+        }
+
+        if words.first().map(String::as_str) == Some("basename") {
+            let Some(path) = words.get(1).map(|word| self.expand_word(word)) else {
+                self.last_command_substitution_status.set(Some(1));
+                return String::new();
+            };
+            let trimmed = path.trim_end_matches(['/', '\\']);
+            let name = trimmed
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(trimmed);
+            let suffix = words.get(2).map(|word| self.expand_word(word));
+            let output = suffix
+                .as_deref()
+                .and_then(|suffix| name.strip_suffix(suffix))
+                .unwrap_or(name);
+            self.last_command_substitution_status.set(Some(0));
+            return output.to_string();
         }
 
         if words.first().map(String::as_str) == Some("umask") {
@@ -13001,7 +13020,7 @@ impl Executor {
             return None;
         }
         let source = word.strip_prefix('`')?.strip_suffix('`')?;
-        Some(run_echo_command_substitution(source))
+        Some(self.expand_command_substitution(source))
     }
 
     fn expand_dirstack_tilde(&self, word: &str) -> Option<String> {
@@ -18022,71 +18041,60 @@ fn command_substitution_word_split(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn run_echo_command_substitution(source: &str) -> String {
-    let mut output = String::new();
-    for command in split_shell_list(source) {
-        let words = split_shell_words(command.trim());
-        if words.first().map(String::as_str) != Some("echo") {
-            continue;
+fn echo_command_substitution_output(args: &[String]) -> String {
+    let mut newline = true;
+    let mut escapes = false;
+    let mut index = 0;
+
+    while let Some(option) = args.get(index).map(String::as_str) {
+        if !option.starts_with('-') || option == "-" {
+            break;
         }
-        let mut newline = true;
-        let mut escapes = false;
-        let mut index = 1;
-        while let Some(option) = words.get(index).map(String::as_str) {
-            if !option.starts_with('-') || option == "-" {
-                break;
-            }
-            if option[1..].chars().all(|ch| matches!(ch, 'n' | 'e' | 'E')) {
-                for ch in option[1..].chars() {
-                    match ch {
-                        'n' => newline = false,
-                        'e' => escapes = true,
-                        'E' => escapes = false,
-                        _ => {}
-                    }
+        if option[1..].chars().all(|ch| matches!(ch, 'n' | 'e' | 'E')) {
+            for ch in option[1..].chars() {
+                match ch {
+                    'n' => newline = false,
+                    'e' => escapes = true,
+                    'E' => escapes = false,
+                    _ => {}
                 }
-                index += 1;
-            } else {
-                break;
             }
+            index += 1;
+        } else {
+            break;
         }
-        let mut text = words[index..].join(" ");
-        if escapes {
-            text = expand_echo_escapes(&text);
-        }
-        output.push_str(&text);
-        if newline {
-            output.push('\n');
-        }
+    }
+
+    let mut output = args[index..].join(" ");
+    if escapes {
+        output = expand_echo_command_substitution_escapes(&output);
+    }
+    if newline {
+        output.push('\n');
     }
     output.trim_end_matches('\n').to_string()
 }
 
-fn split_shell_list(source: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    for ch in source.chars() {
-        match (ch, quote) {
-            ('\'' | '"', None) => {
-                quote = Some(ch);
-                current.push(ch);
+fn expand_echo_command_substitution_escapes(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('\\') => output.push('\\'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
             }
-            (q, Some(active)) if q == active => {
-                quote = None;
-                current.push(ch);
-            }
-            (';', None) => {
-                parts.push(current.trim().to_string());
-                current.clear();
-            }
-            _ => current.push(ch),
+            None => output.push('\\'),
         }
     }
-    if !current.trim().is_empty() {
-        parts.push(current.trim().to_string());
-    }
-    parts
+    output
 }
 
 fn split_shell_words(source: &str) -> Vec<String> {
@@ -18189,28 +18197,6 @@ fn heredoc_delimiter_line_matches(line: &str, delimiter: &str, strip_tabs: bool)
         line
     };
     line == delimiter
-}
-
-fn expand_echo_escapes(value: &str) -> String {
-    let mut output = String::new();
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch != '\\' {
-            output.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some('n') => output.push('\n'),
-            Some('t') => output.push('\t'),
-            Some('\\') => output.push('\\'),
-            Some(other) => {
-                output.push('\\');
-                output.push(other);
-            }
-            None => output.push('\\'),
-        }
-    }
-    output
 }
 
 fn case_command_from_words(words: &[String]) -> Option<CaseCommand> {
