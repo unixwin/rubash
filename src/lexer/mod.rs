@@ -200,7 +200,12 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
                     }
                 }
 
-                if comparable == delimiter.value {
+                if comparable == delimiter.value
+                    || (delimiter.allow_closing_paren
+                        && comparable
+                            .strip_suffix(')')
+                            .is_some_and(|value| value == delimiter.value))
+                {
                     found_delimiter = true;
                     break;
                 }
@@ -267,6 +272,7 @@ struct HereDocDelimiter {
     value: String,
     quoted: bool,
     strip_tabs: bool,
+    allow_closing_paren: bool,
 }
 
 fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
@@ -275,7 +281,7 @@ fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
         .windows(2)
         .filter(|pair| pair[0].kind == TokenKind::HereDoc)
         .map(|pair| {
-            let quoted = heredoc_delimiter_is_quoted(source, &mut source_offset);
+            let context = heredoc_operator_context(source, &mut source_offset);
             let strip_tabs = pair[0].value == "<<-";
             let value = if strip_tabs {
                 pair[1].value.trim_start_matches('\t').to_string()
@@ -284,16 +290,25 @@ fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
             };
             HereDocDelimiter {
                 value,
-                quoted,
+                quoted: context.quoted,
                 strip_tabs,
+                allow_closing_paren: context.in_command_substitution,
             }
         })
         .collect()
 }
 
-fn heredoc_delimiter_is_quoted(source: &str, source_offset: &mut usize) -> bool {
+struct HereDocOperatorContext {
+    quoted: bool,
+    in_command_substitution: bool,
+}
+
+fn heredoc_operator_context(source: &str, source_offset: &mut usize) -> HereDocOperatorContext {
     let Some(relative_index) = source[*source_offset..].find("<<") else {
-        return false;
+        return HereDocOperatorContext {
+            quoted: false,
+            in_command_substitution: false,
+        };
     };
     let index = *source_offset + relative_index;
     *source_offset = index + 2;
@@ -305,7 +320,58 @@ fn heredoc_delimiter_is_quoted(source: &str, source_offset: &mut usize) -> bool 
     while chars.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
         chars.next();
     }
-    matches!(chars.peek(), Some('\'' | '"' | '\\'))
+    HereDocOperatorContext {
+        quoted: matches!(chars.peek(), Some('\'' | '"' | '\\')),
+        in_command_substitution: command_substitution_depth_before(source, index) > 0,
+    }
+}
+
+fn command_substitution_depth_before(source: &str, end: usize) -> usize {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let chars = source[..end].chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single {
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if depth > 0 && ch == '(' {
+            depth += 1;
+        } else if depth > 0 && ch == ')' {
+            depth = depth.saturating_sub(1);
+        }
+        index += 1;
+    }
+    depth
 }
 
 fn has_unclosed_quotes(input: &str) -> bool {
@@ -475,6 +541,18 @@ fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
         } else {
             line.as_str()
         };
+        if comparable
+            .strip_suffix(')')
+            .is_some_and(|value| value == delimiter)
+        {
+            let leading_tabs = if strip_tabs {
+                line.chars().take_while(|ch| *ch == '\t').count()
+            } else {
+                0
+            };
+            index = line_start + leading_tabs + delimiter.chars().count();
+            break;
+        }
         if comparable == delimiter {
             if chars.get(index) == Some(&'\n') {
                 index += 1;
@@ -900,6 +978,18 @@ impl<'a> Lexer<'a> {
             } else {
                 line
             };
+            if comparable
+                .strip_suffix(')')
+                .is_some_and(|value| value == delimiter)
+            {
+                let leading_tabs = if strip_tabs {
+                    line.chars().take_while(|ch| *ch == '\t').count()
+                } else {
+                    0
+                };
+                self.position = line_start + leading_tabs + delimiter.len();
+                break;
+            }
             if comparable == delimiter {
                 if self.peek() == Some('\n') {
                     self.advance();

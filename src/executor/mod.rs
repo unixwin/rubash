@@ -12206,7 +12206,7 @@ impl Executor {
                     chars.next();
                     let mut depth = 1;
                     let mut source = String::new();
-                    for source_ch in chars.by_ref() {
+                    while let Some(source_ch) = chars.next() {
                         match source_ch {
                             '(' => {
                                 depth += 1;
@@ -12749,11 +12749,17 @@ impl Executor {
             return None;
         }
 
-        let tokens = crate::lexer::tokenize(source);
+        let closed_by_paren = source.contains('\x1c');
+        let source = source.replace('\x1c', "");
+        let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
         let first = ast.commands.first()?;
         if first.words.first().map(String::as_str) != Some("cat") {
             return None;
+        }
+
+        if closed_by_paren {
+            self.report_command_substitution_heredoc_warning(&source, first);
         }
 
         let mut output = self.stdin_string_for_command(first)?;
@@ -12772,6 +12778,20 @@ impl Executor {
         }
 
         Some(output.trim_end_matches('\n').to_string())
+    }
+
+    fn report_command_substitution_heredoc_warning(&self, source: &str, command: &CommandNode) {
+        let start_line = self
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|line| line.parse::<usize>().ok())
+            .unwrap_or_else(|| command.line.unwrap_or(1));
+        let warning_line = start_line + source.lines().count().saturating_sub(1);
+        let delimiter = command.heredoc_delimiter.as_deref().unwrap_or("");
+        eprintln!(
+            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            self.diagnostic_prefix_for_line(warning_line)
+        );
     }
 
     fn run_external_command_substitution(&self, words: &[String]) -> Option<String> {
@@ -13017,7 +13037,7 @@ impl Executor {
                     let mut single = false;
                     let mut double = false;
                     let mut escaped = false;
-                    for source_ch in chars.by_ref() {
+                    while let Some(source_ch) = chars.next() {
                         if escaped {
                             source.push(source_ch);
                             escaped = false;
@@ -13036,6 +13056,13 @@ impl Executor {
                             '"' if !single => {
                                 double = !double;
                                 source.push(source_ch);
+                            }
+                            '<'
+                                if !single
+                                    && !double
+                                    && chars.peek().copied() == Some('<') =>
+                            {
+                                copy_command_substitution_heredoc(&mut chars, &mut source);
                             }
                             '(' if !single && !double => {
                                 depth += 1;
@@ -17476,6 +17503,92 @@ fn strip_quoted_heredoc_marker(body: &str) -> &str {
 fn unterminated_heredoc_body_line_count(body: &str) -> usize {
     let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
     body.lines().count()
+}
+
+fn copy_command_substitution_heredoc(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    source: &mut String,
+) {
+    source.push('<');
+    source.push('<');
+    chars.next();
+
+    let strip_tabs = if chars.peek().copied() == Some('-') {
+        source.push('-');
+        chars.next();
+        true
+    } else {
+        false
+    };
+
+    while chars.peek().is_some_and(|ch| matches!(ch, ' ' | '\t')) {
+        let ch = chars.next().unwrap();
+        source.push(ch);
+    }
+
+    let mut raw_delimiter = String::new();
+    while chars
+        .peek()
+        .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
+    {
+        let ch = chars.next().unwrap();
+        raw_delimiter.push(ch);
+        source.push(ch);
+    }
+    let mut delimiter = raw_delimiter.replace(['\'', '"', '\\'], "");
+    if strip_tabs {
+        delimiter = delimiter.trim_start_matches('\t').to_string();
+    }
+    if delimiter.is_empty() {
+        return;
+    }
+
+    while let Some(ch) = chars.next() {
+        source.push(ch);
+        if ch == '\n' {
+            break;
+        }
+    }
+
+    loop {
+        let mut line = String::new();
+        while let Some(ch) = chars.peek().copied() {
+            let comparable = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line.as_str()
+            };
+            if comparable == delimiter && ch == ')' {
+                source.push('\x1c');
+                return;
+            }
+            if ch == '\n' {
+                break;
+            }
+            chars.next();
+            line.push(ch);
+            source.push(ch);
+        }
+
+        let comparable = if strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if comparable == delimiter {
+            if chars.peek().copied() == Some('\n') {
+                source.push('\n');
+                chars.next();
+            }
+            return;
+        }
+
+        match chars.next() {
+            Some('\n') => source.push('\n'),
+            Some(ch) => source.push(ch),
+            None => return,
+        }
+    }
 }
 
 fn contains_windows_forbidden_posix_filename_char(path: &str) -> bool {

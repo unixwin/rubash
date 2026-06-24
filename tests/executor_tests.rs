@@ -986,6 +986,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
+        let output_path = "target/rubash-comsub-heredoc-delim-before-paren-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("text=$(cat <<EOF\nhere is the text\nEOF)\necho = $text = > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "= here is the text =\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_cat_command_substitution_reads_files_and_strips_trailing_newlines() {
         let input_path = "target/rubash-cat-command-substitution-input.txt";
         let output_path = "target/rubash-cat-command-substitution-output.txt";
