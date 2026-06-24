@@ -1601,6 +1601,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_redirects_without_spaces_around_operator() {
+        let output_path = "target/rubash-nospace-redirect-output.txt";
+        let error_path = "target/rubash-nospace-redirect-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "echo alpha>{output_path}; echo beta>>{output_path}; no_such_nospace_cmd 2>{error_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 127);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_nospace_cmd: command not found"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_mapfile_t_reads_here_string_into_array() {
         let output_path = "target/rubash-mapfile-t-output.txt";
         let _ = fs::remove_file(output_path);
