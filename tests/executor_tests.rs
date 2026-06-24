@@ -4375,6 +4375,57 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_temporary_assignment_reaches_shell_function() {
+        let output_path = target_test_path("rubash-temp-assignment-function-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "RUBASH_TEMP_FUNC=outer; \
+             f() {{ printf '%s\\n' \"$RUBASH_TEMP_FUNC\"; RUBASH_TEMP_FUNC=changed; }}; \
+             RUBASH_TEMP_FUNC=temp f > {shell_output_path}; \
+             printf '%s\\n' \"$RUBASH_TEMP_FUNC\" >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "temp\nouter\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_backtick_in_comment_does_not_swallow_temporary_export() {
+        let output_path = target_test_path("rubash-comment-backtick-temp-export-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "# assignment before `eval' and `.'\n\
+             export RUBASH_COMMENT_TEMP=old\n\
+             export -n RUBASH_COMMENT_TEMP # make sure it's not exported\n\
+             echo expect new > {shell_output_path}\n\
+             RUBASH_COMMENT_TEMP=new export RUBASH_COMMENT_TEMP\n\
+             declare -p RUBASH_COMMENT_TEMP >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "expect new\ndeclare -x RUBASH_COMMENT_TEMP=\"new\"\n"
+        );
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_child_environment_includes_exported_pwd() {
         let output_path = target_test_path("rubash-child-pwd-env-output.txt");
         #[cfg(windows)]

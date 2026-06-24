@@ -285,6 +285,17 @@ mod comments {
         assert_eq!(words, vec!["shopt", "-p", "shopt", "-u"]);
         assert_eq!(tokens[2].position, 2);
     }
+
+    #[test]
+    fn test_backtick_in_comment_does_not_continue_command_substitution() {
+        let tokens: Vec<_> = tokenize("# mentions `eval' in prose\nexport -n var\necho ok")
+            .into_iter()
+            .filter(|token| token.kind != TokenKind::Semicolon)
+            .collect();
+        let words: Vec<_> = tokens.iter().map(|token| token.value.as_str()).collect();
+        assert_eq!(words, vec!["export", "-n", "var", "echo", "ok"]);
+        assert_eq!(tokens[3].position, 3);
+    }
 }
 
 // ============================================================================

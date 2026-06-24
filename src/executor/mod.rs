@@ -2048,7 +2048,10 @@ impl Executor {
             .first()
             .and_then(|word| self.function_name_for_command_word(word))
         {
-            return self.execute_function(&function_name, &cmd.words[1..], cmd);
+            let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
+            let result = self.execute_function(&function_name, &cmd.words[1..], cmd);
+            self.restore_temporary_assignments(temporary_assignments);
+            return result;
         }
 
         if self.execute_assignment_words(cmd) {
