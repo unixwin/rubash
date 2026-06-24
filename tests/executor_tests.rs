@@ -11190,6 +11190,22 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_array_element_parameter_colon_question_errors_for_unset_value() {
+        let output_path = "target/rubash-array-element-colon-question-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(ok); echo ${{arr[1]:?boom}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_parameter_question_allows_empty_set_value() {
         let output_path = "target/rubash-param-question-empty-output.txt";
         let _ = fs::remove_file(output_path);
@@ -11242,6 +11258,32 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "empty:default\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_array_element_parameter_operators_use_element_state() {
+        let output_path = "target/rubash-array-element-param-operators-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(value); declare -A assoc; assoc[empty]=; assoc[key]=value; \
+             printf '<%s>|<%s>|<%s>|<%s>\\n' \
+             \"${{arr[0]:+alt}}\" \"${{arr[1]-missing}}\" \
+             \"${{assoc[empty]:-fallback}}\" \"${{assoc[key]+alt}}\" \
+             > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<alt>|<missing>|<fallback>|<alt>\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 
