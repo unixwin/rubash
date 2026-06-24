@@ -1820,6 +1820,9 @@ impl Executor {
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
+        if command_has_unterminated_heredoc(cmd) {
+            self.report_unterminated_heredoc(cmd);
+        }
 
         if let Some(for_command) = &cmd.for_command {
             return self.execute_for_command(for_command);
@@ -14241,7 +14244,23 @@ impl Executor {
         "rubash: ".to_string()
     }
 
+    fn report_unterminated_heredoc(&self, cmd: &CommandNode) {
+        let start_line = cmd.line.unwrap_or(1);
+        let body_lines = cmd
+            .heredoc
+            .as_deref()
+            .map(unterminated_heredoc_body_line_count)
+            .unwrap_or(0);
+        let warning_line = start_line + body_lines;
+        let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
+        eprintln!(
+            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            self.diagnostic_prefix_for_line(warning_line)
+        );
+    }
+
     fn report_unterminated_subshell_heredoc(&self, cmd: &CommandNode) {
+        self.report_unterminated_heredoc(cmd);
         let start_line = cmd.line.unwrap_or(1);
         let body_lines = cmd
             .heredoc
@@ -14250,11 +14269,6 @@ impl Executor {
             .unwrap_or(0);
         let warning_line = start_line + body_lines;
         let syntax_line = warning_line + 1;
-        let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
-        eprintln!(
-            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
-            self.diagnostic_prefix_for_line(warning_line)
-        );
         eprintln!(
             "{}syntax error: unexpected end of file from `(' command on line {start_line}",
             self.diagnostic_prefix_for_line(syntax_line)
