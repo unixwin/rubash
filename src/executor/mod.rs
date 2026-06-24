@@ -1575,6 +1575,13 @@ impl Executor {
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
             self.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        } else if let Some(redirect) = &done_command.redirect_in {
+            let target = self.expand_word(&redirect.target);
+            if let Ok(input) = fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)) {
+                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                self.env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            }
         }
         let mut saved_fd_inputs = Vec::new();
         for redirect in &done_command.heredoc_redirects {
