@@ -3023,6 +3023,47 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_eval_multiple_indexed_array_element_assignments() {
+        let output_path = "target/rubash-eval-multi-array-assign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -a arr; eval \"arr[0]=zero arr[1]=one\"; printf '%s %s\\n' \"${{arr[0]}}\" \"${{arr[1]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "zero one\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_parameter_compound_array_assignment_preserves_quote_chars() {
+        let output_path = "target/rubash-array-param-quotes-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "command='String \"\" validateAndParse NaN'; words=($command); printf '<%s>|<%s>|<%s>|<%s>\\n' \"${{words[0]}}\" \"${{words[1]}}\" \"${{words[2]}}\" \"${{words[3]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<String>|<\"\">|<validateAndParse>|<NaN>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
         let output_path = "target/rubash-indexed-array-compound-sparse-output.txt";
         let _ = fs::remove_file(output_path);

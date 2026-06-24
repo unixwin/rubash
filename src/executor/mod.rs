@@ -9944,6 +9944,23 @@ impl Executor {
         // carries typed SHELL_VAR attributes. This stores the element count
         // shape needed by upstream builtins5.sub.
         if cmd.words.len() != 1 {
+            if !cmd.words.iter().all(|word| is_array_element_assignment_word(word)) {
+                return false;
+            }
+            for word in &cmd.words {
+                let mut single = cmd.clone();
+                single.words = vec![word.clone()];
+                if !self.execute_array_element_assignment(&single) {
+                    return false;
+                }
+                if self.exit_code != 0 {
+                    return true;
+                }
+            }
+            self.exit_code = 0;
+            return true;
+        }
+        if !is_array_element_assignment_word(&cmd.words[0]) {
             return false;
         }
         let Some((left, value)) = cmd.words[0].split_once('=') else {
@@ -10417,6 +10434,12 @@ impl Executor {
             }
             return expanded;
         }
+        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
+            if compound_assignment {
+                return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
+            }
+            return expanded;
+        }
 
         if let Some(expanded) = self.expand_backtick_substitution(value) {
             return expanded;
@@ -10462,6 +10485,17 @@ impl Executor {
             }
         }
         changed.then(|| format!("({})", values.join(" ")))
+    }
+
+    fn expand_unquoted_parameter_compound_assignment(&self, value: &str) -> Option<String> {
+        let inner = value.strip_prefix('(')?.strip_suffix(')')?.trim();
+        let name = single_unquoted_parameter_name(inner)?;
+        let value = self.shell_variable_value(name).unwrap_or_default();
+        let values = field_split_values_with_ifs(&value, self.env_vars.get("IFS").map(String::as_str))
+            .into_iter()
+            .map(|value| quote_compound_field_value(&value))
+            .collect::<Vec<_>>();
+        Some(format!("({})", values.join(" ")))
     }
 
     fn expand_assignment_value_with_status(&mut self, value: &str) -> (String, Option<i32>) {
@@ -10548,6 +10582,16 @@ impl Executor {
         if let Some((name, value)) = split_assignment_word(word) {
             let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
             let value = tilde_expand::strip_assignment_quote_marker(value);
+            let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
+            let raw_value = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER).unwrap_or(value);
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = if compound_assignment {
+                    COMPOUND_ASSIGNMENT_MARKER.to_string()
+                } else {
+                    String::new()
+                };
+                return format!("{name}={marker}{expanded}");
+            }
             let expanded = self.expand_embedded_parameters(value);
             if !quoted
                 && !expanded.contains('=')
@@ -10924,6 +10968,7 @@ impl Executor {
                         resolve_indexed_array_subscript(&value, index)
                             .and_then(|index| array_value_at(&value, index))
                     })
+                    .map(normalize_array_expanded_value)
                     .unwrap_or_default();
             }
             if let Some((var_name, word)) = name.split_once('-') {
@@ -10979,6 +11024,7 @@ impl Executor {
                 return self
                     .parameter_array_storage(array_name)
                     .and_then(|value| array_value_at(&value, index))
+                    .map(normalize_array_expanded_value)
                     .unwrap_or_default();
             }
             if let Some((array_name, key)) = parse_array_subscript(name) {
@@ -11334,6 +11380,16 @@ impl Executor {
         if let Some((name, value)) = split_assignment_word(word) {
             let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
             let value = tilde_expand::strip_assignment_quote_marker(value);
+            let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
+            let raw_value = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER).unwrap_or(value);
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = if compound_assignment {
+                    COMPOUND_ASSIGNMENT_MARKER.to_string()
+                } else {
+                    String::new()
+                };
+                return format!("{name}={marker}{expanded}");
+            }
             let expanded = self.expand_embedded_parameters_mut(value);
             if !quoted
                 && !expanded.contains('=')
@@ -16103,6 +16159,33 @@ fn assignment_name_and_append(name: &str) -> (&str, bool) {
         .unwrap_or((name, false))
 }
 
+fn is_array_element_assignment_word(word: &str) -> bool {
+    let Some((left, _)) = word.split_once('=') else {
+        return false;
+    };
+    let left = left.strip_suffix('+').unwrap_or(left);
+    let Some((name, index)) = left.split_once('[') else {
+        return false;
+    };
+    is_shell_name(name) && index.ends_with(']')
+}
+
+fn single_unquoted_parameter_name(value: &str) -> Option<&str> {
+    if let Some(name) = value.strip_prefix("${").and_then(|name| name.strip_suffix('}')) {
+        return is_shell_name(name).then_some(name);
+    }
+    let name = value.strip_prefix('$')?;
+    is_shell_name(name).then_some(name)
+}
+
+fn normalize_array_expanded_value(value: String) -> String {
+    if value == "\\\"\\" {
+        "\"\"".to_string()
+    } else {
+        value
+    }
+}
+
 fn append_scalar_value(current: &str, value: &str) -> String {
     let mut output = current.to_string();
     output.push_str(value);
@@ -16424,6 +16507,17 @@ impl Iterator for StorageWordIter<'_> {
 }
 
 fn unquote_storage_value(value: &str) -> String {
+    if value == "\\\"\\" {
+        return "\"\"".to_string();
+    }
+
+    if let Some(inner) = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return inner.to_string();
+    }
+
     let Some(inner) = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -16449,7 +16543,17 @@ fn unquote_storage_value(value: &str) -> String {
     if escaped {
         unquoted.push('\\');
     }
+    if unquoted == "\\\"\\" {
+        return "\"\"".to_string();
+    }
     unquoted
+}
+
+fn quote_compound_field_value(value: &str) -> String {
+    if value.contains('"') && !value.contains('\'') && !value.contains(['\n', '\r']) {
+        return format!("'{value}'");
+    }
+    quote_array_value(value)
 }
 
 fn eval_arith_value(value: &str) -> i128 {
@@ -19615,7 +19719,7 @@ fn array_indices(value: &str) -> Vec<String> {
 
 fn array_value_at(value: &str, index: usize) -> Option<String> {
     let mut entries = indexed_array_entries(value);
-    entries.remove(&index)
+    entries.remove(&index).map(normalize_array_expanded_value)
 }
 
 fn resolve_indexed_array_subscript(value: &str, index: i128) -> Option<usize> {
