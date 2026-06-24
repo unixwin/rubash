@@ -6126,14 +6126,21 @@ impl Executor {
             return crate::builtins::source::execute_named(self, &cmd.words[0], &cmd.words[1..]);
         }
 
+        let mut stderr = Vec::new();
         if self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1") {
-            eprintln!("{}.: {filename}: file not found", self.diagnostic_prefix());
+            writeln!(
+                &mut stderr,
+                "{}.: {filename}: file not found",
+                self.diagnostic_prefix()
+            )?;
         } else {
-            eprintln!(
+            writeln!(
+                &mut stderr,
                 "{}{filename}: No such file or directory",
                 self.diagnostic_prefix()
-            );
+            )?;
         }
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = 1;
         Ok(())
     }
