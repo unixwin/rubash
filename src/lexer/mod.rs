@@ -459,6 +459,9 @@ impl<'a> Lexer<'a> {
                 Some('(') => {
                     self.advance();
                     self.skip_cmd_subst();
+                    if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
+                        return Some(self.finish_word_token(start, false));
+                    }
                     Some(Token::new(
                         TokenKind::CommandSubst,
                         self.slice(start),
@@ -485,6 +488,9 @@ impl<'a> Lexer<'a> {
             },
             '`' => {
                 self.skip_backtick();
+                if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
+                    return Some(self.finish_word_token(start, false));
+                }
                 Some(Token::new(
                     TokenKind::CommandSubst,
                     self.slice(start),

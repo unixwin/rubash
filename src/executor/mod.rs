@@ -9845,7 +9845,9 @@ impl Executor {
             .strip_prefix("$(")
             .and_then(|rest| rest.strip_suffix(')'))
         {
-            return self.expand_command_substitution(source);
+            if command_substitution_spans_whole_word(word) {
+                return self.expand_command_substitution(source);
+            }
         }
 
         if let Some(name) = word
@@ -12266,8 +12268,11 @@ impl Executor {
 
     fn expand_backtick_substitution(&self, word: &str) -> Option<String> {
         // TODO(subst.c): Backquote command substitution should invoke the
-        // parser and run a subshell. Upstream strip.tests only uses simple
-        // `echo` command lists and checks trailing-newline stripping.
+        // parser and run a subshell. This reuses the same in-process command
+        // substitution bridge as `$()`.
+        if !backtick_substitution_spans_whole_word(word) {
+            return None;
+        }
         let source = word.strip_prefix('`')?.strip_suffix('`')?;
         Some(run_echo_command_substitution(source))
     }
@@ -12351,6 +12356,28 @@ impl Executor {
         while let Some(ch) = chars.next() {
             if ch == '\x1f' {
                 output.push('$');
+                continue;
+            }
+
+            if ch == '`' {
+                let mut source = String::new();
+                let mut escaped = false;
+                for source_ch in chars.by_ref() {
+                    if escaped {
+                        source.push(source_ch);
+                        escaped = false;
+                        continue;
+                    }
+                    if source_ch == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if source_ch == '`' {
+                        break;
+                    }
+                    source.push(source_ch);
+                }
+                output.push_str(&self.expand_command_substitution(&source));
                 continue;
             }
 
@@ -15915,6 +15942,62 @@ fn braced_parameter_spans_whole_word(word: &str) -> bool {
     matching_parameter_brace(rest).is_some_and(|index| index + 1 == rest.len())
 }
 
+fn command_substitution_spans_whole_word(word: &str) -> bool {
+    let Some(rest) = word.strip_prefix("$(") else {
+        return false;
+    };
+
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (index, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + ch.len_utf8() == rest.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn backtick_substitution_spans_whole_word(word: &str) -> bool {
+    let Some(rest) = word.strip_prefix('`') else {
+        return false;
+    };
+
+    let mut escaped = false;
+    for (index, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '`' {
+            return index + ch.len_utf8() == rest.len();
+        }
+    }
+    false
+}
+
 fn is_parameter_error_name(name: &str) -> bool {
     is_shell_name(name)
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
@@ -16504,6 +16587,10 @@ fn strip_shebang(source: &str) -> &str {
         .unwrap_or(source)
 }
 
+fn command_substitution_word_split(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn run_echo_command_substitution(source: &str) -> String {
     let mut output = String::new();
     for command in split_shell_list(source) {
@@ -16542,10 +16629,6 @@ fn run_echo_command_substitution(source: &str) -> String {
         }
     }
     output.trim_end_matches('\n').to_string()
-}
-
-fn command_substitution_word_split(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn split_shell_list(source: &str) -> Vec<String> {
