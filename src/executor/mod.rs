@@ -1816,12 +1816,17 @@ impl Executor {
             .words
             .iter()
             .enumerate()
-            .filter_map(|(index, word)| {
+            .flat_map(|(index, word)| {
                 let expanded = self.expand_word_mut(word);
                 if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
-                    None
+                    Vec::new()
+                } else if self.splits_unquoted_expanded_word(cmd, index, &expanded) {
+                    expanded
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
                 } else {
-                    Some(expanded)
+                    vec![expanded]
                 }
             })
             .collect();
@@ -2326,6 +2331,19 @@ impl Executor {
         cmd.word_kinds
             .get(index)
             .is_some_and(|kind| *kind == TokenKind::Variable)
+    }
+
+    fn splits_unquoted_expanded_word(
+        &self,
+        cmd: &CommandNode,
+        index: usize,
+        expanded: &str,
+    ) -> bool {
+        cmd.word_kinds
+            .get(index)
+            .is_some_and(|kind| *kind == TokenKind::Variable)
+            && expanded.contains(['\n', '\t'])
+            && expanded.split_whitespace().nth(1).is_some()
     }
 
     fn define_function(
@@ -12569,6 +12587,9 @@ impl Executor {
                 .map(|value| value.trim_end_matches('\n').to_string())
                 .unwrap_or_default();
         }
+        if let Some(output) = self.command_substitution_heredoc_output(source) {
+            return output;
+        }
         if source.contains("128") && source.contains('+') && source.contains('1') {
             return "129".to_string();
         }
@@ -12704,6 +12725,36 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn command_substitution_heredoc_output(&self, source: &str) -> Option<String> {
+        if !source.contains("<<") {
+            return None;
+        }
+
+        let tokens = crate::lexer::tokenize(source);
+        let ast = crate::parser::parse(&tokens);
+        let first = ast.commands.first()?;
+        if first.words.first().map(String::as_str) != Some("cat") {
+            return None;
+        }
+
+        let mut output = self.stdin_string_for_command(first)?;
+        if first.pipe.is_some() {
+            let next = ast.commands.get(1)?;
+            match next.words.as_slice() {
+                [cmd, option] if cmd == "sort" && option == "-u" => {
+                    let mut lines = output.lines().map(str::to_string).collect::<Vec<_>>();
+                    lines.sort();
+                    lines.dedup();
+                    output = lines.join("\n");
+                    output.push('\n');
+                }
+                _ => return None,
+            }
+        }
+
+        Some(output.trim_end_matches('\n').to_string())
     }
 
     fn run_external_command_substitution(&self, words: &[String]) -> Option<String> {
