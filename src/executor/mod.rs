@@ -2081,6 +2081,10 @@ impl Executor {
             return Ok(());
         }
 
+        let (materialized_cmd, process_substitution_files) =
+            self.command_with_process_substitution_files(cmd)?;
+        let cmd = &materialized_cmd;
+
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
         let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
         if self.xtrace_enabled() {
@@ -2504,6 +2508,7 @@ impl Executor {
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
         }
+        self.cleanup_process_substitution_files(process_substitution_files);
         self.update_underscore_parameter(cmd);
         if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
@@ -14946,9 +14951,7 @@ impl Executor {
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         let (cmd, temp_files) = self.command_with_process_substitution_files(cmd)?;
         let result = self.execute_external_inner(&cmd);
-        for path in temp_files {
-            let _ = fs::remove_file(path);
-        }
+        self.cleanup_process_substitution_files(temp_files);
         result
     }
 
@@ -14972,7 +14975,26 @@ impl Executor {
             *word = shell_display_path(&path.to_string_lossy());
             temp_files.push(path);
         }
+        if let Some(redirect) = &mut rewritten.redirect_in {
+            if let Some(source) = redirect
+                .target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                if let Some(output) = self.process_substitution_output(source) {
+                    let path = self.write_process_substitution_temp(&output)?;
+                    redirect.target = shell_display_path(&path.to_string_lossy());
+                    temp_files.push(path);
+                }
+            }
+        }
         Ok((rewritten, temp_files))
+    }
+
+    fn cleanup_process_substitution_files(&self, temp_files: Vec<PathBuf>) {
+        for path in temp_files {
+            let _ = fs::remove_file(path);
+        }
     }
 
     fn write_process_substitution_temp(&self, output: &str) -> Result<PathBuf, ExecuteError> {
@@ -15238,7 +15260,7 @@ impl Executor {
                 }
             }
             if let Some(input) = self.stdin_string_for_command(cmd) {
-                print!("{input}");
+                self.write_cat_output(cmd, input.as_bytes())?;
                 self.exit_code = 0;
                 return Ok(());
             }
@@ -15264,20 +15286,7 @@ impl Executor {
                         }
                     }
                 }
-                if let Some(redirect) = &cmd.redirect_out {
-                    let target = self.expand_word(&redirect.target);
-                    let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                    file.write_all(&output)?;
-                } else if let Some(redirect) = &cmd.append {
-                    let target = self.expand_word(&redirect.target);
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(shell_path_to_windows(&target, &self.env_vars))?;
-                    file.write_all(&output)?;
-                } else {
-                    print!("{}", String::from_utf8_lossy(&output));
-                }
+                self.write_cat_output(cmd, &output)?;
                 self.exit_code = 0;
                 return Ok(());
             }
@@ -15415,6 +15424,24 @@ impl Executor {
             }
         }
 
+        Ok(())
+    }
+
+    fn write_cat_output(&self, cmd: &CommandNode, output: &[u8]) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+            file.write_all(output)?;
+        } else if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(output)?;
+        } else {
+            print!("{}", String::from_utf8_lossy(output));
+        }
         Ok(())
     }
 
