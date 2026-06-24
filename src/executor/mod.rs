@@ -1386,8 +1386,67 @@ impl Executor {
                 };
                 Ok(Some((format!("{value}\n"), 0)))
             }
-            _ => self.execute_external_pipeline_stage(command, input),
+            "tr" => {
+                let args = command.words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect::<Vec<_>>();
+                if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
+                    Ok(Some((input.replace('\n', &args[1]), 0)))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => {
+                if let Some(output) = self.execute_function_pipeline_stage(command, input)? {
+                    Ok(Some(output))
+                } else {
+                    self.execute_external_pipeline_stage(command, input)
+                }
+            }
         }
+    }
+
+    fn execute_function_pipeline_stage(
+        &mut self,
+        command: &CommandNode,
+        input: &str,
+    ) -> Result<Option<(String, i32)>, ExecuteError> {
+        let Some(name) = command.words.first() else {
+            return Ok(Some((String::new(), 0)));
+        };
+        let expanded_name = self.expand_word(name);
+        let Some(function_name) = self.function_name_for_command_word(&expanded_name) else {
+            return Ok(None);
+        };
+        let args = command.words[1..]
+            .iter()
+            .map(|word| self.expand_word(word))
+            .collect::<Vec<_>>();
+        let mut call = command.clone();
+        call.words = std::iter::once(function_name.clone())
+            .chain(args.iter().cloned())
+            .collect();
+
+        let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        self.env_vars
+            .insert(FUNCTION_STDIN.to_string(), input.to_string());
+        self.env_vars
+            .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+
+        let saved_capture = self.stdout_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        let result = self.execute_function(&function_name, &args, &call);
+        let output = self.stdout_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_capture;
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_stdin);
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+        result?;
+        Ok(Some((
+            String::from_utf8_lossy(&output).into_owned(),
+            self.last_exit_code(),
+        )))
     }
 
     fn execute_external_pipeline_stage(
@@ -9944,7 +10003,11 @@ impl Executor {
         // carries typed SHELL_VAR attributes. This stores the element count
         // shape needed by upstream builtins5.sub.
         if cmd.words.len() != 1 {
-            if !cmd.words.iter().all(|word| is_array_element_assignment_word(word)) {
+            if !cmd
+                .words
+                .iter()
+                .all(|word| is_array_element_assignment_word(word))
+            {
                 return false;
             }
             for word in &cmd.words {
@@ -10432,6 +10495,14 @@ impl Executor {
                 return expanded;
             }
         }
+        if compound_assignment
+            && value.starts_with('(')
+            && value.ends_with(')')
+            && !value.contains('$')
+            && !value.contains('`')
+        {
+            return format!("{COMPOUND_ASSIGNMENT_MARKER}{value}");
+        }
         self.apply_parameter_assignment_expansions_in_word(value);
         if let Some(expanded) = self.expand_compound_positional_at_assignment(value) {
             if compound_assignment {
@@ -10485,6 +10556,56 @@ impl Executor {
                         .iter()
                         .map(|value| quote_array_value(value)),
                 );
+            } else if let Some(array_name) = token
+                .strip_prefix('\x1d')
+                .and_then(|token| token.strip_prefix("${"))
+                .and_then(|token| token.strip_suffix("[@]}"))
+            {
+                if let Some(storage) = self.parameter_array_storage(array_name) {
+                    changed = true;
+                    values.extend(
+                        array_values(&storage)
+                            .iter()
+                            .map(|value| quote_array_value(value)),
+                    );
+                } else {
+                    values.push(quote_array_value(""));
+                }
+            } else if let Some(name) = token
+                .strip_prefix('\x1d')
+                .and_then(|token| token.strip_prefix("${"))
+                .and_then(|token| token.strip_suffix('}'))
+            {
+                if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+                    if var_name == "@" {
+                        changed = true;
+                        values.extend(
+                            positional_parameter_substring(&self.positional_params, offset, length)
+                                .iter()
+                                .map(|value| quote_array_value(value)),
+                        );
+                        continue;
+                    }
+                    if let Some(array_name) = var_name
+                        .strip_suffix("[@]")
+                        .or_else(|| var_name.strip_suffix("[*]"))
+                    {
+                        if let Some(storage) = self.parameter_array_storage(array_name) {
+                            changed = true;
+                            values.extend(
+                                array_parameter_slice(
+                                    &storage,
+                                    offset,
+                                    length.and_then(|length| usize::try_from(length).ok()),
+                                )
+                                .iter()
+                                .map(|value| quote_array_value(value)),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                values.push(quote_array_value(&token));
             } else {
                 values.push(quote_array_value(&token));
             }
@@ -10496,10 +10617,11 @@ impl Executor {
         let inner = value.strip_prefix('(')?.strip_suffix(')')?.trim();
         let name = single_unquoted_parameter_name(inner)?;
         let value = self.shell_variable_value(name).unwrap_or_default();
-        let values = field_split_values_with_ifs(&value, self.env_vars.get("IFS").map(String::as_str))
-            .into_iter()
-            .map(|value| quote_compound_field_value(&value))
-            .collect::<Vec<_>>();
+        let values =
+            field_split_values_with_ifs(&value, self.env_vars.get("IFS").map(String::as_str))
+                .into_iter()
+                .map(|value| quote_compound_field_value(&value))
+                .collect::<Vec<_>>();
         Some(format!("({})", values.join(" ")))
     }
 
@@ -10604,8 +10726,18 @@ impl Executor {
                 }
             }
             let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
-            let raw_value = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER).unwrap_or(value);
+            let raw_value = value
+                .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+                .unwrap_or(value);
             if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = if compound_assignment {
+                    COMPOUND_ASSIGNMENT_MARKER.to_string()
+                } else {
+                    String::new()
+                };
+                return format!("{name}={marker}{expanded}");
+            }
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value) {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
                 } else {
@@ -11407,8 +11539,18 @@ impl Executor {
                 }
             }
             let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
-            let raw_value = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER).unwrap_or(value);
+            let raw_value = value
+                .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+                .unwrap_or(value);
             if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = if compound_assignment {
+                    COMPOUND_ASSIGNMENT_MARKER.to_string()
+                } else {
+                    String::new()
+                };
+                return format!("{name}={marker}{expanded}");
+            }
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value) {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
                 } else {
@@ -11728,23 +11870,21 @@ impl Executor {
         self.groups_words().get(index).cloned()
     }
 
-    fn expand_declare_assignment_args(&self, args: &[String]) -> Vec<String> {
+    fn expand_declare_assignment_args(&mut self, args: &[String]) -> Vec<String> {
         // TODO(builtins/declare.def/subst.c): `declare` and `typeset` perform
         // assignment-word RHS expansion before the builtin applies attributes.
         // General word expansion has already handled parameters and unquoted
         // tilde prefixes, so this bridge only removes Rubash's temporary quote
         // marker before declare.rs mirrors declare.def's bookkeeping.
-        args.iter()
-            .map(|arg| {
-                let Some((name, value)) = split_assignment_word(arg) else {
-                    return arg.clone();
-                };
-                format!(
-                    "{name}={}",
-                    tilde_expand::strip_assignment_quote_marker(value)
-                )
-            })
-            .collect()
+        let mut expanded_args = Vec::new();
+        for arg in args {
+            let Some((name, value)) = split_assignment_word(arg) else {
+                expanded_args.push(arg.clone());
+                continue;
+            };
+            expanded_args.push(format!("{name}={}", self.expand_assignment_value(value)));
+        }
+        expanded_args
     }
 
     fn evaluate_declare_integer_assignment_args(&self, args: &[String]) -> Vec<String> {
@@ -13615,7 +13755,10 @@ impl Executor {
         if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
             return Some(self.positional_params.clone());
         }
-        if let Some(name) = word.strip_prefix("${").and_then(|word| word.strip_suffix('}')) {
+        if let Some(name) = word
+            .strip_prefix("${")
+            .and_then(|word| word.strip_suffix('}'))
+        {
             if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                 if var_name == "@" {
                     return Some(positional_parameter_substring(
@@ -14369,8 +14512,10 @@ impl Executor {
     }
 
     fn clear_bash_rematch(&mut self) {
-        self.env_vars
-            .insert("BASH_REMATCH".to_string(), format_indexed_array_storage(BTreeMap::new()));
+        self.env_vars.insert(
+            "BASH_REMATCH".to_string(),
+            format_indexed_array_storage(BTreeMap::new()),
+        );
         mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
     }
 
@@ -16254,7 +16399,10 @@ fn is_array_element_assignment_word(word: &str) -> bool {
 }
 
 fn single_unquoted_parameter_name(value: &str) -> Option<&str> {
-    if let Some(name) = value.strip_prefix("${").and_then(|name| name.strip_suffix('}')) {
+    if let Some(name) = value
+        .strip_prefix("${")
+        .and_then(|name| name.strip_suffix('}'))
+    {
         return is_shell_name(name).then_some(name);
     }
     let name = value.strip_prefix('$')?;
