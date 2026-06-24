@@ -447,6 +447,7 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
     let chars = input.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     let mut depth = 0usize;
+    let mut backtick = false;
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
@@ -477,6 +478,11 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
             index += 1;
             continue;
         }
+        if ch == '`' && depth == 0 {
+            backtick = !backtick;
+            index += 1;
+            continue;
+        }
         if ch == '$' && chars.get(index + 1) == Some(&'(') {
             depth += 1;
             index += 2;
@@ -494,6 +500,18 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
             index = skip_heredoc_in_chars(&chars, index);
             continue;
         }
+        if backtick
+            && ch == '<'
+            && chars.get(index + 1) == Some(&'<')
+            && chars.get(index + 2) == Some(&'<')
+        {
+            index += 3;
+            continue;
+        }
+        if backtick && ch == '<' && chars.get(index + 1) == Some(&'<') {
+            index = skip_heredoc_in_chars(&chars, index);
+            continue;
+        }
         if depth > 0 && ch == '(' {
             depth += 1;
         } else if depth > 0 && ch == ')' {
@@ -502,7 +520,7 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
         index += 1;
     }
 
-    depth > 0
+    depth > 0 || backtick
 }
 
 fn has_unclosed_brace_group(input: &str) -> bool {
@@ -668,7 +686,7 @@ fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
             line.as_str()
         };
         if comparable
-            .strip_suffix(')')
+            .strip_suffix([')', '`'])
             .is_some_and(|value| value == delimiter)
         {
             let leading_tabs = if strip_tabs {
