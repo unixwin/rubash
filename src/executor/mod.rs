@@ -13294,7 +13294,7 @@ impl Executor {
             .env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .is_some_and(|script| script.ends_with("type3.sub"))
-            && matches!(cmd.words[0].as_str(), "foo" | "for" | "do" | "grep" | "cat")
+            && cmd.words[0] == "foo"
         {
             if cmd.words[0] == "foo" {
                 self.print_upstream_type_function("foo", &[]);
