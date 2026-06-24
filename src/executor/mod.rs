@@ -10876,6 +10876,11 @@ impl Executor {
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        let value = if quoted && (value.contains("$(") || value.contains('`')) {
+            strip_matching_quotes(value)
+        } else {
+            value
+        };
         if quoted {
             if let Some(expanded) = self.expand_quoted_array_assignment_value(value) {
                 return expanded;
@@ -13784,6 +13789,9 @@ impl Executor {
             self.last_command_substitution_status.set(Some(1));
             return String::new();
         }
+        if let Some(output) = self.command_substitution_cd_pwd_output(source) {
+            return output;
+        }
         if let Some(output) = self.command_substitution_heredoc_output(source) {
             return output;
         }
@@ -13935,6 +13943,43 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn command_substitution_cd_pwd_output(&self, source: &str) -> Option<String> {
+        let (left, right) = split_unquoted_and_and(source)?;
+        let right_words = split_shell_words(right.trim());
+        if !matches!(right_words.as_slice(), [cmd] if cmd == "pwd")
+            && !matches!(right_words.as_slice(), [cmd, option] if cmd == "pwd" && option == "-P")
+        {
+            return None;
+        }
+
+        let left_words = split_shell_words(left.trim());
+        if left_words.first().map(String::as_str) != Some("cd") || left_words.len() > 2 {
+            return None;
+        }
+        let target = if let Some(word) = left_words.get(1) {
+            self.expand_command_substitution_arg_values(word)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        } else {
+            self.home_value()
+        };
+        let target = shell_path_to_windows(&target, &self.env_vars);
+        let Ok(path) = fs::canonicalize(target) else {
+            self.last_command_substitution_status.set(Some(1));
+            return Some(String::new());
+        };
+        if !path.is_dir() {
+            self.last_command_substitution_status.set(Some(1));
+            return Some(String::new());
+        }
+
+        self.last_command_substitution_status.set(Some(0));
+        Some(shell_display_path(
+            &path.to_string_lossy().replace('\\', "/"),
+        ))
     }
 
     fn command_substitution_read_path(&self, path: &str) -> Option<PathBuf> {
@@ -20454,6 +20499,39 @@ fn split_first_shell_word(source: &str) -> Option<(String, &str)> {
     } else {
         Some((trimmed.to_string(), ""))
     }
+}
+
+fn split_unquoted_and_and(source: &str) -> Option<(&str, &str)> {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let chars = source.char_indices().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let (byte_index, ch) = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '&' if !single && !double && chars.get(index + 1).is_some_and(|(_, ch)| *ch == '&') => {
+                return Some((&source[..byte_index], &source[byte_index + 2..]));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+
+    None
 }
 
 fn command_node_source_line(command: &CommandNode) -> String {

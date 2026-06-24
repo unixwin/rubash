@@ -775,6 +775,34 @@ fn script_bash_source_pattern_removal_uses_first_element() {
 }
 
 #[test]
+fn script_bash_source_index_locates_sibling_source_file() {
+    let script_dir = Path::new("target").join("rubash-cli-script-dir");
+    let script_path = script_dir.join("main.sh");
+    let lib_path = script_dir.join("lib.sh");
+    fs::create_dir_all(&script_dir).unwrap();
+    fs::write(&lib_path, "helper() { printf 'lib:%s\\n' \"$1\"; }\n").unwrap();
+    fs::write(
+        &script_path,
+        "SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n\
+         source \"$SCRIPT_DIR/lib.sh\"\n\
+         helper ok\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(script_path.to_string_lossy().replace('\\', "/"))
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&lib_path);
+    let _ = fs::remove_dir(&script_dir);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "lib:ok\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_assignment_command_substitution_captures_function_output() {
     let script_path = Path::new("target").join("rubash-cli-function-comsub.sh");
     fs::create_dir_all("target").unwrap();
