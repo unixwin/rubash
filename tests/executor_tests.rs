@@ -1645,12 +1645,14 @@ mod command_chaining {
     #[test]
     fn test_mapfile_option_errors_match_bash_statuses() {
         let output_path = "target/rubash-mapfile-option-status-output.txt";
+        let error_path = "target/rubash-mapfile-option-error-output.txt";
         let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
         let input = format!(
-            "mapfile -Z arr; echo invalid:$? > {output_path}; \
-             mapfile -n; echo missing:$? >> {output_path}; \
-             readarray -O nope arr; echo origin:$? >> {output_path}; \
-             mapfile -c 0 -C cb arr; echo quantum:$? >> {output_path}"
+            "mapfile -Z arr 2> {error_path}; echo invalid:$? > {output_path}; \
+             mapfile -n 2>> {error_path}; echo missing:$? >> {output_path}; \
+             readarray -O nope arr 2>> {error_path}; echo origin:$? >> {output_path}; \
+             mapfile -c 0 -C cb arr 2>> {error_path}; echo quantum:$? >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -1664,7 +1666,14 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "invalid:2\nmissing:2\norigin:1\nquantum:1\n"
         );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("mapfile: -Z: invalid option"));
+        assert!(error.contains("mapfile: -n: option requires an argument"));
+        assert!(error.contains("readarray: nope: invalid array origin"));
+        assert!(error.contains("mapfile: 0: invalid callback quantum"));
+        assert!(error.contains("mapfile: usage: mapfile"));
         let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
     }
 
     #[test]

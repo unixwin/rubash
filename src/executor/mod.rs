@@ -7677,6 +7677,7 @@ impl Executor {
         let mut callback_quantum = 5000usize;
         let mut array_name = None;
         let mut index = 1;
+        let mut stderr = Vec::new();
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
                 "-t" => {
@@ -7685,55 +7686,100 @@ impl Executor {
                 }
                 "-d" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "d");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "d",
+                            &mut stderr,
+                        );
                     };
                     delimiter = Some(word.chars().next().unwrap_or('\0'));
                     index += 2;
                 }
                 "-n" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "n");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "n",
+                            &mut stderr,
+                        );
                     };
-                    match self.parse_mapfile_usize(command_name, word, "invalid line count") {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        word,
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
                         Ok(value) => count = Some(value),
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 2;
                 }
                 "-O" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "O");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "O",
+                            &mut stderr,
+                        );
                     };
-                    match self.parse_mapfile_usize(command_name, word, "invalid array origin") {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        word,
+                        "invalid array origin",
+                        &mut stderr,
+                    ) {
                         Ok(value) => origin = Some(value),
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 2;
                 }
                 "-s" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "s");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "s",
+                            &mut stderr,
+                        );
                     };
-                    match self.parse_mapfile_usize(command_name, word, "invalid line count") {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        word,
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
                         Ok(value) => skip = value,
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 2;
                 }
                 "-C" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "C");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "C",
+                            &mut stderr,
+                        );
                     };
                     callback = Some(word.clone());
                     index += 2;
                 }
                 "-c" => {
                     let Some(word) = cmd.words.get(index + 1) else {
-                        return self.mapfile_missing_option_argument(command_name, "c");
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "c",
+                            &mut stderr,
+                        );
                     };
-                    match self.parse_mapfile_callback_quantum(command_name, word) {
+                    match self.parse_mapfile_callback_quantum(command_name, word, &mut stderr) {
                         Ok(value) => callback_quantum = value,
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 2;
                 }
@@ -7742,24 +7788,38 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-n") && word.len() > 2 => {
-                    match self.parse_mapfile_usize(command_name, &word[2..], "invalid line count") {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        &word[2..],
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
                         Ok(value) => count = Some(value),
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 1;
                 }
                 word if word.starts_with("-O") && word.len() > 2 => {
-                    match self.parse_mapfile_usize(command_name, &word[2..], "invalid array origin")
-                    {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        &word[2..],
+                        "invalid array origin",
+                        &mut stderr,
+                    ) {
                         Ok(value) => origin = Some(value),
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 1;
                 }
                 word if word.starts_with("-s") && word.len() > 2 => {
-                    match self.parse_mapfile_usize(command_name, &word[2..], "invalid line count") {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        &word[2..],
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
                         Ok(value) => skip = value,
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 1;
                 }
@@ -7768,15 +7828,16 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-c") && word.len() > 2 => {
-                    match self.parse_mapfile_callback_quantum(command_name, &word[2..]) {
+                    match self.parse_mapfile_callback_quantum(command_name, &word[2..], &mut stderr)
+                    {
                         Ok(value) => callback_quantum = value,
-                        Err(status) => return status,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 1;
                 }
                 word if word.starts_with('-') => {
                     let option = word.trim_start_matches('-').chars().next().unwrap_or('-');
-                    return self.mapfile_invalid_option(command_name, option);
+                    return self.mapfile_invalid_option(cmd, command_name, option, &mut stderr);
                 }
                 word if is_shell_name(word) => {
                     array_name = Some(word.to_string());
@@ -7837,9 +7898,11 @@ impl Executor {
         command_name: &str,
         value: &str,
         diagnostic: &str,
+        stderr: &mut Vec<u8>,
     ) -> Result<usize, i32> {
         value.parse::<usize>().map_err(|_| {
-            eprintln!(
+            let _ = writeln!(
+                stderr,
                 "{}{command_name}: {value}: {diagnostic}",
                 self.diagnostic_prefix()
             );
@@ -7851,10 +7914,13 @@ impl Executor {
         &self,
         command_name: &str,
         value: &str,
+        stderr: &mut Vec<u8>,
     ) -> Result<usize, i32> {
-        let quantum = self.parse_mapfile_usize(command_name, value, "invalid callback quantum")?;
+        let quantum =
+            self.parse_mapfile_usize(command_name, value, "invalid callback quantum", stderr)?;
         if quantum == 0 {
-            eprintln!(
+            let _ = writeln!(
+                stderr,
                 "{}{command_name}: {value}: invalid callback quantum",
                 self.diagnostic_prefix()
             );
@@ -7863,28 +7929,53 @@ impl Executor {
         Ok(quantum)
     }
 
-    fn mapfile_missing_option_argument(&self, command_name: &str, option: &str) -> i32 {
-        eprintln!(
+    fn mapfile_missing_option_argument(
+        &self,
+        cmd: &CommandNode,
+        command_name: &str,
+        option: &str,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let _ = writeln!(
+            stderr,
             "{}{command_name}: -{option}: option requires an argument",
             self.diagnostic_prefix()
         );
-        self.print_mapfile_usage(command_name);
-        2
+        self.print_mapfile_usage(command_name, stderr);
+        self.finish_mapfile_error(cmd, stderr, 2)
     }
 
-    fn mapfile_invalid_option(&self, command_name: &str, option: char) -> i32 {
-        eprintln!(
+    fn mapfile_invalid_option(
+        &self,
+        cmd: &CommandNode,
+        command_name: &str,
+        option: char,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let _ = writeln!(
+            stderr,
             "{}{command_name}: -{option}: invalid option",
             self.diagnostic_prefix()
         );
-        self.print_mapfile_usage(command_name);
-        2
+        self.print_mapfile_usage(command_name, stderr);
+        self.finish_mapfile_error(cmd, stderr, 2)
     }
 
-    fn print_mapfile_usage(&self, command_name: &str) {
-        eprintln!(
+    fn print_mapfile_usage(&self, command_name: &str, stderr: &mut Vec<u8>) {
+        let _ = writeln!(
+            stderr,
             "{command_name}: usage: {command_name} [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]"
         );
+    }
+
+    fn finish_mapfile_error(&self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
+        if self
+            .write_buffered_builtin_output(cmd, &[], stderr)
+            .is_err()
+        {
+            return 1;
+        }
+        status
     }
 
     fn execute_mapfile_callback(
