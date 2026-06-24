@@ -246,6 +246,22 @@ fn script_kshenv_example_parses_multiline_awk_quote() {
 }
 
 #[test]
+fn script_xterm_title_example_reports_script_name_without_display() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("xterm_title")
+        .current_dir(Path::new("bash").join("examples").join("scripts"))
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "xterm_title: not running X\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();

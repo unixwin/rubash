@@ -12387,6 +12387,14 @@ impl Executor {
             );
         }
 
+        if is_special_parameter_name(var_name) {
+            return Some(remove_parameter_pattern(
+                &self.expand_parameter_named_value(var_name),
+                &pattern,
+                operation,
+            ));
+        }
+
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
                 self.positional_params
@@ -12429,6 +12437,10 @@ impl Executor {
     }
 
     fn parameter_pattern_scalar_value(&self, name: &str) -> Option<String> {
+        if is_special_parameter_name(name) {
+            return Some(self.expand_parameter_named_value(name));
+        }
+
         if let Some(value) = self.dynamic_parameter_value(name) {
             return Some(value);
         }
