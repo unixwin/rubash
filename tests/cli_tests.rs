@@ -84,6 +84,30 @@ fn script_file_accepts_shell_style_drive_path() {
 }
 
 #[test]
+fn script_aliasconv_example_converts_aliases() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("aliasconv.bash")
+        .current_dir(Path::new("bash").join("examples").join("misc"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"ll\tls -l\nhi\techo hello\nstar\techo !*\narg\techo !:2 #tag\n")
+        .unwrap();
+    let output = child.wait_with_output().expect("wait for rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "alias ll='ls -l'\nalias hi='echo hello'\nstar () { command echo \"$@\" ; }\narg () { command echo \"$2\" #tag ; }\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();
