@@ -1584,6 +1584,40 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_dev_null_output_redirect_allows_following_commands() {
+        let output_path = "target/rubash-dev-null-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("echo hidden > /dev/null; echo visible > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "visible\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_touch_posix_literal_glob_filename_does_not_abort_script() {
+        let output_path = "target/rubash-touch-literal-glob-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("touch 'x*x'; echo ok > {output_path}; rm 'x*x'");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_unquoted_heredoc_expands_parameters() {
         let output_path = "target/rubash-unquoted-heredoc-output.txt";
         let _ = fs::remove_file(output_path);
@@ -1665,6 +1699,23 @@ mod command_chaining {
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "one\ntwo\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_dash_quoted_tab_delimiter_strips_leading_tabs() {
+        let output_path = "target/rubash-dash-quoted-tab-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<-'\tEND'\n\thello\n\tEND\necho after >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\nafter\n");
         let _ = fs::remove_file(output_path);
     }
 

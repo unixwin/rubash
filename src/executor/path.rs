@@ -174,6 +174,10 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
 
     let normalized = path.replace('\\', "/");
 
+    if normalized == "/dev/null" || normalized.eq_ignore_ascii_case("NUL") {
+        return PathBuf::from("NUL");
+    }
+
     if normalized.len() >= 3
         && normalized.as_bytes()[0] == b'/'
         && normalized.as_bytes()[2] == b'/'
