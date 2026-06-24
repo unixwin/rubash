@@ -1219,7 +1219,10 @@ impl Executor {
             };
             return Ok(true);
         }
-        Ok(false)
+        let tokens = crate::lexer::tokenize(inner);
+        let ast = crate::parser::parse(&tokens);
+        self.execute_ast(&ast)?;
+        Ok(true)
     }
 
     fn execute_simple_pipeline(
@@ -2453,6 +2456,35 @@ impl Executor {
             return expanded.split_whitespace().map(str::to_string).collect();
         }
         vec![expanded]
+    }
+
+    fn expand_escaped_indirect_parameter_literal(&self, value: &str) -> Option<String> {
+        let marker = "\\${$";
+        let start = value.find(marker)?;
+        let mut output = String::new();
+        output.push_str(&value[..start]);
+        let mut index = start + marker.len();
+        let rest = &value[index..];
+        let mut name = String::new();
+        for ch in rest.chars() {
+            if !is_shell_name_char(ch) {
+                break;
+            }
+            name.push(ch);
+            index += ch.len_utf8();
+        }
+        if name.is_empty() {
+            return None;
+        }
+        let tail = &value[index..];
+        let end = tail.find('}')?;
+        let resolved = self.expand_embedded_parameters(&format!("${name}"));
+        output.push_str("${");
+        output.push_str(&resolved);
+        output.push_str(&tail[..end]);
+        output.push('}');
+        output.push_str(&tail[end + 1..]);
+        Some(output)
     }
 
     fn define_function(
@@ -10401,6 +10433,9 @@ impl Executor {
             {
                 let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
                 let value = tilde_expand::strip_assignment_quote_marker(value);
+                if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
+                    return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
+                }
                 let expanded = self.expand_embedded_parameters(value);
                 if !quoted
                     && !expanded.contains('=')
@@ -10809,7 +10844,7 @@ impl Executor {
                 return self
                     .parameter_array_storage(array_name)
                     .filter(|value| !value.is_empty())
-                    .map(|value| array_values(&value).join(" "))
+                    .map(|value| self.join_array_parameter_values(&value, name))
                     .unwrap_or_else(|| default.to_string());
             }
             if let Some((array_expr, default)) = name.split_once('-') {
@@ -10820,7 +10855,7 @@ impl Executor {
                     return self
                         .parameter_array_storage(array_name)
                         .filter(|value| !value.is_empty())
-                        .map(|value| array_values(&value).join(" "))
+                        .map(|value| self.join_array_parameter_values(&value, array_expr))
                         .unwrap_or_else(|| default.to_string());
                 }
                 return self
@@ -10838,7 +10873,7 @@ impl Executor {
                 }
                 return self
                     .parameter_array_storage(array_name)
-                    .map(|value| array_values(&value).join(" "))
+                    .map(|value| self.join_array_parameter_values(&value, name))
                     .unwrap_or_default();
             }
             if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
@@ -11184,6 +11219,9 @@ impl Executor {
             {
                 let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
                 let value = tilde_expand::strip_assignment_quote_marker(value);
+                if let Some(prepared) = self.expand_escaped_indirect_parameter_literal(value) {
+                    return format!("{name}={}", unescape_remaining_shell_escapes(&prepared));
+                }
                 let expanded = self.expand_embedded_parameters_mut(value);
                 if !quoted
                     && !expanded.contains('=')
@@ -13301,6 +13339,19 @@ impl Executor {
         let name = word.strip_prefix("${")?.strip_suffix("[@]}")?;
         self.parameter_array_storage(name)
             .map(|value| array_values(&value))
+    }
+
+    fn join_array_parameter_values(&self, value: &str, expression: &str) -> String {
+        let values = array_values(value);
+        if expression.ends_with("[*]") {
+            let separator = self
+                .env_vars
+                .get("IFS")
+                .and_then(|ifs| ifs.chars().next())
+                .unwrap_or(' ');
+            return values.join(&separator.to_string());
+        }
+        values.join(" ")
     }
 
     fn report_command_substitution_heredoc_warning(&self, source: &str, command: &CommandNode) {

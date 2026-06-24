@@ -14821,6 +14821,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_and_brace_group_short_circuits_and_returns() {
+        let output_path = "target/rubash-and-brace-group-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ (( ($# < 2) || ($# > 3) )) && {{ echo bad >> {output_path}; return 2; }}; echo ok >> {output_path}; }}; \
+             f a b; echo status:$? >> {output_path}; f a; echo status:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "ok\nstatus:0\nbad\nstatus:2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_expansion_evaluates_expressions() {
         let output_path = "target/rubash-arithmetic-expansion-output.txt";
         let _ = fs::remove_file(output_path);

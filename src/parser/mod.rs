@@ -239,6 +239,15 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
         }
 
+        if command_is_empty(&current_cmd) {
+            if let Some((brace_cmd, next_i)) = parse_brace_group_command(tokens, i) {
+                ast.commands.push(brace_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
         match token.kind {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
                 current_cmd.subshell |= in_subshell;
@@ -690,6 +699,42 @@ fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         body,
     });
     Some((command, i + 1))
+}
+
+fn parse_brace_group_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    if !is_keyword(tokens, start, "{") {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "{") {
+            depth += 1;
+        } else if is_keyword(tokens, i, "}") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let mut body = String::new();
+    for token in &tokens[start + 1..i] {
+        if !body.is_empty() && token.kind != TokenKind::Semicolon {
+            body.push(' ');
+        }
+        body.push_str(&token.value);
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.words.push(format!("{{ {body} }}"));
+    Some(finish_arithmetic_command(command, tokens, i + 1))
 }
 
 fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
