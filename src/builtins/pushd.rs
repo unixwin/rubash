@@ -303,6 +303,10 @@ fn parse_popd_operand<W>(
 where
     W: Write,
 {
+    if args.first().copied() == Some("--") {
+        return Ok(Some(PopdOperand::Top { no_cd: false }));
+    }
+
     let (no_cd, args) = parse_stack_options(args);
     if args.is_empty() {
         return Ok(Some(PopdOperand::Top { no_cd }));
