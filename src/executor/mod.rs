@@ -11857,7 +11857,7 @@ impl Executor {
         if source == "type -p e" {
             return "./e".to_string();
         }
-        let words: Vec<String> = source.split_whitespace().map(str::to_string).collect();
+        let words = split_shell_words(source);
         let words = self.expand_aliases(&words);
 
         if words.first().map(String::as_str) == Some("echo") {
@@ -11951,7 +11951,52 @@ impl Executor {
             return crate::builtins::trap::list_first_signal_for_sed().to_string();
         }
 
+        if let Some(output) = self.run_external_command_substitution(&words) {
+            return output;
+        }
+
         String::new()
+    }
+
+    fn run_external_command_substitution(&self, words: &[String]) -> Option<String> {
+        words.first()?;
+        if words
+            .iter()
+            .any(|word| matches!(word.as_str(), "|" | ">" | ">>" | "<" | "2>" | "2>>" | "&>"))
+        {
+            return None;
+        }
+
+        let expanded_words: Vec<String> = words
+            .iter()
+            .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+            .collect();
+        let program = find_user_command(&expanded_words[0], &self.env_vars)?;
+        let mut process = if should_run_with_shell(&program) {
+            if let Some(shell) = find_shell(&self.env_vars) {
+                let mut command = Command::new(shell);
+                command.arg(&program);
+                command.args(&expanded_words[1..]);
+                command
+            } else {
+                Command::new(&program)
+            }
+        } else {
+            let mut command = Command::new(&program);
+            command.args(&expanded_words[1..]);
+            command
+        };
+
+        self.apply_child_environment(&mut process);
+        let output = process.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
     }
 
     fn expand_backtick_substitution(&self, word: &str) -> Option<String> {
