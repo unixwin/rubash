@@ -11631,6 +11631,23 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_array_parameter_pattern_removal_applies_to_each_value() {
+        let output_path = "target/rubash-array-pattern-removal-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("arr=(src/main.rs src/lib.rs); echo ${{arr[@]#*/}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "main.rs lib.rs\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_positional_parameter_substring_uses_offset_and_length() {
         let output_path = "target/rubash-positional-substring-output.txt";
         let _ = fs::remove_file(output_path);
@@ -11667,6 +11684,27 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_positional_parameter_pattern_removal_applies_to_each_value() {
+        let output_path = "target/rubash-positional-pattern-removal-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("set -- alpha.tmp beta.tmp; echo ${{@%.tmp}} / ${{1%%.*}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "alpha beta / alpha\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 
