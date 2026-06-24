@@ -11386,8 +11386,9 @@ impl Executor {
             if let Some((var_name, pattern, replacement, global)) =
                 parse_parameter_replacement(name)
             {
-                let pattern = self.expand_embedded_parameters(pattern);
-                let replacement = self.expand_embedded_parameters(replacement);
+                let pattern = self.expand_parameter_pattern_word(pattern);
+                let replacement =
+                    decode_parameter_pattern_quotes(&self.expand_embedded_parameters(replacement));
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -11795,8 +11796,9 @@ impl Executor {
             if let Some((var_name, pattern, replacement, global)) =
                 parse_parameter_replacement(name)
             {
-                let pattern = self.expand_embedded_parameters(pattern);
-                let replacement = self.expand_embedded_parameters(replacement);
+                let pattern = self.expand_parameter_pattern_word(pattern);
+                let replacement =
+                    decode_parameter_pattern_quotes(&self.expand_embedded_parameters(replacement));
                 if matches!(var_name, "@" | "*") {
                     return self
                         .positional_params
@@ -18974,13 +18976,27 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
         if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
             index += 2;
             let mut quoted = String::new();
+            let mut escaped = false;
             while index < chars.len() {
                 let ch = chars[index];
                 index += 1;
+                if escaped {
+                    quoted.push('\\');
+                    quoted.push(ch);
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
                 if ch == '\'' {
                     break;
                 }
                 quoted.push(ch);
+            }
+            if escaped {
+                quoted.push('\\');
             }
             output.push_str(&decode_ansi_c_escapes(&quoted));
             continue;
