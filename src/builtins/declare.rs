@@ -109,6 +109,7 @@ where
         }
     }
 
+    let had_name_args = !names.is_empty();
     let mut assign_names = Vec::new();
     let mut attr_status = EXECUTION_SUCCESS;
     for name in &names {
@@ -135,6 +136,37 @@ where
         }
         assign_names.push(*name);
     }
+    let arrays = marked_vars(variables, ARRAY_VARS);
+    let assocs = marked_vars(variables, ASSOC_VARS);
+    let mut valid_assign_names = Vec::new();
+    for name in assign_names {
+        let Some(var_name) = declare_base_name(name) else {
+            valid_assign_names.push(name);
+            continue;
+        };
+        if assoc && arrays.contains(var_name) && !assocs.contains(var_name) {
+            writeln!(
+                stderr,
+                "{}declare: {}: cannot convert indexed to associative array",
+                diagnostic_prefix(),
+                var_name
+            )?;
+            attr_status = EXECUTION_FAILURE;
+            continue;
+        }
+        if array && assocs.contains(var_name) && !arrays.contains(var_name) {
+            writeln!(
+                stderr,
+                "{}declare: {}: cannot convert associative to indexed array",
+                diagnostic_prefix(),
+                var_name
+            )?;
+            attr_status = EXECUTION_FAILURE;
+            continue;
+        }
+        valid_assign_names.push(name);
+    }
+    let assign_names = valid_assign_names;
     if assign_declare_names(&assign_names, variables, array, assoc, integer, stderr)?
         != EXECUTION_SUCCESS
     {
@@ -300,7 +332,7 @@ where
         }
     }
 
-    if names.is_empty() {
+    if names.is_empty() && !had_name_args {
         print = true;
     }
 
@@ -534,6 +566,13 @@ fn nameref_self_reference(arg: &str) -> bool {
     };
     let name = name.strip_suffix('+').unwrap_or(name);
     name == value
+}
+
+fn declare_base_name(arg: &str) -> Option<&str> {
+    let name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
+    valid_identifier(name).then_some(name)
 }
 
 fn valid_declare_name(arg: &str) -> bool {

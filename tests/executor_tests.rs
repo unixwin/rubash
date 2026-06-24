@@ -3551,6 +3551,68 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_rejects_indexed_to_assoc_conversion() {
+        let output_path = target_test_path("rubash-declare-indexed-to-assoc-output.txt");
+        let error_path = target_test_path("rubash-declare-indexed-to-assoc-error.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let input = format!(
+            "declare -a arr=(); declare -A arr=() 2> {shell_error_path}; \
+             echo status:$? > {shell_output_path}; declare -p arr >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "status:1\ndeclare -a arr=()\n"
+        );
+        assert!(fs::read_to_string(&error_path)
+            .unwrap()
+            .contains("declare: arr: cannot convert indexed to associative array"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_declare_rejects_assoc_to_indexed_conversion() {
+        let output_path = target_test_path("rubash-declare-assoc-to-indexed-output.txt");
+        let error_path = target_test_path("rubash-declare-assoc-to-indexed-error.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let input = format!(
+            "declare -A assoc; declare -a assoc=() 2> {shell_error_path}; \
+             echo status:$? > {shell_output_path}; declare -p assoc >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "status:1\ndeclare -A assoc\n"
+        );
+        assert!(fs::read_to_string(&error_path)
+            .unwrap()
+            .contains("declare: assoc: cannot convert associative to indexed array"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_declare_indexed_array_assignment_resolves_negative_indices() {
         let output_path = "target/rubash-declare-indexed-array-negative-output.txt";
         let _ = fs::remove_file(output_path);
@@ -13290,6 +13352,59 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(
             fs::read_to_string(&output_path).unwrap(),
             "in:local\nout:changed\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_g_expanded_compound_assignment_updates_global_behind_local() {
+        let output_path =
+            target_test_path("rubash-function-declare-global-expanded-compound-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "unset x; f() {{ local -a x; name=x; declare -ga \"$name=( one two )\"; \
+                    echo in:${{x[@]}} > {shell_output_path}; }}; \
+             f; echo out:${{x[@]}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "in:\nout:one two\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_g_nested_function_updates_global_behind_outer_local() {
+        let output_path = target_test_path("rubash-function-declare-global-nested-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "unset x y; \
+             f() {{ local x; local -a y; g; echo f:$x:${{y[@]}} >> {shell_output_path}; }}; \
+             g() {{ name=y; declare -g x=scalar; declare -ga \"$name=( one two )\"; \
+                    echo g:$x:${{y[@]}} > {shell_output_path}; }}; \
+             f; echo out:$x:${{y[@]}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "g::\nf::\nout:scalar:one two\n"
         );
         let _ = fs::remove_file(output_path);
     }
