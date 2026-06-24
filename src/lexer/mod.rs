@@ -1269,10 +1269,10 @@ fn remove_shell_quotes(raw: &str) -> String {
                             {
                                 chars.next();
                                 if escaped != '\n' {
-                                    if escaped == '$' {
-                                        out.push('\x1f');
-                                    } else {
-                                        out.push(escaped);
+                                    match escaped {
+                                        '$' => out.push('\x1f'),
+                                        '`' => out.push('\x1a'),
+                                        _ => out.push(escaped),
                                     }
                                 }
                             } else {
@@ -1351,7 +1351,11 @@ fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                             {
                                 chars.next();
                                 if escaped != '\n' {
-                                    out.push(escaped);
+                                    if escaped == '`' {
+                                        out.push('\x1a');
+                                    } else {
+                                        out.push(escaped);
+                                    }
                                 }
                             } else {
                                 out.push('\\');
