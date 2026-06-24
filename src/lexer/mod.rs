@@ -835,6 +835,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('>') {
                     self.advance();
                     Some(Token::new(TokenKind::Append, ">>", start))
+                } else if self.peek() == Some('&') {
+                    self.advance();
+                    Some(Token::new(TokenKind::RedirectOut, ">&", start))
                 } else if self.peek() == Some('|') {
                     self.advance();
                     Some(Token::new(TokenKind::RedirectOut, ">|", start))
