@@ -211,6 +211,12 @@ enum UpstreamOutputStream {
     Stderr,
 }
 
+enum NamerefResolution {
+    Target(String),
+    Circular,
+    NotNameref,
+}
+
 const PRECEDENCE_TEST_OUTPUT: &str = r#"`Say' echos its argument. Its return value is of no interest.
 `Truth' echos its argument and returns a TRUE result.
 `False' echos its argument and returns a FALSE result.
@@ -9263,10 +9269,13 @@ impl Executor {
             assignments.push((name.to_string(), self.expand_assignment_value(value)));
         }
 
+        let mut status = 0;
         for (name, value) in assignments {
-            self.apply_shell_assignment(&name, value);
+            if !self.apply_shell_assignment(&name, value) {
+                status = 1;
+            }
         }
-        self.exit_code = 0;
+        self.exit_code = status;
         true
     }
 
@@ -9447,14 +9456,24 @@ impl Executor {
         previous
     }
 
-    fn apply_shell_assignment(&mut self, name: &str, value: String) {
+    fn apply_shell_assignment(&mut self, name: &str, value: String) -> bool {
         // TODO(variables.c/arrayfunc.c): Bash stores append assignment state
         // separately on WORD_DESC/ASSIGNMENT_WORD. This narrow path handles
         // scalar `name+=value` until SHELL_VAR attributes and arrays own it.
         let (base_name, append) = assignment_name_and_append(name);
-        let target_name = self
-            .nameref_target_name(base_name)
-            .unwrap_or_else(|| base_name.to_string());
+        let target_name = match self.nameref_resolution(base_name) {
+            NamerefResolution::Target(target) => target,
+            NamerefResolution::Circular => {
+                eprintln!(
+                    "{}warning: {}: circular name reference",
+                    self.diagnostic_prefix(),
+                    base_name
+                );
+                self.exit_code = 1;
+                return false;
+            }
+            NamerefResolution::NotNameref => base_name.to_string(),
+        };
         let base_name = target_name.as_str();
         if is_marked_var(&self.env_vars, "__RUBASH_READONLY_VARS", base_name) {
             eprintln!(
@@ -9463,7 +9482,7 @@ impl Executor {
                 base_name
             );
             self.exit_code = 1;
-            return;
+            return false;
         }
         if base_name == "OPTIND" && !append {
             self.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
@@ -9479,7 +9498,7 @@ impl Executor {
             self.env_vars
                 .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
             env::set_var(base_name, assigned.to_string());
-            return;
+            return true;
         }
         if base_name == "BASH_ARGV0" && !append {
             self.env_vars
@@ -9489,25 +9508,25 @@ impl Executor {
             self.random_state
                 .set(value.trim().parse::<u32>().unwrap_or(0));
             env::set_var(base_name, value);
-            return;
+            return true;
         }
         if base_name == "BASHPID" && !append {
-            return;
+            return true;
         }
         if base_name == "BASH_SUBSHELL" && !append {
-            return;
+            return true;
         }
         if base_name == "FUNCNAME" && !append {
-            return;
+            return true;
         }
         if base_name == "LINENO" && !append {
-            return;
+            return true;
         }
         if base_name == "BASH_COMMAND" && !append {
-            return;
+            return true;
         }
         if is_noassign_bash_array(base_name) && !append {
-            return;
+            return true;
         }
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
@@ -9538,6 +9557,7 @@ impl Executor {
         let value = self.apply_case_assignment_attributes(base_name, value);
         self.env_vars.insert(base_name.to_string(), value.clone());
         env::set_var(base_name, value);
+        true
     }
 
     fn apply_case_assignment_attributes(&self, name: &str, value: String) -> String {
@@ -9551,29 +9571,48 @@ impl Executor {
     }
 
     fn nameref_target_name(&self, name: &str) -> Option<String> {
+        match self.nameref_resolution(name) {
+            NamerefResolution::Target(target) => Some(target),
+            NamerefResolution::Circular | NamerefResolution::NotNameref => None,
+        }
+    }
+
+    fn nameref_resolution(&self, name: &str) -> NamerefResolution {
         let mut current = name;
         let mut seen = HashSet::new();
         for _ in 0..16 {
-            if !seen.insert(current.to_string())
-                || !is_marked_var(&self.env_vars, NAMEREF_VARS, current)
-            {
-                return None;
+            if !seen.insert(current.to_string()) {
+                return NamerefResolution::Circular;
             }
-            let target = self.env_vars.get(current)?;
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, current) {
+                return NamerefResolution::NotNameref;
+            }
+            let Some(target) = self.env_vars.get(current) else {
+                return NamerefResolution::NotNameref;
+            };
             if !is_shell_name(target) {
-                return None;
+                return NamerefResolution::NotNameref;
             }
             if !is_marked_var(&self.env_vars, NAMEREF_VARS, target) {
-                return Some(target.clone());
+                return NamerefResolution::Target(target.clone());
             }
             current = target;
         }
-        None
+        NamerefResolution::Circular
     }
 
     fn shell_variable_value(&self, name: &str) -> Option<String> {
-        if let Some(target) = self.nameref_target_name(name) {
-            return self.env_vars.get(&target).cloned();
+        match self.nameref_resolution(name) {
+            NamerefResolution::Target(target) => return self.env_vars.get(&target).cloned(),
+            NamerefResolution::Circular => {
+                eprintln!(
+                    "{}warning: {}: circular name reference",
+                    self.diagnostic_prefix(),
+                    name
+                );
+                return None;
+            }
+            NamerefResolution::NotNameref => {}
         }
         self.env_vars.get(name).cloned()
     }
@@ -9938,14 +9977,12 @@ impl Executor {
             }
             if let Some((var_name, word)) = name.split_once(":=") {
                 if self
-                    .env_vars
-                    .get(var_name)
+                    .shell_variable_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self
-                        .env_vars
-                        .get(var_name)
-                        .map(|value| shell_safe_value(value))
+                        .shell_variable_value(var_name)
+                        .map(|value| shell_safe_value(&value))
                         .unwrap_or_default();
                 }
                 let value = self.expand_parameter_word(word);
@@ -9953,22 +9990,19 @@ impl Executor {
             }
             if let Some((var_name, word)) = name.split_once(":-") {
                 if self
-                    .env_vars
-                    .get(var_name)
+                    .shell_variable_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self
-                        .env_vars
-                        .get(var_name)
-                        .map(|value| shell_safe_value(value))
+                        .shell_variable_value(var_name)
+                        .map(|value| shell_safe_value(&value))
                         .unwrap_or_default();
                 }
                 return self.expand_parameter_word(word);
             }
             if let Some((var_name, word)) = name.split_once(":+") {
                 if self
-                    .env_vars
-                    .get(var_name)
+                    .shell_variable_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self.expand_parameter_word(word);
@@ -9978,14 +10012,13 @@ impl Executor {
             if let Some((var_name, word)) = name.split_once('=') {
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
-                        .map(|value| shell_safe_value(value))
+                        .shell_variable_value(var_name)
+                        .map(|value| shell_safe_value(&value))
                         .unwrap_or_else(|| self.expand_parameter_word(word));
                 }
             }
             if let Some((var_name, word)) = name.split_once('+') {
-                if self.env_vars.contains_key(var_name) {
+                if self.shell_variable_value(var_name).is_some() {
                     return self.expand_parameter_word(word);
                 }
                 return String::new();
@@ -9993,9 +10026,8 @@ impl Executor {
             if let Some((var_name, word)) = name.split_once('-') {
                 if is_shell_name(var_name) {
                     return self
-                        .env_vars
-                        .get(var_name)
-                        .map(|value| shell_safe_value(value))
+                        .shell_variable_value(var_name)
+                        .map(|value| shell_safe_value(&value))
                         .unwrap_or_else(|| self.expand_parameter_word(word));
                 }
             }
@@ -10022,10 +10054,9 @@ impl Executor {
                         .unwrap_or_else(|| default.to_string());
                 }
                 return self
-                    .env_vars
-                    .get(array_expr)
+                    .shell_variable_value(array_expr)
                     .filter(|value| !value.is_empty() && !is_array_storage(value))
-                    .map(|value| shell_safe_value(value))
+                    .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| default.to_string());
             }
             if let Some(array_name) = name
@@ -10629,17 +10660,15 @@ impl Executor {
 
         if let Some((var_name, default)) = name.split_once(":-") {
             return self
-                .env_vars
-                .get(var_name)
+                .shell_variable_value(var_name)
                 .filter(|value| !value.is_empty())
-                .map(|value| shell_safe_value(value))
+                .map(|value| shell_safe_value(&value))
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
         }
 
         if let Some((var_name, alternate)) = name.split_once(":+") {
             if self
-                .env_vars
-                .get(var_name)
+                .shell_variable_value(var_name)
                 .is_some_and(|value| !value.is_empty())
             {
                 return self.expand_embedded_parameters(alternate);
@@ -10648,7 +10677,7 @@ impl Executor {
         }
 
         if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.env_vars.contains_key(var_name) {
+            if self.shell_variable_value(var_name).is_some() {
                 return self.expand_embedded_parameters(alternate);
             }
             return String::new();
@@ -10657,9 +10686,8 @@ impl Executor {
         if let Some((var_name, default)) = name.split_once('-') {
             if is_shell_name(var_name) {
                 return self
-                    .env_vars
-                    .get(var_name)
-                    .map(|value| shell_safe_value(value))
+                    .shell_variable_value(var_name)
+                    .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| self.expand_embedded_parameters(default));
             }
         }
