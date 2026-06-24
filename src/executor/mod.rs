@@ -1945,7 +1945,7 @@ impl Executor {
                     self.exit_code = self.execute_logout(cmd)?;
                     Ok(())
                 }
-                "return" => self.execute_return(&cmd.words[1..]),
+                "return" => self.execute_return(cmd),
                 "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
                 "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
                 "pwd" => {
@@ -5185,7 +5185,7 @@ impl Executor {
                 Ok(())
             }
             "." | "source" => self.execute_source_from_command_builtin(cmd),
-            "return" => self.execute_return(&cmd.words[1..]),
+            "return" => self.execute_return(cmd),
             "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
             "recho" => {
@@ -5568,7 +5568,7 @@ impl Executor {
                 &builtin_cmd.words[0],
                 &builtin_cmd.words[1..],
             ),
-            "return" => self.execute_return(&builtin_cmd.words[1..]),
+            "return" => self.execute_return(&builtin_cmd),
             "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Continue),
             "kill" => {
@@ -5806,7 +5806,11 @@ impl Executor {
                 Ok(())
             }
             "source" | "." => crate::builtins::source::execute_named(self, &args[0], &args[1..]),
-            "return" => self.execute_return(&args[1..]),
+            "return" => {
+                let mut command = CommandNode::new();
+                command.words = args.to_vec();
+                self.execute_return(&command)
+            }
             "break" => {
                 let mut command = CommandNode::new();
                 command.words = args.to_vec();
@@ -7306,15 +7310,18 @@ impl Executor {
         }
     }
 
-    fn execute_return(&mut self, args: &[String]) -> Result<(), ExecuteError> {
+    fn execute_return(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let args = &cmd.words[1..];
+        let mut stderr = Vec::new();
         let status = if let Some(value) = args.first() {
             match value.parse::<i128>() {
                 Ok(value) => crate::builtins::exit::normalize_status(value),
                 Err(_) => {
-                    eprintln!(
+                    writeln!(
+                        &mut stderr,
                         "{}return: {value}: numeric argument required",
                         self.diagnostic_prefix()
-                    );
+                    )?;
                     2
                 }
             }
@@ -7325,13 +7332,16 @@ impl Executor {
         let in_function = self.function_depth > 0;
         let in_source = self.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
         if in_function || in_source {
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             return Err(ExecuteError::Return(status));
         }
 
-        eprintln!(
+        writeln!(
+            &mut stderr,
             "{}return: can only `return' from a function or sourced script",
             self.diagnostic_prefix()
-        );
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = 2;
         Ok(())
     }
