@@ -92,7 +92,6 @@ const QUOTEARRAY_TEST_DONE: &str = "__RUBASH_QUOTEARRAY_TEST_DONE";
 const PARSER_TEST_DONE: &str = "__RUBASH_PARSER_TEST_DONE";
 const POSIX2_TEST_DONE: &str = "__RUBASH_POSIX2_TEST_DONE";
 const POSIXPAT_TEST_DONE: &str = "__RUBASH_POSIXPAT_TEST_DONE";
-const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const INVOCATION_TEST_DONE: &str = "__RUBASH_INVOCATION_TEST_DONE";
 const TEST_TEST_DONE: &str = "__RUBASH_TEST_TEST_DONE";
 const READ_TEST_DONE: &str = "__RUBASH_READ_TEST_DONE";
@@ -169,7 +168,6 @@ const QUOTEARRAY_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/
 const PARSER_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/parser.right");
 const POSIX2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posix2.right");
 const POSIXPAT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posixpat.right");
-const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const INVOCATION_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/invocation.right");
 const TEST_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/test.right");
 const READ_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/read.right");
@@ -942,9 +940,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_posixpat_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_type_script() {
             return Ok(());
         }
         if self.execute_upstream_invocation_script() {
@@ -4448,23 +4443,6 @@ impl Executor {
         print!("{}", POSIXPAT_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(POSIXPAT_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    fn execute_upstream_type_script(&mut self) -> bool {
-        if self.env_vars.contains_key(TYPE_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("type.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", TYPE_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(TYPE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
