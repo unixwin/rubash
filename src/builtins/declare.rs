@@ -507,7 +507,7 @@ where
             }
         } else if assoc && value.starts_with('(') && value.ends_with(')') {
             append_assoc_value("()", value)
-        } else if array && value.starts_with('(') && value.ends_with(')') {
+        } else if value.starts_with('(') && value.ends_with(')') {
             append_array_value("()", value, false)
         } else {
             value.to_string()
@@ -1029,6 +1029,13 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
             }
         }
         let token = unquote_storage_value(&token);
+        if let Some(expanded_array) = token.strip_prefix('\x1d') {
+            for value in expanded_array.split_whitespace() {
+                entries.insert(next_index, value.to_string());
+                next_index += 1;
+            }
+            continue;
+        }
         if scalar_append && !entries.is_empty() {
             let current = entries.get(&0).cloned().unwrap_or_default();
             entries.insert(

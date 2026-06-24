@@ -14009,6 +14009,25 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_unquoted_positional_parameter_substring_splits_words() {
+        let output_path = "target/rubash-positional-substring-split-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function p {{ for x in ${{@:2}}; do echo \"$x\" >> {output_path}; done; }}; p arr 0 2 3"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n2\n3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_positional_parameter_substring_supports_negative_offset() {
         let output_path = "target/rubash-positional-substring-negative-output.txt";
         let _ = fs::remove_file(output_path);
