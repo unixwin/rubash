@@ -2612,7 +2612,7 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 let tokens = crate::lexer::tokenize(&source);
                 let mut ast = crate::parser::parse(&tokens);
-                self.apply_eval_output_redirects(cmd, &mut ast)?;
+                self.apply_command_output_redirects(cmd, &mut ast)?;
                 self.execute_ast(&ast)
             }
         }
@@ -2650,7 +2650,7 @@ impl Executor {
         }
     }
 
-    fn apply_eval_output_redirects(
+    pub(crate) fn apply_command_output_redirects(
         &mut self,
         cmd: &CommandNode,
         ast: &mut Ast,
@@ -6173,11 +6173,12 @@ impl Executor {
 
     fn execute_source_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        let result = crate::builtins::source::execute_named_with_io(
+        let result = crate::builtins::source::execute_named_with_io_and_redirects(
             self,
             &cmd.words[0],
             &cmd.words[1..],
             &mut stderr,
+            cmd,
         );
         if !stderr.is_empty() {
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;

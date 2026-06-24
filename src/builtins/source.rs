@@ -8,7 +8,7 @@
 
 use crate::executor::path::shell_path_to_windows;
 use crate::executor::{ExecuteError, Executor};
-use crate::parser::Ast;
+use crate::parser::{Ast, CommandNode};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -30,6 +30,32 @@ pub fn execute_named_with_io<E>(
     command_name: &str,
     args: &[String],
     stderr: &mut E,
+) -> Result<(), ExecuteError>
+where
+    E: Write,
+{
+    execute_named_with_io_impl(executor, command_name, args, stderr, None)
+}
+
+pub fn execute_named_with_io_and_redirects<E>(
+    executor: &mut Executor,
+    command_name: &str,
+    args: &[String],
+    stderr: &mut E,
+    redirect_cmd: &CommandNode,
+) -> Result<(), ExecuteError>
+where
+    E: Write,
+{
+    execute_named_with_io_impl(executor, command_name, args, stderr, Some(redirect_cmd))
+}
+
+fn execute_named_with_io_impl<E>(
+    executor: &mut Executor,
+    command_name: &str,
+    args: &[String],
+    stderr: &mut E,
+    redirect_cmd: Option<&CommandNode>,
 ) -> Result<(), ExecuteError>
 where
     E: Write,
@@ -84,7 +110,7 @@ where
         // that generated text directly until process substitution is parsed.
         let source = args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ");
         if !source.is_empty() {
-            return execute_text(executor, &source);
+            return execute_text_maybe_redirected(executor, &source, &[], redirect_cmd);
         }
     }
 
@@ -125,7 +151,7 @@ where
         }
     };
 
-    execute_text_with_args(executor, &source, invocation.args)
+    execute_text_maybe_redirected(executor, &source, invocation.args, redirect_cmd)
 }
 
 pub fn execute_text(executor: &mut Executor, source: &str) -> Result<(), ExecuteError> {
@@ -137,6 +163,33 @@ pub fn execute_text_with_args(
     source: &str,
     args: &[String],
 ) -> Result<(), ExecuteError> {
+    let ast = parse_source_ast(source);
+    execute_ast_with_args(executor, ast, args)
+}
+
+fn execute_text_maybe_redirected(
+    executor: &mut Executor,
+    source: &str,
+    args: &[String],
+    redirect_cmd: Option<&CommandNode>,
+) -> Result<(), ExecuteError> {
+    let mut ast = parse_source_ast(source);
+    if let Some(redirect_cmd) = redirect_cmd {
+        executor.apply_command_output_redirects(redirect_cmd, &mut ast)?;
+    }
+    execute_ast_with_args(executor, ast, args)
+}
+
+fn parse_source_ast(source: &str) -> Ast {
+    let tokens = crate::lexer::tokenize(source);
+    crate::parser::parse(&tokens)
+}
+
+fn execute_ast_with_args(
+    executor: &mut Executor,
+    ast: Ast,
+    args: &[String],
+) -> Result<(), ExecuteError> {
     let old_positional_params = executor.positional_params();
     let source_positional_params: Vec<String> = args.to_vec();
     let had_source_args = !source_positional_params.is_empty();
@@ -146,8 +199,6 @@ pub fn execute_text_with_args(
         executor.set_positional_params(source_positional_params.clone());
     }
 
-    let tokens = crate::lexer::tokenize(source);
-    let ast = crate::parser::parse(&tokens);
     let result = executor.execute_ast(&ast);
 
     match old_source_marker {
