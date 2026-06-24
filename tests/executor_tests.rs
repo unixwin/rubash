@@ -15359,6 +15359,33 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parameter_replacement_decodes_quoted_pattern_words() {
+        let output_path = "target/rubash-param-replacement-quoted-word-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "v=\"'\"; printf '<%s>\\n' \
+             \"${{v/$'\\''/x}}\" \
+             ${{v/$'\\''/x}} \
+             \"${{v/\\'/x}}\" \
+             ${{v/\\'/x}} \
+             \"${{v/x/\\'}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<x>\n<x>\n<x>\n<x>\n<'>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_substring_uses_offset_and_length() {
         let output_path = "target/rubash-param-substring-output.txt";
         let _ = fs::remove_file(output_path);
