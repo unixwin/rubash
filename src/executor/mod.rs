@@ -10830,23 +10830,34 @@ impl Executor {
 
     fn apply_parameter_assignment_expansion(&mut self, inner: &str) {
         if let Some((name, value)) = inner.split_once(":=") {
-            if !is_shell_name(name)
-                || self
-                    .shell_variable_value(name)
-                    .is_some_and(|value| !value.is_empty())
+            if self
+                .parameter_operator_value(name)
+                .is_some_and(|value| !value.is_empty())
             {
                 return;
             }
             let value = self.expand_parameter_word_mut(value);
+            if self.apply_array_element_parameter_assignment(name, value.clone()) {
+                return;
+            }
+            if !is_shell_name(name) {
+                return;
+            }
             self.apply_shell_assignment(name, value);
             return;
         }
 
         if let Some((name, value)) = inner.split_once('=') {
-            if !is_shell_name(name) || self.shell_variable_value(name).is_some() {
+            if self.parameter_operator_value(name).is_some() {
                 return;
             }
             let value = self.expand_parameter_word_mut(value);
+            if self.apply_array_element_parameter_assignment(name, value.clone()) {
+                return;
+            }
+            if !is_shell_name(name) {
+                return;
+            }
             self.apply_shell_assignment(name, value);
         }
     }
@@ -10882,9 +10893,12 @@ impl Executor {
                     if name.parse::<usize>().is_ok_and(|index| index > 0) {
                         return Some((format!("${name}"), "cannot assign in this way"));
                     }
-                    let target = self
-                        .nameref_target_name(name)
-                        .unwrap_or_else(|| name.to_string());
+                    let target = parse_array_subscript(name)
+                        .map(|(array_name, _)| array_name.to_string())
+                        .unwrap_or_else(|| {
+                            self.nameref_target_name(name)
+                                .unwrap_or_else(|| name.to_string())
+                        });
                     if is_marked_var(&self.env_vars, READONLY_VARS, &target) {
                         return Some((target, "readonly variable"));
                     }
@@ -11408,6 +11422,52 @@ impl Executor {
         key.parse::<usize>()
             .ok()
             .and_then(|index| array_value_at(&storage, index))
+    }
+
+    fn apply_array_element_parameter_assignment(
+        &mut self,
+        expression: &str,
+        value: String,
+    ) -> bool {
+        let Some((array_name, key)) = parse_array_subscript(expression) else {
+            return false;
+        };
+        if !is_shell_name(array_name)
+            || is_marked_var(&self.env_vars, READONLY_VARS, array_name)
+            || is_noassign_bash_array(array_name)
+        {
+            return false;
+        }
+
+        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
+            let mut entries = assoc_entries(&current);
+            if let Some((_, entry_value)) = entries
+                .iter_mut()
+                .rev()
+                .find(|(entry_key, _)| entry_key == key)
+            {
+                *entry_value = value;
+            } else {
+                entries.push((key.to_string(), value));
+            }
+            self.env_vars
+                .insert(array_name.to_string(), format_assoc_storage(entries));
+            return true;
+        }
+
+        let Some(index) = key.parse::<usize>().ok() else {
+            return false;
+        };
+        let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
+        let mut entries = indexed_array_entries(&current);
+        entries.insert(index, value);
+        self.env_vars.insert(
+            array_name.to_string(),
+            format_indexed_array_storage(entries),
+        );
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, array_name);
+        true
     }
 
     fn indirect_pattern_removal(&self, name: &str) -> Option<String> {
@@ -15608,13 +15668,19 @@ fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
 
 fn parse_parameter_assignment_operator(inner: &str) -> Option<(&str, bool)> {
     if let Some((name, _)) = inner.split_once(":=") {
-        if is_shell_name(name) || name.parse::<usize>().is_ok_and(|index| index > 0) {
+        if is_shell_name(name)
+            || name.parse::<usize>().is_ok_and(|index| index > 0)
+            || parse_array_subscript(name).is_some()
+        {
             return Some((name, true));
         }
     }
 
     if let Some((name, _)) = inner.split_once('=') {
-        if is_shell_name(name) || name.parse::<usize>().is_ok_and(|index| index > 0) {
+        if is_shell_name(name)
+            || name.parse::<usize>().is_ok_and(|index| index > 0)
+            || parse_array_subscript(name).is_some()
+        {
             return Some((name, false));
         }
     }
