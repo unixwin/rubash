@@ -2201,7 +2201,7 @@ impl Executor {
                     Ok(())
                 }
                 "type" => {
-                    if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                    if command_has_output_redirects(cmd) {
                         self.exit_code = self.execute_type_redirected(cmd)?;
                         return Ok(());
                     }
@@ -5384,7 +5384,7 @@ impl Executor {
                 Ok(())
             }
             "type" => {
-                if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                if command_has_output_redirects(cmd) {
                     self.exit_code = self.execute_type_redirected(cmd)?;
                     return Ok(());
                 }
@@ -6387,30 +6387,11 @@ impl Executor {
     }
 
     fn execute_type_redirected(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_type_with_io(
-                &cmd.words[1..],
-                &mut file,
-                &mut std::io::stderr().lock(),
-            );
-        }
-
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_type_with_io(
-                &cmd.words[1..],
-                &mut file,
-                &mut std::io::stderr().lock(),
-            );
-        }
-
-        Ok(self.execute_type(&cmd.words[1..]))
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = self.execute_type_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
     }
 
     fn execute_type_with_io<W, E>(
