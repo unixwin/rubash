@@ -11382,6 +11382,9 @@ impl Executor {
                         .and_then(|value| assoc_value_at(&value, &key))
                         .unwrap_or_default();
                 }
+                if let Some(value) = self.array_element_parameter_value(name) {
+                    return normalize_array_expanded_value(value);
+                }
             }
             if let Some((var_name, _pattern)) = name.split_once("##*/") {
                 return self
@@ -12966,7 +12969,8 @@ impl Executor {
             let key = self.assoc_subscript_key(key);
             return assoc_value_at(&storage, &key);
         }
-        eval_conditional_arith_value(key, &self.env_vars)
+        let key = strip_matching_quotes(&self.expand_embedded_parameters(key)).to_string();
+        eval_conditional_arith_value(&key, &self.env_vars)
             .and_then(|index| resolve_indexed_array_subscript(&storage, index))
             .and_then(|index| array_value_at(&storage, index))
     }
@@ -16855,6 +16859,28 @@ fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn pathname_expand_array_token(token: &str) -> Option<Vec<String>> {
+    if token.starts_with('"') || token.starts_with('\'') || !pattern_contains_glob(token) {
+        return None;
+    }
+    if token.contains('/') || token.contains('\\') {
+        return None;
+    }
+    let include_dotfiles = token.starts_with('.');
+    let mut matches = fs::read_dir(env::current_dir().ok()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| include_dotfiles || !name.starts_with('.'))
+        .filter(|name| case_pattern_matches(token, name))
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return None;
+    }
+    matches.sort();
+    Some(matches)
+}
+
 fn append_array_value(current: &str, value: &str, integer: bool, ifs: Option<&str>) -> String {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
@@ -16864,6 +16890,14 @@ fn append_array_value(current: &str, value: &str, integer: bool, ifs: Option<&st
         .unwrap_or(0);
     let scalar_append = integer && !value.starts_with('(');
     for token in array_assignment_tokens(value) {
+        if let Some(matches) = pathname_expand_array_token(&token) {
+            for value in matches {
+                entries.insert(next_index, value);
+                next_index += 1;
+            }
+            continue;
+        }
+
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left, &entries) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
