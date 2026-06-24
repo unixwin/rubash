@@ -1772,6 +1772,11 @@ impl Executor {
             if command_has_no_effect(cmd) {
                 return Ok(());
             }
+            if let Some(name) = self.parameter_assignment_readonly_error(cmd) {
+                eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
+                self.exit_code = 1;
+                return Err(ExecuteError::ExitCode(1));
+            }
             if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
                 eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
                 self.exit_code = status;
@@ -1785,6 +1790,11 @@ impl Executor {
             return Ok(());
         }
 
+        if let Some(name) = self.parameter_assignment_readonly_error(cmd) {
+            eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
+            self.exit_code = 1;
+            return Err(ExecuteError::ExitCode(1));
+        }
         self.apply_parameter_assignment_expansions(cmd);
         if let Some((name, message, status)) = self.parameter_expansion_error(cmd) {
             eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
@@ -10742,6 +10752,57 @@ impl Executor {
         }
     }
 
+    fn parameter_assignment_readonly_error(&self, cmd: &CommandNode) -> Option<String> {
+        for word in &cmd.words {
+            if let Some(name) = self.parameter_assignment_readonly_error_in_word(word) {
+                return Some(name);
+            }
+        }
+        for value in cmd.assignments.values() {
+            if let Some(name) = self.parameter_assignment_readonly_error_in_word(value) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    fn parameter_assignment_readonly_error_in_word(&self, word: &str) -> Option<String> {
+        let word = word
+            .strip_prefix('\x1b')
+            .or_else(|| word.strip_prefix('\x1d'))
+            .unwrap_or(word);
+        let mut rest = word;
+        while let Some(start) = rest.find("${") {
+            let after_start = &rest[start + 2..];
+            let Some(end) = after_start.find('}') else {
+                return None;
+            };
+            let inner = &after_start[..end];
+            if let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) {
+                if self.parameter_assignment_required(name, require_non_empty) {
+                    let target = self
+                        .nameref_target_name(name)
+                        .unwrap_or_else(|| name.to_string());
+                    if is_marked_var(&self.env_vars, READONLY_VARS, &target) {
+                        return Some(target);
+                    }
+                }
+            }
+            rest = &after_start[end + 1..];
+        }
+        None
+    }
+
+    fn parameter_assignment_required(&self, name: &str, require_non_empty: bool) -> bool {
+        if !is_shell_name(name) {
+            return false;
+        }
+        match self.shell_variable_value(name) {
+            Some(value) => require_non_empty && value.is_empty(),
+            None => true,
+        }
+    }
+
     fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String, i32)> {
         for word in &cmd.words {
             if let Some(error) = self.parameter_expansion_error_in_word(word) {
@@ -15245,6 +15306,22 @@ fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
     if let Some((name, message)) = inner.split_once('?') {
         if is_parameter_error_name(name) {
             return Some((name, message, false));
+        }
+    }
+
+    None
+}
+
+fn parse_parameter_assignment_operator(inner: &str) -> Option<(&str, bool)> {
+    if let Some((name, _)) = inner.split_once(":=") {
+        if is_shell_name(name) {
+            return Some((name, true));
+        }
+    }
+
+    if let Some((name, _)) = inner.split_once('=') {
+        if is_shell_name(name) {
+            return Some((name, false));
         }
     }
 
