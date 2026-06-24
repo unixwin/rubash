@@ -677,6 +677,7 @@ pub struct Executor {
     env_vars: HashMap<String, String>,
     aliases: HashMap<String, Alias>,
     functions: HashMap<String, Vec<CommandNode>>,
+    function_definition_redirects: HashMap<String, CommandNode>,
     positional_params: Vec<String>,
     local_var_scopes: Vec<HashMap<String, Option<String>>>,
     local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -771,6 +772,7 @@ impl Executor {
             env_vars,
             aliases: HashMap::new(),
             functions: imported_functions,
+            function_definition_redirects: HashMap::new(),
             positional_params: Vec::new(),
             local_var_scopes: Vec::new(),
             local_attr_scopes: Vec::new(),
@@ -1766,7 +1768,7 @@ impl Executor {
         }
 
         if let Some(function_command) = &cmd.function_command {
-            return self.define_function(function_command);
+            return self.define_function(cmd, function_command);
         }
 
         if cmd.words.is_empty() {
@@ -2268,7 +2270,11 @@ impl Executor {
         }
     }
 
-    fn define_function(&mut self, function: &FunctionCommand) -> Result<(), ExecuteError> {
+    fn define_function(
+        &mut self,
+        cmd: &CommandNode,
+        function: &FunctionCommand,
+    ) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c): Bash stores a COMMAND tree plus source
         // metadata and function attributes. Keep the parsed body in a small
         // function table until the command representation is complete.
@@ -2286,6 +2292,20 @@ impl Executor {
         }
         self.functions
             .insert(function.name.clone(), function.body.clone());
+        if command_has_input_or_output_redirects(cmd) {
+            let mut redirects = CommandNode::new();
+            redirects.redirect_in = cmd.redirect_in.clone();
+            redirects.redirect_out = cmd.redirect_out.clone();
+            redirects.append = cmd.append.clone();
+            redirects.redirect_err = cmd.redirect_err.clone();
+            redirects.redirect_err_append = cmd.redirect_err_append.clone();
+            redirects.heredoc = cmd.heredoc.clone();
+            redirects.here_string = cmd.here_string.clone();
+            self.function_definition_redirects
+                .insert(function.name.clone(), redirects);
+        } else {
+            self.function_definition_redirects.remove(&function.name);
+        }
         self.exit_code = 0;
         Ok(())
     }
@@ -2314,8 +2334,19 @@ impl Executor {
         if self.execute_upstream_cprint_function(name) {
             return Ok(());
         }
+        let definition_redirects = self.function_definition_redirects.get(name).cloned();
+        if let Some(definition_redirects) = &definition_redirects {
+            self.apply_function_call_redirects(&mut body, definition_redirects)?;
+        }
         self.apply_function_call_redirects(&mut body, call_cmd)?;
-        let call_stdin = self.function_call_stdin(call_cmd)?;
+        let call_stdin = if let Some(definition_redirects) = &definition_redirects {
+            match self.function_call_stdin(definition_redirects)? {
+                Some(input) => Some(input),
+                None => self.function_call_stdin(call_cmd)?,
+            }
+        } else {
+            self.function_call_stdin(call_cmd)?
+        };
         let old_function = self.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
         let old_funcname = self.env_vars.get("FUNCNAME").cloned();
         let old_bash_argc = self.env_vars.get("BASH_ARGC").cloned();
@@ -3532,6 +3563,7 @@ impl Executor {
                     continue;
                 }
                 self.functions.remove(name);
+                self.function_definition_redirects.remove(name);
                 unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
@@ -16001,6 +16033,13 @@ fn command_has_output_redirects(cmd: &CommandNode) -> bool {
         || cmd.append.is_some()
         || cmd.redirect_err.is_some()
         || cmd.redirect_err_append.is_some()
+}
+
+fn command_has_input_or_output_redirects(cmd: &CommandNode) -> bool {
+    cmd.redirect_in.is_some()
+        || cmd.heredoc.is_some()
+        || cmd.here_string.is_some()
+        || command_has_output_redirects(cmd)
 }
 
 fn bash_command_text(cmd: &CommandNode) -> String {
