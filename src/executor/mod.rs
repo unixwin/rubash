@@ -8508,6 +8508,15 @@ impl Executor {
     }
 
     fn execute_wait(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
+        if cmd.words.len() == 2
+            && self
+                .last_background_pid
+                .is_some_and(|pid| cmd.words[1] == pid.to_string())
+        {
+            self.write_buffered_builtin_output(cmd, &[], &[])?;
+            return Ok(0);
+        }
+
         let mut stderr = Vec::new();
         let status = crate::builtins::wait::execute_with_io(
             &cmd.words[1..],
