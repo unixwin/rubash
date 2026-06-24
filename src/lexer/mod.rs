@@ -1180,33 +1180,67 @@ impl<'a> Lexer<'a> {
     }
     fn skip_brace(&mut self) {
         let mut depth = 1usize;
+        let mut comment_start = true;
         while let Some(c) = self.advance() {
+            if c == '\n' {
+                comment_start = true;
+                continue;
+            }
+            if c.is_whitespace() {
+                comment_start = true;
+                continue;
+            }
+            if c == '#' && comment_start {
+                while self.peek().is_some_and(|ch| ch != '\n') {
+                    self.advance();
+                }
+                continue;
+            }
             match c {
-                '{' => depth += 1,
+                '{' => {
+                    comment_start = false;
+                    depth += 1;
+                }
                 '}' => {
+                    comment_start = false;
                     depth -= 1;
                     if depth == 0 {
                         break;
                     }
                 }
-                '$' => match self.peek() {
-                    Some('{') => {
-                        self.advance();
-                        self.skip_braced();
+                '$' => {
+                    comment_start = false;
+                    match self.peek() {
+                        Some('{') => {
+                            self.advance();
+                            self.skip_braced();
+                        }
+                        Some('(') => {
+                            self.advance();
+                            self.skip_cmd_subst();
+                        }
+                        _ => {}
                     }
-                    Some('(') => {
-                        self.advance();
-                        self.skip_cmd_subst();
-                    }
-                    _ => {}
-                },
-                '`' => self.skip_backtick(),
-                '\'' => self.skip_single(),
-                '"' => self.skip_double(),
+                }
+                '`' => {
+                    comment_start = false;
+                    self.skip_backtick();
+                }
+                '\'' => {
+                    comment_start = false;
+                    self.skip_single();
+                }
+                '"' => {
+                    comment_start = false;
+                    self.skip_double();
+                }
                 '\\' => {
+                    comment_start = false;
                     self.advance();
                 }
-                _ => {}
+                _ => {
+                    comment_start = false;
+                }
             }
         }
     }
