@@ -9325,6 +9325,20 @@ impl Executor {
         if !index.ends_with(']') || !is_shell_name(name) {
             return false;
         }
+        let name = match self.nameref_resolution(name) {
+            NamerefResolution::Target(target) => target,
+            NamerefResolution::Circular => {
+                eprintln!(
+                    "{}warning: {}: circular name reference",
+                    self.diagnostic_prefix(),
+                    name
+                );
+                self.exit_code = 1;
+                return true;
+            }
+            NamerefResolution::NotNameref => name.to_string(),
+        };
+        let name = name.as_str();
         if name == "BASH_ALIASES" {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
@@ -9644,6 +9658,14 @@ impl Executor {
         match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => Some(target),
             NamerefResolution::Circular | NamerefResolution::NotNameref => None,
+        }
+    }
+
+    fn resolved_variable_name(&self, name: &str) -> Option<String> {
+        match self.nameref_resolution(name) {
+            NamerefResolution::Target(target) => Some(target),
+            NamerefResolution::Circular => None,
+            NamerefResolution::NotNameref => Some(name.to_string()),
         }
     }
 
@@ -10636,6 +10658,8 @@ impl Executor {
     }
 
     fn parameter_array_storage(&self, name: &str) -> Option<String> {
+        let name = self.resolved_variable_name(name)?;
+        let name = name.as_str();
         if name == "DIRSTACK" {
             return Some(self.dirstack_storage());
         }
@@ -11530,8 +11554,9 @@ impl Executor {
 
     fn array_element_parameter_value(&self, expression: &str) -> Option<String> {
         let (array_name, key) = parse_array_subscript(expression)?;
+        let storage_name = self.resolved_variable_name(array_name)?;
         let storage = self.parameter_array_storage(array_name)?;
-        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+        if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
             let key = self.assoc_subscript_key(key);
             return assoc_value_at(&storage, &key);
         }
@@ -11554,6 +11579,10 @@ impl Executor {
         let Some((array_name, key)) = parse_array_subscript(expression) else {
             return false;
         };
+        let Some(array_name) = self.resolved_variable_name(array_name) else {
+            return false;
+        };
+        let array_name = array_name.as_str();
         if !is_shell_name(array_name)
             || is_marked_var(&self.env_vars, READONLY_VARS, array_name)
             || is_noassign_bash_array(array_name)
