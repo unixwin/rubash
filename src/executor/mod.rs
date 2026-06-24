@@ -3562,7 +3562,10 @@ impl Executor {
         }
 
         if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
-            let Ok(index) = subscript.parse::<usize>() else {
+            let Ok(index) = subscript.parse::<i128>() else {
+                return false;
+            };
+            let Some(index) = resolve_indexed_array_subscript(&current, index) else {
                 return false;
             };
             let mut entries = indexed_array_entries(&current);
