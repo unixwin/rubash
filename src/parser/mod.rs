@@ -1110,9 +1110,7 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
         i += 1;
 
         let body_start = i;
-        while i < tokens.len() && !is_keyword(tokens, i, "esac") && !is_case_terminator(tokens, i) {
-            i += 1;
-        }
+        i = case_body_end(tokens, i);
         let body = parse(&tokens[body_start..i]).commands;
         let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
         clauses.push(CaseClause {
@@ -1134,6 +1132,35 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
     command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(CaseCommand { word, clauses });
     Some((command, i + 1))
+}
+
+fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
+    let mut nested_case_depth = 0usize;
+
+    while index < tokens.len() {
+        if is_keyword(tokens, index, "case") {
+            nested_case_depth += 1;
+            index += 1;
+            continue;
+        }
+
+        if is_keyword(tokens, index, "esac") {
+            if nested_case_depth == 0 {
+                break;
+            }
+            nested_case_depth -= 1;
+            index += 1;
+            continue;
+        }
+
+        if nested_case_depth == 0 && is_case_terminator(tokens, index) {
+            break;
+        }
+
+        index += 1;
+    }
+
+    index
 }
 
 fn is_case_terminator(tokens: &[Token], index: usize) -> bool {
