@@ -561,6 +561,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_decimal_split_regex_keeps_literal_dot() {
+        let output_path = "target/rubash-decimal-split-regex-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=1.3; [[ \"$value\" =~ (.*)\\.(.*) ]]; echo \"${{BASH_REMATCH[1]}}/${{BASH_REMATCH[2]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1/3\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_regex_no_match_clears_bash_rematch() {
+        let output_path = "target/rubash-regex-no-match-rematch-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "[[ abc =~ (a)(b)(c) ]]; [[ xx =~ z+ ]]; echo \"${{BASH_REMATCH[0]:-empty}}/${{BASH_REMATCH[1]:-empty}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "empty/empty\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_quoted_positional_slice_expands_to_multiple_arguments() {
         let output_path = "target/rubash-quoted-positional-slice-output.txt";
         let _ = fs::remove_file(output_path);
@@ -579,6 +617,25 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "<a>\n<b>\ntail:<c>\ntail:<d>\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_quoted_positional_at_expands_to_multiple_arguments() {
+        let output_path = "target/rubash-quoted-positional-at-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ printf '<%s>\\n' \"$@\" > {output_path}; }}; f a 'b c' d"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<a>\n<b c>\n<d>\n");
         let _ = fs::remove_file(output_path);
     }
 
