@@ -363,11 +363,29 @@ mod command_substitution {
     }
 
     #[test]
+    fn test_backtick_substitution_with_literal_suffix_stays_one_word() {
+        let input = "`echo left`:`echo right`";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(tokens[0].value, "`echo left`:`echo right`");
+    }
+
+    #[test]
     fn test_dollar_paren_substitution() {
         let input = "$(echo hello)";
         let tokens = tokenize(input);
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::CommandSubst);
+    }
+
+    #[test]
+    fn test_dollar_paren_substitution_with_literal_suffix_stays_one_word() {
+        let input = "$(echo left):$(echo right)";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(tokens[0].value, "$(echo left):$(echo right)");
     }
 }
 
