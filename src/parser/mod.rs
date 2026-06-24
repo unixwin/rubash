@@ -337,7 +337,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                         });
                         current_cmd.redirect_out = Some(Redirect {
                             fd,
-                            target: tokens[i + 1].value.clone(),
+                            target: redirect_target(&token.value, &tokens[i + 1].value),
                             append: false,
                             clobber: token.value == ">|",
                         });
@@ -889,7 +889,7 @@ fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &
             TokenKind::RedirectOut => {
                 command.redirect_out = Some(Redirect {
                     fd: None,
-                    target: target.value.clone(),
+                    target: redirect_target(&token.value, &target.value),
                     append: false,
                     clobber: token.value == ">|",
                 });
@@ -1307,6 +1307,14 @@ fn redirect_operator_fd(operator: &str) -> Option<u32> {
         return None;
     }
     digits.parse().ok()
+}
+
+fn redirect_target(operator: &str, target: &str) -> String {
+    if operator == ">&" {
+        format!("&{target}")
+    } else {
+        target.to_string()
+    }
 }
 
 fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {

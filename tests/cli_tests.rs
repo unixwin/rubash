@@ -57,6 +57,19 @@ fn c_command_redirects_stdout_to_stderr_fd() {
 }
 
 #[test]
+fn c_command_redirects_stdout_with_default_fd_duplication() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("echo -n hi >&2")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "hi");
+}
+
+#[test]
 fn gnu_zprintf_usage_guard_exits_before_body() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("third_party/bash/examples/scripts/zprintf")
