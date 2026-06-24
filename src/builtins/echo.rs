@@ -38,6 +38,7 @@ where
         index += 1;
     }
 
+    let writes_alias_definition = args.get(index).is_some_and(|arg| *arg == "alias");
     let mut suppress_remaining = false;
     for (position, arg) in args[index..].iter().enumerate() {
         if position > 0 {
@@ -45,7 +46,8 @@ where
         }
 
         if interpret_escapes {
-            let normalized = remove_residual_shell_quotes(arg);
+            let normalized =
+                remove_residual_shell_quotes(arg, writes_alias_definition && position > 0);
             let expanded = expand_escapes(&normalized);
             writer.write_all(expanded.output.as_bytes())?;
             if expanded.stop {
@@ -54,7 +56,8 @@ where
                 break;
             }
         } else {
-            let normalized = remove_residual_shell_quotes(arg);
+            let normalized =
+                remove_residual_shell_quotes(arg, writes_alias_definition && position > 0);
             writer.write_all(normalized.as_bytes())?;
         }
     }
@@ -66,10 +69,14 @@ where
     Ok(())
 }
 
-fn remove_residual_shell_quotes(arg: &str) -> String {
+fn remove_residual_shell_quotes(arg: &str, unescape_alias_quotes: bool) -> String {
     // TODO(subst.c/parse.y): Quote removal belongs in the expansion pipeline,
     // not inside echo. This narrow cleanup covers alias replacement text that
     // Rubash has not yet re-read through a complete parser input stack.
+    if unescape_alias_quotes && arg.contains("\\'") {
+        return arg.replace("\\'", "'");
+    }
+
     if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
         return arg[1..arg.len() - 1].to_string();
     }

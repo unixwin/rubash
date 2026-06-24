@@ -15416,6 +15416,8 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
             "test=\"weferfds'dsfsdf\"; \
              printf '<%s>\\n' \"'${{test//\"'\"/}}'\" \
              \"${{test//\"'\"/\"'\\\\''\"}}\" \
+             \"'${{test//\"'\"/\"'\\\\''\"}}'\" \
+             \\'${{test//\"'\"/\\'\\\\\\'\\'}}\\'\" \" \
              \"'\" > {output_path}"
         );
         let tokens = tokenize(&input);
@@ -15428,7 +15430,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "<'weferfdsdsfsdf'>\n<weferfds'\\''dsfsdf>\n<'>\n"
+            "<'weferfdsdsfsdf'>\n<weferfds'\\''dsfsdf>\n<'weferfds'\\''dsfsdf'>\n<'weferfds'\\''dsfsdf' >\n<'>\n"
         );
         let _ = fs::remove_file(output_path);
     }
