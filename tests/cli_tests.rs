@@ -233,6 +233,19 @@ fn script_sort_pos_params_example_handles_quoted_positional_args() {
 }
 
 #[test]
+fn script_kshenv_example_parses_multiline_awk_quote() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("kshenv")
+        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();

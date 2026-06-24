@@ -156,12 +156,7 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
             continue;
         }
 
-        if has_unclosed_quotes(&logical_line)
-            && (is_multiline_alias_definition(&logical_line)
-                || is_multiline_assignment(&logical_line)
-                || is_multiline_command_string(&logical_line)
-                || is_plain_multiline_quoted_command(&logical_line))
-        {
+        if has_unclosed_quotes(&logical_line) {
             continue;
         }
         if has_unclosed_command_substitution(&logical_line) {
@@ -576,43 +571,6 @@ fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
     index
 }
 
-fn is_multiline_alias_definition(input: &str) -> bool {
-    let trimmed = input.trim_start();
-    trimmed.starts_with("alias ") && trimmed.contains('=')
-}
-
-fn is_multiline_assignment(input: &str) -> bool {
-    let trimmed = input.trim_start();
-    let Some(equal) = trimmed.find('=') else {
-        return false;
-    };
-    if trimmed[..equal].chars().any(char::is_whitespace) {
-        return false;
-    }
-    let name = trimmed[..equal].strip_suffix('+').unwrap_or(&trimmed[..equal]);
-    !name.is_empty()
-        && name
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-        && name
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn is_multiline_command_string(input: &str) -> bool {
-    let trimmed = input.trim_start();
-    trimmed.contains(" -c '") || trimmed.contains(" -c \"") || trimmed.starts_with("-c '")
-}
-
-fn is_plain_multiline_quoted_command(input: &str) -> bool {
-    let trimmed = input.trim_start();
-    matches!(
-        trimmed.split_whitespace().next(),
-        Some("echo" | "printf" | "recho" | ":")
-    )
-}
-
 pub struct Lexer<'a> {
     input: &'a [u8],
     position: usize,
@@ -967,9 +925,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     self.advance();
                 }
-                '<' if self.peek() == Some('<') => {
-                    self.skip_heredoc_in_command_substitution()
-                }
+                '<' if self.peek() == Some('<') => self.skip_heredoc_in_command_substitution(),
                 _ => {}
             }
         }
@@ -1209,7 +1165,8 @@ mod unit_tests {
 
     #[test]
     fn test_command_substitution_here_string_does_not_swallow_following_heredoc() {
-        let tokens = tokenize("echo $(\ncat <<< \"comsub here-string\"\n)\ncat <<''\nhi\nthere\n''");
+        let tokens =
+            tokenize("echo $(\ncat <<< \"comsub here-string\"\n)\ncat <<''\nhi\nthere\n''");
 
         let bodies = tokens
             .iter()
