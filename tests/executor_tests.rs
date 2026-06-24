@@ -4681,6 +4681,31 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_posix_function_declare_prefix_assignment_stays_local() {
+        let output_path = target_test_path("rubash-posix-declare-prefix-local-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "set -o posix; var=one; \
+             f() {{ var=value declare -x var; echo inside:$var > {shell_output_path}; }}; \
+             f; echo outside:$var >> {shell_output_path}; declare -p var >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "inside:value\noutside:one\ndeclare -- var=\"one\"\n"
+        );
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_backtick_in_comment_does_not_swallow_temporary_export() {
         let output_path = target_test_path("rubash-comment-backtick-temp-export-output.txt");
         let _ = fs::remove_file(&output_path);
