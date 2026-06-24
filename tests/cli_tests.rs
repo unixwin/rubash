@@ -196,6 +196,27 @@ fn script_array_to_string_example_joins_arrays() {
 }
 
 #[test]
+fn script_center_example_reads_file_in_nested_loop() {
+    let input_path = Path::new("target").join("rubash-center-input.txt");
+    fs::create_dir_all("target").unwrap();
+    fs::write(&input_path, "alpha\nbeta\n").unwrap();
+    let script_input = shell_test_path(&std::env::current_dir().unwrap().join(&input_path));
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("center")
+        .arg(&script_input)
+        .current_dir(Path::new("bash").join("examples").join("scripts"))
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(input_path);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "                                     alpha\n                                      beta\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();

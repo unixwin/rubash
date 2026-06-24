@@ -558,7 +558,10 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
     let body_start = i;
     let mut depth = 0usize;
     while i < tokens.len() {
-        if is_keyword(tokens, i, "for") {
+        if is_keyword(tokens, i, "for")
+            || is_keyword(tokens, i, "while")
+            || is_keyword(tokens, i, "until")
+        {
             depth += 1;
         } else if is_keyword(tokens, i, "done") {
             if depth == 0 {
@@ -665,7 +668,10 @@ fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let body_start = i;
     let mut depth = 0usize;
     while i < tokens.len() {
-        if is_keyword(tokens, i, "for") {
+        if is_keyword(tokens, i, "for")
+            || is_keyword(tokens, i, "while")
+            || is_keyword(tokens, i, "until")
+        {
             depth += 1;
         } else if is_keyword(tokens, i, "done") {
             if depth == 0 {
