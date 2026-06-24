@@ -225,3 +225,40 @@ fn stdin_script_uses_s_positional_arguments() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "rubash:alpha:2\n");
 }
+
+#[test]
+fn stdin_script_child_shell_inherits_unread_input() {
+    let child_script = Path::new("target/rubash-cli-input-line-child.sh");
+    let _ = fs::remove_file(child_script);
+    fs::write(child_script, "read line\nprintf 'child:%s\\n' \"$line\"\n").unwrap();
+
+    let shell = env!("CARGO_BIN_EXE_rubash").replace('\\', "/");
+    let child_script_arg = child_script.to_string_lossy().replace('\\', "/");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("THIS_SH", &shell)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            format!(
+                "echo before\n${{THIS_SH}} {child_script_arg}\nthis line is child input\necho after\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    let _ = fs::remove_file(child_script);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "before\nchild:this line is child input\nafter\n"
+    );
+}

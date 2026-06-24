@@ -127,6 +127,7 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
 }
 
 fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
+    executor.inherit_process_stdin();
     let status = run_source(executor, command, false);
     finish_shell(executor, status, false)
 }
@@ -142,6 +143,7 @@ fn run_script_file(executor: &mut Executor, script: &str, args: &[String]) -> i3
     };
 
     executor.set_env("__RUBASH_SCRIPT_NAME", script);
+    executor.inherit_process_stdin();
     executor.set_positional_params(args.to_vec());
     let status = run_source(executor, &contents, false);
     finish_shell(executor, status, false)
@@ -179,6 +181,7 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
     // prompting, while commands launched from that stream inherit the same
     // input. Keep this line-oriented until parse.y owns incremental input.
+    executor.inherit_process_stdin();
     let mut input = String::new();
 
     loop {
