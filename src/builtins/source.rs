@@ -241,11 +241,11 @@ pub fn execute_simple_if(
     let Some(then_index) = find_word_command(ast, index + 1, "then") else {
         return Ok(None);
     };
-    let Some(fi_index) = find_word_command(ast, then_index + 1, "fi") else {
+    let Some(fi_index) = find_matching_fi(ast, then_index + 1) else {
         return Ok(None);
     };
-    let elif_index = find_word_command_before(ast, then_index + 1, fi_index, "elif");
-    let else_index = find_word_command_before(ast, then_index + 1, fi_index, "else");
+    let elif_index = find_if_branch_command(ast, then_index + 1, fi_index, "elif");
+    let else_index = find_if_branch_command(ast, then_index + 1, fi_index, "else");
 
     let condition_words;
     let words = if keyword == "elif" {
@@ -339,6 +339,32 @@ fn find_word_command(ast: &Ast, start: usize, word: &str) -> Option<usize> {
 
 fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> Option<usize> {
     (start..end).find(|index| ast.commands[*index].words.first().map(String::as_str) == Some(word))
+}
+
+fn find_matching_fi(ast: &Ast, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..ast.commands.len() {
+        match ast.commands[index].words.first().map(String::as_str) {
+            Some("if") => depth += 1,
+            Some("fi") if depth == 0 => return Some(index),
+            Some("fi") => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_if_branch_command(ast: &Ast, start: usize, end: usize, word: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..end {
+        match ast.commands[index].words.first().map(String::as_str) {
+            Some("if") => depth += 1,
+            Some("fi") => depth = depth.saturating_sub(1),
+            Some(candidate) if depth == 0 && candidate == word => return Some(index),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn command_tail(

@@ -406,3 +406,82 @@ fn script_backtick_basename_expands_script_name() {
         "rubash-cli-backtick-basename.sh\n"
     );
 }
+
+#[test]
+fn script_nested_if_keeps_outer_fi_pairing() {
+    let script_path = Path::new("target").join("rubash-cli-nested-if.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        "patch_level=\n\
+         if [ -z \"$patch_level\" ]; then\n\
+           patchlevel_h=target/no-such-patchlevel.h\n\
+           if [ -s $patchlevel_h ]; then\n\
+             echo bad-inner\n\
+           fi\n\
+         fi\n\
+         if [ -z \"$patch_level\" ]; then\n\
+           patch_level=0\n\
+         fi\n\
+         printf '%s\\n' \"$patch_level\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn script_backtick_echo_sed_pipeline_splits_version() {
+    let script_path = Path::new("target").join("rubash-cli-backtick-sed-pipeline.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        "dist_version=5.3\n\
+         dist_major=`echo $dist_version | sed 's:\\..*$::'`\n\
+         dist_minor=`echo $dist_version | sed 's:^.*\\.::'`\n\
+         printf '%s:%s\\n' \"$dist_major\" \"$dist_minor\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "5:3\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn script_escaped_backtick_in_quotes_is_literal() {
+    let script_path = Path::new("target").join("rubash-cli-escaped-backtick.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        "echo \"   \\`make version.h' to the Makefile.  It is created by mkversion. */\"\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "   `make version.h' to the Makefile.  It is created by mkversion. */\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}

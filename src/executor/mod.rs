@@ -12802,6 +12802,10 @@ impl Executor {
         let words = split_shell_words(source);
         let words = self.expand_aliases(&words);
 
+        if let Some(output) = self.command_substitution_pipeline_output(&words) {
+            return output;
+        }
+
         if words.first().map(String::as_str) == Some("echo") {
             let expanded_args = words[1..]
                 .iter()
@@ -12955,6 +12959,76 @@ impl Executor {
         Some(output.trim_end_matches('\n').to_string())
     }
 
+    fn command_substitution_pipeline_output(&self, words: &[String]) -> Option<String> {
+        if !words.iter().any(|word| word == "|") {
+            return None;
+        }
+
+        let stages = split_pipeline_words(words)?;
+        let mut output = self.command_substitution_pipeline_first_stage(stages.first()?)?;
+        for stage in stages.iter().skip(1) {
+            output = self.command_substitution_pipeline_filter(stage, &output)?;
+        }
+        Some(output.trim_end_matches('\n').to_string())
+    }
+
+    fn command_substitution_pipeline_first_stage(&self, words: &[String]) -> Option<String> {
+        match words.first().map(String::as_str)? {
+            "echo" => {
+                let args = words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect::<Vec<_>>();
+                let mut output = echo_command_substitution_output(&args);
+                output.push('\n');
+                Some(output)
+            }
+            "printf" => {
+                let expanded_args: Vec<String> = words[1..]
+                    .iter()
+                    .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+                    .collect();
+                let mut env_vars = self.env_vars.clone();
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let _ = crate::builtins::printf::execute_with_io(
+                    expanded_args.iter().map(String::as_str),
+                    &mut env_vars,
+                    &mut stdout,
+                    &mut stderr,
+                );
+                Some(String::from_utf8_lossy(&stdout).into_owned())
+            }
+            "cat" => {
+                let mut output = String::new();
+                for word in &words[1..] {
+                    let path = self.expand_word(word);
+                    if let Ok(value) =
+                        fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                    {
+                        output.push_str(&value);
+                    }
+                }
+                Some(output)
+            }
+            _ => None,
+        }
+    }
+
+    fn command_substitution_pipeline_filter(
+        &self,
+        words: &[String],
+        input: &str,
+    ) -> Option<String> {
+        match words.first().map(String::as_str)? {
+            "sed" => {
+                let script = sed_script_arg(&words[1..])?;
+                apply_simple_sed_substitution(input, script)
+            }
+            _ => None,
+        }
+    }
+
     fn report_command_substitution_heredoc_warning(&self, source: &str, command: &CommandNode) {
         let start_line = self
             .env_vars
@@ -13100,6 +13174,11 @@ impl Executor {
         let mut chars = word.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '\x1a' {
+                output.push('`');
+                continue;
+            }
+
             if ch == '\x1f' {
                 output.push('$');
                 continue;
@@ -18095,6 +18174,91 @@ fn expand_echo_command_substitution_escapes(value: &str) -> String {
         }
     }
     output
+}
+
+fn split_pipeline_words(words: &[String]) -> Option<Vec<&[String]>> {
+    let mut stages = Vec::new();
+    let mut start = 0usize;
+    for (index, word) in words.iter().enumerate() {
+        if word == "|" {
+            if start == index {
+                return None;
+            }
+            stages.push(&words[start..index]);
+            start = index + 1;
+        }
+    }
+    if start >= words.len() {
+        return None;
+    }
+    stages.push(&words[start..]);
+    (stages.len() > 1).then_some(stages)
+}
+
+fn sed_script_arg(args: &[String]) -> Option<&str> {
+    match args {
+        [option, script, ..] if option == "-e" => Some(script.as_str()),
+        [script, ..] => Some(script.as_str()),
+        _ => None,
+    }
+}
+
+fn apply_simple_sed_substitution(input: &str, script: &str) -> Option<String> {
+    let (pattern, replacement) = parse_sed_substitution(script)?;
+    let mut output = input
+        .lines()
+        .map(|line| apply_simple_sed_line(line, pattern, replacement))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if input.ends_with('\n') {
+        output.push('\n');
+    }
+    Some(output)
+}
+
+fn parse_sed_substitution(script: &str) -> Option<(&str, &str)> {
+    let rest = script.strip_prefix('s')?;
+    let separator = rest.chars().next()?;
+    let rest = &rest[separator.len_utf8()..];
+    let (pattern, rest) = split_escaped_separator(rest, separator)?;
+    let (replacement, _) = split_escaped_separator(rest, separator)?;
+    Some((pattern, replacement))
+}
+
+fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)> {
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == separator {
+            return Some((&value[..index], &value[index + ch.len_utf8()..]));
+        }
+    }
+    None
+}
+
+fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
+    match pattern {
+        r"\..*$" => line
+            .split_once('.')
+            .map(|(prefix, _)| format!("{prefix}{replacement}"))
+            .unwrap_or_else(|| line.to_string()),
+        r"^.*\." => line
+            .rsplit_once('.')
+            .map(|(_, suffix)| format!("{replacement}{suffix}"))
+            .unwrap_or_else(|| line.to_string()),
+        ".*/" => line
+            .rsplit_once('/')
+            .map(|(_, basename)| format!("{replacement}{basename}"))
+            .unwrap_or_else(|| line.to_string()),
+        _ => line.to_string(),
+    }
 }
 
 fn split_shell_words(source: &str) -> Vec<String> {
