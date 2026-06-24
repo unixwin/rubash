@@ -125,7 +125,8 @@ where
         }
         assign_names.push(*name);
     }
-    if assign_declare_names(&assign_names, variables, array, integer, stderr)? != EXECUTION_SUCCESS
+    if assign_declare_names(&assign_names, variables, array, assoc, integer, stderr)?
+        != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
     }
@@ -438,6 +439,7 @@ fn assign_declare_names<W>(
     names: &[&str],
     variables: &mut HashMap<String, String>,
     array: bool,
+    assoc: bool,
     integer: bool,
     stderr: &mut W,
 ) -> io::Result<i32>
@@ -482,7 +484,7 @@ where
         };
         let value = if append {
             let current = variables.get(var_name).cloned().unwrap_or_default();
-            if marked_vars(variables, ASSOC_VARS).contains(var_name) {
+            if assoc || marked_vars(variables, ASSOC_VARS).contains(var_name) {
                 append_assoc_value(&current, value)
             } else if array
                 || marked_vars(variables, ARRAY_VARS).contains(var_name)
@@ -503,6 +505,8 @@ where
             } else {
                 eval_arith_value(value).to_string()
             }
+        } else if assoc && value.starts_with('(') && value.ends_with(')') {
+            append_assoc_value("()", value)
         } else if array && value.starts_with('(') && value.ends_with(')') {
             append_array_value("()", value, false)
         } else {
@@ -895,7 +899,26 @@ fn unquote_storage_value(value: &str) -> String {
 
 fn append_assoc_value(current: &str, value: &str) -> String {
     let mut entries = parse_assoc_words(current);
-    for token in parse_array_tokens(value) {
+    let tokens = parse_array_tokens(value);
+    let explicit_subscripts = tokens.iter().any(|token| {
+        token
+            .split_once('=')
+            .and_then(|(left, _)| left.strip_prefix('[')?.strip_suffix(']'))
+            .is_some()
+    });
+
+    if !explicit_subscripts {
+        for pair in tokens.chunks(2) {
+            let Some(key) = pair.first() else {
+                continue;
+            };
+            let value = pair.get(1).cloned().unwrap_or_default();
+            entries.push((key.clone(), value));
+        }
+        return format_assoc_storage(entries);
+    }
+
+    for token in tokens {
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(key) = left
                 .strip_prefix('[')
@@ -908,6 +931,10 @@ fn append_assoc_value(current: &str, value: &str) -> String {
         entries.push(("0".to_string(), token));
     }
 
+    format_assoc_storage(entries)
+}
+
+fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
     format!(
         "({})",
         entries
