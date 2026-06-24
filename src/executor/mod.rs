@@ -3468,7 +3468,13 @@ impl Executor {
             if command.words.is_empty() {
                 continue;
             }
-            let terminator = if index < last_index { ";" } else { "" };
+            let terminator = if function_definition_command_omits_terminator(command)
+                || index == last_index
+            {
+                ""
+            } else {
+                ";"
+            };
             if let Some(here_string) = &command.here_string {
                 writeln!(
                     stdout,
@@ -3479,6 +3485,12 @@ impl Executor {
                 )?;
             } else if command.words == ["time"] {
                 writeln!(stdout, "    time {terminator}")?;
+            } else if command.heredoc.is_some() {
+                let line = self
+                    .function_command_description_line(command, false)
+                    .unwrap_or_else(|| command.words.join(" "));
+                writeln!(stdout, "    {line}")?;
+                write_function_definition_heredoc_body(command, stdout)?;
             } else {
                 writeln!(stdout, "    {}{terminator}", command.words.join(" "))?;
             }
@@ -16380,6 +16392,30 @@ fn command_has_redirect(cmd: &CommandNode) -> bool {
 
 fn function_body_needs_command_terminators(body: &[CommandNode]) -> bool {
     body.iter().any(|command| command.heredoc.is_some())
+}
+
+fn function_definition_command_omits_terminator(command: &CommandNode) -> bool {
+    command.heredoc.is_some()
+        || matches!(
+            command.words.first().map(String::as_str),
+            Some("then" | "do" | "else" | "elif" | "fi" | "done")
+        )
+}
+
+fn write_function_definition_heredoc_body<W>(
+    command: &CommandNode,
+    stdout: &mut W,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    let (Some(body), Some(delimiter)) = (&command.heredoc, &command.heredoc_delimiter) else {
+        return Ok(());
+    };
+    let body = body.strip_prefix('\x1e').unwrap_or(body);
+    write!(stdout, "{body}")?;
+    writeln!(stdout, "{delimiter}")?;
+    Ok(())
 }
 
 fn append_function_redirect(
