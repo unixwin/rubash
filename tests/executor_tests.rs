@@ -11648,6 +11648,26 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_array_element_parameter_substring_uses_element_value() {
+        let output_path = "target/rubash-array-element-substring-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero alpha); declare -A assoc; assoc[key]=gamma; \
+             echo ${{arr[1]:1:3}} ${{assoc[key]:2}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "lph mma\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_positional_parameter_substring_uses_offset_and_length() {
         let output_path = "target/rubash-positional-substring-output.txt";
         let _ = fs::remove_file(output_path);
