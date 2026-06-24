@@ -11193,6 +11193,54 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parameter_assignment_expansion_rejects_readonly_targets() {
+        let output_path = target_test_path("rubash-param-assign-readonly-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO");
+        let input = format!(
+            "unset RUBASH_PARAM_ASSIGN_RO; readonly RUBASH_PARAM_ASSIGN_RO; \
+             printf '<%s>\\n' \"${{RUBASH_PARAM_ASSIGN_RO:=new}}\" > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert!(!output_path.exists());
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO");
+    }
+
+    #[test]
+    fn test_parameter_assignment_expansion_reports_readonly_nameref_target() {
+        let output_path = target_test_path("rubash-param-assign-readonly-nameref-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_TARGET");
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_REF");
+        let input = format!(
+            "unset RUBASH_PARAM_ASSIGN_RO_TARGET RUBASH_PARAM_ASSIGN_RO_REF; \
+             readonly RUBASH_PARAM_ASSIGN_RO_TARGET; \
+             declare -n RUBASH_PARAM_ASSIGN_RO_REF=RUBASH_PARAM_ASSIGN_RO_TARGET; \
+             printf '<%s>\\n' \"${{RUBASH_PARAM_ASSIGN_RO_REF:=new}}\" > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert!(!output_path.exists());
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_TARGET");
+        std::env::remove_var("RUBASH_PARAM_ASSIGN_RO_REF");
+    }
+
+    #[test]
     fn test_parameter_colon_equals_assigns_empty_value() {
         let output_path = "target/rubash-param-colon-equals-output.txt";
         let _ = fs::remove_file(output_path);
