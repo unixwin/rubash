@@ -37,6 +37,8 @@ const SHELL_START_EPOCH: &str = "__RUBASH_SHELL_START_EPOCH";
 const SECONDS_OFFSET: &str = "__RUBASH_SECONDS_OFFSET";
 const FUNCTION_STDIN: &str = "__RUBASH_FUNCTION_STDIN";
 const FUNCTION_STDIN_OFFSET: &str = "__RUBASH_FUNCTION_STDIN_OFFSET";
+const FD_STDIN_PREFIX: &str = "__RUBASH_FD_STDIN_";
+const FD_STDIN_OFFSET_PREFIX: &str = "__RUBASH_FD_STDIN_OFFSET_";
 const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
@@ -1533,16 +1535,49 @@ impl Executor {
         let body = Ast {
             commands: body_commands,
         };
+        let done_command = ast.commands.get(done_index).expect("done index is valid");
+        let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        if let Some(input) = done_command
+            .heredoc_redirects
+            .iter()
+            .rev()
+            .find(|redirect| redirect.fd.is_none())
+            .and_then(|redirect| redirect.body.clone())
+        {
+            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
+        let mut saved_fd_inputs = Vec::new();
+        for redirect in &done_command.heredoc_redirects {
+            let (Some(fd), Some(body)) = (redirect.fd, redirect.body.clone()) else {
+                continue;
+            };
+            let input_key = fd_stdin_key(fd);
+            let offset_key = fd_stdin_offset_key(fd);
+            saved_fd_inputs.push((
+                input_key.clone(),
+                self.env_vars.get(&input_key).cloned(),
+                offset_key.clone(),
+                self.env_vars.get(&offset_key).cloned(),
+            ));
+            self.env_vars.insert(input_key, body);
+            self.env_vars.insert(offset_key, "0".to_string());
+        }
 
         let mut ran_body = false;
-        loop {
+        let mut last_body_status = 0;
+        let loop_result = loop {
             let condition_ast = Ast {
                 commands: vec![condition.clone()],
             };
-            self.execute_ast(&condition_ast)?;
+            if let Err(error) = self.execute_ast(&condition_ast) {
+                break Err(error);
+            }
             let condition_matched = self.exit_code == 0;
             if condition_matched == until {
-                break;
+                break Ok(());
             }
 
             ran_body = true;
@@ -1550,25 +1585,41 @@ impl Executor {
             let result = self.execute_ast(&body);
             self.loop_depth -= 1;
             match result {
-                Ok(()) => {}
+                Ok(()) => {
+                    last_body_status = self.exit_code;
+                }
                 Err(ExecuteError::Break(level)) if level <= 1 => {
                     self.exit_code = 0;
-                    break;
+                    break Ok(());
                 }
-                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
                 Err(ExecuteError::Continue(level)) if level <= 1 => {
                     self.exit_code = 0;
                     continue;
                 }
                 Err(ExecuteError::Continue(level)) => {
-                    return Err(ExecuteError::Continue(level - 1));
+                    break Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => break Err(error),
             }
+        };
+
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
+        restore_optional_env_var(
+            &mut self.env_vars,
+            FUNCTION_STDIN_OFFSET,
+            old_function_stdin_offset,
+        );
+        for (input_key, old_input, offset_key, old_offset) in saved_fd_inputs {
+            restore_optional_env_var(&mut self.env_vars, &input_key, old_input);
+            restore_optional_env_var(&mut self.env_vars, &offset_key, old_offset);
         }
+        loop_result?;
 
         if !ran_body {
             self.exit_code = 0;
+        } else if self.exit_code != 0 {
+            self.exit_code = last_body_status;
         }
         Ok(Some(done_index + 1))
     }
@@ -7580,6 +7631,18 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
+        if let Some(redirect) = &cmd.redirect_in {
+            if let Some(fd) = redirect.target.strip_prefix('&') {
+                if let Ok(fd) = fd.parse::<u32>() {
+                    if let Some(line) =
+                        self.read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit)
+                    {
+                        return Some(line);
+                    }
+                }
+            }
+        }
+
         if let Some(line) = self.stdin_string_for_command(cmd) {
             return Some(trim_read_input(
                 line,
@@ -7591,6 +7654,60 @@ impl Executor {
 
         self.read_function_stdin(delimiter, char_limit, exact_char_limit)
             .or_else(|| self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit))
+    }
+
+    fn read_virtual_fd_stdin(
+        &mut self,
+        fd: u32,
+        delimiter: char,
+        char_limit: Option<usize>,
+        exact_char_limit: bool,
+    ) -> Option<String> {
+        let input_key = fd_stdin_key(fd);
+        let offset_key = fd_stdin_offset_key(fd);
+        let input = self.env_vars.get(&input_key)?.clone();
+        let offset = self
+            .env_vars
+            .get(&offset_key)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if offset >= input.len() {
+            return None;
+        }
+        if char_limit == Some(0) {
+            return Some(String::new());
+        }
+
+        let slice = &input[offset..];
+        let mut output = String::new();
+        let mut consumed = 0usize;
+        let mut took_any = false;
+        for (index, ch) in slice.char_indices() {
+            if !exact_char_limit && ch == delimiter {
+                consumed = index + ch.len_utf8();
+                took_any = true;
+                break;
+            }
+
+            output.push(ch);
+            consumed = index + ch.len_utf8();
+            took_any = true;
+            if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
+                break;
+            }
+        }
+        if !took_any {
+            return None;
+        }
+
+        self.env_vars
+            .insert(offset_key, (offset + consumed).to_string());
+        Some(trim_read_input(
+            output,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+        ))
     }
 
     fn read_function_stdin(
@@ -16035,6 +16152,14 @@ fn append_function_redirect(
         line.push(' ');
         line.push_str(&redirect.target);
     }
+}
+
+fn fd_stdin_key(fd: u32) -> String {
+    format!("{FD_STDIN_PREFIX}{fd}")
+}
+
+fn fd_stdin_offset_key(fd: u32) -> String {
+    format!("{FD_STDIN_OFFSET_PREFIX}{fd}")
 }
 
 fn command_has_output_redirects(cmd: &CommandNode) -> bool {
