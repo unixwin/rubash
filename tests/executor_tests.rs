@@ -1688,6 +1688,44 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_command_v_pipeline_command_substitution_outputs_description() {
+        let output_path = "target/rubash-command-v-pipeline-comsub-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=$(command -v echo | sort -u); printf '<%s>\\n' \"$value\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<echo>\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_substitution_sed_replaces_backslashes() {
+        let output_path = "target/rubash-comsub-sed-backslash-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=$(printf '%s\\n' 'a\\\\b' | sed 's#\\\\\\\\#/#g'); printf '<%s>\\n' \"$value\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<a/b>\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_escaped_quotes_survive_adjacent_command_substitution() {
         let output_path = "target/rubash-command-substitution-escaped-quote-output.txt";
         let _ = fs::remove_file(output_path);

@@ -13901,6 +13901,10 @@ impl Executor {
             return output.to_string();
         }
 
+        if let Some(output) = self.command_describe_substitution_output(&words) {
+            return output;
+        }
+
         if words.first().map(String::as_str) == Some("umask") {
             return self
                 .env_vars
@@ -14180,6 +14184,14 @@ impl Executor {
                 }
                 Some(output)
             }
+            "command" => self
+                .command_describe_substitution_output(words)
+                .map(|mut output| {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output
+                }),
             _ => None,
         }
     }
@@ -14191,7 +14203,7 @@ impl Executor {
     ) -> Option<String> {
         match words.first().map(String::as_str)? {
             "sed" => {
-                let script = sed_script_arg(&words[1..])?;
+                let script = strip_matching_quotes(sed_script_arg(&words[1..])?);
                 apply_simple_sed_substitution(input, script)
             }
             "sort" => {
@@ -14219,6 +14231,39 @@ impl Executor {
             return values;
         }
         vec![strip_matching_quotes(&self.expand_word(word)).to_string()]
+    }
+
+    fn command_describe_substitution_output(&self, words: &[String]) -> Option<String> {
+        if words.first().map(String::as_str) != Some("command") {
+            return None;
+        }
+        if words
+            .iter()
+            .any(|word| matches!(word.as_str(), "|" | ">" | ">>" | "<" | "2>" | "2>>" | "&>"))
+        {
+            return None;
+        }
+        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(&words[1..])
+        else {
+            return None;
+        };
+
+        let mut stdout = Vec::new();
+        let mut status = 0;
+        for name in &words[1 + first_name..] {
+            let name = self.expand_word(name);
+            match self.describe_name_with_io(&name, mode, use_standard_path, false, &mut stdout) {
+                Ok(true) => {}
+                Ok(false) => status = 1,
+                Err(_) => status = 1,
+            }
+        }
+        self.last_command_substitution_status.set(Some(status));
+        Some(
+            String::from_utf8_lossy(&stdout)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
     }
 
     fn quoted_positional_at_word_values(
@@ -20399,6 +20444,10 @@ fn parse_sed_substitution(script: &str) -> Option<(&str, &str)> {
     let rest = script.strip_prefix('s')?;
     let separator = rest.chars().next()?;
     let rest = &rest[separator.len_utf8()..];
+    if separator == '#' && rest.starts_with("\\#") {
+        let (replacement, _) = split_escaped_separator(&rest[2..], separator)?;
+        return Some((&rest[..1], replacement));
+    }
     let (pattern, rest) = split_escaped_separator(rest, separator)?;
     let (replacement, _) = split_escaped_separator(rest, separator)?;
     Some((pattern, replacement))
@@ -20424,6 +20473,7 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
 
 fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
     match pattern {
+        "\\" | r"\\" => line.replace('\\', &unescape_sed_replacement(replacement)),
         r"\!\*" => line.replace("!*", &unescape_sed_replacement(replacement)),
         r"\!:\([1-9]\)" => replace_aliasconv_positional_markers(line),
         "#" => line.replace('#', &unescape_sed_replacement(replacement)),
