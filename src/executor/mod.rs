@@ -2345,10 +2345,17 @@ impl Executor {
         index: usize,
         expanded: &str,
     ) -> bool {
-        cmd.word_kinds
+        let unquoted_variable = cmd
+            .word_kinds
             .get(index)
-            .is_some_and(|kind| *kind == TokenKind::Variable)
-            && expanded.contains(['\n', '\t'])
+            .is_some_and(|kind| *kind == TokenKind::Variable);
+        let unquoted_command_substitution = cmd
+            .words
+            .get(index)
+            .is_some_and(|word| word_has_unquoted_command_substitution(word));
+
+        ((unquoted_variable && expanded.contains(['\n', '\t']))
+            || (unquoted_command_substitution && expanded.contains(char::is_whitespace)))
             && expanded.split_whitespace().nth(1).is_some()
     }
 
@@ -11967,7 +11974,7 @@ impl Executor {
         pattern: &str,
         operation: PatternRemoval,
     ) -> Option<String> {
-        let pattern = self.expand_embedded_parameters(pattern);
+        let pattern = self.expand_parameter_pattern_word(pattern);
         if matches!(var_name, "@" | "*") {
             return Some(
                 self.positional_params
@@ -12008,7 +12015,22 @@ impl Executor {
             );
         }
 
+        if is_shell_name(var_name) {
+            let resolved = self.resolved_variable_name(var_name)?;
+            return Some(
+                self.env_vars
+                    .get(&resolved)
+                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                    .unwrap_or_default(),
+            );
+        }
+
         None
+    }
+
+    fn expand_parameter_pattern_word(&self, pattern: &str) -> String {
+        let pattern = self.expand_embedded_parameters(pattern);
+        decode_parameter_pattern_quotes(&pattern)
     }
 
     fn array_element_parameter_value(&self, expression: &str) -> Option<String> {
@@ -16815,6 +16837,79 @@ fn remove_parameter_pattern(value: &str, pattern: &str, operation: PatternRemova
     }
 }
 
+fn decode_parameter_pattern_quotes(pattern: &str) -> String {
+    let mut output = String::new();
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+            index += 2;
+            let mut quoted = String::new();
+            while index < chars.len() {
+                let ch = chars[index];
+                index += 1;
+                if ch == '\'' {
+                    break;
+                }
+                quoted.push(ch);
+            }
+            output.push_str(&decode_ansi_c_escapes(&quoted));
+            continue;
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+            index += 2;
+            while index < chars.len() {
+                let ch = chars[index];
+                index += 1;
+                if ch == '"' {
+                    break;
+                }
+                output.push(ch);
+            }
+            continue;
+        }
+
+        match chars[index] {
+            '\'' => {
+                index += 1;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    index += 1;
+                    if ch == '\'' {
+                        break;
+                    }
+                    output.push(ch);
+                }
+            }
+            '"' => {
+                index += 1;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    index += 1;
+                    if ch == '"' {
+                        break;
+                    }
+                    output.push(ch);
+                }
+            }
+            '\\' => {
+                if let Some(ch) = chars.get(index + 1) {
+                    output.push(*ch);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+            ch => {
+                output.push(ch);
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
 fn parse_parameter_substring(name: &str) -> Option<(&str, isize, Option<usize>)> {
     let (var_name, rest) = name.split_once(':')?;
     if var_name.is_empty() || matches!(rest.chars().next(), Some('=' | '+' | '?')) {
@@ -17593,6 +17688,45 @@ fn copy_command_substitution_heredoc(
 
 fn contains_windows_forbidden_posix_filename_char(path: &str) -> bool {
     path.chars().any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|'))
+}
+
+fn word_has_unquoted_command_substitution(word: &str) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let chars = word.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single && !double && ch == '`' {
+            return true;
+        }
+        if !single && !double && ch == '$' && chars.get(index + 1) == Some(&'(') {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn bash_aliases_assignment_name(word: &str) -> Option<String> {
