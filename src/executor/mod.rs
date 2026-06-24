@@ -2961,6 +2961,7 @@ impl Executor {
             2
         } else {
             self.save_local_names(&cmd.words[1..]);
+            self.initialize_non_inherited_locals(&cmd.words[1..]);
             crate::builtins::declare::execute_with_io(
                 &cmd.words[1..],
                 &mut self.env_vars,
@@ -2970,6 +2971,17 @@ impl Executor {
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
+    }
+
+    fn initialize_non_inherited_locals(&mut self, args: &[String]) {
+        if crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_inherit") {
+            return;
+        }
+        for name in local_names_without_assignment(args) {
+            self.env_vars.insert(name.clone(), String::new());
+            env::set_var(&name, "");
+            set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
+        }
     }
 
     fn execute_export(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -15172,6 +15184,25 @@ fn local_assignment_name(arg: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn local_names_without_assignment(args: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    for arg in args {
+        if arg == "--" {
+            continue;
+        }
+        if (arg.starts_with('-') || arg.starts_with('+')) && arg != "-" && arg != "+" {
+            continue;
+        }
+        if arg.contains('=') {
+            continue;
+        }
+        if let Some(name) = local_assignment_name(arg) {
+            names.push(name.to_string());
+        }
+    }
+    names
 }
 
 fn restore_optional_env_var(
