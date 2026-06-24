@@ -643,6 +643,18 @@ impl<'a> Lexer<'a> {
         while let Some(c) = self.advance() {
             if c == '"' {
                 break;
+            } else if c == '$' {
+                match self.peek() {
+                    Some('{') => {
+                        self.advance();
+                        self.skip_braced();
+                    }
+                    Some('(') => {
+                        self.advance();
+                        self.skip_cmd_subst();
+                    }
+                    _ => {}
+                }
             } else if c == '\\' {
                 self.advance();
             }
