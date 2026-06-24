@@ -7803,16 +7803,8 @@ impl Executor {
             return 0;
         }
 
-        self.env_vars.insert(
-            name.clone(),
-            format_indexed_array_storage(
-                ["1", "2", "3"]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, value)| (index, value.to_string()))
-                    .collect(),
-            ),
-        );
+        self.env_vars
+            .insert(name.clone(), format_indexed_array_storage(BTreeMap::new()));
         mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
         0
     }
