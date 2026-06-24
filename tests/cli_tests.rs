@@ -387,3 +387,22 @@ fn script_nested_case_stays_inside_outer_case_body() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "inner\nouter\n");
 }
+
+#[test]
+fn script_backtick_basename_expands_script_name() {
+    let script_path = Path::new("target").join("rubash-cli-backtick-basename.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(&script_path, "prog=`basename $0`\nprintf '%s\\n' \"$prog\"\n").unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "rubash-cli-backtick-basename.sh\n"
+    );
+}
