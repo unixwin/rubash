@@ -13617,8 +13617,14 @@ impl Executor {
 
         if cmd.words[0] == "touch" {
             for path in &cmd.words[1..] {
-                let target = shell_path_to_windows(&self.expand_word(path), &self.env_vars);
-                let _ = File::create(target)?;
+                let expanded = self.expand_word(path);
+                let target = shell_path_to_windows(&expanded, &self.env_vars);
+                if let Err(error) = File::create(target) {
+                    if !(cfg!(windows) && contains_windows_forbidden_posix_filename_char(&expanded))
+                    {
+                        return Err(error.into());
+                    }
+                }
             }
             self.exit_code = 0;
             return Ok(());
@@ -17403,6 +17409,10 @@ fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {
 
 fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
+}
+
+fn contains_windows_forbidden_posix_filename_char(path: &str) -> bool {
+    path.chars().any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|'))
 }
 
 fn bash_aliases_assignment_name(word: &str) -> Option<String> {

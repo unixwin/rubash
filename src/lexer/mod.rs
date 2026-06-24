@@ -271,10 +271,16 @@ fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
         .filter(|pair| pair[0].kind == TokenKind::HereDoc)
         .map(|pair| {
             let quoted = heredoc_delimiter_is_quoted(source, &mut source_offset);
+            let strip_tabs = pair[0].value == "<<-";
+            let value = if strip_tabs {
+                pair[1].value.trim_start_matches('\t').to_string()
+            } else {
+                pair[1].value.clone()
+            };
             HereDocDelimiter {
-                value: pair[1].value.clone(),
+                value,
                 quoted,
-                strip_tabs: pair[0].value == "<<-",
+                strip_tabs,
             }
         })
         .collect()
@@ -436,10 +442,13 @@ fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
     {
         index += 1;
     }
-    let delimiter = chars[delimiter_start..index]
+    let mut delimiter = chars[delimiter_start..index]
         .iter()
         .collect::<String>()
         .replace(['\'', '"', '\\'], "");
+    if strip_tabs {
+        delimiter = delimiter.trim_start_matches('\t').to_string();
+    }
     if delimiter.is_empty() {
         return index;
     }
@@ -859,9 +868,12 @@ impl<'a> Lexer<'a> {
         {
             self.advance();
         }
-        let delimiter = from_utf8(&self.input[delimiter_start..self.position])
+        let mut delimiter = from_utf8(&self.input[delimiter_start..self.position])
             .unwrap_or("")
             .replace(['\'', '"', '\\'], "");
+        if strip_tabs {
+            delimiter = delimiter.trim_start_matches('\t').to_string();
+        }
         if delimiter.is_empty() {
             return;
         }
