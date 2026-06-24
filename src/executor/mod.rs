@@ -7356,6 +7356,7 @@ impl Executor {
     }
 
     fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
+        let mut stderr = Vec::new();
         let mut array_name = None;
         let mut delimiter = '\n';
         let mut char_limit = None;
@@ -7399,8 +7400,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
                         Ok(limit) => limit,
                         Err(word) => {
-                            eprintln!("{}read: {word}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = false;
@@ -7410,8 +7415,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
                         Ok(limit) => limit,
                         Err(word) => {
-                            eprintln!("{}read: {word}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = true;
@@ -7459,8 +7468,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(Some(&word[3..])) {
                         Ok(limit) => limit,
                         Err(value) => {
-                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = false;
@@ -7471,8 +7484,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(Some(&word[3..])) {
                         Ok(limit) => limit,
                         Err(value) => {
-                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = true;
@@ -7482,8 +7499,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(Some(&word[2..])) {
                         Ok(limit) => limit,
                         Err(value) => {
-                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = false;
@@ -7493,8 +7514,12 @@ impl Executor {
                     char_limit = match read_char_limit_argument(Some(&word[2..])) {
                         Ok(limit) => limit,
                         Err(value) => {
-                            eprintln!("{}read: {value}: invalid number", self.diagnostic_prefix());
-                            return 1;
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
                         }
                     };
                     exact_char_limit = true;
@@ -7580,8 +7605,18 @@ impl Executor {
             };
             return status;
         }
-        eprintln!("{}read: command not found", self.diagnostic_prefix());
-        127
+        let _ = writeln!(
+            &mut stderr,
+            "{}read: command not found",
+            self.diagnostic_prefix()
+        );
+        self.finish_read_error(cmd, &stderr, 127)
+    }
+
+    fn finish_read_error(&self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
+        self.write_buffered_builtin_output(cmd, &[], stderr)
+            .map(|_| status)
+            .unwrap_or(1)
     }
 
     fn read_input_for_command(
