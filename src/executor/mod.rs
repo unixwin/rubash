@@ -3459,6 +3459,7 @@ impl Executor {
                 self.save_local_names(&args);
                 self.initialize_non_inherited_locals(&args);
             }
+            self.write_local_compound_readonly_assignment_errors(&args, &mut stderr)?;
             crate::builtins::declare::execute_with_io(
                 &args,
                 &mut self.env_vars,
@@ -3469,6 +3470,34 @@ impl Executor {
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
+    }
+
+    fn write_local_compound_readonly_assignment_errors<W>(
+        &self,
+        args: &[String],
+        stderr: &mut W,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        for arg in args {
+            let Some((name, value)) = split_assignment_word(arg) else {
+                continue;
+            };
+            if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                continue;
+            }
+            let (name, _) = assignment_name_and_append(name);
+            if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+                writeln!(
+                    stderr,
+                    "{}{}: readonly variable",
+                    self.diagnostic_prefix(),
+                    name
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn initialize_non_inherited_locals(&mut self, args: &[String]) {
