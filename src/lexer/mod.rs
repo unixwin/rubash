@@ -451,26 +451,55 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    let mut comment_start = true;
+    let mut in_comment = false;
 
     while index < chars.len() {
         let ch = chars[index];
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                comment_start = true;
+            }
+            index += 1;
+            continue;
+        }
         if escaped {
             escaped = false;
+            comment_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\n' && !single && !double && !backtick && depth == 0 {
+            comment_start = true;
+            index += 1;
+            continue;
+        }
+        if ch == '#' && !single && !double && !backtick && depth == 0 && comment_start {
+            in_comment = true;
+            index += 1;
+            continue;
+        }
+        if ch.is_whitespace() && !single && !double && !backtick && depth == 0 {
+            comment_start = true;
             index += 1;
             continue;
         }
         if ch == '\\' && !single {
             escaped = true;
+            comment_start = false;
             index += 1;
             continue;
         }
         if ch == '\'' && !double {
             single = !single;
+            comment_start = false;
             index += 1;
             continue;
         }
         if ch == '"' && !single {
             double = !double;
+            comment_start = false;
             index += 1;
             continue;
         }
@@ -480,11 +509,13 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
         }
         if ch == '`' && depth == 0 {
             backtick = !backtick;
+            comment_start = false;
             index += 1;
             continue;
         }
         if ch == '$' && chars.get(index + 1) == Some(&'(') {
             depth += 1;
+            comment_start = false;
             index += 2;
             continue;
         }
@@ -516,6 +547,9 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
             depth += 1;
         } else if depth > 0 && ch == ')' {
             depth -= 1;
+        }
+        if !single && !double && !backtick && depth == 0 {
+            comment_start = false;
         }
         index += 1;
     }
