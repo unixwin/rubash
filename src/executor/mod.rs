@@ -6736,6 +6736,10 @@ impl Executor {
                 writeln!(stdout, "    v='^A'")?;
                 continue;
             }
+            if command.words.is_empty() && !command.assignments.is_empty() {
+                writeln!(stdout, "    {}", function_assignment_text(command))?;
+                continue;
+            }
             if let Some(line) = self.function_command_description_line(command) {
                 writeln!(stdout, "    {line}")?;
                 self.write_function_heredoc_body(command, stdout)?;
@@ -6761,6 +6765,10 @@ impl Executor {
         for command in body {
             if command.assignments.contains_key("v") {
                 println!("    v='^A'");
+                continue;
+            }
+            if command.words.is_empty() && !command.assignments.is_empty() {
+                println!("    {}", function_assignment_text(command));
                 continue;
             }
             if let Some(line) = self.function_command_description_line(command) {
@@ -14771,18 +14779,83 @@ fn exported_function_env_value(body: &[CommandNode]) -> String {
     if commands.is_empty() {
         "() { :; }".to_string()
     } else {
-        format!("() {{ {}; }}", commands.join("; "))
+        let mut output = String::from("() {");
+        for command in commands {
+            output.push('\n');
+            output.push_str(&command);
+        }
+        output.push_str("\n}");
+        output
     }
 }
 
 fn exported_function_command_text(command: &CommandNode) -> Option<String> {
-    if command.words.is_empty() {
+    if command.words.is_empty() && command.assignments.is_empty() {
         return None;
     }
+    if command.words.is_empty() {
+        return Some(function_assignment_text(command));
+    }
+
+    let mut line = command.words.join(" ");
+    if let Some(delimiter) = &command.heredoc_delimiter {
+        line.push_str(" <<");
+        line.push_str(delimiter);
+    }
+    append_exported_redirect(&mut line, command.redirect_in.as_ref(), "<");
+    append_exported_redirect(
+        &mut line,
+        command.redirect_out.as_ref(),
+        command
+            .redirect_out
+            .as_ref()
+            .filter(|redirect| redirect.clobber)
+            .map(|_| ">|")
+            .unwrap_or(">"),
+    );
+    append_exported_redirect(&mut line, command.append.as_ref(), ">>");
+    append_exported_redirect(
+        &mut line,
+        command.redirect_err.as_ref(),
+        command
+            .redirect_err
+            .as_ref()
+            .filter(|redirect| redirect.clobber)
+            .map(|_| "2>|")
+            .unwrap_or("2>"),
+    );
+    append_exported_redirect(&mut line, command.redirect_err_append.as_ref(), "2>>");
+    if let (Some(body), Some(delimiter)) = (&command.heredoc, &command.heredoc_delimiter) {
+        let body = body.strip_prefix('\x1e').unwrap_or(body);
+        line.push('\n');
+        line.push_str(body);
+        line.push_str(delimiter);
+        return Some(line);
+    }
+
     if let Some(here_string) = &command.here_string {
         Some(format!("{} <<< {}", command.words.join(" "), here_string))
     } else {
-        Some(command.words.join(" "))
+        Some(line)
+    }
+}
+
+fn function_assignment_text(command: &CommandNode) -> String {
+    let mut assignments = command.assignments.iter().collect::<Vec<_>>();
+    assignments.sort_by(|(left, _), (right, _)| left.cmp(right));
+    assignments
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn append_exported_redirect(line: &mut String, redirect: Option<&Redirect>, op: &str) {
+    if let Some(redirect) = redirect {
+        line.push(' ');
+        line.push_str(op);
+        line.push(' ');
+        line.push_str(&redirect.target);
     }
 }
 
