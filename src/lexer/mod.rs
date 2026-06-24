@@ -160,11 +160,11 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         for token in &mut line_tokens {
             token.position = logical_start_line;
         }
-        let delimiter = heredoc_delimiter(&line_tokens);
+        let delimiter = heredoc_delimiter(&line_tokens, &logical_line);
         output.append(&mut line_tokens);
         logical_line.clear();
 
-        if let Some(delimiter) = delimiter {
+        if let Some((delimiter, quoted)) = delimiter {
             let mut body = String::new();
             for body_line in lines.by_ref() {
                 position += body_line.len() + 1;
@@ -174,6 +174,9 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
                 }
                 body.push_str(body_line);
                 body.push('\n');
+            }
+            if quoted {
+                body.insert(0, '\x1e');
             }
             output.push(Token::new(TokenKind::HereDocBody, &body, position));
         }
@@ -204,11 +207,25 @@ fn tokenize_plain(input: &str) -> Vec<Token> {
     tokens
 }
 
-fn heredoc_delimiter(tokens: &[Token]) -> Option<String> {
+fn heredoc_delimiter(tokens: &[Token], source: &str) -> Option<(String, bool)> {
     tokens
         .windows(2)
         .find(|pair| pair[0].kind == TokenKind::HereDoc)
-        .map(|pair| pair[1].value.clone())
+        .map(|pair| (pair[1].value.clone(), heredoc_delimiter_is_quoted(source)))
+}
+
+fn heredoc_delimiter_is_quoted(source: &str) -> bool {
+    let Some(index) = source.find("<<") else {
+        return false;
+    };
+    let mut chars = source[index + 2..].chars().peekable();
+    if chars.peek() == Some(&'-') {
+        chars.next();
+    }
+    while chars.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
+        chars.next();
+    }
+    matches!(chars.peek(), Some('\'' | '"' | '\\'))
 }
 
 fn has_unclosed_quotes(input: &str) -> bool {
