@@ -162,6 +162,11 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         if has_unclosed_command_substitution(&logical_line) {
             continue;
         }
+        if has_unclosed_brace_group(&logical_line)
+            && !opens_function_body_after_previous_signature(&logical_line, &output)
+        {
+            continue;
+        }
 
         let mut line_tokens = tokenize_plain(&logical_line);
         for token in &mut line_tokens {
@@ -497,6 +502,55 @@ fn has_unclosed_command_substitution(input: &str) -> bool {
     }
 
     depth > 0
+}
+
+fn has_unclosed_brace_group(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    if !(trimmed.starts_with('{')
+        || input.contains("&& {")
+        || input.contains("|| {")
+        || input.contains("; {"))
+    {
+        return false;
+    }
+
+    let tokens = tokenize_plain(input);
+    tokens.iter().enumerate().any(|(index, token)| {
+        token.kind == TokenKind::Keyword
+            && token.value.starts_with('{')
+            && !token.value.trim_end().ends_with('}')
+            && !is_function_body_open_brace(&tokens, index)
+    })
+}
+
+fn is_function_body_open_brace(tokens: &[Token], brace_index: usize) -> bool {
+    let previous = tokens[..brace_index]
+        .iter()
+        .rposition(|token| token.kind != TokenKind::Semicolon);
+    let Some(previous) = previous else {
+        return false;
+    };
+
+    if tokens[previous].value == ")" {
+        return true;
+    }
+
+    previous >= 1
+        && tokens[previous - 1].kind == TokenKind::Keyword
+        && tokens[previous - 1].value == "function"
+        && tokens[previous].kind == TokenKind::Word
+}
+
+fn opens_function_body_after_previous_signature(input: &str, output: &[Token]) -> bool {
+    if input.trim() != "{" {
+        return false;
+    }
+
+    output
+        .iter()
+        .rev()
+        .find(|token| token.kind != TokenKind::Semicolon)
+        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == ")")
 }
 
 fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
