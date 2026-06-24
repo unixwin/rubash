@@ -18,6 +18,7 @@ const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
+const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 
 pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
@@ -359,6 +360,7 @@ where
     let uppercase = marked_vars(variables, UPPERCASE_VARS);
     let lowercase = marked_vars(variables, LOWERCASE_VARS);
     let namerefs = marked_vars(variables, NAMEREF_VARS);
+    let declared_unset = marked_vars(variables, DECLARED_UNSET_VARS);
     let names_to_print = if names.is_empty() {
         declaration_names_to_print(
             variables,
@@ -395,7 +397,7 @@ where
         };
         if let Some(value) = variables.get(&name) {
             print_declaration(&name, value, attrs, stdout)?;
-        } else if attrs.has_scalar_attribute() {
+        } else if attrs.has_scalar_attribute() || declared_unset.contains(&name) {
             print_unset_declaration(&name, attrs, stdout)?;
         } else {
             writeln!(
