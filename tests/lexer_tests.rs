@@ -225,6 +225,20 @@ mod quotes {
         assert_eq!(tokens[0].value, "echo");
         assert_eq!(tokens[1].value, "foo\nbar");
     }
+
+    #[test]
+    fn test_pipeline_multiline_single_quote_is_one_word() {
+        let tokens = tokenize("printf x | awk '\n/^}$/ { print $0 }\n/.*/ { next }\n'");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].value, "printf");
+        assert_eq!(tokens[1].value, "x");
+        assert_eq!(tokens[2].kind, TokenKind::Pipe);
+        assert_eq!(tokens[3].value, "awk");
+        assert_eq!(
+            tokens[4].value,
+            "\n/^}\x1f/ { print \x1f0 }\n/.*/ { next }\n"
+        );
+    }
 }
 
 // ============================================================================
