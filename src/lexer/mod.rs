@@ -163,6 +163,9 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         {
             continue;
         }
+        if has_unclosed_command_substitution(&logical_line) {
+            continue;
+        }
 
         let mut line_tokens = tokenize_plain(&logical_line);
         for token in &mut line_tokens {
@@ -359,6 +362,117 @@ fn has_unclosed_quotes(input: &str) -> bool {
     }
 
     single || double
+}
+
+fn has_unclosed_command_substitution(input: &str) -> bool {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single {
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if depth > 0 && ch == '<' && chars.get(index + 1) == Some(&'<') {
+            index = skip_heredoc_in_chars(&chars, index);
+            continue;
+        }
+        if depth > 0 && ch == '(' {
+            depth += 1;
+        } else if depth > 0 && ch == ')' {
+            depth -= 1;
+        }
+        index += 1;
+    }
+
+    depth > 0
+}
+
+fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
+    let mut index = start + 2;
+    let strip_tabs = if chars.get(index) == Some(&'-') {
+        index += 1;
+        true
+    } else {
+        false
+    };
+    while chars.get(index).is_some_and(|ch| matches!(ch, ' ' | '\t')) {
+        index += 1;
+    }
+    let delimiter_start = index;
+    while chars
+        .get(index)
+        .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
+    {
+        index += 1;
+    }
+    let delimiter = chars[delimiter_start..index]
+        .iter()
+        .collect::<String>()
+        .replace(['\'', '"', '\\'], "");
+    if delimiter.is_empty() {
+        return index;
+    }
+    while chars.get(index).is_some_and(|ch| *ch != '\n') {
+        index += 1;
+    }
+    if chars.get(index) == Some(&'\n') {
+        index += 1;
+    }
+
+    while index < chars.len() {
+        let line_start = index;
+        while chars.get(index).is_some_and(|ch| *ch != '\n') {
+            index += 1;
+        }
+        let line = chars[line_start..index].iter().collect::<String>();
+        let comparable = if strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if comparable == delimiter {
+            if chars.get(index) == Some(&'\n') {
+                index += 1;
+            }
+            break;
+        }
+        if chars.get(index) == Some(&'\n') {
+            index += 1;
+        }
+    }
+
+    index
 }
 
 fn is_multiline_alias_definition(input: &str) -> bool {
@@ -721,7 +835,62 @@ impl<'a> Lexer<'a> {
                 }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),
+                '<' if self.peek() == Some('<') => self.skip_heredoc_in_command_substitution(),
                 _ => {}
+            }
+        }
+    }
+
+    fn skip_heredoc_in_command_substitution(&mut self) {
+        self.advance();
+        let strip_tabs = if self.peek() == Some('-') {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        while self.peek().is_some_and(|ch| matches!(ch, ' ' | '\t')) {
+            self.advance();
+        }
+        let delimiter_start = self.position;
+        while self
+            .peek()
+            .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
+        {
+            self.advance();
+        }
+        let delimiter = from_utf8(&self.input[delimiter_start..self.position])
+            .unwrap_or("")
+            .replace(['\'', '"', '\\'], "");
+        if delimiter.is_empty() {
+            return;
+        }
+        while self.peek().is_some_and(|ch| ch != '\n') {
+            self.advance();
+        }
+        if self.peek() == Some('\n') {
+            self.advance();
+        }
+
+        while !self.at_end() {
+            let line_start = self.position;
+            while self.peek().is_some_and(|ch| ch != '\n') {
+                self.advance();
+            }
+            let line = from_utf8(&self.input[line_start..self.position]).unwrap_or("");
+            let comparable = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if comparable == delimiter {
+                if self.peek() == Some('\n') {
+                    self.advance();
+                }
+                break;
+            }
+            if self.peek() == Some('\n') {
+                self.advance();
             }
         }
     }

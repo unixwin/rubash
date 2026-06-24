@@ -400,19 +400,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::HereDocBody => {
                 note_command_line(&mut current_cmd, token);
-                if let Some(redirect) = current_cmd
-                    .heredoc_redirects
-                    .iter_mut()
-                    .find(|redirect| redirect.body.is_none())
-                {
-                    redirect.body = Some(token.value.clone());
-                    if redirect.fd.is_none() {
-                        current_cmd.heredoc = Some(token.value.clone());
-                        current_cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
-                    }
-                } else {
-                    current_cmd.heredoc = Some(token.value.clone());
-                }
+                assign_heredoc_body(&mut current_cmd, &mut ast, token.value.clone());
             }
             TokenKind::And | TokenKind::Or => {
                 if command_is_open_conditional(&current_cmd) {
@@ -1189,6 +1177,35 @@ fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
     Some(fd)
 }
 
+fn assign_heredoc_body(current_cmd: &mut CommandNode, ast: &mut Ast, body: String) {
+    if fill_pending_heredoc_body(current_cmd, &body) {
+        return;
+    }
+    for command in ast.commands.iter_mut().rev() {
+        if fill_pending_heredoc_body(command, &body) {
+            return;
+        }
+    }
+    current_cmd.heredoc = Some(body);
+}
+
+fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str) -> bool {
+    let Some(redirect) = cmd
+        .heredoc_redirects
+        .iter_mut()
+        .find(|redirect| redirect.body.is_none())
+    else {
+        return false;
+    };
+
+    redirect.body = Some(body.to_string());
+    if redirect.fd.is_none() {
+        cmd.heredoc = Some(body.to_string());
+        cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
+    }
+    true
+}
+
 fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
     tokens
         .get(index)
@@ -1296,6 +1313,18 @@ mod unit_tests {
             ast.commands[0].heredoc_redirects[1].body.as_deref(),
             Some("two\n")
         );
+    }
+
+    #[test]
+    fn test_parse_piped_heredoc_body_belongs_to_left_command() {
+        let tokens = tokenize("cat <<EOF | sort -u\nbody\nEOF");
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 2);
+        assert_eq!(ast.commands[0].words, vec!["cat"]);
+        assert_eq!(ast.commands[0].heredoc.as_deref(), Some("body\n"));
+        assert_eq!(ast.commands[1].words, vec!["sort", "-u"]);
+        assert!(ast.commands[1].heredoc.is_none());
     }
 
     #[test]
