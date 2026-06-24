@@ -1928,7 +1928,7 @@ impl Executor {
         }
 
         if let Some(for_command) = &cmd.for_command {
-            return self.execute_for_command(for_command);
+            return self.execute_for_command_with_redirects(for_command, cmd);
         }
 
         if let Some(case_command) = &cmd.case_command {
@@ -4043,6 +4043,43 @@ impl Executor {
             self.exit_code = 0;
         }
         Ok(())
+    }
+
+    fn execute_for_command_with_redirects(
+        &mut self,
+        for_command: &ForCommand,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
+        let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        if let Some(input) = self.loop_redirect_input(cmd) {
+            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+            self.env_vars
+                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+        }
+
+        let result = self.execute_for_command(for_command);
+        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
+        restore_optional_env_var(
+            &mut self.env_vars,
+            FUNCTION_STDIN_OFFSET,
+            old_function_stdin_offset,
+        );
+        result
+    }
+
+    fn loop_redirect_input(&mut self, cmd: &CommandNode) -> Option<String> {
+        let redirect = cmd.redirect_in.as_ref()?;
+        if let Some(source) = redirect
+            .target
+            .strip_prefix("<(")
+            .and_then(|target| target.strip_suffix(')'))
+        {
+            return self.process_substitution_output(source);
+        }
+
+        let target = self.expand_word(&redirect.target);
+        fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok()
     }
 
     fn execute_arithmetic_for_command(
@@ -7951,6 +7988,21 @@ impl Executor {
         exact_char_limit: bool,
     ) -> Option<String> {
         if let Some(redirect) = &cmd.redirect_in {
+            if let Some(source) = redirect
+                .target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                if let Some(output) = self.process_substitution_output(source) {
+                    return Some(trim_read_input(
+                        output,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                    ));
+                }
+            }
+
             if let Some(fd) = redirect.target.strip_prefix('&') {
                 if let Ok(fd) = fd.parse::<u32>() {
                     if let Some(line) =
@@ -7973,6 +8025,31 @@ impl Executor {
 
         self.read_function_stdin(delimiter, char_limit, exact_char_limit)
             .or_else(|| self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit))
+    }
+
+    fn process_substitution_output(&mut self, source: &str) -> Option<String> {
+        let tokens = crate::lexer::tokenize(source);
+        let ast = crate::parser::parse(&tokens);
+        if ast.commands.is_empty() {
+            return None;
+        }
+
+        let saved_env = self.env_vars.clone();
+        let saved_exit_code = self.exit_code;
+        let saved_capture = self.stdout_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        let result = self.execute_ast(&ast);
+        let output = self.stdout_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_capture;
+        self.env_vars = saved_env;
+        self.exit_code = saved_exit_code;
+
+        match result {
+            Ok(()) | Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::Return(_)) => {
+                Some(String::from_utf8_lossy(&output).to_string())
+            }
+            Err(_) => None,
+        }
     }
 
     fn read_virtual_fd_stdin(

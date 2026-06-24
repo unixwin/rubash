@@ -311,7 +311,16 @@ pub fn parse(tokens: &[Token]) -> Ast {
                     push_command_word(&mut current_cmd, token);
                 } else {
                     note_command_line(&mut current_cmd, token);
-                    if i + 1 < tokens.len()
+                    if let Some((target, next_i)) = process_substitution_redirect_target(tokens, i)
+                    {
+                        current_cmd.redirect_in = Some(Redirect {
+                            fd: None,
+                            target,
+                            append: false,
+                            clobber: false,
+                        });
+                        i = next_i;
+                    } else if i + 1 < tokens.len()
                         && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
                     {
                         current_cmd.redirect_in = Some(Redirect {
@@ -513,6 +522,57 @@ pub fn parse(tokens: &[Token]) -> Ast {
     ast
 }
 
+fn process_substitution_redirect_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(String, usize)> {
+    if tokens.get(redirect_index)?.kind != TokenKind::RedirectIn {
+        return None;
+    }
+
+    let mut index = redirect_index + 1;
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::RedirectIn)
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        index += 2;
+    } else if tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        index += 1;
+    } else {
+        return None;
+    }
+
+    let source_start = index;
+    let mut depth = 1usize;
+    while index < tokens.len() {
+        if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "(" {
+            depth += 1;
+        } else if tokens[index].kind == TokenKind::Keyword && tokens[index].value == ")" {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        index += 1;
+    }
+    if index >= tokens.len() {
+        return None;
+    }
+
+    let source = tokens[source_start..index]
+        .iter()
+        .map(|token| token.value.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some((format!("<({source})"), index))
+}
+
 fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports all `for_command`
     // grammar alternatives, nested compound lists, redirections on compound
@@ -598,7 +658,9 @@ fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usi
         arithmetic: None,
         body,
     });
-    Some((command, i + 1))
+    let mut next_i = i + 1;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    Some((command, next_i))
 }
 
 fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
@@ -868,6 +930,19 @@ fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &
         let Some(token) = tokens.get(*index) else {
             break;
         };
+        if token.kind == TokenKind::RedirectIn {
+            if let Some((target, next_i)) = process_substitution_redirect_target(tokens, *index) {
+                command.redirect_in = Some(Redirect {
+                    fd: None,
+                    target,
+                    append: false,
+                    clobber: false,
+                });
+                *index = next_i + 1;
+                continue;
+            }
+        }
+
         let Some(target) = tokens.get(*index + 1).filter(|next| {
             matches!(
                 next.kind,
