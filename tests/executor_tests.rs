@@ -9258,6 +9258,39 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_alias_heredoc_reads_following_lines_and_nested_alias_body() {
+        let first_output_path = "target/rubash-alias-heredoc-following-output.txt";
+        let nested_output_path = "target/rubash-alias-heredoc-nested-output.txt";
+        let _ = fs::remove_file(first_output_path);
+        let _ = fs::remove_file(nested_output_path);
+        let input = format!(
+            "shopt -s expand_aliases\n\
+             alias 'headplus=cat > {first_output_path} <<EOF\nhello'\n\
+             headplus\nworld\nEOF\n\
+             alias head='cat > {nested_output_path} <<\\END' body='head\nhere-document\nEND'\n\
+             body"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(first_output_path).unwrap(),
+            "hello\nworld\n"
+        );
+        assert_eq!(
+            fs::read_to_string(nested_output_path).unwrap(),
+            "here-document\n"
+        );
+        let _ = fs::remove_file(first_output_path);
+        let _ = fs::remove_file(nested_output_path);
+    }
+
+    #[test]
     fn test_type_invalid_option_redirects_stderr() {
         let status_path = "target/rubash-type-invalid-option-status.txt";
         let error_path = "target/rubash-type-invalid-option-error.txt";
