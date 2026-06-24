@@ -142,6 +142,29 @@ fn script_arrayops_example_manipulates_arrays() {
 }
 
 #[test]
+fn script_array_stuff_example_runs_array_workflows() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("array-stuff")
+        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1 2 3 4 5 6 7\n\
+         7 6 5 4 3 2 1\n\
+         1 2 3 4 5 6 7\n\
+         1 2 3 4 5 6\n\
+         3 4 5 6\n\
+         4 5 6\n\
+         \n\
+         1 1 2 2 3 3 4 5 5 6 9\n\
+         1 2 3 4 5 6 9\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();

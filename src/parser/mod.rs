@@ -918,7 +918,7 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
 
         if matches!(
             tokens[i].kind,
-            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
+            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment | TokenKind::CommandSubst
         ) {
             values.push(quote_compound_assignment_word(&tokens[i].value));
         }

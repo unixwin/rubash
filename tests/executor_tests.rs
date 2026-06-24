@@ -2785,6 +2785,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unset_indexed_array_arithmetic_subscript() {
+        let output_path = "target/rubash-unset-array-arith-subscript-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); alen=${{#arr[@]}}; unset 'arr[$alen-1]'; echo ${{!arr[@]}} / ${{arr[@]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0 1 / zero one\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_indexed_array_arithmetic_subscript_assignment_and_expansion() {
         let output_path = "target/rubash-array-arith-subscript-output.txt";
         let _ = fs::remove_file(output_path);
@@ -9039,6 +9058,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
             "before\nalpha\nbeta\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_eval_expands_assignment_lhs_to_array_name() {
+        let output_path = "target/rubash-eval-array-lhs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ local -a r; r=(three two one); eval $1=\\( \\\"\\$\\{{r\\[@\\]\\}}\\\" \\); }}; \
+             f arr; declare -p arr > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -a arr=([0]=\"three\" [1]=\"two\" [2]=\"one\")\n"
         );
         let _ = fs::remove_file(output_path);
     }
