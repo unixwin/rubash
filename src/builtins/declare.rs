@@ -629,10 +629,15 @@ where
     W: Write,
 {
     if attrs.assoc {
+        let attrs = declaration_assoc_attrs(attrs);
         if value.is_empty() {
-            writeln!(stdout, "declare -A {name}")
+            writeln!(stdout, "declare {attrs} {name}")
         } else {
-            writeln!(stdout, "declare -A {name}={}", format_assoc_value(value))
+            writeln!(
+                stdout,
+                "declare {attrs} {name}={}",
+                format_assoc_value(value)
+            )
         }
     } else if attrs.array {
         let attrs = declaration_array_attrs(attrs);
@@ -702,6 +707,29 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
 
 fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
     let mut flags = String::from("-a");
+    if attrs.nameref {
+        flags.push('n');
+    }
+    if attrs.integer {
+        flags.push('i');
+    }
+    if attrs.readonly {
+        flags.push('r');
+    }
+    if attrs.exported {
+        flags.push('x');
+    }
+    if attrs.lowercase {
+        flags.push('l');
+    }
+    if attrs.uppercase {
+        flags.push('u');
+    }
+    flags
+}
+
+fn declaration_assoc_attrs(attrs: DeclarationAttrs) -> String {
+    let mut flags = String::from("-A");
     if attrs.nameref {
         flags.push('n');
     }
@@ -1129,11 +1157,7 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
 }
 
 fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> Option<usize> {
-    let index = left
-        .strip_prefix('[')?
-        .strip_suffix(']')?
-        .parse::<i128>()
-        .ok()?;
+    let index = eval_arith_value(left.strip_prefix('[')?.strip_suffix(']')?);
     if index >= 0 {
         return usize::try_from(index).ok();
     }

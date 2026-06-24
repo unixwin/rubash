@@ -3613,6 +3613,50 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_readonly_assoc_array_prints_combined_attrs() {
+        let output_path = target_test_path("rubash-declare-readonly-assoc-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input =
+            format!("declare -rA FOOBAR=([foo]=bar); declare -p FOOBAR > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -Ar FOOBAR=([foo]=\"bar\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_indexed_array_arithmetic_subscript_names_default_to_zero() {
+        let output_path = target_test_path("rubash-declare-indexed-named-subscript-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input =
+            format!("declare -ra FOOBAR2=([foo]=bar); declare -p FOOBAR2 > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -ar FOOBAR2=([0]=\"bar\")\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_indexed_array_assignment_resolves_negative_indices() {
         let output_path = "target/rubash-declare-indexed-array-negative-output.txt";
         let _ = fs::remove_file(output_path);
