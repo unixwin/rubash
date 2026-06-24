@@ -13226,12 +13226,26 @@ impl Executor {
         if words.first().map(String::as_str) != Some("mktemp") {
             return None;
         }
-        let template = match words {
-            [_] => "rubash-mktemp.XXXXXX",
-            [_, flag, template] if flag == "-t" => template.as_str(),
-            [_, template] => template.as_str(),
-            _ => return None,
-        };
+        let mut directory = false;
+        let mut template = "rubash-mktemp.XXXXXX";
+        let mut index = 1;
+        while index < words.len() {
+            match words[index].as_str() {
+                "-d" => {
+                    directory = true;
+                    index += 1;
+                }
+                "-t" => {
+                    template = words.get(index + 1)?.as_str();
+                    index += 2;
+                }
+                value if value.starts_with('-') => return None,
+                value => {
+                    template = value;
+                    index += 1;
+                }
+            }
+        }
         let unique = format!(
             "{}-{}",
             std::process::id(),
@@ -13251,7 +13265,11 @@ impl Executor {
             .cloned()
             .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
         let path = std::path::Path::new(&dir).join(filename);
-        std::fs::File::create(&path).ok()?;
+        if directory {
+            std::fs::create_dir(&path).ok()?;
+        } else {
+            std::fs::File::create(&path).ok()?;
+        }
         self.last_command_substitution_status.set(Some(0));
         Some(shell_display_path(
             &path.to_string_lossy().replace('\\', "/"),
