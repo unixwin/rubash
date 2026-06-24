@@ -121,7 +121,6 @@ const INTL_TEST_DONE: &str = "__RUBASH_INTL_TEST_DONE";
 const NAMEREF_TEST_DONE: &str = "__RUBASH_NAMEREF_TEST_DONE";
 const NEW_EXP_TEST_DONE: &str = "__RUBASH_NEW_EXP_TEST_DONE";
 const ALIAS_TEST_DONE: &str = "__RUBASH_ALIAS_TEST_DONE";
-const APPENDOP_TEST_DONE: &str = "__RUBASH_APPENDOP_TEST_DONE";
 const BUILTINS_TEST_DONE: &str = "__RUBASH_BUILTINS_TEST_DONE";
 const GLOB_TEST_DONE: &str = "__RUBASH_GLOB_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
@@ -199,7 +198,6 @@ const INTL_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/intl.r
 const NAMEREF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nameref.right");
 const NEW_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/new-exp.right");
 const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias.right");
-const APPENDOP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/appendop.right");
 const BUILTINS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/builtins.right");
 const GLOB_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/glob.right");
 
@@ -1027,9 +1025,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_alias_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_appendop_script() {
             return Ok(());
         }
         if self.execute_upstream_builtins_script() {
@@ -4870,15 +4865,6 @@ impl Executor {
             ALIAS_TEST_DONE,
             "alias.tests",
             ALIAS_TEST_OUTPUT,
-            UpstreamOutputStream::Stdout,
-        )
-    }
-
-    fn execute_upstream_appendop_script(&mut self) -> bool {
-        self.emit_upstream_text_script(
-            APPENDOP_TEST_DONE,
-            "appendop.tests",
-            APPENDOP_TEST_OUTPUT,
             UpstreamOutputStream::Stdout,
         )
     }
@@ -9878,7 +9864,11 @@ impl Executor {
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
-                append_assoc_value(&current, &value)
+                if value.starts_with('(') && value.ends_with(')') {
+                    append_assoc_value(&current, &value)
+                } else {
+                    append_assoc_scalar_value(&current, &value)
+                }
             } else if is_array_storage(&current)
                 || is_marked_var(&self.env_vars, ARRAY_VARS, base_name)
             {
@@ -14866,6 +14856,17 @@ fn append_assoc_value(current: &str, value: &str) -> String {
         entries.push(("0".to_string(), unquote_storage_value(&token)));
     }
 
+    format_assoc_storage(entries)
+}
+
+fn append_assoc_scalar_value(current: &str, value: &str) -> String {
+    let mut entries = assoc_entries(current);
+    let value = unquote_storage_value(value);
+    if let Some((_, entry_value)) = entries.iter_mut().rev().find(|(key, _)| key == "0") {
+        *entry_value = value;
+    } else {
+        entries.push(("0".to_string(), value));
+    }
     format_assoc_storage(entries)
 }
 
