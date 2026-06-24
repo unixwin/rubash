@@ -11516,8 +11516,13 @@ impl Executor {
 
     fn eval_parameter_substring_offset(&self, value: &str) -> Option<isize> {
         let expression = value
-            .strip_prefix('(')
-            .and_then(|inner| inner.strip_suffix(')'))
+            .strip_prefix("$((")
+            .and_then(|inner| inner.strip_suffix("))"))
+            .or_else(|| {
+                value
+                    .strip_prefix('(')
+                    .and_then(|inner| inner.strip_suffix(')'))
+            })
             .unwrap_or(value)
             .trim();
         let expression = self.expand_arithmetic_special_parameters(expression);
@@ -13599,8 +13604,24 @@ impl Executor {
         word: &str,
         kind: Option<&TokenKind>,
     ) -> Option<Vec<String>> {
-        if word.strip_prefix('\x1d') == Some("${@}") {
+        let word = word
+            .strip_prefix('"')
+            .and_then(|word| word.strip_suffix('"'))
+            .unwrap_or(word);
+        let word = word.strip_prefix('\x1d').unwrap_or(word);
+        if word == "${@}" {
             return Some(self.positional_params.clone());
+        }
+        if let Some(name) = word.strip_prefix("${").and_then(|word| word.strip_suffix('}')) {
+            if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+                if var_name == "@" {
+                    return Some(positional_parameter_substring(
+                        &self.positional_params,
+                        offset,
+                        length,
+                    ));
+                }
+            }
         }
         if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
             return Some(self.positional_params.clone());
