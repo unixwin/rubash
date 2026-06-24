@@ -2066,7 +2066,7 @@ impl Executor {
             return result;
         }
 
-        if self.execute_assignment_words(cmd) {
+        if self.execute_integer_assignment_suffix(cmd) || self.execute_assignment_words(cmd) {
             return Ok(());
         }
 
@@ -10099,6 +10099,38 @@ impl Executor {
         true
     }
 
+    fn execute_integer_assignment_suffix(&mut self, cmd: &CommandNode) -> bool {
+        if cmd.assignments.len() != 1 || cmd.words.len() != 1 {
+            return false;
+        }
+        let Some(suffix) = cmd
+            .words
+            .first()
+            .filter(|word| arithmetic_assignment_suffix(word))
+        else {
+            return false;
+        };
+        let Some((name, value)) = cmd.assignments.iter().next() else {
+            return false;
+        };
+        let (base_name, _) = assignment_name_and_append(name);
+        if !is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
+            || !value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+        {
+            return false;
+        }
+
+        let mut value = value.clone();
+        value.push_str(suffix);
+        let expanded_value = self.expand_assignment_value(&value);
+        self.exit_code = if self.apply_shell_assignment(name, expanded_value) {
+            0
+        } else {
+            1
+        };
+        true
+    }
+
     fn execute_array_element_assignment(&mut self, cmd: &CommandNode) -> bool {
         // TODO(variables.c/array.c/assoc.c): Bash array element assignment
         // carries typed SHELL_VAR attributes. This stores the element count
@@ -10437,6 +10469,12 @@ impl Executor {
             && is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
         {
             append_assoc_value("()", &value)
+        } else if compound_assignment
+            && value.starts_with('(')
+            && value.ends_with(')')
+            && is_marked_var(&self.env_vars, INTEGER_VARS, base_name)
+        {
+            self.eval_integer_assignment_value(&value).to_string()
         } else if compound_assignment
             && value.starts_with('(')
             && value.ends_with(')')
@@ -14762,11 +14800,23 @@ impl Executor {
         }
 
         let mut value = None;
-        for expression in expressions {
-            value = self.eval_arithmetic_command_value(expression);
+        let mut index = 0;
+        while index < expressions.len() {
+            let mut expression = expressions[index].clone();
+            if expression.contains(COMPOUND_ASSIGNMENT_MARKER)
+                && expressions
+                    .get(index + 1)
+                    .is_some_and(|word| arithmetic_assignment_suffix(word))
+            {
+                expression.push_str(&expressions[index + 1]);
+                index += 1;
+            }
+            let expression = arithmetic_expression_arg(&expression);
+            value = self.eval_arithmetic_command_value(&expression);
             if value.is_none() {
                 return 1;
             }
+            index += 1;
         }
         match value {
             Some(0) | None => 1,
@@ -16678,6 +16728,17 @@ fn assignment_name_and_append(name: &str) -> (&str, bool) {
         .unwrap_or((name, false))
 }
 
+fn arithmetic_expression_arg(expression: &str) -> String {
+    expression.replace(COMPOUND_ASSIGNMENT_MARKER, "")
+}
+
+fn arithmetic_assignment_suffix(value: &str) -> bool {
+    value
+        .as_bytes()
+        .first()
+        .is_some_and(|ch| matches!(ch, b'+' | b'-' | b'*' | b'/' | b'%'))
+}
+
 fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((left, _)) = word.split_once('=') else {
         return false;
@@ -17847,9 +17908,12 @@ impl ConditionalArithParser<'_> {
     }
 
     fn assign_lvalue(&mut self, lvalue: &ArithLValue, op: &str, rhs: i128) -> Option<i128> {
+        if op == "=" {
+            self.set_lvalue(lvalue, rhs);
+            return Some(rhs);
+        }
         let current = self.lvalue_value(lvalue)?;
         let value = match op {
-            "=" => rhs,
             "+=" => bash_arith(current + rhs),
             "-=" => bash_arith(current - rhs),
             "*=" => bash_arith(current * rhs),

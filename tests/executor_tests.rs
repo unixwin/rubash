@@ -16206,7 +16206,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         let output_path = "target/rubash-let-arithmetic-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "let n=1 n+=2 n; echo $? $n > {output_path}; let n=0; echo $? $n >> {output_path}; let n=2 n**=3 n-8; echo $? $n >> {output_path}; let n/=0; echo $? $n >> {output_path}; let; echo $? >> {output_path}"
+            "let n=1 n+=2 n; echo $? $n > {output_path}; let n=0; echo $? $n >> {output_path}; let n=2 n**=3 n-8; echo $? $n >> {output_path}; let n/=0; echo $? $n >> {output_path}; let; echo $? >> {output_path}; a=() b=(); let a=(5 + 3) b=(4 + 7); echo $? $a $b >> {output_path}; let a=(4*3)/2; echo $? $a >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -16218,7 +16218,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "0 3\n1 0\n1 8\n1 8\n1\n"
+            "0 3\n1 0\n1 8\n1 8\n1\n0 8 11\n0 6\n"
         );
         let _ = fs::remove_file(output_path);
     }
@@ -16241,6 +16241,28 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
             "14\n8\n18\ndeclare -i n=\"18\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_integer_compound_assignment_evaluates_as_scalar_arithmetic() {
+        let output_path = "target/rubash-integer-compound-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "typeset -i a b; a=(5+3) b=(4+7); echo $a $b > {output_path}; declare -p a b >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "8 11\ndeclare -i a=\"8\"\ndeclare -i b=\"11\"\n"
         );
         let _ = fs::remove_file(output_path);
     }
