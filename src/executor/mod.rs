@@ -16,8 +16,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use self::path::{
     find_shell, find_user_command, shell_path_to_windows, should_run_with_shell, standard_path,
@@ -14909,6 +14911,60 @@ impl Executor {
     }
 
     fn execute_external(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let (cmd, temp_files) = self.command_with_process_substitution_files(cmd)?;
+        let result = self.execute_external_inner(&cmd);
+        for path in temp_files {
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+
+    fn command_with_process_substitution_files(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(CommandNode, Vec<PathBuf>), ExecuteError> {
+        let mut rewritten = cmd.clone();
+        let mut temp_files = Vec::new();
+        for word in &mut rewritten.words {
+            let Some(source) = word
+                .strip_prefix("<(")
+                .and_then(|word| word.strip_suffix(')'))
+            else {
+                continue;
+            };
+            let Some(output) = self.process_substitution_output(source) else {
+                continue;
+            };
+            let path = self.write_process_substitution_temp(&output)?;
+            *word = shell_display_path(&path.to_string_lossy());
+            temp_files.push(path);
+        }
+        Ok((rewritten, temp_files))
+    }
+
+    fn write_process_substitution_temp(&self, output: &str) -> Result<PathBuf, ExecuteError> {
+        let dir_value = self
+            .env_vars
+            .get("TMPDIR")
+            .cloned()
+            .unwrap_or_else(safe_temp_dir_string);
+        let mut dir = shell_path_to_windows(&dir_value, &self.env_vars);
+        if !dir.exists() {
+            fs::create_dir_all(&dir)?;
+        }
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        dir.push(format!(
+            "rubash-process-subst-{}-{nanos}.tmp",
+            std::process::id()
+        ));
+        fs::write(&dir, output)?;
+        Ok(dir)
+    }
+
+    fn execute_external_inner(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if cmd.words.is_empty() {
             return Ok(());
         }
@@ -15150,6 +15206,45 @@ impl Executor {
             }
             if let Some(input) = self.stdin_string_for_command(cmd) {
                 print!("{input}");
+                self.exit_code = 0;
+                return Ok(());
+            }
+            if cmd.words.len() > 1 {
+                let mut output = Vec::new();
+                for word in cmd
+                    .words
+                    .iter()
+                    .skip(1)
+                    .filter(|word| !word.starts_with('-'))
+                {
+                    let target = self.expand_word(word);
+                    match fs::read(shell_path_to_windows(&target, &self.env_vars)) {
+                        Ok(bytes) => output.extend(bytes),
+                        Err(_) => {
+                            eprintln!(
+                                "{}cat: {}: No such file or directory",
+                                self.diagnostic_prefix(),
+                                target
+                            );
+                            self.exit_code = 1;
+                            return Ok(());
+                        }
+                    }
+                }
+                if let Some(redirect) = &cmd.redirect_out {
+                    let target = self.expand_word(&redirect.target);
+                    let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                    file.write_all(&output)?;
+                } else if let Some(redirect) = &cmd.append {
+                    let target = self.expand_word(&redirect.target);
+                    let mut file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.env_vars))?;
+                    file.write_all(&output)?;
+                } else {
+                    print!("{}", String::from_utf8_lossy(&output));
+                }
                 self.exit_code = 0;
                 return Ok(());
             }

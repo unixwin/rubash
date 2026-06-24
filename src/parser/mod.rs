@@ -320,6 +320,12 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             clobber: false,
                         });
                         i = next_i;
+                    } else if let Some((target, next_i)) =
+                        process_substitution_word_target(tokens, i)
+                    {
+                        current_cmd.words.push(target);
+                        current_cmd.word_kinds.push(TokenKind::Word);
+                        i = next_i;
                     } else if i + 1 < tokens.len()
                         && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
                     {
@@ -531,23 +537,40 @@ fn process_substitution_redirect_target(
     }
 
     let mut index = redirect_index + 1;
-    if tokens
+    if !tokens
         .get(index)
         .is_some_and(|token| token.kind == TokenKind::RedirectIn)
-        && tokens
+        || !tokens
             .get(index + 1)
             .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
     {
-        index += 2;
-    } else if tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+        return None;
+    }
+    index += 2;
+
+    collect_process_substitution_target(tokens, index)
+}
+
+fn process_substitution_word_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(String, usize)> {
+    if tokens.get(redirect_index)?.kind != TokenKind::RedirectIn
+        || !tokens
+            .get(redirect_index + 1)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
     {
-        index += 1;
-    } else {
         return None;
     }
 
+    collect_process_substitution_target(tokens, redirect_index + 2)
+}
+
+fn collect_process_substitution_target(
+    tokens: &[Token],
+    source_start: usize,
+) -> Option<(String, usize)> {
+    let mut index = source_start;
     let source_start = index;
     let mut depth = 1usize;
     while index < tokens.len() {
