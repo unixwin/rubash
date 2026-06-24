@@ -1054,6 +1054,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
                 index = next_index;
                 continue;
@@ -1754,6 +1759,55 @@ impl Executor {
         }
 
         Ok(None)
+    }
+
+    fn execute_alias_heredoc(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        if !self.alias_expansion_enabled() {
+            return Ok(None);
+        }
+
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let Some(first_word) = command.words.first() else {
+            return Ok(None);
+        };
+        if !self.aliases.contains_key(first_word) {
+            return Ok(None);
+        }
+
+        let Some(mut source) = self.alias_parser_source(first_word, &command.words[1..]) else {
+            return Ok(None);
+        };
+        if !source.contains("<<") {
+            return Ok(None);
+        }
+
+        let mut next_index = index + 1;
+        while let Some(delimiter) = pending_heredoc_delimiter(&source) {
+            let Some(next_command) = ast.commands.get(next_index) else {
+                break;
+            };
+            let line = command_node_source_line(next_command);
+            source.push('\n');
+            source.push_str(&line);
+            next_index += 1;
+            if heredoc_delimiter_line_matches(&line, &delimiter, false) {
+                break;
+            }
+        }
+
+        self.expanding_aliases.push(first_word.clone());
+        let tokens = crate::lexer::tokenize(&source);
+        let ast = crate::parser::parse(&tokens);
+        let result = self.execute_ast(&ast);
+        self.expanding_aliases.pop();
+        result?;
+        Ok(Some(next_index))
     }
 
     /// Execute a single command
@@ -13549,6 +13603,54 @@ impl Executor {
         result.map(|_| true)
     }
 
+    fn alias_parser_source(&self, word: &str, rest: &[String]) -> Option<String> {
+        let mut seen = Vec::new();
+        let mut source = self.alias_parser_source_inner(word, rest, &mut seen)?;
+        while let Some((first, remainder)) = split_first_shell_word(&source) {
+            let remainder = remainder.to_string();
+            if seen.iter().any(|seen_word| seen_word == &first) {
+                break;
+            }
+            let Some(expanded) = self.alias_parser_source_inner(&first, &[], &mut seen) else {
+                break;
+            };
+            source = expanded;
+            if !remainder.is_empty() {
+                if !source.ends_with(' ') && !source.ends_with('\t') && !source.ends_with('\n') {
+                    source.push('\n');
+                }
+                source.push_str(&remainder);
+            }
+        }
+        Some(source)
+    }
+
+    fn alias_parser_source_inner(
+        &self,
+        word: &str,
+        rest: &[String],
+        seen: &mut Vec<String>,
+    ) -> Option<String> {
+        if seen.iter().any(|seen_word| seen_word == word) {
+            return None;
+        }
+        let alias = self.aliases.get(word)?;
+        if !needs_parser_level_alias_expansion(&alias.value) {
+            return None;
+        }
+
+        seen.push(word.to_string());
+        let mut source = alias.value.replace('\x1f', "$");
+        if !rest.is_empty()
+            && (has_unclosed_quote(&alias.value)
+                || (!source.ends_with(' ') && !source.ends_with('\t')))
+        {
+            source.push(' ');
+        }
+        source.push_str(&rest.join(" "));
+        Some(source)
+    }
+
     fn expand_alias_word(&self, word: &str, seen: &mut Vec<String>) -> (Vec<String>, bool) {
         // TODO(alias.c/alias.h/parse.y): Bash marks AL_BEINGEXPANDED in
         // parse.y::alias_expand_token and re-reads parser input. This executor-level
@@ -17934,6 +18036,86 @@ fn split_shell_words(source: &str) -> Vec<String> {
         words.push(current);
     }
     words
+}
+
+fn split_first_shell_word(source: &str) -> Option<(String, &str)> {
+    let trimmed = source.trim_start();
+    let offset = source.len() - trimmed.len();
+    let mut quote = None;
+    for (index, ch) in trimmed.char_indices() {
+        match (ch, quote) {
+            ('\'' | '"', None) => quote = Some(ch),
+            (q, Some(active)) if q == active => quote = None,
+            (' ' | '\t' | '\n' | '\r', None) => {
+                let word = trimmed[..index].to_string();
+                let remainder = &source[offset + index + ch.len_utf8()..];
+                return Some((word, remainder));
+            }
+            _ => {}
+        }
+    }
+
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some((trimmed.to_string(), ""))
+    }
+}
+
+fn command_node_source_line(command: &CommandNode) -> String {
+    command.words.join(" ")
+}
+
+fn pending_heredoc_delimiter(source: &str) -> Option<String> {
+    let mut pending: Option<(String, bool)> = None;
+    for line in source.lines() {
+        if let Some((delimiter, strip_tabs)) = &pending {
+            if heredoc_delimiter_line_matches(line, delimiter, *strip_tabs) {
+                pending = None;
+            }
+            continue;
+        }
+        pending = heredoc_delimiter_from_line(line);
+    }
+
+    pending.map(|(delimiter, _)| delimiter)
+}
+
+fn heredoc_delimiter_from_line(line: &str) -> Option<(String, bool)> {
+    let words = split_shell_words(line);
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "<<" || word == "<<-" {
+            let delimiter = words.get(index + 1)?;
+            return Some((normalize_heredoc_delimiter(delimiter), word == "<<-"));
+        }
+        if let Some(delimiter) = word.strip_prefix("<<-") {
+            return Some((normalize_heredoc_delimiter(delimiter), true));
+        }
+        if let Some(delimiter) = word.strip_prefix("<<") {
+            return Some((normalize_heredoc_delimiter(delimiter), false));
+        }
+        index += 1;
+    }
+    None
+}
+
+fn normalize_heredoc_delimiter(delimiter: &str) -> String {
+    delimiter
+        .trim_matches('\'')
+        .trim_matches('"')
+        .trim_start_matches('\\')
+        .to_string()
+}
+
+fn heredoc_delimiter_line_matches(line: &str, delimiter: &str, strip_tabs: bool) -> bool {
+    let line = if strip_tabs {
+        line.trim_start_matches('\t')
+    } else {
+        line
+    };
+    line == delimiter
 }
 
 fn expand_echo_escapes(value: &str) -> String {
