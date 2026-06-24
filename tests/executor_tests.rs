@@ -11114,7 +11114,8 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
 
     #[test]
     fn test_compact_function_definition_redirect_applies_when_called() {
-        let output_path = target_test_path("rubash-compact-function-definition-redirect-output.txt");
+        let output_path =
+            target_test_path("rubash-compact-function-definition-redirect-output.txt");
         let shell_output_path = shell_test_path(&output_path);
         let _ = fs::remove_file(&output_path);
         let input = format!(
