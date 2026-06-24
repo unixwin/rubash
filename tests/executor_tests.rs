@@ -16,6 +16,17 @@ fn shell_test_path(path: &std::path::Path) -> String {
     }
 }
 
+fn shell_output_path_to_host(path: &str) -> std::path::PathBuf {
+    if cfg!(windows) && path.len() >= 3 && path.as_bytes()[0] == b'/' && path.as_bytes()[2] == b'/'
+    {
+        let drive = path.as_bytes()[1] as char;
+        return std::path::PathBuf::from(
+            format!("{}:\\{}", drive.to_ascii_uppercase(), &path[3..]).replace('/', "\\"),
+        );
+    }
+    std::path::PathBuf::from(path)
+}
+
 fn target_test_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -162,6 +173,7 @@ mod command_chaining {
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
+        executor.set_env("TMPDIR", &std::env::temp_dir().to_string_lossy());
 
         let result = executor.execute_ast(&ast);
 
@@ -185,6 +197,7 @@ mod command_chaining {
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
+        executor.set_env("TMPDIR", &std::env::temp_dir().to_string_lossy());
 
         let result = executor.execute_ast(&ast);
 
@@ -1104,13 +1117,13 @@ mod command_chaining {
 
     #[test]
     fn test_mktemp_t_command_substitution_succeeds() {
-        let output_path = "target/rubash-mktemp-t-command-substitution-output.txt";
-        let _ = fs::remove_file(output_path);
+        let output_path = target_test_path("rubash-mktemp-t-command-substitution-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
         let input = format!(
             "tmp=$(mktemp -t cb.XXXXXX) || exit 1\n\
              test -f \"$tmp\"\n\
-             echo status:$?:$tmp > {output_path}\n\
-             rm -f \"$tmp\""
+             echo status:$?:$tmp > {shell_output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -1120,9 +1133,37 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        let output = fs::read_to_string(output_path).unwrap();
+        let output = fs::read_to_string(&output_path).unwrap();
         assert!(output.starts_with("status:0:"));
         assert!(output.contains("cb."));
+        let temp_path = output.trim_end().trim_start_matches("status:0:");
+        let _ = fs::remove_file(shell_output_path_to_host(temp_path));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_mktemp_d_command_substitution_creates_directory() {
+        let output_path = target_test_path("rubash-mktemp-d-command-substitution-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "tmp=$(mktemp -d) || exit 1\n\
+             test -d \"$tmp\"\n\
+             echo status:$?:$tmp > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(&output_path).unwrap();
+        assert!(output.starts_with("status:0:"));
+        assert!(output.contains("rubash-mktemp."));
+        let temp_path = output.trim_end().trim_start_matches("status:0:");
+        let _ = fs::remove_dir_all(shell_output_path_to_host(temp_path));
         let _ = fs::remove_file(output_path);
     }
 
