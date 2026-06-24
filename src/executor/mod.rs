@@ -10285,6 +10285,9 @@ impl Executor {
                         .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                         .unwrap_or_default();
                 }
+                if let Some(value) = self.array_element_parameter_value(var_name) {
+                    return apply_parameter_case_mod(&value, operation, &pattern);
+                }
                 if let Some(array_name) = var_name
                     .strip_suffix("[@]")
                     .or_else(|| var_name.strip_suffix("[*]"))
@@ -10332,6 +10335,9 @@ impl Executor {
                             replace_parameter_pattern(value, &pattern, &replacement, global)
                         })
                         .unwrap_or_default();
+                }
+                if let Some(value) = self.array_element_parameter_value(var_name) {
+                    return replace_parameter_pattern(&value, &pattern, &replacement, global);
                 }
                 if let Some(array_name) = var_name
                     .strip_suffix("[@]")
@@ -11360,6 +11366,10 @@ impl Executor {
             );
         }
 
+        if let Some(value) = self.array_element_parameter_value(var_name) {
+            return Some(remove_parameter_pattern(&value, &pattern, operation));
+        }
+
         if let Some(array_name) = var_name
             .strip_suffix("[@]")
             .or_else(|| var_name.strip_suffix("[*]"))
@@ -11378,6 +11388,17 @@ impl Executor {
         }
 
         None
+    }
+
+    fn array_element_parameter_value(&self, expression: &str) -> Option<String> {
+        let (array_name, key) = parse_array_subscript(expression)?;
+        let storage = self.parameter_array_storage(array_name)?;
+        if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            return assoc_value_at(&storage, key);
+        }
+        key.parse::<usize>()
+            .ok()
+            .and_then(|index| array_value_at(&storage, index))
     }
 
     fn indirect_pattern_removal(&self, name: &str) -> Option<String> {

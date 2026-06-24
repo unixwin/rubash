@@ -11709,6 +11709,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_array_element_parameter_operations_use_element_value() {
+        let output_path = "target/rubash-array-element-param-ops-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(src/main.rs alpha beta); declare -A assoc; assoc[key]=src/lib.rs; \
+             echo ${{arr[0]#*/}} ${{arr[1]/a/o}} ${{arr[2]^}} ${{assoc[key]#*/}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "main.rs olpha Beta lib.rs\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_replacement_replaces_first_and_all_matches() {
         let output_path = "target/rubash-param-replace-output.txt";
         let _ = fs::remove_file(output_path);
