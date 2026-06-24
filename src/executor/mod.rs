@@ -3464,10 +3464,15 @@ impl Executor {
             .filter(|command| !command.words.is_empty())
             .collect::<Vec<_>>();
         let last_index = printable_commands.len().saturating_sub(1);
+        let mut indent_level = 1usize;
         for (index, command) in printable_commands.iter().enumerate() {
             if command.words.is_empty() {
                 continue;
             }
+            if function_definition_command_closes_block(command) {
+                indent_level = indent_level.saturating_sub(1).max(1);
+            }
+            let indent = "    ".repeat(indent_level);
             let terminator = if function_definition_command_omits_terminator(command)
                 || index == last_index
             {
@@ -3478,21 +3483,24 @@ impl Executor {
             if let Some(here_string) = &command.here_string {
                 writeln!(
                     stdout,
-                    "    {} <<< {}{}",
+                    "{indent}{} <<< {}{}",
                     command.words.join(" "),
                     function_here_string_text(here_string, printable_commands.len() > 1),
                     terminator
                 )?;
             } else if command.words == ["time"] {
-                writeln!(stdout, "    time {terminator}")?;
+                writeln!(stdout, "{indent}time {terminator}")?;
             } else if command.heredoc.is_some() {
                 let line = self
                     .function_command_description_line(command, false)
                     .unwrap_or_else(|| command.words.join(" "));
-                writeln!(stdout, "    {line}")?;
+                writeln!(stdout, "{indent}{line}")?;
                 write_function_definition_heredoc_body(command, stdout)?;
             } else {
-                writeln!(stdout, "    {}{terminator}", command.words.join(" "))?;
+                writeln!(stdout, "{indent}{}{terminator}", command.words.join(" "))?;
+            }
+            if function_definition_command_opens_nested_body(command) {
+                indent_level += 1;
             }
         }
         writeln!(stdout, "}}")
@@ -16400,6 +16408,20 @@ fn function_definition_command_omits_terminator(command: &CommandNode) -> bool {
             command.words.first().map(String::as_str),
             Some("then" | "do" | "else" | "elif" | "fi" | "done")
         )
+}
+
+fn function_definition_command_closes_block(command: &CommandNode) -> bool {
+    matches!(
+        command.words.first().map(String::as_str),
+        Some("else" | "elif" | "fi" | "done")
+    )
+}
+
+fn function_definition_command_opens_nested_body(command: &CommandNode) -> bool {
+    matches!(
+        command.words.first().map(String::as_str),
+        Some("then" | "do" | "else" | "elif")
+    )
 }
 
 fn write_function_definition_heredoc_body<W>(

@@ -9251,7 +9251,9 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         let output = fs::read_to_string(output_path).unwrap();
         assert!(output.contains("    if cat <<HERE\ncontents\nHERE\n    then\n"));
+        assert!(output.contains("        echo 1 2;\n        echo 3 4;\n    fi\n"));
         assert!(output.contains("    while read var <<HERE\ncontents\nHERE\n    do\n"));
+        assert!(output.contains("        echo 1 2;\n        echo 3 4;\n    done\n"));
         let _ = fs::remove_file(output_path);
     }
 
