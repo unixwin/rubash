@@ -258,7 +258,11 @@ pub fn execute_simple_if(
     } else {
         &command.words
     };
-    let condition_true = if test_if_condition_true(executor, words)? {
+    let condition_true = if let Some(value) =
+        execute_and_or_if_condition(executor, ast, index, then_index)?
+    {
+        value
+    } else if test_if_condition_true(executor, words)? {
         true
     } else if let Some(value) = arithmetic_if_condition_value(executor, words) {
         value
@@ -298,6 +302,42 @@ pub fn execute_simple_if(
 
     executor.set_exit_code(0);
     Ok(Some(fi_index + 1))
+}
+
+fn execute_and_or_if_condition(
+    executor: &mut Executor,
+    ast: &Ast,
+    index: usize,
+    then_index: usize,
+) -> Result<Option<bool>, ExecuteError> {
+    let Some(command) = ast.commands.get(index) else {
+        return Ok(None);
+    };
+    if command.and_or().is_none() && then_index <= index + 1 {
+        return Ok(None);
+    }
+
+    let mut first = command.clone();
+    first.words = first.words[1..].to_vec();
+    first.pipe = None;
+    if first.and_or().is_none() && then_index > index + 1 && is_arithmetic_condition_words(&first.words)
+    {
+        first.and_or = Some(true);
+    }
+    let mut commands = vec![first];
+    commands.extend(
+        ast.commands[index + 1..then_index]
+            .iter()
+            .filter(|command| !command.words.is_empty())
+            .cloned(),
+    );
+    let condition_ast = Ast { commands };
+    executor.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))?;
+    Ok(Some(executor.last_exit_code() == 0))
+}
+
+fn is_arithmetic_condition_words(words: &[String]) -> bool {
+    matches!(words, [open, _, close] if open == "((" && close == "))")
 }
 
 pub fn execute_pipe_into_source(

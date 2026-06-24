@@ -3201,10 +3201,14 @@ impl Executor {
             writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
             2
         } else {
-            self.save_local_names(&cmd.words[1..]);
-            self.initialize_non_inherited_locals(&cmd.words[1..]);
+            let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            if declare_args_request_integer(&args) {
+                args = self.evaluate_declare_integer_assignment_args(&args);
+            }
+            self.save_local_names(&args);
+            self.initialize_non_inherited_locals(&args);
             crate::builtins::declare::execute_with_io(
-                &cmd.words[1..],
+                &args,
                 &mut self.env_vars,
                 &mut stdout,
                 &mut stderr,

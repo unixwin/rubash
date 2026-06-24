@@ -231,6 +231,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
                 note_command_line(&mut current_cmd, token);
                 current_cmd.words.extend(arith_cmd.words);
+                current_cmd.and_or = arith_cmd.and_or;
                 ast.commands.push(current_cmd);
                 current_cmd = CommandNode::new();
                 i = next_i;
@@ -277,11 +278,15 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 }
             }
             TokenKind::Pipe => {
-                // Save current command with pipe flag
-                current_cmd.subshell |= in_subshell;
-                current_cmd.pipe = Some(1);
-                ast.commands.push(current_cmd);
-                current_cmd = CommandNode::new();
+                if command_is_open_conditional(&current_cmd) {
+                    push_command_word(&mut current_cmd, token);
+                } else {
+                    // Save current command with pipe flag
+                    current_cmd.subshell |= in_subshell;
+                    current_cmd.pipe = Some(1);
+                    ast.commands.push(current_cmd);
+                    current_cmd = CommandNode::new();
+                }
             }
             TokenKind::Semicolon => {
                 // Command separator
@@ -1270,7 +1275,9 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
 }
 
 fn command_is_open_conditional(cmd: &CommandNode) -> bool {
-    cmd.words.first().map(String::as_str) == Some("[[")
+    (cmd.words.first().map(String::as_str) == Some("[[")
+        || (matches!(cmd.words.first().map(String::as_str), Some("if" | "elif"))
+            && cmd.words.get(1).map(String::as_str) == Some("[[")))
         && !cmd.words.iter().any(|word| word == "]]")
 }
 
