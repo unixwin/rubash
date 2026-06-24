@@ -2095,6 +2095,9 @@ impl Executor {
         let cmd = &materialized_cmd;
 
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
+        if self.posix_function_declare_prefix_assignments_are_local(cmd) {
+            self.save_assignment_local_names(&cmd.assignments);
+        }
         let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
         if self.xtrace_enabled() {
             println!("+ {}", cmd.words.join(" "));
@@ -2857,6 +2860,40 @@ impl Executor {
             let attrs = capture_var_attrs(&self.env_vars, &name);
             self.local_attr_scopes[attr_scope_index].insert(name, attrs);
         }
+    }
+
+    fn save_assignment_local_names(&mut self, assignments: &HashMap<String, String>) {
+        let names = assignments
+            .keys()
+            .map(|name| assignment_name_and_append(name).0.to_string())
+            .collect::<Vec<_>>();
+
+        let Some(scope) = self.local_var_scopes.last_mut() else {
+            return;
+        };
+        let Some(attr_scope_index) = self.local_attr_scopes.len().checked_sub(1) else {
+            return;
+        };
+        for name in names {
+            if scope.contains_key(&name) {
+                continue;
+            }
+            scope.insert(name.clone(), self.env_vars.get(&name).cloned());
+            let attrs = capture_var_attrs(&self.env_vars, &name);
+            self.local_attr_scopes[attr_scope_index].insert(name, attrs);
+        }
+    }
+
+    fn posix_function_declare_prefix_assignments_are_local(&self, cmd: &CommandNode) -> bool {
+        self.function_depth > 0
+            && self.posix_mode_enabled()
+            && !cmd.assignments.is_empty()
+            && cmd
+                .words
+                .first()
+                .is_some_and(|word| matches!(word.as_str(), "declare" | "typeset"))
+            && !declare_args_force_global(&cmd.words[1..])
+            && !declare_args_request_print(&cmd.words[1..])
     }
 
     fn restore_function_locals(&mut self) -> HashSet<String> {
