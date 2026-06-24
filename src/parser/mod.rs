@@ -329,8 +329,11 @@ pub fn parse(tokens: &[Token]) -> Ast {
                     if i + 1 < tokens.len()
                         && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
                     {
+                        let fd = redirect_operator_fd(&token.value).or_else(|| {
+                            take_adjacent_redirect_fd_prefix(&mut current_cmd, tokens, i)
+                        });
                         current_cmd.redirect_out = Some(Redirect {
-                            fd: None,
+                            fd,
                             target: tokens[i + 1].value.clone(),
                             append: false,
                             clobber: token.value == ">|",
@@ -344,8 +347,10 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 if i + 1 < tokens.len()
                     && matches!(tokens[i + 1].kind, TokenKind::Word | TokenKind::Variable)
                 {
+                    let fd = redirect_operator_fd(&token.value)
+                        .or_else(|| take_adjacent_redirect_fd_prefix(&mut current_cmd, tokens, i));
                     current_cmd.append = Some(Redirect {
-                        fd: None,
+                        fd,
                         target: tokens[i + 1].value.clone(),
                         append: true,
                         clobber: false,
@@ -1262,6 +1267,36 @@ fn push_command_word(cmd: &mut CommandNode, token: &Token) {
 }
 
 fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
+    take_redirect_fd_prefix(cmd)
+}
+
+fn take_adjacent_redirect_fd_prefix(
+    cmd: &mut CommandNode,
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<u32> {
+    let previous = redirect_index
+        .checked_sub(1)
+        .and_then(|index| tokens.get(index))?;
+    let redirect = tokens.get(redirect_index)?;
+    if previous.position + previous.value.len() != redirect.position {
+        return None;
+    }
+    take_redirect_fd_prefix(cmd)
+}
+
+fn redirect_operator_fd(operator: &str) -> Option<u32> {
+    let digits = operator
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
     let fd = cmd
         .words
         .last()
