@@ -109,7 +109,26 @@ where
         }
     }
 
-    let mut attr_status = assign_declare_names(&names, variables, integer, stderr)?;
+    let mut assign_names = Vec::new();
+    let mut attr_status = EXECUTION_SUCCESS;
+    for name in &names {
+        if nameref && nameref_self_reference(name) {
+            let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
+            writeln!(
+                stderr,
+                "{}declare: {}: nameref variable self references not allowed",
+                diagnostic_prefix(),
+                name
+            )?;
+            attr_status = EXECUTION_FAILURE;
+            continue;
+        }
+        assign_names.push(*name);
+    }
+    if assign_declare_names(&assign_names, variables, integer, stderr)? != EXECUTION_SUCCESS {
+        attr_status = EXECUTION_FAILURE;
+    }
+    let names = assign_names;
     if unset_export
         || unset_array
         || unset_assoc
@@ -479,6 +498,14 @@ where
         env::set_var(var_name, value);
     }
     Ok(status)
+}
+
+fn nameref_self_reference(arg: &str) -> bool {
+    let Some((name, value)) = arg.split_once('=') else {
+        return false;
+    };
+    let name = name.strip_suffix('+').unwrap_or(name);
+    name == value
 }
 
 #[derive(Clone, Copy)]

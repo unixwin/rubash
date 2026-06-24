@@ -12391,6 +12391,40 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_nameref_rejects_self_reference() {
+        let output_path = target_test_path("rubash-nameref-self-reference-output.txt");
+        let error_path = target_test_path("rubash-nameref-self-reference-error.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        std::env::remove_var("RUBASH_NAMEREF_SELF");
+        let input = format!(
+            "RUBASH_NAMEREF_SELF=old; declare -n RUBASH_NAMEREF_SELF=RUBASH_NAMEREF_SELF 2> {shell_error_path}; \
+             echo status:$? > {shell_output_path}; declare -p RUBASH_NAMEREF_SELF >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "status:1\ndeclare -- RUBASH_NAMEREF_SELF=\"old\"\n"
+        );
+        let error = fs::read_to_string(&error_path).unwrap();
+        assert!(error.contains(
+            "declare: RUBASH_NAMEREF_SELF: nameref variable self references not allowed"
+        ));
+        std::env::remove_var("RUBASH_NAMEREF_SELF");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);
