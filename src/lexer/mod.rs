@@ -136,17 +136,25 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
     let mut line_number = 1;
     let mut logical_start_line = 1;
     let mut logical_line = String::new();
+    let mut continued_line = false;
 
     while let Some(line) = lines.next() {
         if logical_line.is_empty() {
             logical_start_line = line_number;
         }
-        if !logical_line.is_empty() {
+        if !logical_line.is_empty() && !continued_line {
             logical_line.push('\n');
         }
+        continued_line = false;
         logical_line.push_str(line);
         position += line.len() + 1;
         line_number += 1;
+
+        if ends_with_unquoted_backslash(&logical_line) {
+            logical_line.pop();
+            continued_line = true;
+            continue;
+        }
 
         if has_unclosed_quotes(&logical_line)
             && (is_multiline_alias_definition(&logical_line)
@@ -166,22 +174,32 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
 
         for delimiter in delimiters {
             let mut body = String::new();
+            let mut continued_body_line = String::new();
             for body_line in lines.by_ref() {
                 position += body_line.len() + 1;
                 line_number += 1;
-                let comparable = if delimiter.strip_tabs {
+                let mut comparable = if delimiter.strip_tabs {
                     body_line.trim_start_matches('\t')
                 } else {
                     body_line
-                };
+                }
+                .to_string();
+
+                if !delimiter.quoted {
+                    if let Some(stripped) = comparable.strip_suffix('\\') {
+                        continued_body_line.push_str(stripped);
+                        continue;
+                    }
+                    if !continued_body_line.is_empty() {
+                        continued_body_line.push_str(&comparable);
+                        comparable = std::mem::take(&mut continued_body_line);
+                    }
+                }
+
                 if comparable == delimiter.value {
                     break;
                 }
-                if delimiter.strip_tabs {
-                    body.push_str(body_line.trim_start_matches('\t'));
-                } else {
-                    body.push_str(body_line);
-                }
+                body.push_str(&comparable);
                 body.push('\n');
             }
             if delimiter.quoted {
@@ -216,6 +234,29 @@ fn tokenize_plain(input: &str) -> Vec<Token> {
         tokens.push(token);
     }
     tokens
+}
+
+fn ends_with_unquoted_backslash(input: &str) -> bool {
+    let mut single = false;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !escaped => single = !single,
+            _ => {}
+        }
+    }
+
+    let trailing_backslashes = input
+        .chars()
+        .rev()
+        .take_while(|ch| *ch == '\\')
+        .count();
+    !single && trailing_backslashes % 2 == 1
 }
 
 struct HereDocDelimiter {
