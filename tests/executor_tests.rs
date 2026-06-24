@@ -11149,6 +11149,49 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_cat_reads_process_substitution_stdin_redirect() {
+        let output_path = "target/rubash-cat-process-subst-stdin-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat < <(echo redirected stdin) > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "redirected stdin\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_process_substitution_does_not_see_temporary_assignment() {
+        let output_path = "target/rubash-process-subst-temp-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset RUBASH_PS_TEMP; RUBASH_PS_TEMP=inner cat < <(echo $RUBASH_PS_TEMP:1) > {output_path}; \
+             echo after:${{RUBASH_PS_TEMP-unset}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            ":1\nafter:unset\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_cat_reads_shell_style_file_path() {
         let output_path = "target/rubash-cat-shell-path-output.txt";
         let _ = fs::remove_file(output_path);
