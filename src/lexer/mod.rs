@@ -178,6 +178,7 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         for delimiter in delimiters {
             let mut body = String::new();
             let mut continued_body_line = String::new();
+            let mut found_delimiter = false;
             for body_line in lines.by_ref() {
                 position += body_line.len() + 1;
                 line_number += 1;
@@ -200,10 +201,14 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
                 }
 
                 if comparable == delimiter.value {
+                    found_delimiter = true;
                     break;
                 }
                 body.push_str(&comparable);
                 body.push('\n');
+            }
+            if !found_delimiter {
+                body.insert(0, '\x1f');
             }
             if delimiter.quoted {
                 body.insert(0, '\x1e');
