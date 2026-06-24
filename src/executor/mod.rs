@@ -1208,9 +1208,9 @@ impl Executor {
         command: &CommandNode,
     ) -> Result<bool, ExecuteError> {
         if let Some(body) = &command.brace_group {
-            let ast = Ast {
-                commands: body.clone(),
-            };
+            let mut body = body.clone();
+            self.apply_brace_group_redirects(command, &mut body)?;
+            let ast = Ast { commands: body };
             self.execute_ast(&ast)?;
             return Ok(true);
         }
@@ -6705,6 +6705,50 @@ impl Executor {
         }
 
         Ok(false)
+    }
+
+    fn apply_brace_group_redirects(
+        &mut self,
+        command: &CommandNode,
+        body: &mut [CommandNode],
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &command.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if redirect_target_fd(&target).is_none() {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            apply_stdout_append_redirect(body, &append_redirect);
+        }
+
+        if let Some(redirect) = &command.append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            apply_stdout_append_redirect(body, &append_redirect);
+        }
+
+        if let Some(redirect) = &command.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            apply_stderr_append_redirect(body, &append_redirect);
+        }
+
+        if let Some(redirect) = &command.redirect_err_append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            apply_stderr_append_redirect(body, &append_redirect);
+        }
+
+        Ok(())
     }
 
     fn execute_type_with_disabled_builtin_state_with_io<W>(
@@ -16336,6 +16380,9 @@ fn apply_stdout_append_redirect(commands: &mut [CommandNode], redirect: &Redirec
                 apply_stdout_append_redirect(&mut clause.body, redirect);
             }
         }
+        if let Some(brace_group) = &mut command.brace_group {
+            apply_stdout_append_redirect(brace_group, redirect);
+        }
     }
 }
 
@@ -16351,6 +16398,9 @@ fn apply_stderr_append_redirect(commands: &mut [CommandNode], redirect: &Redirec
             for clause in &mut case_command.clauses {
                 apply_stderr_append_redirect(&mut clause.body, redirect);
             }
+        }
+        if let Some(brace_group) = &mut command.brace_group {
+            apply_stderr_append_redirect(brace_group, redirect);
         }
     }
 }
