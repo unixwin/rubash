@@ -10358,15 +10358,17 @@ impl Executor {
                         .map(|value| apply_parameter_transform(value, transform))
                         .unwrap_or_default();
                 }
+                if let Some(value) = self.array_element_parameter_value(var_name) {
+                    return apply_parameter_transform(&value, transform);
+                }
                 if let Some(array_name) = var_name
                     .strip_suffix("[@]")
                     .or_else(|| var_name.strip_suffix("[*]"))
                 {
                     return self
-                        .env_vars
-                        .get(array_name)
+                        .parameter_array_storage(array_name)
                         .map(|value| {
-                            array_values(value)
+                            array_values(&value)
                                 .into_iter()
                                 .map(|value| apply_parameter_transform(&value, transform))
                                 .collect::<Vec<_>>()
@@ -10375,11 +10377,23 @@ impl Executor {
                         .unwrap_or_default();
                 }
                 if is_shell_name(var_name) {
-                    return self
-                        .env_vars
-                        .get(var_name)
-                        .map(|value| apply_parameter_transform(value, transform))
-                        .unwrap_or_default();
+                    let Some(name) = self.resolved_variable_name(var_name) else {
+                        return String::new();
+                    };
+                    if let Some(value) = self.env_vars.get(&name) {
+                        if is_marked_var(&self.env_vars, ASSOC_VARS, &name) {
+                            return assoc_value_at(value, "0")
+                                .map(|value| apply_parameter_transform(&value, transform))
+                                .unwrap_or_default();
+                        }
+                        if is_marked_array_var(&self.env_vars, &name) || is_array_storage(value) {
+                            return array_value_at(value, 0)
+                                .map(|value| apply_parameter_transform(&value, transform))
+                                .unwrap_or_default();
+                        }
+                        return apply_parameter_transform(value, transform);
+                    }
+                    return String::new();
                 }
             }
             if let Some((var_name, operation, pattern)) = parse_parameter_case_mod(name) {
@@ -16351,7 +16365,7 @@ fn parse_parameter_transform(name: &str) -> Option<(&str, ParameterTransform)> {
 
 fn apply_parameter_transform(value: &str, transform: ParameterTransform) -> String {
     match transform {
-        ParameterTransform::Quote => shell_quote_parameter_value(value),
+        ParameterTransform::Quote => shell_single_quote_assignment_value(value),
         ParameterTransform::Escape => decode_ansi_c_escapes(value),
         ParameterTransform::Assignment => shell_single_quote_assignment_value(value),
         ParameterTransform::Attributes => String::new(),
@@ -16397,25 +16411,6 @@ fn prompt_hostname(env_vars: &HashMap<String, String>, full: bool) -> String {
         hostname
     } else {
         hostname.split('.').next().unwrap_or(&hostname).to_string()
-    }
-}
-
-fn shell_quote_parameter_value(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
-
-    if value == "~" {
-        return "\\~".to_string();
-    }
-
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '/' | '.' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
