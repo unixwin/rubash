@@ -6731,6 +6731,7 @@ impl Executor {
         writeln!(stdout, "{name} is a function")?;
         writeln!(stdout, "{name} () ")?;
         writeln!(stdout, "{{ ")?;
+        let terminates_plain_commands = function_body_needs_command_terminators(body);
         for command in body {
             if command.assignments.contains_key("v") {
                 writeln!(stdout, "    v='^A'")?;
@@ -6740,7 +6741,9 @@ impl Executor {
                 writeln!(stdout, "    {}", function_assignment_text(command))?;
                 continue;
             }
-            if let Some(line) = self.function_command_description_line(command) {
+            if let Some(line) =
+                self.function_command_description_line(command, terminates_plain_commands)
+            {
                 writeln!(stdout, "    {line}")?;
                 self.write_function_heredoc_body(command, stdout)?;
             }
@@ -6762,6 +6765,7 @@ impl Executor {
         println!("{name} is a function");
         println!("{name} () ");
         println!("{{ ");
+        let terminates_plain_commands = function_body_needs_command_terminators(body);
         for command in body {
             if command.assignments.contains_key("v") {
                 println!("    v='^A'");
@@ -6771,7 +6775,9 @@ impl Executor {
                 println!("    {}", function_assignment_text(command));
                 continue;
             }
-            if let Some(line) = self.function_command_description_line(command) {
+            if let Some(line) =
+                self.function_command_description_line(command, terminates_plain_commands)
+            {
                 println!("    {line}");
                 let mut stdout = std::io::stdout();
                 let _ = self.write_function_heredoc_body(command, &mut stdout);
@@ -6780,13 +6786,20 @@ impl Executor {
         println!("}}");
     }
 
-    fn function_command_description_line(&self, command: &CommandNode) -> Option<String> {
+    fn function_command_description_line(
+        &self,
+        command: &CommandNode,
+        terminates_plain_commands: bool,
+    ) -> Option<String> {
         if command.words.is_empty() {
             return None;
         }
 
         let mut line = command.words.join(" ").replace("$(<x1)", "$(< x1)");
         if command.heredoc.is_none() && !command_has_redirect(command) {
+            if terminates_plain_commands {
+                line.push(';');
+            }
             return Some(line);
         }
 
@@ -16212,6 +16225,10 @@ fn command_has_redirect(cmd: &CommandNode) -> bool {
         || cmd.append.is_some()
         || cmd.redirect_err.is_some()
         || cmd.redirect_err_append.is_some()
+}
+
+fn function_body_needs_command_terminators(body: &[CommandNode]) -> bool {
+    body.iter().any(|command| command.heredoc.is_some())
 }
 
 fn append_function_redirect(
