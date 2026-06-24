@@ -720,6 +720,24 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_zero_parameter_supports_pattern_removal() {
+        let output_path = "target/rubash-zero-param-pattern-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf '%s\\n' \"${{0##*/}}\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SCRIPT_NAME", "./bin/script.sh");
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "script.sh\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_dynamic_bash_parameter_lengths_use_current_values() {
         let output_path = "target/rubash-dynamic-param-length-output.txt";
         let _ = fs::remove_file(output_path);
