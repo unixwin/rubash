@@ -93,9 +93,7 @@ const POSIX2_TEST_DONE: &str = "__RUBASH_POSIX2_TEST_DONE";
 const POSIXPAT_TEST_DONE: &str = "__RUBASH_POSIXPAT_TEST_DONE";
 const DYNVAR_TEST_DONE: &str = "__RUBASH_DYNVAR_TEST_DONE";
 const SHOPT_TEST_DONE: &str = "__RUBASH_SHOPT_TEST_DONE";
-const STRIP_TEST_DONE: &str = "__RUBASH_STRIP_TEST_DONE";
 const TILDE_TEST_DONE: &str = "__RUBASH_TILDE_TEST_DONE";
-const TILDE2_TEST_DONE: &str = "__RUBASH_TILDE2_TEST_DONE";
 const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const INVOCATION_TEST_DONE: &str = "__RUBASH_INVOCATION_TEST_DONE";
 const TEST_TEST_DONE: &str = "__RUBASH_TEST_TEST_DONE";
@@ -176,9 +174,7 @@ const POSIX2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posi
 const POSIXPAT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posixpat.right");
 const DYNVAR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dynvar.right");
 const SHOPT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/shopt.right");
-const STRIP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/strip.right");
 const TILDE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde.right");
-const TILDE2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/tilde2.right");
 const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const INVOCATION_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/invocation.right");
 const TEST_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/test.right");
@@ -961,13 +957,7 @@ impl Executor {
         if self.execute_upstream_shopt_script() {
             return Ok(());
         }
-        if self.execute_upstream_strip_script() {
-            return Ok(());
-        }
         if self.execute_upstream_tilde_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_tilde2_script() {
             return Ok(());
         }
         if self.execute_upstream_type_script() {
@@ -4459,23 +4449,6 @@ impl Executor {
         true
     }
 
-    fn execute_upstream_strip_script(&mut self) -> bool {
-        if self.env_vars.contains_key(STRIP_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("strip.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", STRIP_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(STRIP_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
     fn execute_upstream_tilde_script(&mut self) -> bool {
         if self.env_vars.contains_key(TILDE_TEST_DONE)
             || !self
@@ -4489,23 +4462,6 @@ impl Executor {
         print!("{}", TILDE_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(TILDE_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    fn execute_upstream_tilde2_script(&mut self) -> bool {
-        if self.env_vars.contains_key(TILDE2_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("tilde2.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", TILDE2_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(TILDE2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
