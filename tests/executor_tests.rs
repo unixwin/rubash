@@ -8064,6 +8064,46 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_command_source_redirects_body_stdout_and_stderr() {
+        let script_path = "target/rubash-command-source-body-redirect.sh";
+        let output_path = "target/rubash-command-source-body-output.txt";
+        let error_path = "target/rubash-command-source-body-error.txt";
+        let status_path = "target/rubash-command-source-body-status.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        fs::write(
+            script_path,
+            "echo command-source-out\nno_such_command_source_body\n",
+        )
+        .unwrap();
+        let input = format!(
+            "command source {script_path} > {output_path} 2> {error_path}; echo $? > {status_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "127\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "command-source-out\n"
+        );
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_command_source_body: command not found"));
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
     fn test_command_dot_missing_redirects_stderr() {
         let output_path = "target/rubash-command-dot-missing-status.txt";
         let error_path = "target/rubash-command-dot-missing-error.txt";
@@ -8082,6 +8122,42 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(fs::read_to_string(error_path)
             .unwrap()
             .contains("no_such_dot_file: No such file or directory"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_command_dot_appends_body_stdout_and_stderr() {
+        let script_path = "target/rubash-command-dot-body-append.sh";
+        let output_path = "target/rubash-command-dot-body-output.txt";
+        let error_path = "target/rubash-command-dot-body-error.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        fs::write(
+            script_path,
+            "echo command-dot-out\nno_such_command_dot_body\n",
+        )
+        .unwrap();
+        fs::write(output_path, "before-out\n").unwrap();
+        fs::write(error_path, "before-err\n").unwrap();
+        let input = format!("command . {script_path} >> {output_path} 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 127);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "before-out\ncommand-dot-out\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before-err\n"));
+        assert!(error.contains("no_such_command_dot_body: command not found"));
+        let _ = fs::remove_file(script_path);
         let _ = fs::remove_file(output_path);
         let _ = fs::remove_file(error_path);
     }

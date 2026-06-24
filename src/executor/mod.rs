@@ -6149,7 +6149,18 @@ impl Executor {
             return Ok(());
         };
         if shell_path_to_windows(filename, &self.env_vars).exists() {
-            return crate::builtins::source::execute_named(self, &cmd.words[0], &cmd.words[1..]);
+            let mut stderr = Vec::new();
+            let result = crate::builtins::source::execute_named_with_io_and_redirects(
+                self,
+                &cmd.words[0],
+                &cmd.words[1..],
+                &mut stderr,
+                cmd,
+            );
+            if !stderr.is_empty() {
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            }
+            return result;
         }
 
         let mut stderr = Vec::new();
