@@ -72,6 +72,18 @@ fn gnu_zprintf_usage_guard_exits_before_body() {
 }
 
 #[test]
+fn gnu_dirstack_function_definitions_parse_comments() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("third_party/bash/examples/functions/dirstack")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_file_uses_script_name_and_positional_arguments() {
     let script_path = Path::new("target").join("rubash-cli-script-args.sh");
     fs::create_dir_all("target").unwrap();
