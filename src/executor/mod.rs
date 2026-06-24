@@ -5250,6 +5250,7 @@ impl Executor {
                     }
                 }
             }
+            "builtin" => self.execute_builtin_direct_command(cmd),
             "printf" => {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
                     return self.execute_external(cmd);
