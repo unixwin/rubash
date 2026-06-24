@@ -116,7 +116,6 @@ const HEREDOC_TEST_DONE: &str = "__RUBASH_HEREDOC_TEST_DONE";
 const INTL_TEST_DONE: &str = "__RUBASH_INTL_TEST_DONE";
 const NAMEREF_TEST_DONE: &str = "__RUBASH_NAMEREF_TEST_DONE";
 const NEW_EXP_TEST_DONE: &str = "__RUBASH_NEW_EXP_TEST_DONE";
-const ALIAS_TEST_DONE: &str = "__RUBASH_ALIAS_TEST_DONE";
 const BUILTINS_TEST_DONE: &str = "__RUBASH_BUILTINS_TEST_DONE";
 const GLOB_TEST_DONE: &str = "__RUBASH_GLOB_TEST_DONE";
 const FUNC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/func.right");
@@ -188,7 +187,6 @@ const HEREDOC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/her
 const INTL_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/intl.right");
 const NAMEREF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nameref.right");
 const NEW_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/new-exp.right");
-const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias.right");
 const BUILTINS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/builtins.right");
 const GLOB_TEST_OUTPUT: &[u8] = include_bytes!("../../third_party/bash/tests/glob.right");
 
@@ -998,9 +996,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_new_exp_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_alias_script() {
             return Ok(());
         }
         if self.execute_upstream_builtins_script() {
@@ -4805,15 +4800,6 @@ impl Executor {
         self.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
         true
-    }
-
-    fn execute_upstream_alias_script(&mut self) -> bool {
-        self.emit_upstream_text_script(
-            ALIAS_TEST_DONE,
-            "alias.tests",
-            ALIAS_TEST_OUTPUT,
-            UpstreamOutputStream::Stdout,
-        )
     }
 
     fn execute_upstream_builtins_script(&mut self) -> bool {
@@ -13460,11 +13446,6 @@ impl Executor {
         }
 
         if cmd.words[0] == "cat" {
-            if let Some(input) = self.stdin_string_for_command(cmd) {
-                print!("{input}");
-                self.exit_code = 0;
-                return Ok(());
-            }
             if let Some(body) = &cmd.heredoc {
                 if let Some(redirect) = &cmd.append {
                     let target = self.expand_word(&redirect.target);
@@ -13484,6 +13465,11 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(());
                 }
+            }
+            if let Some(input) = self.stdin_string_for_command(cmd) {
+                print!("{input}");
+                self.exit_code = 0;
+                return Ok(());
             }
         }
 
