@@ -3,7 +3,7 @@
 //! GNU Bash source ownership:
 // - builtins/declare.def
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::io::{self, Write};
 
@@ -125,7 +125,8 @@ where
         }
         assign_names.push(*name);
     }
-    if assign_declare_names(&assign_names, variables, integer, stderr)? != EXECUTION_SUCCESS {
+    if assign_declare_names(&assign_names, variables, array, integer, stderr)? != EXECUTION_SUCCESS
+    {
         attr_status = EXECUTION_FAILURE;
     }
     let names = assign_names;
@@ -203,7 +204,13 @@ where
             let name = name.strip_suffix('+').unwrap_or(name);
             mark_typed(variables, INTEGER_VARS, name);
             if let Some(value) = variables.get(name).cloned() {
-                let value = if value.starts_with('(') && value.ends_with(')') {
+                let value = if value.starts_with('\x1d') {
+                    let mut entries = indexed_array_entries(&value);
+                    for element in entries.values_mut() {
+                        *element = eval_arith_value(element).to_string();
+                    }
+                    format_indexed_array_storage(entries)
+                } else if value.starts_with('(') && value.ends_with(')') {
                     format!(
                         "({})",
                         parse_array_words(&value)
@@ -430,6 +437,7 @@ fn declaration_names_to_print(
 fn assign_declare_names<W>(
     names: &[&str],
     variables: &mut HashMap<String, String>,
+    array: bool,
     integer: bool,
     stderr: &mut W,
 ) -> io::Result<i32>
@@ -476,10 +484,14 @@ where
             let current = variables.get(var_name).cloned().unwrap_or_default();
             if marked_vars(variables, ASSOC_VARS).contains(var_name) {
                 append_assoc_value(&current, value)
+            } else if array
+                || marked_vars(variables, ARRAY_VARS).contains(var_name)
+                || current.starts_with('\x1d')
+                || current.starts_with('(') && current.ends_with(')')
+            {
+                append_array_value(&current, value, integer)
             } else if integer {
                 (eval_arith_value(&current) + eval_arith_value(value)).to_string()
-            } else if current.starts_with('(') && current.ends_with(')') {
-                append_array_value(&current, value, integer)
             } else {
                 let mut current = current;
                 current.push_str(value);
@@ -491,6 +503,8 @@ where
             } else {
                 eval_arith_value(value).to_string()
             }
+        } else if array && value.starts_with('(') && value.ends_with(')') {
+            append_array_value("()", value, false)
         } else {
             value.to_string()
         };
@@ -905,46 +919,52 @@ fn append_assoc_value(current: &str, value: &str) -> String {
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
-    let mut elements = parse_array_words(current);
-    if current == "()" {
-        elements.clear();
-    }
+    let mut entries = indexed_array_entries(current);
+    let mut next_index = entries
+        .keys()
+        .next_back()
+        .map(|index| index + 1)
+        .unwrap_or(0);
     let scalar_append = integer && !value.starts_with('(');
 
     for token in parse_array_tokens(value) {
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] =
-                    (eval_arith_value(&elements[index]) + eval_arith_value(rhs)).to_string();
+                let current = entries.get(&index).cloned().unwrap_or_default();
+                entries.insert(
+                    index,
+                    (eval_arith_value(&current) + eval_arith_value(rhs)).to_string(),
+                );
+                next_index = index + 1;
                 continue;
             }
         }
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] = rhs.to_string();
+                entries.insert(index, rhs.to_string());
+                next_index = index + 1;
                 continue;
             }
         }
-        if scalar_append && !elements.is_empty() {
-            elements[0] = (eval_arith_value(&elements[0]) + eval_arith_value(&token)).to_string();
+        if scalar_append && !entries.is_empty() {
+            let current = entries.get(&0).cloned().unwrap_or_default();
+            entries.insert(
+                0,
+                (eval_arith_value(&current) + eval_arith_value(&token)).to_string(),
+            );
         } else {
-            elements.push(token);
+            entries.insert(next_index, token);
+            next_index += 1;
         }
     }
 
     if integer {
-        for element in &mut elements {
+        for element in entries.values_mut() {
             *element = eval_arith_value(element).to_string();
         }
     }
 
-    format!("({})", elements.join(" "))
+    format_indexed_array_storage(entries)
 }
 
 fn array_assignment_index(left: &str) -> Option<usize> {
@@ -956,9 +976,51 @@ fn parse_array_tokens(value: &str) -> Vec<String> {
         .strip_prefix('(')
         .and_then(|value| value.strip_suffix(')'))
     else {
-        return vec![value.to_string()];
+        return if value.is_empty() {
+            Vec::new()
+        } else {
+            vec![value.to_string()]
+        };
     };
-    inner.split_whitespace().map(str::to_string).collect()
+    split_storage_words(inner).collect()
+}
+
+fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
+    if let Some(rendered) = value.strip_prefix('\x1d') {
+        return rendered_array_entries(rendered);
+    }
+
+    parse_array_words(value).into_iter().enumerate().collect()
+}
+
+fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return BTreeMap::new();
+    };
+
+    split_storage_words(inner)
+        .filter_map(|part| {
+            let (key, value) = part.split_once('=')?;
+            let index = key
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<usize>()
+                .ok()?;
+            Some((index, unquote_storage_value(value)))
+        })
+        .collect()
+}
+
+fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
+    let rendered = entries
+        .into_iter()
+        .map(|(index, value)| format!("[{index}]=\"{}\"", quote_double(&value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("\x1d({rendered})")
 }
 
 fn eval_arith_value(value: &str) -> i128 {
