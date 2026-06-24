@@ -1594,6 +1594,79 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_multiple_heredocs_use_last_stdin_redirect() {
+        let output_path = "target/rubash-multiple-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<EOF1 <<EOF2\nfirst\nEOF1\nsecond\nEOF2");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "second\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_dash_heredoc_strips_leading_tabs() {
+        let output_path = "target/rubash-dash-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<-EOF\n\tone\n\ttwo\n\tEOF");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "one\ntwo\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_heredoc_removes_backslash_newline() {
+        let output_path = "target/rubash-heredoc-backslash-newline-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<EOF\nline 1\\\nline 2\nEOF");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "line 1line 2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_for_loop_heredoc_append_expands_loop_variable_target() {
+        let dir = target_test_path("rubash-for-heredoc-append");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let shell_dir = shell_test_path(&dir);
+        let input =
+            format!("cd {shell_dir}; for f in a b c; do cat <<-EOF >> ${{f}}\n\tfile\n\tEOF\ndone");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(dir.join("a")).unwrap(), "file\n");
+        assert_eq!(fs::read_to_string(dir.join("b")).unwrap(), "file\n");
+        assert_eq!(fs::read_to_string(dir.join("c")).unwrap(), "file\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_lineno_assignment_does_not_override_dynamic_value() {
         let output_path = "target/rubash-lineno-assignment-output.txt";
         let _ = fs::remove_file(output_path);

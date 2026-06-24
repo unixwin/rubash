@@ -160,23 +160,34 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
         for token in &mut line_tokens {
             token.position = logical_start_line;
         }
-        let delimiter = heredoc_delimiter(&line_tokens, &logical_line);
+        let delimiters = heredoc_delimiters(&line_tokens, &logical_line);
         output.append(&mut line_tokens);
         logical_line.clear();
 
-        if let Some((delimiter, quoted)) = delimiter {
+        for delimiter in delimiters {
             let mut body = String::new();
             for body_line in lines.by_ref() {
                 position += body_line.len() + 1;
                 line_number += 1;
-                if body_line == delimiter {
+                let comparable = if delimiter.strip_tabs {
+                    body_line.trim_start_matches('\t')
+                } else {
+                    body_line
+                };
+                if comparable == delimiter.value {
                     break;
                 }
-                body.push_str(body_line);
+                if delimiter.strip_tabs {
+                    body.push_str(body_line.trim_start_matches('\t'));
+                } else {
+                    body.push_str(body_line);
+                }
                 body.push('\n');
             }
-            if quoted {
+            if delimiter.quoted {
                 body.insert(0, '\x1e');
+            } else {
+                body = body.replace("\\\n", "");
             }
             output.push(Token::new(TokenKind::HereDocBody, &body, position));
         }
@@ -207,20 +218,38 @@ fn tokenize_plain(input: &str) -> Vec<Token> {
     tokens
 }
 
-fn heredoc_delimiter(tokens: &[Token], source: &str) -> Option<(String, bool)> {
-    tokens
-        .windows(2)
-        .find(|pair| pair[0].kind == TokenKind::HereDoc)
-        .map(|pair| (pair[1].value.clone(), heredoc_delimiter_is_quoted(source)))
+struct HereDocDelimiter {
+    value: String,
+    quoted: bool,
+    strip_tabs: bool,
 }
 
-fn heredoc_delimiter_is_quoted(source: &str) -> bool {
-    let Some(index) = source.find("<<") else {
+fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
+    let mut source_offset = 0;
+    tokens
+        .windows(2)
+        .filter(|pair| pair[0].kind == TokenKind::HereDoc)
+        .map(|pair| {
+            let quoted = heredoc_delimiter_is_quoted(source, &mut source_offset);
+            HereDocDelimiter {
+                value: pair[1].value.clone(),
+                quoted,
+                strip_tabs: pair[0].value == "<<-",
+            }
+        })
+        .collect()
+}
+
+fn heredoc_delimiter_is_quoted(source: &str, source_offset: &mut usize) -> bool {
+    let Some(relative_index) = source[*source_offset..].find("<<") else {
         return false;
     };
+    let index = *source_offset + relative_index;
+    *source_offset = index + 2;
     let mut chars = source[index + 2..].chars().peekable();
     if chars.peek() == Some(&'-') {
         chars.next();
+        *source_offset += 1;
     }
     while chars.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
         chars.next();
@@ -430,6 +459,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some('<') {
                         self.advance();
                         Some(Token::new(TokenKind::HereString, "<<<", start))
+                    } else if self.peek() == Some('-') {
+                        self.advance();
+                        Some(Token::new(TokenKind::HereDoc, "<<-", start))
                     } else {
                         Some(Token::new(TokenKind::HereDoc, "<<", start))
                     }
