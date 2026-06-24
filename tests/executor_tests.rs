@@ -460,9 +460,8 @@ mod command_chaining {
     fn test_inline_then_executes_if_body_tail() {
         let output_path = "target/rubash-inline-then-output.txt";
         let _ = fs::remove_file(output_path);
-        let input = format!(
-            "if true; then echo yes > {output_path}; else echo no > {output_path}; fi"
-        );
+        let input =
+            format!("if true; then echo yes > {output_path}; else echo no > {output_path}; fi");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -538,6 +537,110 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "String \"4 0 0 0 0\" validateAndParse 4\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_compound_array_assignment_preserves_quoted_fields() {
+        let output_path = "target/rubash-compound-array-quoted-fields-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("foo=(a 'b c' d); printf '<%s>\\n' \"${{foo[@]}}\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<a>\n<b c>\n<d>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_compound_array_assignment_preserves_quoted_array_at() {
+        let output_path = "target/rubash-compound-array-quoted-at-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "foo=(a 'b c'); foo=(\"${{foo[@]}}\" d); printf '<%s>\\n' \"${{foo[@]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<a>\n<b c>\n<d>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_compound_array_assignment_preserves_quoted_array_slice() {
+        let output_path = "target/rubash-compound-array-quoted-slice-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "foo=(a 'b c' d e); foo=(\"${{foo[@]:0:${{#foo[@]}}-1}}\"); printf '<%s>\\n' \"${{foo[@]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<a>\n<b c>\n<d>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_compound_array_assignment_preserves_quoted_array_at() {
+        let output_path = "target/rubash-local-compound-array-quoted-at-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ foo=(a 'b c' d); local v=(\"${{foo[@]}}\"); printf '<%s>\\n' \"${{v[@]}}\" > {output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<a>\n<b c>\n<d>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_function_pipeline_feeds_external_stage_stdin() {
+        let output_path = "target/rubash-function-pipeline-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("emit() {{ printf '%s\\n' a 'b c'; }}; emit | tr '\\n' ',' > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "a,b c,");
         let _ = fs::remove_file(output_path);
     }
 
@@ -624,9 +727,7 @@ mod command_chaining {
     fn test_quoted_positional_at_expands_to_multiple_arguments() {
         let output_path = "target/rubash-quoted-positional-at-output.txt";
         let _ = fs::remove_file(output_path);
-        let input = format!(
-            "f() {{ printf '<%s>\\n' \"$@\" > {output_path}; }}; f a 'b c' d"
-        );
+        let input = format!("f() {{ printf '<%s>\\n' \"$@\" > {output_path}; }}; f a 'b c' d");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -635,7 +736,10 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "<a>\n<b c>\n<d>\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<a>\n<b c>\n<d>\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 

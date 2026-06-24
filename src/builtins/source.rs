@@ -304,7 +304,7 @@ pub fn execute_simple_if(
                 body_commands.push(command);
             }
         } else if let Some(command) = command_tail(ast.commands.get(then_index)) {
-                body_commands.push(command);
+            body_commands.push(command);
         }
         body_commands.extend(ast.commands[body_start..body_end].iter().cloned());
         let body = Ast {
@@ -351,7 +351,9 @@ fn execute_and_or_if_condition(
     let mut first = command.clone();
     first.words = first.words[1..].to_vec();
     first.pipe = None;
-    if first.and_or().is_none() && then_index > index + 1 && is_arithmetic_condition_words(&first.words)
+    if first.and_or().is_none()
+        && then_index > index + 1
+        && is_arithmetic_condition_words(&first.words)
     {
         first.and_or = Some(true);
     }
@@ -454,10 +456,7 @@ fn command_starts_if(command: &CommandNode) -> bool {
 }
 
 fn command_tail_starts_if(command: &CommandNode, start: usize) -> bool {
-    command
-        .words
-        .get(start)
-        .is_some_and(|word| word == "if")
+    command.words.get(start).is_some_and(|word| word == "if")
 }
 
 fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
@@ -468,10 +467,7 @@ fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
     command_tail_from(Some(command), 1)
 }
 
-fn command_tail_from(
-    command: Option<&CommandNode>,
-    start: usize,
-) -> Option<CommandNode> {
+fn command_tail_from(command: Option<&CommandNode>, start: usize) -> Option<CommandNode> {
     let command = command?;
     if command.words.len() <= start {
         return None;
