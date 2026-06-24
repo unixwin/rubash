@@ -2239,6 +2239,26 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_compound_indexed_array_assignment_resolves_negative_indices() {
+        let output_path = "target/rubash-indexed-array-compound-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=([2]=two [5]=five); arr+=([-1]=FIVE [-4]=TWO); \
+             printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 5 / TWO FIVE\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_compound_indexed_array_assignment_preserves_quoted_words() {
         let output_path = "target/rubash-indexed-array-compound-quotes-output.txt";
         let _ = fs::remove_file(output_path);
@@ -2281,6 +2301,26 @@ mod command_chaining {
             fs::read_to_string(output_path).unwrap(),
             "0 1 2 5 6 / zero middle two five tail\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_indexed_array_assignment_resolves_negative_indices() {
+        let output_path = "target/rubash-declare-indexed-array-negative-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -a arr=([2]=two [5]=five); declare -a arr+=([-1]=FIVE [-4]=TWO); \
+             printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2 5 / TWO FIVE\n");
         let _ = fs::remove_file(output_path);
     }
 

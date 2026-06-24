@@ -1004,7 +1004,7 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
 
     for token in parse_array_tokens(value) {
         if let Some((left, rhs)) = token.split_once("+=") {
-            if let Some(index) = array_assignment_index(left) {
+            if let Some(index) = array_assignment_index(left, &entries) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
                 let rhs = unquote_storage_value(rhs);
                 entries.insert(
@@ -1014,11 +1014,17 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
                 next_index = index + 1;
                 continue;
             }
+            if array_assignment_has_subscript(left) {
+                continue;
+            }
         }
         if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(index) = array_assignment_index(left) {
+            if let Some(index) = array_assignment_index(left, &entries) {
                 entries.insert(index, unquote_storage_value(rhs));
                 next_index = index + 1;
+                continue;
+            }
+            if array_assignment_has_subscript(left) {
                 continue;
             }
         }
@@ -1044,8 +1050,27 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
     format_indexed_array_storage(entries)
 }
 
-fn array_assignment_index(left: &str) -> Option<usize> {
-    left.strip_prefix('[')?.strip_suffix(']')?.parse().ok()
+fn array_assignment_index(left: &str, entries: &BTreeMap<usize, String>) -> Option<usize> {
+    let index = left
+        .strip_prefix('[')?
+        .strip_suffix(']')?
+        .parse::<i128>()
+        .ok()?;
+    if index >= 0 {
+        return usize::try_from(index).ok();
+    }
+    let max_index = entries.keys().next_back().copied()?;
+    let resolved = i128::try_from(max_index)
+        .ok()?
+        .checked_add(1)?
+        .checked_add(index)?;
+    usize::try_from(resolved).ok()
+}
+
+fn array_assignment_has_subscript(left: &str) -> bool {
+    left.strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .is_some()
 }
 
 fn parse_array_tokens(value: &str) -> Vec<String> {
