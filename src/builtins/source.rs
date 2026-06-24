@@ -8,7 +8,7 @@
 
 use crate::executor::path::shell_path_to_windows;
 use crate::executor::{ExecuteError, Executor};
-use crate::parser::{Ast, CommandNode};
+use crate::parser::{ArithmeticForCommand, Ast, CommandNode, ForCommand};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -250,11 +250,21 @@ pub fn execute_simple_if(
     } else {
         then_index + 1
     };
-    let Some(fi_index) = find_matching_fi(ast, body_start) else {
+    let branch_scan_start = if inline_then.is_none()
+        && ast
+            .commands
+            .get(then_index)
+            .is_some_and(|command| command_tail_starts_if(command, 1))
+    {
+        then_index
+    } else {
+        body_start
+    };
+    let Some(fi_index) = find_matching_fi(ast, branch_scan_start) else {
         return Ok(None);
     };
-    let elif_index = find_if_branch_command(ast, body_start, fi_index, "elif");
-    let else_index = find_if_branch_command(ast, body_start, fi_index, "else");
+    let elif_index = find_if_branch_command(ast, branch_scan_start, fi_index, "elif");
+    let else_index = find_if_branch_command(ast, branch_scan_start, fi_index, "else");
 
     let condition_words;
     let words = if keyword == "elif" {
@@ -298,7 +308,7 @@ pub fn execute_simple_if(
         }
         body_commands.extend(ast.commands[body_start..body_end].iter().cloned());
         let body = Ast {
-            commands: body_commands,
+            commands: normalize_inline_compound_commands(body_commands),
         };
         executor.execute_ast(&body)?;
         return Ok(Some(fi_index + 1));
@@ -315,7 +325,7 @@ pub fn execute_simple_if(
         }
         body_commands.extend(ast.commands[else_index + 1..fi_index].iter().cloned());
         let body = Ast {
-            commands: body_commands,
+            commands: normalize_inline_compound_commands(body_commands),
         };
         executor.execute_ast(&body)?;
         return Ok(Some(fi_index + 1));
@@ -405,8 +415,11 @@ fn find_word_command_before(ast: &Ast, start: usize, end: usize, word: &str) -> 
 fn find_matching_fi(ast: &Ast, start: usize) -> Option<usize> {
     let mut depth = 0usize;
     for index in start..ast.commands.len() {
+        if command_starts_if(&ast.commands[index]) {
+            depth += 1;
+            continue;
+        }
         match ast.commands[index].words.first().map(String::as_str) {
-            Some("if") => depth += 1,
             Some("fi") if depth == 0 => return Some(index),
             Some("fi") => depth = depth.saturating_sub(1),
             _ => {}
@@ -418,8 +431,11 @@ fn find_matching_fi(ast: &Ast, start: usize) -> Option<usize> {
 fn find_if_branch_command(ast: &Ast, start: usize, end: usize, word: &str) -> Option<usize> {
     let mut depth = 0usize;
     for index in start..end {
+        if command_starts_if(&ast.commands[index]) {
+            depth += 1;
+            continue;
+        }
         match ast.commands[index].words.first().map(String::as_str) {
-            Some("if") => depth += 1,
             Some("fi") => depth = depth.saturating_sub(1),
             Some(candidate) if depth == 0 && candidate == word => return Some(index),
             _ => {}
@@ -428,9 +444,23 @@ fn find_if_branch_command(ast: &Ast, start: usize, end: usize, word: &str) -> Op
     None
 }
 
-fn command_tail(
-    command: Option<&crate::parser::CommandNode>,
-) -> Option<crate::parser::CommandNode> {
+fn command_starts_if(command: &CommandNode) -> bool {
+    matches!(command.words.as_slice(), [first, ..] if first == "if")
+        || matches!(
+            command.words.as_slice(),
+            [first, second, ..]
+                if matches!(first.as_str(), "then" | "else" | "do") && second == "if"
+        )
+}
+
+fn command_tail_starts_if(command: &CommandNode, start: usize) -> bool {
+    command
+        .words
+        .get(start)
+        .is_some_and(|word| word == "if")
+}
+
+fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
     let command = command?;
     if command.words.len() <= 1 {
         return None;
@@ -439,9 +469,9 @@ fn command_tail(
 }
 
 fn command_tail_from(
-    command: Option<&crate::parser::CommandNode>,
+    command: Option<&CommandNode>,
     start: usize,
-) -> Option<crate::parser::CommandNode> {
+) -> Option<CommandNode> {
     let command = command?;
     if command.words.len() <= start {
         return None;
@@ -449,6 +479,77 @@ fn command_tail_from(
     let mut tail = command.clone();
     tail.words = tail.words[start..].to_vec();
     Some(tail)
+}
+
+fn normalize_inline_compound_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    let mut normalized = Vec::new();
+    let mut index = 0usize;
+    while index < commands.len() {
+        if let Some((command, next_index)) = inline_arithmetic_for_command(&commands, index) {
+            normalized.push(command);
+            index = next_index;
+            continue;
+        }
+
+        normalized.push(commands[index].clone());
+        index += 1;
+    }
+    normalized
+}
+
+fn inline_arithmetic_for_command(
+    commands: &[CommandNode],
+    index: usize,
+) -> Option<(CommandNode, usize)> {
+    let command = commands.get(index)?;
+    if command.words.first().map(String::as_str) != Some("for") {
+        return None;
+    }
+    if command.words.len() != 4 || command.words.get(2).map(String::as_str) != Some(";;") {
+        return None;
+    }
+
+    let do_index = index + 1;
+    let do_command = commands.get(do_index)?;
+    if do_command.words.first().map(String::as_str) != Some("do") {
+        return None;
+    }
+    let done_index = find_matching_done(commands, do_index + 1)?;
+
+    let mut body = Vec::new();
+    if let Some(command) = command_tail(commands.get(do_index)) {
+        body.push(command);
+    }
+    body.extend(commands[do_index + 1..done_index].iter().cloned());
+
+    let mut for_node = command.clone();
+    for_node.words.clear();
+    for_node.word_kinds.clear();
+    for_node.for_command = Some(ForCommand {
+        variable: String::new(),
+        words: Vec::new(),
+        default_positional: false,
+        arithmetic: Some(ArithmeticForCommand {
+            init: command.words[1].clone(),
+            test: String::new(),
+            update: command.words[3].clone(),
+        }),
+        body: normalize_inline_compound_commands(body),
+    });
+    Some((for_node, done_index + 1))
+}
+
+fn find_matching_done(commands: &[CommandNode], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..commands.len() {
+        match commands[index].words.first().map(String::as_str) {
+            Some("for" | "while" | "until") => depth += 1,
+            Some("done") if depth == 0 => return Some(index),
+            Some("done") => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_null_device(path: &str) -> bool {

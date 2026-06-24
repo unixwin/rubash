@@ -14318,7 +14318,8 @@ impl Executor {
     }
 
     fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
-        let Ok(regex) = regex::Regex::new(right) else {
+        let right = unescape_remaining_shell_escapes(right);
+        let Ok(regex) = regex::Regex::new(&right) else {
             return false;
         };
         let Some(captures) = regex.captures(left) else {
@@ -14346,7 +14347,7 @@ impl Executor {
 
     fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
         let left = self.expand_word(left);
-        let right = self.expand_word(right);
+        let right = unescape_remaining_shell_escapes(&self.expand_word(right));
         let Ok(regex) = regex::Regex::new(&right) else {
             return 2;
         };
@@ -16601,9 +16602,6 @@ fn unquote_storage_value(value: &str) -> String {
 }
 
 fn quote_compound_field_value(value: &str) -> String {
-    if value.contains('"') && !value.contains('\'') && !value.contains(['\n', '\r']) {
-        return format!("'{value}'");
-    }
     quote_array_value(value)
 }
 
@@ -19749,7 +19747,7 @@ fn array_values(value: &str) -> Vec<String> {
                 .split_once('=')
                 .map(|(_, value)| value)
                 .map(unquote_storage_value)
-                .unwrap_or(part);
+                .unwrap_or_else(|| unquote_storage_value(&part));
             normalize_array_expanded_value(value)
         })
         .collect()
@@ -19936,7 +19934,7 @@ fn decode_rendered_array_value(value: &str) -> String {
             .replace("\\\\", "\\");
     }
 
-    value.trim_matches('"').to_string()
+    unquote_storage_value(value)
 }
 
 fn quote_array_value(value: &str) -> String {

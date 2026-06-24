@@ -476,6 +476,72 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_nested_inline_if_scans_quoted_words_with_arithmetic_for() {
+        let output_path = "target/rubash-nested-inline-if-for-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "command='String  \"4 0 0 0 0\"    validateAndParse 4'; words=($command); if [[ ${{words[1]}} =~ ^\\\" ]]; then if [[ ${{words[1]}} =~ \\\"$ ]]; then nextWord=2; else for ((nextWord=2;;nextWord++)); do if [[ ${{words[nextWord]}} =~ \\\"$ ]]; then ((nextWord++)); break; fi; done; fi; else nextWord=2; fi; echo next:$nextWord word:${{words[nextWord]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "next:6 word:validateAndParse\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_case_body_keeps_arithmetic_for_semicolons_inside_nested_if() {
+        let output_path = "target/rubash-case-arithmetic-for-semicolons-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "command='String  \"4 0 0 0 0\"    validateAndParse 4'; words=($command); case ${{words[0]}} in String) if [[ ${{words[1]}} =~ ^\\\" ]]; then if [[ ${{words[1]}} =~ \\\"$ ]]; then nextWord=2; else for ((nextWord=2;;nextWord++)); do if [[ ${{words[nextWord]}} =~ \\\"$ ]]; then ((nextWord++)); break; fi; done; fi; else nextWord=2; fi; echo next:$nextWord word:${{words[nextWord]}} > {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "next:6 word:validateAndParse\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_parameter_array_assignment_preserves_quote_characters() {
+        let output_path = "target/rubash-array-assignment-quoted-fields-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "command='String  \"4 0 0 0 0\"    validateAndParse 4'; words=($command); full=\"${{words[*]}}\"; echo \"$full\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "String \"4 0 0 0 0\" validateAndParse 4\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_printf_percent_n_assigns_output_count() {
         let output_path = "target/rubash-printf-percent-n-output.txt";
         let _ = fs::remove_file(output_path);
