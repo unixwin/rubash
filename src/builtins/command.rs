@@ -33,7 +33,7 @@ pub fn execute(args: &[String]) -> io::Result<CommandAction> {
     execute_with_io(args.iter().map(String::as_str), &mut stdout, &mut stderr)
 }
 
-fn execute_with_io<'a, I, W, E>(
+pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     stdout: &mut W,
     stderr: &mut E,
