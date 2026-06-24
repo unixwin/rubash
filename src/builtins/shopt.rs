@@ -207,7 +207,7 @@ enum ShoptMode {
     Query,
 }
 
-fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
+pub(crate) fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
     match name {
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
