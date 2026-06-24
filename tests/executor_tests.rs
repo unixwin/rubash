@@ -2128,6 +2128,52 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_indexed_array_assignment_preserves_explicit_indices() {
+        let output_path = "target/rubash-declare-indexed-array-sparse-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -a arr=([2]=two [0]=zero middle); declare -a arr+=([5]=five tail); \
+             printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 1 2 5 6 / zero middle two five tail\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_declare_integer_array_assignment_preserves_indices() {
+        let output_path = "target/rubash-declare-integer-array-sparse-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -ai arr=([2]=1+2 [0]=3+4 middle); declare -ai arr+=([2]+=5 [5]=2+6 tail); \
+             printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 1 2 5 6 / 7 0 8 8 0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_unset_assoc_array_element() {
         let output_path = "target/rubash-unset-assoc-element-output.txt";
         let _ = fs::remove_file(output_path);
