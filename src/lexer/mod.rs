@@ -774,6 +774,18 @@ impl<'a> Lexer<'a> {
                     Some(Token::new(TokenKind::RedirectOut, ">", start))
                 }
             }
+            '0'..='9' if c != '2' && self.peek() == Some('>') => {
+                self.advance();
+                if self.peek() == Some('>') {
+                    self.advance();
+                    Some(Token::new(TokenKind::Append, self.slice(start), start))
+                } else if self.peek() == Some('|') {
+                    self.advance();
+                    Some(Token::new(TokenKind::RedirectOut, self.slice(start), start))
+                } else {
+                    Some(Token::new(TokenKind::RedirectOut, self.slice(start), start))
+                }
+            }
             '2' => {
                 if self.peek() == Some('>') {
                     self.advance();

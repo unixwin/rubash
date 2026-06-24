@@ -8833,15 +8833,27 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            file.write_all(stdout)?;
+            if redirect_target_fd(&target) == Some(2) {
+                std::io::stderr().lock().write_all(stdout)?;
+            } else if redirect_target_fd(&target) == Some(1) {
+                std::io::stdout().lock().write_all(stdout)?;
+            } else {
+                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                file.write_all(stdout)?;
+            }
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            file.write_all(stdout)?;
+            if redirect_target_fd(&target) == Some(2) {
+                std::io::stderr().lock().write_all(stdout)?;
+            } else if redirect_target_fd(&target) == Some(1) {
+                std::io::stdout().lock().write_all(stdout)?;
+            } else {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                file.write_all(stdout)?;
+            }
         } else if let Some(capture) = &mut self.stdout_capture {
             capture.write_all(stdout)?;
         } else {
@@ -8850,17 +8862,31 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if !is_null_device(&target) {
+            if redirect_target_fd(&target) == Some(1) {
+                if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(stderr)?;
+                } else {
+                    std::io::stdout().lock().write_all(stderr)?;
+                }
+            } else if !is_null_device(&target) {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(stderr)?;
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            file.write_all(stderr)?;
+            if redirect_target_fd(&target) == Some(1) {
+                if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(stderr)?;
+                } else {
+                    std::io::stdout().lock().write_all(stderr)?;
+                }
+            } else {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                file.write_all(stderr)?;
+            }
         } else {
             std::io::stderr().lock().write_all(stderr)?;
         }
@@ -18721,6 +18747,13 @@ fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {
 
 fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
+}
+
+fn redirect_target_fd(target: &str) -> Option<u32> {
+    let fd = target.strip_prefix('&')?;
+    (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| fd.parse::<u32>().ok())
+        .flatten()
 }
 
 fn command_has_unterminated_heredoc(cmd: &CommandNode) -> bool {
