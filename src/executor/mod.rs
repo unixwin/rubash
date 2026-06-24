@@ -13090,6 +13090,11 @@ impl Executor {
             return Some(self.expand_embedded_parameters(body));
         }
 
+        if let Some(redirect) = &cmd.redirect_in {
+            let target = self.expand_word(&redirect.target);
+            return fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok();
+        }
+
         let word = cmd.here_string.as_ref()?;
         let mut input = decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
         input.push('\n');
