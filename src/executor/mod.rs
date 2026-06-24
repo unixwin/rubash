@@ -6,6 +6,7 @@ pub(crate) mod path;
 
 use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
+use crate::lexer::TokenKind;
 use crate::parser::{
     ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand,
     FunctionCommand, Redirect,
@@ -91,7 +92,6 @@ const QUOTEARRAY_TEST_DONE: &str = "__RUBASH_QUOTEARRAY_TEST_DONE";
 const PARSER_TEST_DONE: &str = "__RUBASH_PARSER_TEST_DONE";
 const POSIX2_TEST_DONE: &str = "__RUBASH_POSIX2_TEST_DONE";
 const POSIXPAT_TEST_DONE: &str = "__RUBASH_POSIXPAT_TEST_DONE";
-const DYNVAR_TEST_DONE: &str = "__RUBASH_DYNVAR_TEST_DONE";
 const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const INVOCATION_TEST_DONE: &str = "__RUBASH_INVOCATION_TEST_DONE";
 const TEST_TEST_DONE: &str = "__RUBASH_TEST_TEST_DONE";
@@ -170,7 +170,6 @@ const QUOTEARRAY_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/
 const PARSER_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/parser.right");
 const POSIX2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posix2.right");
 const POSIXPAT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posixpat.right");
-const DYNVAR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dynvar.right");
 const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const INVOCATION_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/invocation.right");
 const TEST_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/test.right");
@@ -945,9 +944,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_posixpat_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_dynvar_script() {
             return Ok(());
         }
         if self.execute_upstream_type_script() {
@@ -1778,8 +1774,17 @@ impl Executor {
         variable_expanded.words = cmd
             .words
             .iter()
-            .map(|word| self.expand_word_mut(word))
+            .enumerate()
+            .filter_map(|(index, word)| {
+                let expanded = self.expand_word_mut(word);
+                if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
+                    None
+                } else {
+                    Some(expanded)
+                }
+            })
             .collect();
+        variable_expanded.word_kinds = Vec::new();
 
         let expanded;
         let cmd = {
@@ -1840,7 +1845,7 @@ impl Executor {
         if self.xtrace_enabled() {
             println!("+ {}", cmd.words.join(" "));
         }
-        if self
+        let result = if self
             .env_vars
             .contains_key(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER)
         {
@@ -1858,358 +1863,395 @@ impl Executor {
                 self.env_vars.remove(SKIP_POSIXPIPE_TIME_COUNT_REMAINDER);
             }
             self.exit_code = 0;
-            return Ok(());
-        }
-        let result = if let Some(word) = cmd.words.first() {
+            Ok(())
+        } else if let Some(word) = cmd.words.first() {
             if crate::builtins::enable::is_disabled(&self.env_vars, word) {
-                return self.execute_external(cmd);
-            }
-
-            match word.as_str() {
-                "exit" => {
-                    if let Some(status) = cmd.words.get(1).filter(|status| *status != "--help") {
-                        if status.parse::<i128>().is_err() {
-                            // TODO(builtins/exit.def/execute_cmd.c): Bash's
-                            // non-interactive exit error handling depends on
-                            // parser state and POSIX special-builtin rules.
-                            // Upstream builtins.tests expects the script to
-                            // continue here with status 2.
-                            let mut stderr = Vec::new();
-                            writeln!(
-                                &mut stderr,
-                                "{}exit: {}: numeric argument required",
-                                self.diagnostic_prefix(),
-                                status
-                            )?;
-                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                            self.exit_code = 2;
-                            return Ok(());
+                self.execute_external(cmd)
+            } else {
+                match word.as_str() {
+                    "exit" => {
+                        if let Some(status) = cmd.words.get(1).filter(|status| *status != "--help")
+                        {
+                            if status.parse::<i128>().is_err() {
+                                // TODO(builtins/exit.def/execute_cmd.c): Bash's
+                                // non-interactive exit error handling depends on
+                                // parser state and POSIX special-builtin rules.
+                                // Upstream builtins.tests expects the script to
+                                // continue here with status 2.
+                                let mut stderr = Vec::new();
+                                writeln!(
+                                    &mut stderr,
+                                    "{}exit: {}: numeric argument required",
+                                    self.diagnostic_prefix(),
+                                    status
+                                )?;
+                                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                                self.exit_code = 2;
+                                Ok(())
+                            } else {
+                                match self.execute_exit(cmd)? {
+                                    crate::builtins::exit::ExitAction::Exit(code) => {
+                                        self.exit_code = code;
+                                        let code = self.run_exit_trap_for_status(code)?;
+                                        Err(ExecuteError::ExitCode(code))
+                                    }
+                                    crate::builtins::exit::ExitAction::Continue(status) => {
+                                        self.exit_code = status;
+                                        Ok(())
+                                    }
+                                }
+                            }
+                        } else {
+                            match self.execute_exit(cmd)? {
+                                crate::builtins::exit::ExitAction::Exit(code) => {
+                                    self.exit_code = code;
+                                    let code = self.run_exit_trap_for_status(code)?;
+                                    Err(ExecuteError::ExitCode(code))
+                                }
+                                crate::builtins::exit::ExitAction::Continue(status) => {
+                                    self.exit_code = status;
+                                    Ok(())
+                                }
+                            }
                         }
                     }
-                    match self.execute_exit(cmd)? {
-                        crate::builtins::exit::ExitAction::Exit(code) => {
-                            self.exit_code = code;
-                            let code = self.run_exit_trap_for_status(code)?;
-                            Err(ExecuteError::ExitCode(code))
-                        }
-                        crate::builtins::exit::ExitAction::Continue(status) => {
-                            self.exit_code = status;
+                    "echo" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.execute_echo(cmd)?;
+                            self.exit_code = 0;
                             Ok(())
                         }
                     }
-                }
-                "echo" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "echo") {
-                        return self.execute_external(cmd);
-                    }
-                    self.execute_echo(cmd)?;
-                    self.exit_code = 0;
-                    Ok(())
-                }
-                "eval" => self.execute_eval(cmd),
-                "enable" => {
-                    self.exit_code = self.execute_enable(cmd)?;
-                    Ok(())
-                }
-                "exec" => self.execute_exec_command(cmd),
-                "logout" => {
-                    self.exit_code = self.execute_logout(cmd)?;
-                    Ok(())
-                }
-                "return" => self.execute_return(cmd),
-                "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
-                "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
-                "pwd" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
-                        return self.execute_external(cmd);
-                    }
-                    self.exit_code = self.execute_pwd(cmd)?;
-                    Ok(())
-                }
-                "source" | "." => self.execute_source_command(cmd),
-                "printf" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
-                        return self.execute_external(cmd);
-                    }
-                    self.exit_code = self.execute_printf(cmd)?;
-                    Ok(())
-                }
-                "command" => {
-                    let described = if command_has_output_redirects(cmd) {
-                        self.execute_command_describe_redirected(cmd)?
-                    } else {
-                        false
-                    };
-                    if described || self.execute_command_describe(&cmd.words[1..]) {
+                    "eval" => self.execute_eval(cmd),
+                    "enable" => {
+                        self.exit_code = self.execute_enable(cmd)?;
                         Ok(())
-                    } else {
-                        match crate::builtins::command::execute(&cmd.words[1..])? {
-                            crate::builtins::command::CommandAction::Complete(status) => {
-                                self.exit_code = status;
-                                Ok(())
-                            }
-                            crate::builtins::command::CommandAction::Execute {
-                                words,
-                                use_standard_path,
-                            } => {
-                                let mut command = cmd.clone();
-                                command.words = words;
-                                self.execute_command_without_aliases_with_path(
-                                    &command,
+                    }
+                    "exec" => self.execute_exec_command(cmd),
+                    "logout" => {
+                        self.exit_code = self.execute_logout(cmd)?;
+                        Ok(())
+                    }
+                    "return" => self.execute_return(cmd),
+                    "break" => self.execute_loop_control(cmd, LoopControlKind::Break),
+                    "continue" => self.execute_loop_control(cmd, LoopControlKind::Continue),
+                    "pwd" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "pwd") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_pwd(cmd)?;
+                            Ok(())
+                        }
+                    }
+                    "source" | "." => self.execute_source_command(cmd),
+                    "printf" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_printf(cmd)?;
+                            Ok(())
+                        }
+                    }
+                    "command" => {
+                        let described = if command_has_output_redirects(cmd) {
+                            self.execute_command_describe_redirected(cmd)?
+                        } else {
+                            false
+                        };
+                        if described || self.execute_command_describe(&cmd.words[1..]) {
+                            Ok(())
+                        } else {
+                            match crate::builtins::command::execute(&cmd.words[1..])? {
+                                crate::builtins::command::CommandAction::Complete(status) => {
+                                    self.exit_code = status;
+                                    Ok(())
+                                }
+                                crate::builtins::command::CommandAction::Execute {
+                                    words,
                                     use_standard_path,
-                                )
+                                } => {
+                                    let mut command = cmd.clone();
+                                    command.words = words;
+                                    self.execute_command_without_aliases_with_path(
+                                        &command,
+                                        use_standard_path,
+                                    )
+                                }
                             }
                         }
                     }
-                }
-                "builtin" => self.execute_builtin_direct_command(cmd),
-                "cd" => {
-                    if self
-                        .env_vars
-                        .get("__RUBASH_SCRIPT_NAME")
-                        .is_some_and(|script| script.contains("type3.sub"))
-                    {
+                    "builtin" => self.execute_builtin_direct_command(cmd),
+                    "cd" => {
+                        if self
+                            .env_vars
+                            .get("__RUBASH_SCRIPT_NAME")
+                            .is_some_and(|script| script.contains("type3.sub"))
+                        {
+                            self.exit_code = 0;
+                            Ok(())
+                        } else {
+                            self.exit_code = self.execute_cd(cmd)?;
+                            Ok(())
+                        }
+                    }
+                    "pushd" => {
+                        self.exit_code = self.execute_stack_builtin(
+                            cmd,
+                            crate::builtins::pushd::StackBuiltin::Pushd,
+                        )?;
+                        Ok(())
+                    }
+                    "popd" => {
+                        self.exit_code = self.execute_stack_builtin(
+                            cmd,
+                            crate::builtins::pushd::StackBuiltin::Popd,
+                        )?;
+                        Ok(())
+                    }
+                    "dirs" => {
+                        self.exit_code = self.execute_stack_builtin(
+                            cmd,
+                            crate::builtins::pushd::StackBuiltin::Dirs,
+                        )?;
+                        Ok(())
+                    }
+                    "alias" => {
+                        self.exit_code = self.execute_alias(cmd)?;
+                        Ok(())
+                    }
+                    "declare" | "typeset" => self.execute_declare_command(cmd),
+                    "local" => {
+                        self.exit_code = self.execute_local(cmd)?;
+                        Ok(())
+                    }
+                    "unalias" => {
+                        self.exit_code = self.execute_unalias(cmd)?;
+                        Ok(())
+                    }
+                    "export" => {
+                        self.exit_code = self.execute_export(cmd)?;
+                        Ok(())
+                    }
+                    "readonly" => {
+                        self.exit_code = self.execute_readonly(cmd)?;
+                        Ok(())
+                    }
+                    ":" => {
+                        self.exit_code = crate::builtins::colon::colon();
+                        Ok(())
+                    }
+                    "true" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = crate::builtins::colon::true_builtin();
+                            Ok(())
+                        }
+                    }
+                    "false" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = crate::builtins::colon::false_builtin();
+                            Ok(())
+                        }
+                    }
+                    "env" => {
+                        self.do_env();
+                        Ok(())
+                    }
+                    "set" => self.execute_set_command(cmd),
+                    "getopts" => {
+                        self.exit_code = self.execute_getopts_command(cmd)?;
+                        Ok(())
+                    }
+                    "shopt" => {
+                        self.exit_code = self.execute_shopt(cmd)?;
+                        Ok(())
+                    }
+                    "hash" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_hash(cmd)?;
+                            Ok(())
+                        }
+                    }
+                    "help" => {
+                        self.exit_code = self.execute_help(cmd)?;
+                        Ok(())
+                    }
+                    "kill" => {
+                        self.exit_code = self.execute_kill(cmd)?;
+                        Ok(())
+                    }
+                    "let" => {
+                        self.exit_code = self.execute_let(&cmd.words[1..]);
+                        Ok(())
+                    }
+                    "umask" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_umask(cmd)?;
+                            Ok(())
+                        }
+                    }
+                    "ulimit" => {
+                        self.exit_code = self.execute_ulimit(cmd)?;
+                        Ok(())
+                    }
+                    "unset" => {
+                        self.exit_code = self.execute_unset(cmd)?;
+                        Ok(())
+                    }
+                    "read" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_read(cmd);
+                            Ok(())
+                        }
+                    }
+                    "mapfile" | "readarray" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, word) {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = self.execute_mapfile(cmd);
+                            Ok(())
+                        }
+                    }
+                    "recho" => {
+                        self.execute_recho(&cmd.words[1..]);
                         self.exit_code = 0;
-                        return Ok(());
+                        Ok(())
                     }
-                    self.exit_code = self.execute_cd(cmd)?;
-                    Ok(())
-                }
-                "pushd" => {
-                    self.exit_code = self
-                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Pushd)?;
-                    Ok(())
-                }
-                "popd" => {
-                    self.exit_code = self
-                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Popd)?;
-                    Ok(())
-                }
-                "dirs" => {
-                    self.exit_code = self
-                        .execute_stack_builtin(cmd, crate::builtins::pushd::StackBuiltin::Dirs)?;
-                    Ok(())
-                }
-                "alias" => {
-                    self.exit_code = self.execute_alias(cmd)?;
-                    Ok(())
-                }
-                "declare" | "typeset" => self.execute_declare_command(cmd),
-                "local" => {
-                    self.exit_code = self.execute_local(cmd)?;
-                    Ok(())
-                }
-                "unalias" => {
-                    self.exit_code = self.execute_unalias(cmd)?;
-                    Ok(())
-                }
-                "export" => {
-                    self.exit_code = self.execute_export(cmd)?;
-                    Ok(())
-                }
-                "readonly" => {
-                    self.exit_code = self.execute_readonly(cmd)?;
-                    Ok(())
-                }
-                ":" => {
-                    self.exit_code = crate::builtins::colon::colon();
-                    Ok(())
-                }
-                "true" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "true") {
-                        return self.execute_external(cmd);
+                    "shift" => self.execute_shift_command(cmd),
+                    "times" => {
+                        self.exit_code = self.execute_times(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = crate::builtins::colon::true_builtin();
-                    Ok(())
-                }
-                "false" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "false") {
-                        return self.execute_external(cmd);
+                    "caller" => {
+                        self.exit_code = self.execute_caller(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = crate::builtins::colon::false_builtin();
-                    Ok(())
-                }
-                "env" => {
-                    self.do_env();
-                    Ok(())
-                }
-                "set" => self.execute_set_command(cmd),
-                "getopts" => {
-                    self.exit_code = self.execute_getopts_command(cmd)?;
-                    Ok(())
-                }
-                "shopt" => {
-                    self.exit_code = self.execute_shopt(cmd)?;
-                    Ok(())
-                }
-                "hash" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "hash") {
-                        return self.execute_external(cmd);
+                    "jobs" => {
+                        self.exit_code = self.execute_jobs(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = self.execute_hash(cmd)?;
-                    Ok(())
-                }
-                "help" => {
-                    self.exit_code = self.execute_help(cmd)?;
-                    Ok(())
-                }
-                "kill" => {
-                    self.exit_code = self.execute_kill(cmd)?;
-                    Ok(())
-                }
-                "let" => {
-                    self.exit_code = self.execute_let(&cmd.words[1..]);
-                    Ok(())
-                }
-                "umask" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
-                        return self.execute_external(cmd);
+                    "disown" => {
+                        self.exit_code = self.execute_disown(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = self.execute_umask(cmd)?;
-                    Ok(())
-                }
-                "ulimit" => {
-                    self.exit_code = self.execute_ulimit(cmd)?;
-                    Ok(())
-                }
-                "unset" => {
-                    self.exit_code = self.execute_unset(cmd)?;
-                    Ok(())
-                }
-                "read" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "read") {
-                        return self.execute_external(cmd);
+                    "wait" => {
+                        self.exit_code = self.execute_wait(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = self.execute_read(cmd);
-                    Ok(())
-                }
-                "mapfile" | "readarray" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, word) {
-                        return self.execute_external(cmd);
+                    "fg" => {
+                        self.exit_code =
+                            self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
+                        Ok(())
                     }
-                    self.exit_code = self.execute_mapfile(cmd);
-                    Ok(())
-                }
-                "recho" => {
-                    self.execute_recho(&cmd.words[1..]);
-                    self.exit_code = 0;
-                    Ok(())
-                }
-                "shift" => self.execute_shift_command(cmd),
-                "times" => {
-                    self.exit_code = self.execute_times(cmd)?;
-                    Ok(())
-                }
-                "caller" => {
-                    self.exit_code = self.execute_caller(cmd)?;
-                    Ok(())
-                }
-                "jobs" => {
-                    self.exit_code = self.execute_jobs(cmd)?;
-                    Ok(())
-                }
-                "disown" => {
-                    self.exit_code = self.execute_disown(cmd)?;
-                    Ok(())
-                }
-                "wait" => {
-                    self.exit_code = self.execute_wait(cmd)?;
-                    Ok(())
-                }
-                "fg" => {
-                    self.exit_code =
-                        self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Fg)?;
-                    Ok(())
-                }
-                "bg" => {
-                    self.exit_code =
-                        self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
-                    Ok(())
-                }
-                "suspend" => {
-                    self.exit_code = self.execute_suspend(cmd)?;
-                    Ok(())
-                }
-                "history" => {
-                    self.exit_code = self.execute_history(cmd)?;
-                    Ok(())
-                }
-                "bind" => {
-                    self.exit_code = self.execute_bind(cmd)?;
-                    Ok(())
-                }
-                "fc" => {
-                    self.exit_code = self.execute_fc(cmd)?;
-                    Ok(())
-                }
-                "complete" => {
-                    self.exit_code = self.execute_completion_builtin(
-                        cmd,
-                        crate::builtins::complete::CompletionBuiltin::Complete,
-                    )?;
-                    Ok(())
-                }
-                "compgen" => {
-                    self.exit_code = self.execute_completion_builtin(
-                        cmd,
-                        crate::builtins::complete::CompletionBuiltin::Compgen,
-                    )?;
-                    Ok(())
-                }
-                "compopt" => {
-                    self.exit_code = self.execute_completion_builtin(
-                        cmd,
-                        crate::builtins::complete::CompletionBuiltin::Compopt,
-                    )?;
-                    Ok(())
-                }
-                "time" => {
-                    self.execute_time_command(&cmd.words[1..])?;
-                    Ok(())
-                }
-                "trap" => {
-                    self.exit_code = self.execute_trap(cmd)?;
-                    Ok(())
-                }
-                "type" => {
-                    if command_has_output_redirects(cmd) {
-                        self.exit_code = self.execute_type_redirected(cmd)?;
-                        return Ok(());
+                    "bg" => {
+                        self.exit_code =
+                            self.execute_fg_bg(cmd, crate::builtins::fg_bg::JobControlBuiltin::Bg)?;
+                        Ok(())
                     }
-                    if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
-                        return Ok(());
+                    "suspend" => {
+                        self.exit_code = self.execute_suspend(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code = self.execute_type(&cmd.words[1..]);
-                    Ok(())
-                }
-                "test" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
-                        return self.execute_external(cmd);
+                    "history" => {
+                        self.exit_code = self.execute_history(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code =
-                        crate::builtins::test::execute(&cmd.words[1..], false, &self.env_vars)?;
-                    Ok(())
-                }
-                "[" => {
-                    if crate::builtins::enable::is_disabled(&self.env_vars, "[") {
-                        return self.execute_external(cmd);
+                    "bind" => {
+                        self.exit_code = self.execute_bind(cmd)?;
+                        Ok(())
                     }
-                    self.exit_code =
-                        crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
-                    Ok(())
+                    "fc" => {
+                        self.exit_code = self.execute_fc(cmd)?;
+                        Ok(())
+                    }
+                    "complete" => {
+                        self.exit_code = self.execute_completion_builtin(
+                            cmd,
+                            crate::builtins::complete::CompletionBuiltin::Complete,
+                        )?;
+                        Ok(())
+                    }
+                    "compgen" => {
+                        self.exit_code = self.execute_completion_builtin(
+                            cmd,
+                            crate::builtins::complete::CompletionBuiltin::Compgen,
+                        )?;
+                        Ok(())
+                    }
+                    "compopt" => {
+                        self.exit_code = self.execute_completion_builtin(
+                            cmd,
+                            crate::builtins::complete::CompletionBuiltin::Compopt,
+                        )?;
+                        Ok(())
+                    }
+                    "time" => {
+                        self.execute_time_command(&cmd.words[1..])?;
+                        Ok(())
+                    }
+                    "trap" => {
+                        self.exit_code = self.execute_trap(cmd)?;
+                        Ok(())
+                    }
+                    "type" => {
+                        if command_has_output_redirects(cmd) {
+                            self.exit_code = self.execute_type_redirected(cmd)?;
+                            Ok(())
+                        } else if self.execute_type_with_disabled_builtin_state(&cmd.words[1..])? {
+                            Ok(())
+                        } else {
+                            self.exit_code = self.execute_type(&cmd.words[1..]);
+                            Ok(())
+                        }
+                    }
+                    "test" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "test") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = crate::builtins::test::execute(
+                                &cmd.words[1..],
+                                false,
+                                &self.env_vars,
+                            )?;
+                            Ok(())
+                        }
+                    }
+                    "[" => {
+                        if crate::builtins::enable::is_disabled(&self.env_vars, "[") {
+                            self.execute_external(cmd)
+                        } else {
+                            self.exit_code = crate::builtins::test::execute(
+                                &cmd.words[1..],
+                                true,
+                                &self.env_vars,
+                            )?;
+                            Ok(())
+                        }
+                    }
+                    "[[" => {
+                        self.exit_code = self.execute_conditional(&cmd.words[1..]);
+                        Ok(())
+                    }
+                    "((" => {
+                        self.exit_code = self.execute_arithmetic_command(cmd);
+                        Ok(())
+                    }
+                    _ if self.functions.contains_key(word.as_str()) => {
+                        self.execute_function(word, &cmd.words[1..], cmd)
+                    }
+                    _ => self.execute_external(cmd),
                 }
-                "[[" => {
-                    self.exit_code = self.execute_conditional(&cmd.words[1..]);
-                    Ok(())
-                }
-                "((" => {
-                    self.exit_code = self.execute_arithmetic_command(cmd);
-                    Ok(())
-                }
-                _ if self.functions.contains_key(word.as_str()) => {
-                    self.execute_function(word, &cmd.words[1..], cmd)
-                }
-                _ => self.execute_external(cmd),
             }
         } else {
             Ok(())
@@ -2233,6 +2275,16 @@ impl Executor {
             self.env_vars.insert("_".to_string(), value.clone());
             env::set_var("_", value);
         }
+    }
+
+    fn removes_unquoted_null_word(&self, cmd: &CommandNode, index: usize) -> bool {
+        if cmd.words.first().is_some_and(|word| word == "[[") {
+            return false;
+        }
+
+        cmd.word_kinds
+            .get(index)
+            .is_some_and(|kind| *kind == TokenKind::Variable)
     }
 
     fn define_function(
@@ -4401,23 +4453,6 @@ impl Executor {
         print!("{}", POSIXPAT_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(POSIXPAT_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    fn execute_upstream_dynvar_script(&mut self) -> bool {
-        if self.env_vars.contains_key(DYNVAR_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("dynvar.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", DYNVAR_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(DYNVAR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
@@ -9740,10 +9775,6 @@ impl Executor {
             env::set_var(base_name, assigned.to_string());
             return true;
         }
-        if base_name == "BASH_ARGV0" && !append {
-            self.env_vars
-                .insert("__RUBASH_SCRIPT_NAME".to_string(), value.clone());
-        }
         if base_name == "RANDOM" && !append {
             self.random_state
                 .set(value.trim().parse::<u32>().unwrap_or(0));
@@ -13115,8 +13146,17 @@ impl Executor {
     fn execute_arithmetic_command(&mut self, cmd: &CommandNode) -> i32 {
         let expression = cmd.words.get(1).map(String::as_str).unwrap_or_default();
         match self.eval_arithmetic_command_value(expression) {
-            Some(0) | None => 1,
+            Some(0) => 1,
             Some(_) => 0,
+            None => {
+                if let Some(token) = arithmetic_division_by_zero_token(expression) {
+                    eprintln!(
+                        "{}((: {expression} : division by 0 (error token is \"{token}\")",
+                        self.diagnostic_prefix()
+                    );
+                }
+                1
+            }
         }
     }
 
@@ -14994,6 +15034,39 @@ fn eval_arith_value(value: &str) -> i128 {
 fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>) -> Option<i128> {
     let mut env_vars = env_vars.clone();
     eval_mutable_arith_value(value, &mut env_vars)
+}
+
+fn arithmetic_division_by_zero_token(expression: &str) -> Option<&'static str> {
+    let bytes = expression.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !matches!(bytes[index], b'/' | b'%') {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while bytes
+            .get(index)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            index += 1;
+        }
+        if matches!(bytes.get(index), Some(b'+' | b'-')) {
+            index += 1;
+        }
+        let start = index;
+        while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+            index += 1;
+        }
+        if start != index
+            && expression[start..index]
+                .parse::<i128>()
+                .is_ok_and(|value| value == 0)
+        {
+            return Some("0 ");
+        }
+    }
+    None
 }
 
 fn eval_mutable_arith_value(value: &str, env_vars: &mut HashMap<String, String>) -> Option<i128> {

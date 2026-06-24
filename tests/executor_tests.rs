@@ -1491,6 +1491,41 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_lineno_in_multiline_function_body_uses_body_line() {
+        let output_path = "target/rubash-lineno-function-body-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input =
+            format!("show_line() {{\n  printf '%s\\n' \"$LINENO\" > {output_path}\n}}\nshow_line");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_empty_parameter_removes_word() {
+        let output_path = "target/rubash-unquoted-empty-parameter-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("empty=; echo a $empty b > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "a b\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_lineno_assignment_does_not_override_dynamic_value() {
         let output_path = "target/rubash-lineno-assignment-output.txt";
         let _ = fs::remove_file(output_path);

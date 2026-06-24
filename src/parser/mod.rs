@@ -64,6 +64,9 @@ pub struct FunctionCommand {
 pub struct CommandNode {
     /// The command words (first is the command name)
     pub words: Vec<String>,
+    /// Lexer kind for each command word, used for quote-sensitive expansion
+    /// decisions while the parser still stores words as strings.
+    pub word_kinds: Vec<TokenKind>,
     /// Variable assignments
     pub assignments: std::collections::HashMap<String, String>,
     /// Input redirect
@@ -106,6 +109,7 @@ impl CommandNode {
     pub fn new() -> Self {
         Self {
             words: Vec::new(),
+            word_kinds: Vec::new(),
             assignments: std::collections::HashMap::new(),
             redirect_in: None,
             redirect_out: None,
@@ -224,7 +228,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
                 current_cmd.subshell |= in_subshell;
                 note_command_line(&mut current_cmd, token);
-                current_cmd.words.push(token.value.clone());
+                push_command_word(&mut current_cmd, token);
             }
             TokenKind::Assignment => {
                 current_cmd.subshell |= in_subshell;
@@ -254,6 +258,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             }
                         }
                         current_cmd.words.push(word);
+                        current_cmd.word_kinds.push(TokenKind::Word);
                     }
                 }
             }
@@ -272,7 +277,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectIn => {
                 if command_is_open_conditional(&current_cmd) {
-                    current_cmd.words.push(token.value.clone());
+                    push_command_word(&mut current_cmd, token);
                 } else {
                     note_command_line(&mut current_cmd, token);
                     if i + 1 < tokens.len()
@@ -290,7 +295,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::RedirectOut => {
                 if command_is_open_conditional(&current_cmd) {
-                    current_cmd.words.push(token.value.clone());
+                    push_command_word(&mut current_cmd, token);
                 } else {
                     note_command_line(&mut current_cmd, token);
                     if i + 1 < tokens.len()
@@ -375,7 +380,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::And | TokenKind::Or => {
                 if command_is_open_conditional(&current_cmd) {
-                    current_cmd.words.push(token.value.clone());
+                    push_command_word(&mut current_cmd, token);
                 } else {
                     // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
                     // list connector on simple commands. Full Bash grammar needs
@@ -400,7 +405,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 if command_is_open_conditional(&current_cmd)
                     && matches!(token.value.as_str(), "(" | ")")
                 {
-                    current_cmd.words.push(token.value.clone());
+                    push_command_word(&mut current_cmd, token);
                     i += 1;
                     continue;
                 }
@@ -440,7 +445,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                 // keep the token text so alias expansion can reparse it later.
                 if !matches!(token.value.as_str(), "(" | ")" | "{" | "}") {
                     note_command_line(&mut current_cmd, token);
-                    current_cmd.words.push(token.value.clone());
+                    push_command_word(&mut current_cmd, token);
                 }
             }
             TokenKind::Eof => {
@@ -745,10 +750,7 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         return None;
     }
 
-    let mut body = parse(&tokens[body_start..i]).commands;
-    if let Some(line) = tokens.get(start).map(|token| token.position) {
-        set_body_line(&mut body, line);
-    }
+    let body = parse(&tokens[body_start..i]).commands;
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.function_command = Some(FunctionCommand { name, body });
@@ -1132,6 +1134,11 @@ fn note_command_line(cmd: &mut CommandNode, token: &Token) {
     if cmd.line.is_none() {
         cmd.line = Some(token.position);
     }
+}
+
+fn push_command_word(cmd: &mut CommandNode, token: &Token) {
+    cmd.words.push(token.value.clone());
+    cmd.word_kinds.push(token.kind.clone());
 }
 
 fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
