@@ -389,6 +389,15 @@ mod variables {
     }
 
     #[test]
+    fn test_braced_variable_with_literal_suffix_stays_one_word() {
+        let input = "${left}:${right}";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(tokens[0].value, "${left}:${right}");
+    }
+
+    #[test]
     fn test_positional_parameter() {
         let input = "$1 $2 $3";
         let tokens = tokenize(input);

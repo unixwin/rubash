@@ -9852,6 +9852,9 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
+            if !braced_parameter_spans_whole_word(word) {
+                return self.expand_embedded_parameters(word);
+            }
             match name {
                 "#" => return self.positional_params.len().to_string(),
                 "@" | "*" => return self.positional_params.join(" "),
@@ -10787,6 +10790,9 @@ impl Executor {
         else {
             return self.expand_embedded_parameters(word);
         };
+        if !braced_parameter_spans_whole_word(word) {
+            return self.expand_embedded_parameters(word);
+        }
 
         if let Some((var_name, default)) = name.split_once(":-") {
             return self
@@ -10840,6 +10846,9 @@ impl Executor {
         else {
             return self.expand_embedded_parameters_mut(word);
         };
+        if !braced_parameter_spans_whole_word(word) {
+            return self.expand_embedded_parameters_mut(word);
+        }
 
         if let Some((var_name, default)) = name.split_once(":-") {
             return self
@@ -15897,6 +15906,13 @@ fn matching_parameter_brace(input: &str) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+fn braced_parameter_spans_whole_word(word: &str) -> bool {
+    let Some(rest) = word.strip_prefix("${") else {
+        return false;
+    };
+    matching_parameter_brace(rest).is_some_and(|index| index + 1 == rest.len())
 }
 
 fn is_parameter_error_name(name: &str) -> bool {
