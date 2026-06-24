@@ -6144,42 +6144,27 @@ impl Executor {
         // TODO(builtins/command.def/builtins/source.def): `command` removes
         // special-builtin exit behavior while still invoking `.` as a builtin.
         // This covers builtins7.sub's `command . notthere` in POSIX mode.
-        let Some(filename) = cmd.words.get(1) else {
+        if cmd.words.get(1).is_none() {
             self.exit_code = 2;
             return Ok(());
         };
-        if shell_path_to_windows(filename, &self.env_vars).exists() {
-            let mut stderr = Vec::new();
-            let result = crate::builtins::source::execute_named_with_io_and_redirects(
-                self,
-                &cmd.words[0],
-                &cmd.words[1..],
-                &mut stderr,
-                cmd,
-            );
-            if !stderr.is_empty() {
-                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            }
-            return result;
-        }
 
         let mut stderr = Vec::new();
-        if self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1") {
-            writeln!(
-                &mut stderr,
-                "{}.: {filename}: file not found",
-                self.diagnostic_prefix()
-            )?;
-        } else {
-            writeln!(
-                &mut stderr,
-                "{}{filename}: No such file or directory",
-                self.diagnostic_prefix()
-            )?;
+        let result = crate::builtins::source::execute_named_with_io_and_redirects(
+            self,
+            &cmd.words[0],
+            &cmd.words[1..],
+            &mut stderr,
+            cmd,
+        );
+        let had_diagnostic = !stderr.is_empty();
+        if had_diagnostic {
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         }
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        self.exit_code = 1;
-        Ok(())
+        match result {
+            Err(ExecuteError::ExitCode(1)) if had_diagnostic => Ok(()),
+            other => other,
+        }
     }
 
     fn execute_source_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
