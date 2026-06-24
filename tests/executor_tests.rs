@@ -9232,6 +9232,30 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_pf_prints_condition_heredocs() {
+        let output_path = "target/rubash-declare-function-condition-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "foo()\n{{\necho begin\nif cat << HERE\ncontents\nHERE\nthen\n    echo 1 2\n    echo 3 4\nfi\n}}\n\
+             declare -pf foo > {output_path}\n\
+             foo()\n{{\necho begin\nwhile read var << HERE\ncontents\nHERE\ndo\n    echo 1 2\n    echo 3 4\ndone\n}}\n\
+             declare -pf foo >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.contains("    if cat <<HERE\ncontents\nHERE\n    then\n"));
+        assert!(output.contains("    while read var <<HERE\ncontents\nHERE\n    do\n"));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_type_invalid_option_redirects_stderr() {
         let status_path = "target/rubash-type-invalid-option-status.txt";
         let error_path = "target/rubash-type-invalid-option-error.txt";
