@@ -8384,6 +8384,52 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_command_invalid_option_redirects_stderr() {
+        let status_path = "target/rubash-command-invalid-option-status.txt";
+        let error_path = "target/rubash-command-invalid-option-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("command -Z 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("command: -Z: invalid option"));
+        assert!(error.contains("command: usage: command"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_command_verbose_missing_redirects_stderr() {
+        let status_path = "target/rubash-command-verbose-missing-status.txt";
+        let error_path = "target/rubash-command-verbose-missing-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("command -V no_such_name 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("command: no_such_name: not found"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_command_p_uses_standard_path_for_external_command() {
         let output_path = "target/rubash-command-p-output.txt";
         let _ = fs::remove_file(output_path);

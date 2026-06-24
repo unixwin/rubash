@@ -1964,7 +1964,7 @@ impl Executor {
                     Ok(())
                 }
                 "command" => {
-                    let described = if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                    let described = if command_has_output_redirects(cmd) {
                         self.execute_command_describe_redirected(cmd)?
                     } else {
                         false
@@ -5192,7 +5192,7 @@ impl Executor {
                 Ok(())
             }
             "command" => {
-                let described = if cmd.redirect_out.is_some() || cmd.append.is_some() {
+                let described = if command_has_output_redirects(cmd) {
                     self.execute_command_describe_redirected(cmd)?
                 } else {
                     false
@@ -6245,30 +6245,25 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_command_describe_with_io(
-                &cmd.words[1..],
-                &mut file,
-                &mut std::io::stderr().lock(),
-            );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if self.execute_command_describe_with_io(&cmd.words[1..], &mut stdout, &mut stderr)? {
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(true);
         }
 
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return self.execute_command_describe_with_io(
-                &cmd.words[1..],
-                &mut file,
-                &mut std::io::stderr().lock(),
-            );
+        match crate::builtins::command::execute_with_io(
+            cmd.words[1..].iter().map(String::as_str),
+            &mut stdout,
+            &mut stderr,
+        )? {
+            crate::builtins::command::CommandAction::Complete(status) => {
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                self.exit_code = status;
+                Ok(true)
+            }
+            crate::builtins::command::CommandAction::Execute { .. } => Ok(false),
         }
-
-        Ok(false)
     }
 
     fn execute_command_describe_with_io<W, E>(
@@ -15900,6 +15895,13 @@ fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+}
+
+fn command_has_output_redirects(cmd: &CommandNode) -> bool {
+    cmd.redirect_out.is_some()
+        || cmd.append.is_some()
+        || cmd.redirect_err.is_some()
+        || cmd.redirect_err_append.is_some()
 }
 
 fn bash_command_text(cmd: &CommandNode) -> String {
