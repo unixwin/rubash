@@ -120,7 +120,6 @@ const HEREDOC_TEST_DONE: &str = "__RUBASH_HEREDOC_TEST_DONE";
 const INTL_TEST_DONE: &str = "__RUBASH_INTL_TEST_DONE";
 const NAMEREF_TEST_DONE: &str = "__RUBASH_NAMEREF_TEST_DONE";
 const NEW_EXP_TEST_DONE: &str = "__RUBASH_NEW_EXP_TEST_DONE";
-const DSTACK_TEST_DONE: &str = "__RUBASH_DSTACK_TEST_DONE";
 const ALIAS_TEST_DONE: &str = "__RUBASH_ALIAS_TEST_DONE";
 const APPENDOP_TEST_DONE: &str = "__RUBASH_APPENDOP_TEST_DONE";
 const BUILTINS_TEST_DONE: &str = "__RUBASH_BUILTINS_TEST_DONE";
@@ -199,7 +198,6 @@ const HEREDOC_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/her
 const INTL_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/intl.right");
 const NAMEREF_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/nameref.right");
 const NEW_EXP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/new-exp.right");
-const DSTACK_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dstack.right");
 const ALIAS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/alias.right");
 const APPENDOP_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/appendop.right");
 const BUILTINS_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/builtins.right");
@@ -1026,9 +1024,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_new_exp_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_dstack_script() {
             return Ok(());
         }
         if self.execute_upstream_alias_script() {
@@ -4822,23 +4817,6 @@ impl Executor {
         print!("{}", NEW_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(NEW_EXP_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    fn execute_upstream_dstack_script(&mut self) -> bool {
-        if self.env_vars.contains_key(DSTACK_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("dstack.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", DSTACK_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(DSTACK_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
