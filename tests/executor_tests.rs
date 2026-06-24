@@ -880,7 +880,7 @@ mod command_chaining {
         let output_path = "target/rubash-bashpid-command-substitution-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "printf '%s:%s:%s\\n' \"$$\" \"$BASHPID\" \"$(echo $BASHPID)\" > {output_path}"
+            "printf '%s:%s:%s:%s\\n' \"$$\" \"$BASHPID\" \"$(echo $BASHPID)\" \"$( (echo $BASHPID) )\" > {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -892,9 +892,10 @@ mod command_chaining {
         assert_eq!(executor.last_exit_code(), 0);
         let output = fs::read_to_string(output_path).unwrap();
         let parts: Vec<_> = output.trim_end().split(':').collect();
-        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.len(), 4);
         assert_eq!(parts[0], parts[1]);
         assert_ne!(parts[0], parts[2]);
+        assert_ne!(parts[0], parts[3]);
         let _ = fs::remove_file(output_path);
     }
 
@@ -14709,6 +14710,27 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
             fs::read_to_string(output_path).unwrap(),
             "0\n1\n0\n1\n0\n1\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_command_accepts_dollar_variables() {
+        let output_path = "target/rubash-arithmetic-command-dollar-vars-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "now1=100; now2=100; offset=1; \
+             (( $now1 - $offset <= $now2 && ${{now2}} <= $now1 + $offset )); echo $? > {output_path}; \
+             echo $(( $now1 + ${{offset}} )) >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n101\n");
         let _ = fs::remove_file(output_path);
     }
 
