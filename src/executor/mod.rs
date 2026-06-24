@@ -3836,7 +3836,8 @@ impl Executor {
         }
 
         if is_marked_array_var(&self.env_vars, array_name) || is_array_storage(&current) {
-            let Ok(index) = subscript.parse::<i128>() else {
+            let subscript = self.expand_arithmetic_special_parameters(subscript);
+            let Some(index) = eval_conditional_arith_value(&subscript, &self.env_vars) else {
                 return false;
             };
             let Some(index) = resolve_indexed_array_subscript(&current, index) else {
@@ -10295,8 +10296,10 @@ impl Executor {
     }
 
     fn expand_assignment_value(&mut self, value: &str) -> String {
-        if let Some(array_value) = normalize_single_element_array_assignment(value) {
-            return array_value;
+        if !value.contains("$(") && !value.contains('`') {
+            if let Some(array_value) = normalize_single_element_array_assignment(value) {
+                return array_value;
+            }
         }
 
         let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
@@ -10387,6 +10390,28 @@ impl Executor {
 
         if let Some(value) = tilde_expand::expand_word_prefix(word, &self.env_vars) {
             return value;
+        }
+
+        if let Some((raw_name, value)) = word.split_once('=') {
+            let name = self.expand_embedded_parameters(raw_name);
+            let (base_name, _) = assignment_name_and_append(&name);
+            if raw_name.contains('$')
+                && !raw_name.contains(['{', '(', ')', '}'])
+                && is_shell_name(base_name)
+            {
+                let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
+                let value = tilde_expand::strip_assignment_quote_marker(value);
+                let expanded = self.expand_embedded_parameters(value);
+                if !quoted
+                    && !expanded.contains('=')
+                    && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                        || expanded.starts_with("~/"))
+                {
+                    return format!("{name}={}", self.expand_assignment_tilde(&expanded));
+                }
+
+                return format!("{name}={expanded}");
+            }
         }
 
         if let Some((name, value)) = split_assignment_word(word) {
@@ -11148,6 +11173,28 @@ impl Executor {
 
         if let Some(word) = word.strip_prefix('\x1d') {
             return self.expand_quoted_parameter_word_mut(word);
+        }
+
+        if let Some((raw_name, value)) = word.split_once('=') {
+            let name = self.expand_embedded_parameters_mut(raw_name);
+            let (base_name, _) = assignment_name_and_append(&name);
+            if raw_name.contains('$')
+                && !raw_name.contains(['{', '(', ')', '}'])
+                && is_shell_name(base_name)
+            {
+                let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
+                let value = tilde_expand::strip_assignment_quote_marker(value);
+                let expanded = self.expand_embedded_parameters_mut(value);
+                if !quoted
+                    && !expanded.contains('=')
+                    && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                        || expanded.starts_with("~/"))
+                {
+                    return format!("{name}={}", self.expand_assignment_tilde(&expanded));
+                }
+
+                return format!("{name}={expanded}");
+            }
         }
 
         if let Some((name, value)) = split_assignment_word(word) {
@@ -13183,7 +13230,7 @@ impl Executor {
             "printf" => {
                 let expanded_args: Vec<String> = words[1..]
                     .iter()
-                    .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+                    .flat_map(|word| self.expand_command_substitution_arg_values(word))
                     .collect();
                 let mut env_vars = self.env_vars.clone();
                 let mut stdout = Vec::new();
@@ -13222,8 +13269,38 @@ impl Executor {
                 let script = sed_script_arg(&words[1..])?;
                 apply_simple_sed_substitution(input, script)
             }
+            "sort" => {
+                let unique = words[1..].iter().any(|word| self.expand_word(word) == "-u");
+                let mut lines = input.lines().map(str::to_string).collect::<Vec<_>>();
+                lines.sort();
+                if unique {
+                    lines.dedup();
+                }
+                let mut output = lines.join("\n");
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                Some(output)
+            }
             _ => None,
         }
+    }
+
+    fn expand_command_substitution_arg_values(&self, word: &str) -> Vec<String> {
+        if let Some(values) = self.array_at_word_values(word) {
+            return values;
+        }
+        vec![strip_matching_quotes(&self.expand_word(word)).to_string()]
+    }
+
+    fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
+        let word = word
+            .strip_prefix('"')
+            .and_then(|word| word.strip_suffix('"'))
+            .unwrap_or(word);
+        let name = word.strip_prefix("${")?.strip_suffix("[@]}")?;
+        self.parameter_array_storage(name)
+            .map(|value| array_values(&value))
     }
 
     fn report_command_substitution_heredoc_warning(&self, source: &str, command: &CommandNode) {
@@ -13625,6 +13702,7 @@ impl Executor {
                         _ => source.push(source_ch),
                     }
                 }
+                let source = unescape_storage_command_substitution_source(&source);
                 output.push_str(&protect_command_substitution_output(
                     &self.expand_command_substitution_mut(&source),
                 ));
@@ -15744,9 +15822,18 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
             }
         }
 
+        let command_subst_token = token.starts_with("\"$(") && token.ends_with('"');
+        let quoted_token = token.starts_with('"') && token.ends_with('"') && !command_subst_token;
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in expanded_array.split_whitespace() {
+                entries.insert(next_index, value.to_string());
+                next_index += 1;
+            }
+            continue;
+        }
+        if token.contains('\n') || (token.contains(char::is_whitespace) && !quoted_token) {
+            for value in token.split_whitespace() {
                 entries.insert(next_index, value.to_string());
                 next_index += 1;
             }
@@ -16010,6 +16097,9 @@ fn unquote_storage_value(value: &str) -> String {
     let mut escaped = false;
     for ch in inner.chars() {
         if escaped {
+            if !matches!(ch, '$' | '`' | '"' | '\\' | '\n') {
+                unquoted.push('\\');
+            }
             unquoted.push(ch);
             escaped = false;
         } else if ch == '\\' {
@@ -18536,6 +18626,24 @@ fn command_substitution_word_split(value: &str) -> String {
 
 fn protect_command_substitution_output(value: &str) -> String {
     value.replace('`', "\x1a").replace('$', "\x1f")
+}
+
+fn unescape_storage_command_substitution_source(source: &str) -> String {
+    let mut output = String::new();
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some('"') | Some('\\') => {
+                    output.push(chars.next().unwrap());
+                }
+                _ => output.push(ch),
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 fn collect_braced_parameter_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
