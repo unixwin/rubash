@@ -112,6 +112,16 @@ where
     let mut assign_names = Vec::new();
     let mut attr_status = EXECUTION_SUCCESS;
     for name in &names {
+        if !valid_declare_name(name) {
+            writeln!(
+                stderr,
+                "{}declare: `{}`: not a valid identifier",
+                diagnostic_prefix(),
+                name
+            )?;
+            attr_status = EXECUTION_FAILURE;
+            continue;
+        }
         if nameref && nameref_self_reference(name) {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             writeln!(
@@ -526,6 +536,27 @@ fn nameref_self_reference(arg: &str) -> bool {
     name == value
 }
 
+fn valid_declare_name(arg: &str) -> bool {
+    let name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
+    let name = name.strip_suffix('+').unwrap_or(name);
+    if let Some((base, subscript)) = name.split_once('[') {
+        let Some(subscript) = subscript.strip_suffix(']') else {
+            return false;
+        };
+        return !subscript.is_empty() && valid_identifier(base);
+    }
+    valid_identifier(name)
+}
+
+fn valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 #[derive(Clone, Copy)]
 struct DeclarationAttrs {
     exported: bool,
@@ -800,6 +831,7 @@ fn parse_array_words(value: &str) -> Vec<String> {
 }
 
 fn is_noassign_bash_array(name: &str) -> bool {
+    let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
     matches!(
         name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
@@ -1161,4 +1193,19 @@ fn quote_double(value: &str) -> String {
         }
     }
     quoted
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_declare_name;
+
+    #[test]
+    fn invalid_declare_names_are_rejected_before_assignment() {
+        assert!(!valid_declare_name("[]=asdf"));
+        assert!(!valid_declare_name("a[]=asdf"));
+        assert!(!valid_declare_name("=asdf"));
+        assert!(valid_declare_name("BASH_ARGV[1]=foo"));
+        assert!(valid_declare_name("name=value"));
+        assert!(valid_declare_name("name+=value"));
+    }
 }
