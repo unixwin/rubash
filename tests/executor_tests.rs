@@ -8104,6 +8104,33 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_command_source_searches_sourcepath() {
+        let bin_dir = "target/rubash-command-sourcepath-bin";
+        let script_name = "rubash-command-sourcepath-script.sh";
+        let script_path = format!("{bin_dir}/{script_name}");
+        let output_path = "target/rubash-command-sourcepath-output.txt";
+        let _ = fs::remove_dir_all(bin_dir);
+        let _ = fs::remove_file(output_path);
+        fs::create_dir_all(bin_dir).unwrap();
+        fs::write(&script_path, "echo command-sourcepath\n").unwrap();
+        let input = format!("PATH={bin_dir}; command source {script_name} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "command-sourcepath\n"
+        );
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_dir_all(bin_dir);
+    }
+
+    #[test]
     fn test_command_dot_missing_redirects_stderr() {
         let output_path = "target/rubash-command-dot-missing-status.txt";
         let error_path = "target/rubash-command-dot-missing-error.txt";
