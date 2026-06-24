@@ -9930,10 +9930,14 @@ impl Executor {
                     .strip_suffix("[@]")
                     .or_else(|| indirect_name.strip_suffix("[*]"))
                 {
+                    let storage_name = self.resolved_variable_name(array_name);
                     return self
                         .parameter_array_storage(array_name)
                         .map(|value| {
-                            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                            if storage_name
+                                .as_deref()
+                                .is_some_and(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
+                            {
                                 assoc_keys(&value).join(" ")
                             } else {
                                 array_indices(&value).join(" ")
@@ -10043,7 +10047,7 @@ impl Executor {
                         .unwrap_or_else(|| "0".to_string());
                 }
                 if let Some((array_name, key)) = parse_array_subscript(var_name) {
-                    if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                    if self.is_assoc_parameter_array(array_name) {
                         let key = self.assoc_subscript_key(key);
                         return self
                             .parameter_array_storage(array_name)
@@ -10209,7 +10213,7 @@ impl Executor {
                     .unwrap_or_default();
             }
             if let Some((array_name, key)) = parse_array_subscript(name) {
-                if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                if self.is_assoc_parameter_array(array_name) {
                     let key = self.assoc_subscript_key(key);
                     return self
                         .parameter_array_storage(array_name)
@@ -10670,6 +10674,12 @@ impl Executor {
             return Some(self.bash_cmds_storage());
         }
         self.env_vars.get(name).cloned()
+    }
+
+    fn is_assoc_parameter_array(&self, name: &str) -> bool {
+        self.resolved_variable_name(name)
+            .as_deref()
+            .is_some_and(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
     }
 
     fn dirstack_storage(&self) -> String {
