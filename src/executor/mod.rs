@@ -7265,12 +7265,15 @@ impl Executor {
         cmd: &CommandNode,
         kind: LoopControlKind,
     ) -> Result<(), ExecuteError> {
+        let mut stderr = Vec::new();
         if self.loop_depth == 0 {
-            eprintln!(
+            writeln!(
+                &mut stderr,
                 "{}{}: only meaningful in a `for', `while', or `until' loop",
                 self.diagnostic_prefix(),
                 kind.name()
-            );
+            )?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 0;
             return Ok(());
         }
@@ -7281,29 +7284,35 @@ impl Executor {
                 LoopControlKind::Continue => Err(ExecuteError::Continue(level)),
             },
             Err(LoopControlError::TooManyArguments) => {
-                eprintln!(
+                writeln!(
+                    &mut stderr,
                     "{}{}: too many arguments",
                     self.diagnostic_prefix(),
                     kind.name()
-                );
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 1;
                 Ok(())
             }
             Err(LoopControlError::OutOfRange(value)) => {
-                eprintln!(
+                writeln!(
+                    &mut stderr,
                     "{}{}: {value}: loop count out of range",
                     self.diagnostic_prefix(),
                     kind.name()
-                );
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 1;
                 Ok(())
             }
             Err(LoopControlError::NotNumeric(value)) => {
-                eprintln!(
+                writeln!(
+                    &mut stderr,
                     "{}{}: {value}: numeric argument required",
                     self.diagnostic_prefix(),
                     kind.name()
-                );
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 1;
                 Ok(())
             }
