@@ -10,6 +10,7 @@ use crate::executor::path::shell_path_to_windows;
 use crate::executor::{ExecuteError, Executor};
 use crate::parser::Ast;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteError> {
@@ -21,6 +22,18 @@ pub fn execute_named(
     command_name: &str,
     args: &[String],
 ) -> Result<(), ExecuteError> {
+    execute_named_with_io(executor, command_name, args, &mut std::io::stderr().lock())
+}
+
+pub fn execute_named_with_io<E>(
+    executor: &mut Executor,
+    command_name: &str,
+    args: &[String],
+    stderr: &mut E,
+) -> Result<(), ExecuteError>
+where
+    E: Write,
+{
     // TODO(builtins/source.def): GNU Bash `source_builtin` uses unwind/trap
     // machinery around `source_file`.
     let invocation = match SourceInvocation::parse(args) {
@@ -28,25 +41,31 @@ pub fn execute_named(
         Err(error) => {
             match error {
                 SourceParseError::MissingFilename => {
-                    eprintln!(
+                    writeln!(
+                        stderr,
                         "{}{command_name}: filename argument required",
                         executor.diagnostic_prefix()
-                    );
+                    )?;
                 }
                 SourceParseError::MissingPathArgument => {
-                    eprintln!(
+                    writeln!(
+                        stderr,
                         "{}{command_name}: -p: option requires an argument",
                         executor.diagnostic_prefix()
-                    );
+                    )?;
                 }
                 SourceParseError::InvalidOption(option) => {
-                    eprintln!(
+                    writeln!(
+                        stderr,
                         "{}{command_name}: -{option}: invalid option",
                         executor.diagnostic_prefix()
-                    );
+                    )?;
                 }
             }
-            eprintln!("{command_name}: usage: {command_name} [-p path] filename [arguments]");
+            writeln!(
+                stderr,
+                "{command_name}: usage: {command_name} [-p path] filename [arguments]"
+            )?;
             executor.set_exit_code(2);
             return Ok(());
         }
@@ -71,15 +90,17 @@ pub fn execute_named(
 
     let Some(source_path) = invocation.resolve_path(executor) else {
         if invocation.path.is_some() || posix_plain_name_lookup(executor, filename) {
-            eprintln!(
+            writeln!(
+                stderr,
                 "{}.: {filename}: file not found",
                 executor.diagnostic_prefix()
-            );
+            )?;
         } else {
-            eprintln!(
+            writeln!(
+                stderr,
                 "{}{filename}: No such file or directory",
                 executor.diagnostic_prefix()
-            );
+            )?;
         }
         executor.set_exit_code(1);
         if executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
@@ -91,10 +112,11 @@ pub fn execute_named(
     let source = match fs::read_to_string(&source_path) {
         Ok(source) => source,
         Err(_) => {
-            eprintln!(
+            writeln!(
+                stderr,
                 "{}{filename}: No such file or directory",
                 executor.diagnostic_prefix()
-            );
+            )?;
             executor.set_exit_code(1);
             if executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
                 return Err(ExecuteError::ExitCode(1));
