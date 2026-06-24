@@ -15588,6 +15588,25 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_conditional_bare_regex_groups_set_bash_rematch() {
+        let output_path = "target/rubash-conditional-bare-regex-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "[[ '2:bad' =~ ^([0-9]+):(.*) ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0 2:bad 2 bad\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_conditional_logical_operators_stay_inside_expression() {
         let output_path = "target/rubash-conditional-logical-output.txt";
         let _ = fs::remove_file(output_path);
