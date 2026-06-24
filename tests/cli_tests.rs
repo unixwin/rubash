@@ -262,3 +262,34 @@ fn stdin_script_child_shell_inherits_unread_input() {
         "before\nchild:this line is child input\nafter\n"
     );
 }
+
+#[test]
+fn script_errexit_allows_common_conditional_failures() {
+    let script_path = Path::new("target").join("rubash-cli-errexit-common.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        "set -e\n\
+         if false; then echo bad-if; fi\n\
+         false || echo recovered\n\
+         ! false\n\
+         echo after-invert\n\
+         while false; do echo bad-while; done\n\
+         echo before-final-failure\n\
+         true && false\n\
+         echo bad-after\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "recovered\nafter-invert\nbefore-final-failure\n"
+    );
+}

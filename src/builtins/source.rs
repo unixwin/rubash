@@ -431,7 +431,7 @@ fn execute_command_if_condition(
     let ast = Ast {
         commands: vec![condition],
     };
-    executor.execute_ast(&ast)?;
+    executor.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
     Ok(executor.last_exit_code() == 0)
 }
 

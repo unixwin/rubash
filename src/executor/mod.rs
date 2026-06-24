@@ -670,6 +670,7 @@ pub struct Executor {
     random_state: Cell<u32>,
     subshell_depth: Cell<usize>,
     last_background_pid: Option<u32>,
+    suppress_errexit: usize,
 }
 
 impl Executor {
@@ -765,6 +766,7 @@ impl Executor {
             random_state: Cell::new(current_epoch_micros() as u32),
             subshell_depth: Cell::new(0),
             last_background_pid: None,
+            suppress_errexit: 0,
         }
     }
 
@@ -1085,7 +1087,12 @@ impl Executor {
                 self.subshell_depth.set(old_depth + 1);
             }
 
-            match self.execute_command(command) {
+            let execution_result = if command.inverted || command.and_or().is_some() {
+                self.with_errexit_suppressed(|executor| executor.execute_command(command))
+            } else {
+                self.execute_command(command)
+            };
+            match execution_result {
                 Ok(()) => {}
                 Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.loop_depth == 0 => {
                     self.exit_code = 0;
@@ -1577,7 +1584,9 @@ impl Executor {
             let condition_ast = Ast {
                 commands: vec![condition.clone()],
             };
-            if let Err(error) = self.execute_ast(&condition_ast) {
+            if let Err(error) =
+                self.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
+            {
                 break Err(error);
             }
             let condition_matched = self.exit_code == 0;
@@ -2373,7 +2382,7 @@ impl Executor {
             self.restore_temporary_assignments(temporary_assignments);
         }
         self.update_underscore_parameter(cmd);
-        if self.errexit_enabled() && self.exit_code != 0 {
+        if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
         }
         result
@@ -12433,6 +12442,20 @@ impl Executor {
     fn errexit_enabled(&self) -> bool {
         self.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
             || crate::builtins::set::shell_option_enabled(&self.env_vars, "errexit")
+    }
+
+    fn errexit_is_active(&self) -> bool {
+        self.suppress_errexit == 0
+    }
+
+    pub(crate) fn with_errexit_suppressed<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, ExecuteError>,
+    ) -> Result<T, ExecuteError> {
+        self.suppress_errexit += 1;
+        let result = body(self);
+        self.suppress_errexit -= 1;
+        result
     }
 
     fn xtrace_enabled(&self) -> bool {
