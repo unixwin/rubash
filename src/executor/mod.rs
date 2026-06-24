@@ -9415,7 +9415,13 @@ impl Executor {
                 "({})",
                 entries
                     .into_iter()
-                    .map(|(key, value)| format!("[{}]={value}", quote_assoc_key(&key)))
+                    .map(|(key, value)| {
+                        format!(
+                            "[{}]={}",
+                            quote_assoc_key(&key),
+                            quote_assoc_storage_value(&value)
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             );

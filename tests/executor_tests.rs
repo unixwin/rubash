@@ -2310,6 +2310,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_assoc_element_assignment_accepts_expanded_quoted_keys() {
+        let output_path = "target/rubash-assoc-expanded-key-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_EXPANDED_ASSIGN");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_EXPANDED_ASSIGN=([\"two words\"]=\"value here\"); \
+             key=\"two words\"; RUBASH_ASSOC_EXPANDED_ASSIGN[$key]+=!; \
+             printf '<%s>\\n' \"${{RUBASH_ASSOC_EXPANDED_ASSIGN[$key]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<value here!>\n");
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_EXPANDED_ASSIGN");
+    }
+
+    #[test]
     fn test_assoc_compound_append_accepts_key_value_pairs() {
         let output_path = "target/rubash-assoc-append-pairs-output.txt";
         let _ = fs::remove_file(output_path);
