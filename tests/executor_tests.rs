@@ -9025,7 +9025,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         let output_path = "target/rubash-type-function-heredoc-output.txt";
         let _ = fs::remove_file(output_path);
         let input =
-            format!("f()\n{{\ncat <<EOF > /dev/null\nbody\nEOF\n}}\ntype f > {output_path}");
+            format!("f()\n{{\ncat <<EOF > /dev/null\nbody\nEOF\naa=1\n}}\ntype f > {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -9036,7 +9036,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "f is a function\nf () \n{ \n    cat <<EOF > /dev/null\nbody\nEOF\n\n}\n"
+            "f is a function\nf () \n{ \n    cat <<EOF > /dev/null\nbody\nEOF\n\n    aa=1\n}\n"
         );
         let _ = fs::remove_file(output_path);
     }
@@ -11411,6 +11411,32 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(&output_path).unwrap(), "child\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_export_f_preserves_function_heredoc_in_child_rubash() {
+        let output_path = target_test_path("rubash-exported-function-heredoc-child-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+        let input = format!(
+            "rubash_heredoc_func()\n{{\ncat <<EOF > /dev/null\nbody\nEOF\naa=1\n}}\n\
+             export -f rubash_heredoc_func; \
+             {rubash} -c 'type rubash_heredoc_func' > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "rubash_heredoc_func is a function\nrubash_heredoc_func () \n{ \n    cat <<EOF > /dev/null\nbody\nEOF\n\n    aa=1\n}\n"
+        );
         let _ = fs::remove_file(&output_path);
     }
 
