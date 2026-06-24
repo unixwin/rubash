@@ -158,6 +158,7 @@ fn tokenize_with_heredocs(input: &str) -> Vec<Token> {
 
         if has_unclosed_quotes(&logical_line)
             && (is_multiline_alias_definition(&logical_line)
+                || is_multiline_assignment(&logical_line)
                 || is_multiline_command_string(&logical_line)
                 || is_plain_multiline_quoted_command(&logical_line))
         {
@@ -578,6 +579,25 @@ fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {
 fn is_multiline_alias_definition(input: &str) -> bool {
     let trimmed = input.trim_start();
     trimmed.starts_with("alias ") && trimmed.contains('=')
+}
+
+fn is_multiline_assignment(input: &str) -> bool {
+    let trimmed = input.trim_start();
+    let Some(equal) = trimmed.find('=') else {
+        return false;
+    };
+    if trimmed[..equal].chars().any(char::is_whitespace) {
+        return false;
+    }
+    let name = trimmed[..equal].strip_suffix('+').unwrap_or(&trimmed[..equal]);
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn is_multiline_command_string(input: &str) -> bool {
