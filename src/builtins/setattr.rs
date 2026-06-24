@@ -551,8 +551,8 @@ fn is_array_value(value: &str) -> bool {
 fn array_attribute_assignment_value(
     value: &str,
     explicit_array: bool,
-    env_vars: &HashMap<String, String>,
-    name: &str,
+    _env_vars: &HashMap<String, String>,
+    _name: &str,
 ) -> String {
     if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
         return compound.to_string();
@@ -560,12 +560,7 @@ fn array_attribute_assignment_value(
     // TODO(array.c/variables.c): Bash distinguishes compound array syntax
     // from a quoted scalar assigned to an existing array. The lexer has removed
     // quote state by this point, so preserve attr.tests' existing-array shape.
-    if !explicit_array
-        && is_array_value(value)
-        && env_vars
-            .get(name)
-            .is_some_and(|current| is_array_value(current))
-    {
+    if !explicit_array && is_array_value(value) {
         return format!("({value})");
     }
     value.to_string()

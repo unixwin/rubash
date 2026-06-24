@@ -9550,11 +9550,18 @@ impl Executor {
         if is_noassign_bash_array(base_name) && !append {
             return true;
         }
+        let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
+        let value = value
+            .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+            .unwrap_or(&value)
+            .to_string();
         let value = if append {
             let current = self.env_vars.get(base_name).cloned().unwrap_or_default();
             if is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
                 append_assoc_value(&current, &value)
-            } else if current.starts_with('(') && current.ends_with(')') {
+            } else if is_array_storage(&current)
+                || is_marked_var(&self.env_vars, ARRAY_VARS, base_name)
+            {
                 append_array_value(
                     &current,
                     &value,
@@ -9567,16 +9574,25 @@ impl Executor {
             } else {
                 append_scalar_value(&current, &value)
             }
+        } else if compound_assignment
+            && value.starts_with('(')
+            && value.ends_with(')')
+            && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
+        {
+            append_array_value(
+                "()",
+                &value,
+                is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
+            )
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
-            if value.starts_with('(') && value.ends_with(')') {
-                append_array_value("()", &value, true)
-            } else {
-                self.eval_integer_assignment_value(&value).to_string()
-            }
+            self.eval_integer_assignment_value(&value).to_string()
         } else {
             value
         };
         let value = self.apply_case_assignment_attributes(base_name, value);
+        if is_array_storage(&value) && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+            mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
+        }
         self.env_vars.insert(base_name.to_string(), value.clone());
         env::set_var(base_name, value);
         true
@@ -9697,6 +9713,7 @@ impl Executor {
 
         let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
         let value = tilde_expand::strip_assignment_quote_marker(value);
+        let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
@@ -9708,6 +9725,9 @@ impl Executor {
 
         let expanded = self.expand_embedded_parameters_mut(value);
         if value.starts_with('(') && value.ends_with(')') {
+            if compound_assignment {
+                return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
+            }
             return expanded;
         }
         if value.contains('=') {
@@ -14168,44 +14188,53 @@ fn append_scalar_value(current: &str, value: &str) -> String {
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
-    let mut elements = array_values(current);
+    let mut entries = indexed_array_entries(current);
+    let mut next_index = entries
+        .keys()
+        .next_back()
+        .map(|index| index + 1)
+        .unwrap_or(0);
     let scalar_append = integer && !value.starts_with('(');
     for token in array_assignment_tokens(value) {
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] =
-                    (eval_arith_value(&elements[index]) + eval_arith_value(rhs)).to_string();
+                let current = entries.get(&index).cloned().unwrap_or_default();
+                entries.insert(
+                    index,
+                    (eval_arith_value(&current) + eval_arith_value(rhs)).to_string(),
+                );
+                next_index = index + 1;
                 continue;
             }
         }
 
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left) {
-                while elements.len() <= index {
-                    elements.push(String::new());
-                }
-                elements[index] = rhs.to_string();
+                entries.insert(index, rhs.to_string());
+                next_index = index + 1;
                 continue;
             }
         }
 
-        if scalar_append && !elements.is_empty() {
-            elements[0] = (eval_arith_value(&elements[0]) + eval_arith_value(&token)).to_string();
+        if scalar_append && !entries.is_empty() {
+            let current = entries.get(&0).cloned().unwrap_or_default();
+            entries.insert(
+                0,
+                (eval_arith_value(&current) + eval_arith_value(&token)).to_string(),
+            );
         } else {
-            elements.push(token);
+            entries.insert(next_index, token);
+            next_index += 1;
         }
     }
 
     if integer {
-        for element in &mut elements {
+        for element in entries.values_mut() {
             *element = eval_arith_value(element).to_string();
         }
     }
 
-    format!("({})", elements.join(" "))
+    format_indexed_array_storage(entries)
 }
 
 fn append_assoc_value(current: &str, value: &str) -> String {
@@ -16747,20 +16776,7 @@ fn split_mapfile_input(input: &str, delimiter: Option<char>, trim_delimiter: boo
 }
 
 fn rendered_array_values(value: &str) -> Vec<String> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return Vec::new();
-    };
-
-    rendered_array_parts(inner)
-        .into_iter()
-        .filter_map(|part| {
-            part.split_once('=')
-                .map(|(_, value)| decode_rendered_array_value(value))
-        })
-        .collect()
+    rendered_array_entries(value).into_values().collect()
 }
 
 fn rendered_array_parts(inner: &str) -> Vec<String> {

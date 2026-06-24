@@ -2105,6 +2105,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
+        let output_path = "target/rubash-indexed-array-compound-sparse-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=([2]=two [0]=zero middle); arr+=([5]=five tail); \
+             printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "0 1 2 5 6 / zero middle two five tail\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_unset_assoc_array_element() {
         let output_path = "target/rubash-unset-assoc-element-output.txt";
         let _ = fs::remove_file(output_path);
