@@ -13268,6 +13268,40 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_nameref_assoc_array_elements_read_keys_and_assign_target() {
+        let output_path = target_test_path("rubash-nameref-assoc-array-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        for name in ["RUBASH_NAMEREF_ASSOC_TARGET", "RUBASH_NAMEREF_ASSOC_REF"] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "declare -A RUBASH_NAMEREF_ASSOC_TARGET=([k]=v); \
+             declare -n RUBASH_NAMEREF_ASSOC_REF=RUBASH_NAMEREF_ASSOC_TARGET; \
+             echo read:${{RUBASH_NAMEREF_ASSOC_REF[k]}} len:${{#RUBASH_NAMEREF_ASSOC_REF[@]}} > {shell_output_path}; \
+             RUBASH_NAMEREF_ASSOC_REF[k]=V; RUBASH_NAMEREF_ASSOC_REF[new]=N; \
+             echo assign:${{RUBASH_NAMEREF_ASSOC_TARGET[k]}} new:${{RUBASH_NAMEREF_ASSOC_TARGET[new]}} len:${{#RUBASH_NAMEREF_ASSOC_REF[@]}} >> {shell_output_path}; \
+             printf 'key:%s\\n' ${{!RUBASH_NAMEREF_ASSOC_REF[@]}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "read:v len:1\nassign:V new:N len:2\nkey:k new\n"
+        );
+        let _ = fs::remove_file(output_path);
+        for name in ["RUBASH_NAMEREF_ASSOC_TARGET", "RUBASH_NAMEREF_ASSOC_REF"] {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn test_local_nameref_restores_after_function() {
         let output_path = target_test_path("rubash-local-nameref-output.txt");
         let shell_output_path = shell_test_path(&output_path);
