@@ -10354,6 +10354,10 @@ impl Executor {
             return self.expand_embedded_parameters_mut(word);
         }
 
+        if let Some(word) = word.strip_prefix('\x1d') {
+            return self.expand_quoted_parameter_word_mut(word);
+        }
+
         if let Some((name, value)) = split_assignment_word(word) {
             let quoted = value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE);
             let value = tilde_expand::strip_assignment_quote_marker(value);
@@ -10697,6 +10701,49 @@ impl Executor {
                 .parameter_operator_value(var_name)
                 .map(|value| shell_safe_value(&value))
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
+        }
+
+        self.expand_word(word)
+    }
+
+    fn expand_quoted_parameter_word_mut(&mut self, word: &str) -> String {
+        let Some(name) = word
+            .strip_prefix("${")
+            .and_then(|word| word.strip_suffix('}'))
+        else {
+            return self.expand_embedded_parameters_mut(word);
+        };
+
+        if let Some((var_name, default)) = name.split_once(":-") {
+            return self
+                .parameter_operator_value(var_name)
+                .filter(|value| !value.is_empty())
+                .map(|value| shell_safe_value(&value))
+                .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
+        }
+
+        if let Some((var_name, alternate)) = name.split_once(":+") {
+            if self
+                .parameter_operator_value(var_name)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return self.expand_embedded_parameters_mut(alternate);
+            }
+            return String::new();
+        }
+
+        if let Some((var_name, alternate)) = name.split_once('+') {
+            if self.parameter_operator_value(var_name).is_some() {
+                return self.expand_embedded_parameters_mut(alternate);
+            }
+            return String::new();
+        }
+
+        if let Some((var_name, default)) = name.split_once('-') {
+            return self
+                .parameter_operator_value(var_name)
+                .map(|value| shell_safe_value(&value))
+                .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
         }
 
         self.expand_word(word)
@@ -12099,6 +12146,7 @@ impl Executor {
     }
 
     fn expand_embedded_parameters_mut(&mut self, word: &str) -> String {
+        self.apply_parameter_assignment_expansions_in_word(word);
         let word = self.expand_embedded_arithmetic_mut(word);
         self.expand_embedded_parameters(&word)
     }
