@@ -6657,6 +6657,75 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_source_redirects_body_stdout_and_stderr() {
+        let script_path = "target/rubash-source-body-redirect.sh";
+        let output_path = "target/rubash-source-body-redirect-output.txt";
+        let error_path = "target/rubash-source-body-redirect-error.txt";
+        let status_path = "target/rubash-source-body-redirect-status.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+        fs::write(script_path, "echo source-out\nno_such_source_body_cmd\n").unwrap();
+        let input = format!(
+            "source {script_path} > {output_path} 2> {error_path}; echo $? > {status_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "127\n");
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "source-out\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_source_body_cmd: command not found"));
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let _ = fs::remove_file(status_path);
+    }
+
+    #[test]
+    fn test_source_appends_body_stdout_and_stderr() {
+        let script_path = "target/rubash-source-body-append.sh";
+        let output_path = "target/rubash-source-body-append-output.txt";
+        let error_path = "target/rubash-source-body-append-error.txt";
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        fs::write(
+            script_path,
+            "echo appended-out\nno_such_source_append_cmd\n",
+        )
+        .unwrap();
+        fs::write(output_path, "before-out\n").unwrap();
+        fs::write(error_path, "before-err\n").unwrap();
+        let input = format!("source {script_path} >> {output_path} 2>> {error_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 127);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "before-out\nappended-out\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.starts_with("before-err\n"));
+        assert!(error.contains("no_such_source_append_cmd: command not found"));
+        let _ = fs::remove_file(script_path);
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_builtin_return_returns_from_function() {
         let output_path = "target/rubash-builtin-return-output.txt";
         let _ = fs::remove_file(output_path);
