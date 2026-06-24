@@ -1240,6 +1240,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_brace_group_preserves_quoted_bracket_words() {
+        let input = "[ $# -lt 1 ] && {\n\
+             echo \"zprintf: usage: zprintf format [args ...]\" >&2\n\
+             exit 2\n\
+        }\n\
+        echo after";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(2))));
+        assert_eq!(executor.last_exit_code(), 2);
+    }
+
+    #[test]
     fn test_command_substitution_output_is_not_reexpanded() {
         let output_path = "target/rubash-command-substitution-no-reexpand-output.txt";
         let _ = fs::remove_file(output_path);

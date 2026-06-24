@@ -57,6 +57,21 @@ fn c_command_redirects_stdout_to_stderr_fd() {
 }
 
 #[test]
+fn gnu_zprintf_usage_guard_exits_before_body() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("third_party/bash/examples/scripts/zprintf")
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "zprintf: usage: zprintf format [args ...]\n"
+    );
+}
+
+#[test]
 fn script_file_uses_script_name_and_positional_arguments() {
     let script_path = Path::new("target").join("rubash-cli-script-args.sh");
     fs::create_dir_all("target").unwrap();
