@@ -1183,11 +1183,14 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
 
         let mut patterns = Vec::new();
         while i < tokens.len() && !is_keyword(tokens, i, ")") {
-            if matches!(
-                tokens[i].kind,
-                TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
-            ) {
-                patterns.push(tokens[i].value.clone());
+            match tokens[i].kind {
+                TokenKind::Word | TokenKind::Assignment => {
+                    patterns.push(mark_case_pattern_literal_backslashes(&tokens[i].value));
+                }
+                TokenKind::Variable => {
+                    patterns.push(tokens[i].value.clone());
+                }
+                _ => {}
             }
             i += 1;
         }
@@ -1219,6 +1222,10 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
     command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(CaseCommand { word, clauses });
     Some((command, i + 1))
+}
+
+fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {
+    pattern.replace('\\', "\x18")
 }
 
 fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
