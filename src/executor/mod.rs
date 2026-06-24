@@ -15009,7 +15009,7 @@ impl ConditionalArithParser<'_> {
                         .trim()
                         .to_string();
                     self.pos += 1;
-                    return Some(key);
+                    return Some(self.expand_assoc_subscript_key(&key));
                 }
                 b']' => {
                     depth -= 1;
@@ -15019,6 +15019,43 @@ impl ConditionalArithParser<'_> {
             }
         }
         None
+    }
+
+    fn expand_assoc_subscript_key(&self, key: &str) -> String {
+        let mut output = String::new();
+        let mut chars = key.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch != '$' {
+                output.push(ch);
+                continue;
+            }
+
+            match chars.peek().copied() {
+                Some('{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    for name_ch in chars.by_ref() {
+                        if name_ch == '}' {
+                            break;
+                        }
+                        name.push(name_ch);
+                    }
+                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                }
+                Some(first) if is_shell_name_start(first) => {
+                    chars.next();
+                    let mut name = String::from(first);
+                    while chars.peek().copied().is_some_and(is_shell_name_char) {
+                        name.push(chars.next().unwrap());
+                    }
+                    output.push_str(self.env_vars.get(&name).map(String::as_str).unwrap_or(""));
+                }
+                _ => output.push(ch),
+            }
+        }
+
+        strip_matching_quotes(output.trim()).to_string()
     }
 
     fn consume_assignment_operator(&mut self) -> Option<&'static str> {
