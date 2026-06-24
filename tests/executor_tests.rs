@@ -12020,6 +12020,35 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_while_read_or_nonempty_line_condition_list() {
+        let output_path = "target/rubash-while-read-or-line-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "count=0; \
+             while IFS= read -r line || [ -n \"$line\" ]; do\n\
+               case \"$line\" in\n\
+                 ''|'#'*) continue ;;\n\
+                 *) count=$((count + 1)); last=$line ;;\n\
+               esac\n\
+             done <<'EOF'\n# comment\nalpha\nbeta\nEOF\n\
+             printf 'count:%s last:%s\\n' \"$count\" \"$last\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "count:2 last:beta\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_return_outside_function_sets_failure_status() {
         let output_path = "target/rubash-return-outside-output.txt";
         let _ = fs::remove_file(output_path);

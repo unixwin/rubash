@@ -1618,20 +1618,27 @@ impl Executor {
             return Ok(None);
         }
 
-        let Some(do_command) = ast.commands.get(index + 1) else {
+        let Some(do_index) = ast.commands[index + 1..]
+            .iter()
+            .position(|command| command.words.first().map(String::as_str) == Some("do"))
+            .map(|offset| index + 1 + offset)
+        else {
             return Ok(None);
         };
-        if do_command.words.first().map(String::as_str) != Some("do") {
+        let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
-        }
-        let Some(done_index) = find_done_command(ast, index + 2) else {
+        };
+        let Some(done_index) = find_done_command(ast, do_index + 1) else {
             return Ok(None);
         };
 
         let mut condition = command.clone();
         condition.words = condition.words[1..].to_vec();
         condition.pipe = None;
-        condition.and_or = None;
+        normalize_leading_assignment_words(&mut condition);
+
+        let mut condition_commands = vec![condition];
+        condition_commands.extend(ast.commands[index + 1..do_index].iter().cloned());
 
         let mut body_commands = Vec::new();
         if do_command.words.len() > 1 {
@@ -1639,7 +1646,7 @@ impl Executor {
             body_command.words = body_command.words[1..].to_vec();
             body_commands.push(body_command);
         }
-        body_commands.extend(ast.commands[index + 2..done_index].iter().cloned());
+        body_commands.extend(ast.commands[do_index + 1..done_index].iter().cloned());
         let body = Ast {
             commands: body_commands,
         };
@@ -1653,6 +1660,8 @@ impl Executor {
             .find(|redirect| redirect.fd.is_none())
             .and_then(|redirect| redirect.body.clone())
         {
+            let input =
+                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&input)).to_string();
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
             self.env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
@@ -1671,6 +1680,8 @@ impl Executor {
             };
             let input_key = fd_stdin_key(fd);
             let offset_key = fd_stdin_offset_key(fd);
+            let body =
+                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string();
             saved_fd_inputs.push((
                 input_key.clone(),
                 self.env_vars.get(&input_key).cloned(),
@@ -1685,7 +1696,7 @@ impl Executor {
         let mut last_body_status = 0;
         let loop_result = loop {
             let condition_ast = Ast {
-                commands: vec![condition.clone()],
+                commands: condition_commands.clone(),
             };
             if let Err(error) =
                 self.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
@@ -4369,10 +4380,10 @@ impl Executor {
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
             let matched = fall_through
-                || clause
-                    .patterns
-                    .iter()
-                    .any(|pattern| case_pattern_matches(&self.expand_word(pattern), &word));
+                || clause.patterns.iter().any(|pattern| {
+                    let pattern = decode_parameter_pattern_quotes(&self.expand_word(pattern));
+                    case_pattern_matches(&pattern, &word)
+                });
             if matched {
                 let body = Ast {
                     commands: clause.body.clone(),
@@ -8167,7 +8178,10 @@ impl Executor {
                 0
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
-                    Ok((0, _)) => 1,
+                    Ok((0, _)) => {
+                        self.assign_read_scalar_names(&scalar_names, "", raw);
+                        1
+                    }
                     Ok((_, line)) => {
                         self.assign_read_scalar_names(&scalar_names, &line, raw);
                         0
@@ -18493,6 +18507,20 @@ fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+}
+
+fn normalize_leading_assignment_words(cmd: &mut CommandNode) {
+    let mut count = 0;
+    while let Some(word) = cmd.words.get(count) {
+        let Some((name, value)) = split_assignment_word(word) else {
+            break;
+        };
+        cmd.assignments.insert(name.to_string(), value.to_string());
+        count += 1;
+    }
+    if count > 0 {
+        cmd.words.drain(0..count);
+    }
 }
 
 fn command_has_redirect(cmd: &CommandNode) -> bool {
