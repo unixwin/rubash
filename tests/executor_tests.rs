@@ -13302,6 +13302,60 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_nameref_parameter_transforms_describe_target() {
+        let output_path = target_test_path("rubash-nameref-transform-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        for name in [
+            "RUBASH_NAMEREF_TRANSFORM_SCALAR",
+            "RUBASH_NAMEREF_TRANSFORM_SCALAR_REF",
+            "RUBASH_NAMEREF_TRANSFORM_ASSOC",
+            "RUBASH_NAMEREF_TRANSFORM_ASSOC_REF",
+            "RUBASH_NAMEREF_TRANSFORM_ARRAY",
+            "RUBASH_NAMEREF_TRANSFORM_ARRAY_REF",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_NAMEREF_TRANSFORM_SCALAR=val; \
+             declare -n RUBASH_NAMEREF_TRANSFORM_SCALAR_REF=RUBASH_NAMEREF_TRANSFORM_SCALAR; \
+             declare -A RUBASH_NAMEREF_TRANSFORM_ASSOC=([k]=v); \
+             declare -n RUBASH_NAMEREF_TRANSFORM_ASSOC_REF=RUBASH_NAMEREF_TRANSFORM_ASSOC; \
+             RUBASH_NAMEREF_TRANSFORM_ARRAY=(zero one); \
+             declare -n RUBASH_NAMEREF_TRANSFORM_ARRAY_REF=RUBASH_NAMEREF_TRANSFORM_ARRAY; \
+             echo scalar_attr:${{RUBASH_NAMEREF_TRANSFORM_SCALAR_REF@a}} > {shell_output_path}; \
+             echo scalar_decl:${{RUBASH_NAMEREF_TRANSFORM_SCALAR_REF@A}} >> {shell_output_path}; \
+             echo assoc_attr:${{RUBASH_NAMEREF_TRANSFORM_ASSOC_REF@a}} >> {shell_output_path}; \
+             echo assoc_decl:${{RUBASH_NAMEREF_TRANSFORM_ASSOC_REF@A}} >> {shell_output_path}; \
+             echo assoc_k:${{RUBASH_NAMEREF_TRANSFORM_ASSOC_REF@K}} elem:${{RUBASH_NAMEREF_TRANSFORM_ASSOC_REF[k]@K}} >> {shell_output_path}; \
+             echo array_k:${{RUBASH_NAMEREF_TRANSFORM_ARRAY_REF@K}} elem:${{RUBASH_NAMEREF_TRANSFORM_ARRAY_REF[0]@K}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "scalar_attr:\nscalar_decl:RUBASH_NAMEREF_TRANSFORM_SCALAR='val'\nassoc_attr:A\nassoc_decl:declare -A RUBASH_NAMEREF_TRANSFORM_ASSOC\nassoc_k: elem:'v'\narray_k:'zero' elem:'zero'\n"
+        );
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_NAMEREF_TRANSFORM_SCALAR",
+            "RUBASH_NAMEREF_TRANSFORM_SCALAR_REF",
+            "RUBASH_NAMEREF_TRANSFORM_ASSOC",
+            "RUBASH_NAMEREF_TRANSFORM_ASSOC_REF",
+            "RUBASH_NAMEREF_TRANSFORM_ARRAY",
+            "RUBASH_NAMEREF_TRANSFORM_ARRAY_REF",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn test_local_nameref_restores_after_function() {
         let output_path = target_test_path("rubash-local-nameref-output.txt");
         let shell_output_path = shell_test_path(&output_path);
