@@ -9428,26 +9428,26 @@ impl Executor {
             return false;
         };
         let current = self.env_vars.get(name).cloned().unwrap_or_default();
-        let mut elements = array_values(&current);
-        while elements.len() <= index {
-            elements.push(String::new());
-        }
+        let mut entries = indexed_array_entries(&current);
+        let current_element = entries.get(&index).cloned().unwrap_or_default();
         let element = if append {
             if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
-                (eval_arith_value(&elements[index]) + eval_arith_value(value)).to_string()
+                (eval_arith_value(&current_element) + eval_arith_value(value)).to_string()
             } else {
-                append_scalar_value(&elements[index], value)
+                append_scalar_value(&current_element, value)
             }
         } else {
             value.to_string()
         };
-        elements[index] = if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
+        let element = if is_marked_var(&self.env_vars, INTEGER_VARS, name) {
             eval_arith_value(&element).to_string()
         } else {
             element
         };
-        let new_value = format!("({})", elements.join(" "));
-        self.env_vars.insert(name.to_string(), new_value);
+        entries.insert(index, element);
+        self.env_vars
+            .insert(name.to_string(), format_indexed_array_storage(entries));
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, name);
         self.exit_code = 0;
         true
     }
