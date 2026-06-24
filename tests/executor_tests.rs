@@ -11976,6 +11976,46 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_posix_return_keeps_prefix_assignment() {
+        let output_path = "target/rubash-posix-return-prefix-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -o posix; value=outer; change() {{ value=inner return 5; }}; \
+             change; printf '%s:%s\\n' \"$?\" \"$value\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "5:inner\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_posix_function_prefix_assignment_restores_when_unchanged() {
+        let output_path = "target/rubash-posix-function-prefix-assignment-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -o posix; value=outer; noop() {{ return 5; }}; \
+             value=temp noop; printf '%s:%s\\n' \"$?\" \"$value\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "5:outer\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_for_without_in_iterates_positional_params() {
         let output_path = "target/rubash-for-default-positional-output.txt";
         let _ = fs::remove_file(output_path);
