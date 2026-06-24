@@ -6603,6 +6603,60 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_source_option_errors_redirect_stderr() {
+        let output_path = "target/rubash-source-option-errors-redirect-status.txt";
+        let error_path = "target/rubash-source-option-errors-redirect-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "source 2> {error_path}; echo missing:$? > {output_path}; \
+             . -i 2>> {error_path}; echo invalid:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "missing:2\ninvalid:2\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("source: filename argument required"));
+        assert!(error.contains("source: usage: source"));
+        assert!(error.contains(".: -i: invalid option"));
+        assert!(error.contains(".: usage: ."));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_source_missing_file_redirects_stderr() {
+        let output_path = "target/rubash-source-missing-redirect-status.txt";
+        let error_path = "target/rubash-source-missing-redirect-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("source no_such_source_file 2> {error_path}; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_source_file: No such file or directory"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_builtin_return_returns_from_function() {
         let output_path = "target/rubash-builtin-return-output.txt";
         let _ = fs::remove_file(output_path);

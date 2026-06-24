@@ -1955,9 +1955,7 @@ impl Executor {
                     self.exit_code = self.execute_pwd(cmd)?;
                     Ok(())
                 }
-                "source" | "." => {
-                    crate::builtins::source::execute_named(self, &cmd.words[0], &cmd.words[1..])
-                }
+                "source" | "." => self.execute_source_command(cmd),
                 "printf" => {
                     if crate::builtins::enable::is_disabled(&self.env_vars, "printf") {
                         return self.execute_external(cmd);
@@ -5575,11 +5573,7 @@ impl Executor {
             }
             "eval" => self.execute_eval(&builtin_cmd),
             "command" => self.execute_command_without_aliases(&builtin_cmd),
-            "source" | "." => crate::builtins::source::execute_named(
-                self,
-                &builtin_cmd.words[0],
-                &builtin_cmd.words[1..],
-            ),
+            "source" | "." => self.execute_source_command(&builtin_cmd),
             "return" => self.execute_return(&builtin_cmd),
             "break" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Break),
             "continue" => self.execute_loop_control(&builtin_cmd, LoopControlKind::Continue),
@@ -6143,6 +6137,20 @@ impl Executor {
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = 1;
         Ok(())
+    }
+
+    fn execute_source_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        let mut stderr = Vec::new();
+        let result = crate::builtins::source::execute_named_with_io(
+            self,
+            &cmd.words[0],
+            &cmd.words[1..],
+            &mut stderr,
+        );
+        if !stderr.is_empty() {
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        }
+        result
     }
 
     fn execute_type_with_disabled_builtin_state(
