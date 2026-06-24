@@ -10123,6 +10123,13 @@ impl Executor {
                     .to_string();
             }
             if let Some((var_name, pattern)) = name.split_once("##") {
+                if let Some(value) = self.expand_parameter_pattern_removal(
+                    var_name,
+                    pattern,
+                    PatternRemoval::LongestPrefix,
+                ) {
+                    return value;
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -10138,6 +10145,13 @@ impl Executor {
                 }
             }
             if let Some((var_name, pattern)) = name.split_once('#') {
+                if let Some(value) = self.expand_parameter_pattern_removal(
+                    var_name,
+                    pattern,
+                    PatternRemoval::ShortestPrefix,
+                ) {
+                    return value;
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -10153,6 +10167,13 @@ impl Executor {
                 }
             }
             if let Some((var_name, pattern)) = name.split_once("%%") {
+                if let Some(value) = self.expand_parameter_pattern_removal(
+                    var_name,
+                    pattern,
+                    PatternRemoval::LongestSuffix,
+                ) {
+                    return value;
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -10168,6 +10189,13 @@ impl Executor {
                 }
             }
             if let Some((var_name, pattern)) = name.split_once('%') {
+                if let Some(value) = self.expand_parameter_pattern_removal(
+                    var_name,
+                    pattern,
+                    PatternRemoval::ShortestSuffix,
+                ) {
+                    return value;
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
@@ -11304,6 +11332,52 @@ impl Executor {
                 .unwrap_or_default()
         };
         Some(apply_parameter_transform(&value, transform))
+    }
+
+    fn expand_parameter_pattern_removal(
+        &self,
+        var_name: &str,
+        pattern: &str,
+        operation: PatternRemoval,
+    ) -> Option<String> {
+        let pattern = self.expand_embedded_parameters(pattern);
+        if matches!(var_name, "@" | "*") {
+            return Some(
+                self.positional_params
+                    .iter()
+                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+
+        if let Ok(index) = var_name.parse::<usize>() {
+            return Some(
+                self.positional_params
+                    .get(index.saturating_sub(1))
+                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                    .unwrap_or_default(),
+            );
+        }
+
+        if let Some(array_name) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            return Some(
+                self.parameter_array_storage(array_name)
+                    .map(|value| {
+                        array_values(&value)
+                            .into_iter()
+                            .map(|value| remove_parameter_pattern(&value, &pattern, operation))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+
+        None
     }
 
     fn indirect_pattern_removal(&self, name: &str) -> Option<String> {
@@ -15435,6 +15509,23 @@ fn remove_matching_suffix(value: &str, pattern: &str, length: MatchLength) -> St
     }
 
     value.to_string()
+}
+
+fn remove_parameter_pattern(value: &str, pattern: &str, operation: PatternRemoval) -> String {
+    match operation {
+        PatternRemoval::ShortestPrefix => {
+            remove_matching_prefix(value, pattern, MatchLength::Shortest)
+        }
+        PatternRemoval::LongestPrefix => {
+            remove_matching_prefix(value, pattern, MatchLength::Longest)
+        }
+        PatternRemoval::ShortestSuffix => {
+            remove_matching_suffix(value, pattern, MatchLength::Shortest)
+        }
+        PatternRemoval::LongestSuffix => {
+            remove_matching_suffix(value, pattern, MatchLength::Longest)
+        }
+    }
 }
 
 fn parse_parameter_substring(name: &str) -> Option<(&str, isize, Option<usize>)> {
