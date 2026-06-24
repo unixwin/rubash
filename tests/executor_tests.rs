@@ -11241,6 +11241,48 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parameter_assignment_expansion_rejects_positional_parameters() {
+        let output_path = target_test_path("rubash-param-assign-positional-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!("set --; printf '<%s>\\n' \"${{1:=default}}\" > {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+        assert_eq!(executor.last_exit_code(), 1);
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn test_parameter_assignment_expansion_uses_existing_positional_and_special_values() {
+        let output_path = "target/rubash-param-assign-special-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "set -- ok; printf 'pos:<%s>\\n' \"${{1:=default}}\" > {output_path}; \
+             set -- ''; \
+             printf 'empty:<%s>\\n' \"${{1=default}}\" >> {output_path}; \
+             printf 'status:<%s>\\n' \"${{?:=default}}\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "pos:<ok>\nempty:<>\nstatus:<0>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_colon_equals_assigns_empty_value() {
         let output_path = "target/rubash-param-colon-equals-output.txt";
         let _ = fs::remove_file(output_path);
