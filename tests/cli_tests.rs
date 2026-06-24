@@ -357,3 +357,33 @@ fn script_multiline_quoted_assignment_is_one_command() {
         )
     );
 }
+
+#[test]
+fn script_nested_case_stays_inside_outer_case_body() {
+    let script_path = Path::new("target").join("rubash-cli-nested-case.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(
+        &script_path,
+        "case \"$1\" in\n\
+         a)\n\
+           case \"$2\" in\n\
+             b) echo inner ;;\n\
+           esac\n\
+           echo outer\n\
+           ;;\n\
+         *) echo other ;;\n\
+         esac\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .arg("a")
+        .arg("b")
+        .output()
+        .expect("run rubash");
+
+    let _ = fs::remove_file(script_path);
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "inner\nouter\n");
+}
