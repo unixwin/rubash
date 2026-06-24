@@ -44,6 +44,7 @@ const FD_STDIN_OFFSET_PREFIX: &str = "__RUBASH_FD_STDIN_OFFSET_";
 const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 const POSIX_FUNCTION_EXPORT_TOUCHED: &str = "__RUBASH_POSIX_FUNCTION_EXPORT_TOUCHED";
+const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -1372,7 +1373,7 @@ impl Executor {
                 let mut output = String::new();
                 for line in input.split_inclusive('\n') {
                     let comparable = line.strip_suffix('\n').unwrap_or(line);
-                    if comparable.contains(&pattern) {
+                    if simple_grep_pattern_matches(comparable, &pattern) {
                         matched = true;
                         output.push_str(line);
                         if !line.ends_with('\n') {
@@ -2896,6 +2897,52 @@ impl Executor {
             && !declare_args_request_print(&cmd.words[1..])
     }
 
+    fn posix_function_declare_unset_export_names(
+        &self,
+        args: &[String],
+    ) -> Vec<(String, Option<String>, bool)> {
+        if self.function_depth == 0
+            || !self.posix_mode_enabled()
+            || declare_args_force_global(args)
+            || declare_args_request_print(args)
+            || !declare_args_contain_option(args, 'x', false)
+        {
+            return Vec::new();
+        }
+
+        args.iter()
+            .filter(|arg| {
+                !((arg.starts_with('-') || arg.starts_with('+'))
+                    && arg.as_str() != "-"
+                    && arg.as_str() != "+")
+            })
+            .filter_map(|arg| local_assignment_name(arg))
+            .map(|name| {
+                (
+                    name.to_string(),
+                    self.env_vars.get(name).cloned(),
+                    is_marked_var(&self.env_vars, EXPORTED_VARS, name),
+                )
+            })
+            .collect()
+    }
+
+    fn apply_posix_function_declare_unset_export(
+        &mut self,
+        names: Vec<(String, Option<String>, bool)>,
+    ) {
+        for (name, old_value, was_exported) in names {
+            if was_exported {
+                if let Some(value) = old_value {
+                    set_local_export_env_value(&mut self.env_vars, &name, value);
+                }
+            }
+            self.env_vars.remove(&name);
+            env::remove_var(&name);
+            mark_env_name(&mut self.env_vars, DECLARED_UNSET_VARS, &name);
+        }
+    }
+
     fn restore_function_locals(&mut self) -> HashSet<String> {
         let Some(scope) = self.local_var_scopes.pop() else {
             return HashSet::new();
@@ -3296,6 +3343,7 @@ impl Executor {
             self.save_local_names(&args);
         }
         let global_local_values = self.begin_global_declare_for_local_names(&args);
+        let posix_function_export_unsets = self.posix_function_declare_unset_export_names(&args);
 
         let result = (|| -> Result<i32, ExecuteError> {
             if let Some(redirect) = &cmd.redirect_out {
@@ -3361,6 +3409,9 @@ impl Executor {
                 &mut self.env_vars,
             )?)
         })();
+        if result.as_ref().is_ok_and(|status| *status == 0) {
+            self.apply_posix_function_declare_unset_export(posix_function_export_unsets);
+        }
         self.finish_global_declare_for_local_names(global_local_values);
         result
     }
@@ -10600,6 +10651,7 @@ impl Executor {
         if value.starts_with('\x1d') && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
             mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
         }
+        unmark_env_name(&mut self.env_vars, DECLARED_UNSET_VARS, base_name);
         self.env_vars.insert(base_name.to_string(), value.clone());
         set_process_env(base_name, value);
         true
@@ -19554,6 +19606,14 @@ fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
         case_pattern_matches(right, left)
     } else {
         left == right
+    }
+}
+
+fn simple_grep_pattern_matches(line: &str, pattern: &str) -> bool {
+    if let Some(pattern) = pattern.strip_prefix('^') {
+        line.starts_with(pattern)
+    } else {
+        line.contains(pattern)
     }
 }
 

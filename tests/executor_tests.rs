@@ -319,6 +319,23 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_pipeline_grep_matches_start_anchor() {
+        let output_path = "target/rubash-pipeline-grep-anchor-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("printf 'foo=abc\\nbar=foo\\n' | grep ^foo= > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "foo=abc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_pipeline_status_uses_last_command_by_default() {
         let output_path = "target/rubash-pipeline-status-output.txt";
         let _ = fs::remove_file(output_path);
@@ -4701,6 +4718,32 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(
             fs::read_to_string(&output_path).unwrap(),
             "inside:value\noutside:one\ndeclare -- var=\"one\"\n"
+        );
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_posix_function_typeset_plus_x_unsets_shell_value() {
+        let output_path = target_test_path("rubash-posix-typeset-plus-x-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let input = format!(
+            "set -o posix; \
+             f() {{ foo=abc; export foo; typeset +x foo; \
+                    echo shell:${{foo-unset}} > {shell_output_path}; \
+                    declare -p foo >> {shell_output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "shell:unset\ndeclare -- foo\n"
         );
         let _ = fs::remove_file(&output_path);
     }
