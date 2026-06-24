@@ -1891,6 +1891,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_array_negative_subscript_expands_from_end() {
+        let output_path = "target/rubash-array-negative-subscript-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); printf '%s:%s:%s\\n' \"${{arr[-1]}}\" \"${{arr[-2]}}\" \"${{#arr[-1]}}\" > {output_path}; sparse=([2]=two [5]=five); printf '%s:%s\\n' \"${{sparse[-1]}}\" \"${{sparse[-4]}}\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "two:one:3\nfive:two\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_sparse_array_numeric_subscript_expands_element() {
         let output_path = "target/rubash-sparse-array-subscript-output.txt";
         let _ = fs::remove_file(output_path);
@@ -12817,7 +12839,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         let output_path = "target/rubash-arithmetic-array-subscript-output.txt";
         let _ = fs::remove_file(output_path);
         let input = format!(
-            "arr=(4 7); i=1; echo $((arr[i]+1)) > {output_path}; (( arr[i] += 2 )); echo ${{arr[1]}} $((arr[i])) >> {output_path}; (( arr[0]++ )); echo ${{arr[0]}} >> {output_path}; echo $((arr[2])) >> {output_path}; arr[2]=5; echo $((arr[2])) >> {output_path}; i=0; echo $((arr[i++])) $i >> {output_path}"
+            "arr=(4 7); i=1; echo $((arr[i]+1)) > {output_path}; (( arr[i] += 2 )); echo ${{arr[1]}} $((arr[i])) >> {output_path}; (( arr[0]++ )); echo ${{arr[0]}} >> {output_path}; echo $((arr[2])) >> {output_path}; arr[2]=5; echo $((arr[2])) >> {output_path}; i=0; echo $((arr[i++])) $i >> {output_path}; (( arr[-1] += 4 )); echo ${{arr[2]}} $((arr[-1])) >> {output_path}"
         );
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
@@ -12829,7 +12851,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
-            "8\n9 9\n5\n0\n5\n5 1\n"
+            "8\n9 9\n5\n0\n5\n5 1\n9 9\n"
         );
         let _ = fs::remove_file(output_path);
     }

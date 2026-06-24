@@ -9976,6 +9976,17 @@ impl Executor {
                         .count()
                         .to_string();
                 }
+                if let Some((array_name, index)) = parse_array_integer_subscript(var_name) {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .and_then(|value| {
+                            resolve_indexed_array_subscript(value, index)
+                                .and_then(|index| array_value_at(value, index))
+                        })
+                        .map(|value| value.chars().count().to_string())
+                        .unwrap_or_else(|| "0".to_string());
+                }
                 if let Some((array_name, index)) = parse_array_numeric_subscript(var_name) {
                     return self
                         .env_vars
@@ -10079,6 +10090,21 @@ impl Executor {
                     return self.expand_parameter_word(word);
                 }
                 return String::new();
+            }
+            if let Some((array_name, index)) = parse_array_integer_subscript(name) {
+                if array_name == "GROUPS" {
+                    let Ok(index) = usize::try_from(index) else {
+                        return String::new();
+                    };
+                    return self.group_value_at(index).unwrap_or_default();
+                }
+                return self
+                    .parameter_array_storage(array_name)
+                    .and_then(|value| {
+                        resolve_indexed_array_subscript(&value, index)
+                            .and_then(|index| array_value_at(&value, index))
+                    })
+                    .unwrap_or_default();
             }
             if let Some((var_name, word)) = name.split_once('-') {
                 return self
@@ -10787,6 +10813,16 @@ impl Executor {
             return String::new();
         }
 
+        if let Some(var_name) = name.strip_prefix('#') {
+            if let Some(value) = self.array_element_parameter_value(var_name) {
+                return value.chars().count().to_string();
+            }
+        }
+
+        if let Some(value) = self.array_element_parameter_value(name) {
+            return shell_safe_value(&value);
+        }
+
         if let Some((var_name, default)) = name.split_once('-') {
             return self
                 .parameter_operator_value(var_name)
@@ -10828,6 +10864,16 @@ impl Executor {
                 return self.expand_embedded_parameters_mut(alternate);
             }
             return String::new();
+        }
+
+        if let Some(var_name) = name.strip_prefix('#') {
+            if let Some(value) = self.array_element_parameter_value(var_name) {
+                return value.chars().count().to_string();
+            }
+        }
+
+        if let Some(value) = self.array_element_parameter_value(name) {
+            return shell_safe_value(&value);
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
@@ -11458,8 +11504,9 @@ impl Executor {
             let key = self.assoc_subscript_key(key);
             return assoc_value_at(&storage, &key);
         }
-        key.parse::<usize>()
+        key.parse::<i128>()
             .ok()
+            .and_then(|index| resolve_indexed_array_subscript(&storage, index))
             .and_then(|index| array_value_at(&storage, index))
     }
 
@@ -14586,7 +14633,7 @@ struct ConditionalArithParser<'a> {
 #[derive(Clone)]
 enum ArithLValue {
     Scalar(String),
-    Indexed { name: String, index: usize },
+    Indexed { name: String, index: i128 },
     Assoc { name: String, key: String },
 }
 
@@ -14990,7 +15037,6 @@ impl ConditionalArithParser<'_> {
         if !self.consume("]") {
             return None;
         }
-        let index = usize::try_from(index).ok()?;
         Some(ArithLValue::Indexed { name, index })
     }
 
@@ -15068,11 +15114,11 @@ impl ConditionalArithParser<'_> {
         match lvalue {
             ArithLValue::Scalar(name) => self.variable_value(name),
             ArithLValue::Indexed { name, index } => {
-                let value = self
-                    .env_vars
-                    .get(name)
-                    .and_then(|value| array_value_at(value, *index))
-                    .unwrap_or_default();
+                let value = self.env_vars.get(name).and_then(|value| {
+                    resolve_indexed_array_subscript(value, *index)
+                        .and_then(|index| array_value_at(value, index))
+                });
+                let value = value.unwrap_or_default();
                 self.evaluate_variable_text(&format!("{name}[{index}]"), &value)
             }
             ArithLValue::Assoc { name, key } => {
@@ -15194,7 +15240,7 @@ impl ConditionalArithParser<'_> {
         env::set_var(name, value);
     }
 
-    fn set_array_element(&mut self, name: &str, index: usize, value: i128) {
+    fn set_array_element(&mut self, name: &str, index: i128, value: i128) {
         if is_noassign_bash_array(name) {
             return;
         }
@@ -15203,6 +15249,18 @@ impl ConditionalArithParser<'_> {
             .get(name)
             .map(|value| indexed_array_entries(value))
             .unwrap_or_default();
+        let index = if index < 0 {
+            let storage = format_indexed_array_storage(entries.clone());
+            let Some(index) = resolve_indexed_array_subscript(&storage, index) else {
+                return;
+            };
+            index
+        } else {
+            let Ok(index) = usize::try_from(index) else {
+                return;
+            };
+            index
+        };
         entries.insert(index, value.to_string());
         let value = format_indexed_array_storage(entries);
         self.env_vars.insert(name.to_string(), value);
@@ -16788,6 +16846,25 @@ fn array_indices(value: &str) -> Vec<String> {
 fn array_value_at(value: &str, index: usize) -> Option<String> {
     let mut entries = indexed_array_entries(value);
     entries.remove(&index)
+}
+
+fn resolve_indexed_array_subscript(value: &str, index: i128) -> Option<usize> {
+    if index >= 0 {
+        return usize::try_from(index).ok();
+    }
+
+    let max_index = indexed_array_entries(value).keys().next_back().copied()?;
+    let resolved = i128::try_from(max_index)
+        .ok()?
+        .checked_add(1)?
+        .checked_add(index)?;
+    usize::try_from(resolved).ok()
+}
+
+fn parse_array_integer_subscript(name: &str) -> Option<(&str, i128)> {
+    let (array_name, subscript) = parse_array_subscript(name)?;
+    let index = subscript.parse::<i128>().ok()?;
+    Some((array_name, index))
 }
 
 fn parse_array_numeric_subscript(name: &str) -> Option<(&str, usize)> {
