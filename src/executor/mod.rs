@@ -1761,6 +1761,12 @@ impl Executor {
         self.set_current_line(cmd);
         self.set_current_command(cmd);
 
+        if cmd.subshell && command_has_unterminated_heredoc(cmd) {
+            self.report_unterminated_subshell_heredoc(cmd);
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
         if let Some(for_command) = &cmd.for_command {
             return self.execute_for_command(for_command);
         }
@@ -12559,7 +12565,9 @@ impl Executor {
 
     fn stdin_string_for_command(&self, cmd: &CommandNode) -> Option<String> {
         if let Some(body) = &cmd.heredoc {
-            if let Some(body) = body.strip_prefix('\x1e') {
+            let quoted = body.starts_with('\x1e');
+            let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
+            if quoted {
                 return Some(body.to_string());
             }
             return Some(self.expand_embedded_parameters(body));
@@ -14052,6 +14060,34 @@ impl Executor {
         }
 
         "rubash: ".to_string()
+    }
+
+    fn diagnostic_prefix_for_line(&self, line: usize) -> String {
+        if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+            return format!("{script}: line {line}: ");
+        }
+
+        "rubash: ".to_string()
+    }
+
+    fn report_unterminated_subshell_heredoc(&self, cmd: &CommandNode) {
+        let start_line = cmd.line.unwrap_or(1);
+        let body_lines = cmd
+            .heredoc
+            .as_deref()
+            .map(unterminated_heredoc_body_line_count)
+            .unwrap_or(0);
+        let warning_line = start_line + body_lines;
+        let syntax_line = warning_line + 1;
+        let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
+        eprintln!(
+            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            self.diagnostic_prefix_for_line(warning_line)
+        );
+        eprintln!(
+            "{}syntax error: unexpected end of file from `(' command on line {start_line}",
+            self.diagnostic_prefix_for_line(syntax_line)
+        );
     }
 }
 
@@ -17418,6 +17454,28 @@ fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {
 
 fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
+}
+
+fn command_has_unterminated_heredoc(cmd: &CommandNode) -> bool {
+    cmd.heredoc
+        .as_deref()
+        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with('\x1f'))
+}
+
+fn strip_unterminated_heredoc_marker(body: &str) -> &str {
+    let Some(stripped) = body.strip_prefix('\x1f') else {
+        return body;
+    };
+    stripped
+}
+
+fn strip_quoted_heredoc_marker(body: &str) -> &str {
+    body.strip_prefix('\x1e').unwrap_or(body)
+}
+
+fn unterminated_heredoc_body_line_count(body: &str) -> usize {
+    let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
+    body.lines().count()
 }
 
 fn contains_windows_forbidden_posix_filename_char(path: &str) -> bool {

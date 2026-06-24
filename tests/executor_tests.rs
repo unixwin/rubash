@@ -1788,6 +1788,22 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unterminated_subshell_heredoc_does_not_execute_body() {
+        let output_path = "target/rubash-unterminated-subshell-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("(cat <<EOF > {output_path}\nstill more text in a subshell\nEOF)");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_err());
+        assert_eq!(executor.last_exit_code(), 2);
+        assert!(!std::path::Path::new(output_path).exists());
+    }
+
+    #[test]
     fn test_for_loop_heredoc_append_expands_loop_variable_target() {
         let dir = target_test_path("rubash-for-heredoc-append");
         let _ = fs::remove_dir_all(&dir);
