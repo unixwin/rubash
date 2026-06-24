@@ -1620,6 +1620,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_without_input_sets_empty_array_at_eof() {
+        let output_path = "target/rubash-mapfile-eof-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset arr MAPFILE; mapfile arr; echo named:$?:${{#arr[@]}} > {output_path}; \
+             mapfile; echo default:$?:${{#MAPFILE[@]}} >> {output_path}; declare -p arr MAPFILE >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "named:0:0\ndefault:0:0\ndeclare -a arr=()\ndeclare -a MAPFILE=()\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_mapfile_without_t_preserves_record_newlines() {
         let input = "mapfile arr <<< $'alpha\\nbeta'";
         let tokens = tokenize(input);
