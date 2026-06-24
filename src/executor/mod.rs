@@ -1772,8 +1772,8 @@ impl Executor {
             if command_has_no_effect(cmd) {
                 return Ok(());
             }
-            if let Some(name) = self.parameter_assignment_readonly_error(cmd) {
-                eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
+            if let Some((name, message)) = self.parameter_assignment_error(cmd) {
+                eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
                 self.exit_code = 1;
                 return Err(ExecuteError::ExitCode(1));
             }
@@ -1790,8 +1790,8 @@ impl Executor {
             return Ok(());
         }
 
-        if let Some(name) = self.parameter_assignment_readonly_error(cmd) {
-            eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
+        if let Some((name, message)) = self.parameter_assignment_error(cmd) {
+            eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
             self.exit_code = 1;
             return Err(ExecuteError::ExitCode(1));
         }
@@ -9987,11 +9987,11 @@ impl Executor {
             }
             if let Some((var_name, word)) = name.split_once(":=") {
                 if self
-                    .shell_variable_value(var_name)
+                    .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self
-                        .shell_variable_value(var_name)
+                        .parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
                         .unwrap_or_default();
                 }
@@ -10000,11 +10000,11 @@ impl Executor {
             }
             if let Some((var_name, word)) = name.split_once(":-") {
                 if self
-                    .shell_variable_value(var_name)
+                    .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self
-                        .shell_variable_value(var_name)
+                        .parameter_operator_value(var_name)
                         .map(|value| shell_safe_value(&value))
                         .unwrap_or_default();
                 }
@@ -10012,7 +10012,7 @@ impl Executor {
             }
             if let Some((var_name, word)) = name.split_once(":+") {
                 if self
-                    .shell_variable_value(var_name)
+                    .parameter_operator_value(var_name)
                     .is_some_and(|value| !value.is_empty())
                 {
                     return self.expand_parameter_word(word);
@@ -10020,26 +10020,22 @@ impl Executor {
                 return String::new();
             }
             if let Some((var_name, word)) = name.split_once('=') {
-                if is_shell_name(var_name) {
-                    return self
-                        .shell_variable_value(var_name)
-                        .map(|value| shell_safe_value(&value))
-                        .unwrap_or_else(|| self.expand_parameter_word(word));
-                }
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_parameter_word(word));
             }
             if let Some((var_name, word)) = name.split_once('+') {
-                if self.shell_variable_value(var_name).is_some() {
+                if self.parameter_operator_value(var_name).is_some() {
                     return self.expand_parameter_word(word);
                 }
                 return String::new();
             }
             if let Some((var_name, word)) = name.split_once('-') {
-                if is_shell_name(var_name) {
-                    return self
-                        .shell_variable_value(var_name)
-                        .map(|value| shell_safe_value(&value))
-                        .unwrap_or_else(|| self.expand_parameter_word(word));
-                }
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_parameter_word(word));
             }
             if let Some((array_name, default)) = name
                 .strip_suffix("[@]")
@@ -10672,7 +10668,7 @@ impl Executor {
 
         if let Some((var_name, default)) = name.split_once(":-") {
             return self
-                .shell_variable_value(var_name)
+                .parameter_operator_value(var_name)
                 .filter(|value| !value.is_empty())
                 .map(|value| shell_safe_value(&value))
                 .unwrap_or_else(|| self.expand_embedded_parameters(default));
@@ -10680,7 +10676,7 @@ impl Executor {
 
         if let Some((var_name, alternate)) = name.split_once(":+") {
             if self
-                .shell_variable_value(var_name)
+                .parameter_operator_value(var_name)
                 .is_some_and(|value| !value.is_empty())
             {
                 return self.expand_embedded_parameters(alternate);
@@ -10689,19 +10685,17 @@ impl Executor {
         }
 
         if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.shell_variable_value(var_name).is_some() {
+            if self.parameter_operator_value(var_name).is_some() {
                 return self.expand_embedded_parameters(alternate);
             }
             return String::new();
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
-            if is_shell_name(var_name) {
-                return self
-                    .shell_variable_value(var_name)
-                    .map(|value| shell_safe_value(&value))
-                    .unwrap_or_else(|| self.expand_embedded_parameters(default));
-            }
+            return self
+                .parameter_operator_value(var_name)
+                .map(|value| shell_safe_value(&value))
+                .unwrap_or_else(|| self.expand_embedded_parameters(default));
         }
 
         self.expand_word(word)
@@ -10752,21 +10746,21 @@ impl Executor {
         }
     }
 
-    fn parameter_assignment_readonly_error(&self, cmd: &CommandNode) -> Option<String> {
+    fn parameter_assignment_error(&self, cmd: &CommandNode) -> Option<(String, &'static str)> {
         for word in &cmd.words {
-            if let Some(name) = self.parameter_assignment_readonly_error_in_word(word) {
-                return Some(name);
+            if let Some(error) = self.parameter_assignment_error_in_word(word) {
+                return Some(error);
             }
         }
         for value in cmd.assignments.values() {
-            if let Some(name) = self.parameter_assignment_readonly_error_in_word(value) {
-                return Some(name);
+            if let Some(error) = self.parameter_assignment_error_in_word(value) {
+                return Some(error);
             }
         }
         None
     }
 
-    fn parameter_assignment_readonly_error_in_word(&self, word: &str) -> Option<String> {
+    fn parameter_assignment_error_in_word(&self, word: &str) -> Option<(String, &'static str)> {
         let word = word
             .strip_prefix('\x1b')
             .or_else(|| word.strip_prefix('\x1d'))
@@ -10780,11 +10774,14 @@ impl Executor {
             let inner = &after_start[..end];
             if let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) {
                 if self.parameter_assignment_required(name, require_non_empty) {
+                    if name.parse::<usize>().is_ok_and(|index| index > 0) {
+                        return Some((format!("${name}"), "cannot assign in this way"));
+                    }
                     let target = self
                         .nameref_target_name(name)
                         .unwrap_or_else(|| name.to_string());
                     if is_marked_var(&self.env_vars, READONLY_VARS, &target) {
-                        return Some(target);
+                        return Some((target, "readonly variable"));
                     }
                 }
             }
@@ -10794,13 +10791,19 @@ impl Executor {
     }
 
     fn parameter_assignment_required(&self, name: &str, require_non_empty: bool) -> bool {
-        if !is_shell_name(name) {
-            return false;
-        }
-        match self.shell_variable_value(name) {
+        match self.parameter_operator_value(name) {
             Some(value) => require_non_empty && value.is_empty(),
             None => true,
         }
+    }
+
+    fn parameter_operator_value(&self, name: &str) -> Option<String> {
+        if is_shell_name(name) {
+            return self
+                .dynamic_parameter_value(name)
+                .or_else(|| self.shell_variable_value(name));
+        }
+        self.parameter_error_value(name)
     }
 
     fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String, i32)> {
@@ -15314,13 +15317,13 @@ fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
 
 fn parse_parameter_assignment_operator(inner: &str) -> Option<(&str, bool)> {
     if let Some((name, _)) = inner.split_once(":=") {
-        if is_shell_name(name) {
+        if is_shell_name(name) || name.parse::<usize>().is_ok_and(|index| index > 0) {
             return Some((name, true));
         }
     }
 
     if let Some((name, _)) = inner.split_once('=') {
-        if is_shell_name(name) {
+        if is_shell_name(name) || name.parse::<usize>().is_ok_and(|index| index > 0) {
             return Some((name, false));
         }
     }
