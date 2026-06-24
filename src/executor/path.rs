@@ -203,13 +203,19 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
 
     if normalized == "/tmp" {
         if let Some(tmpdir) = env_vars.get("TMPDIR") {
-            return PathBuf::from(tmpdir);
+            if tmpdir.replace('\\', "/") == "/tmp" {
+                return std::env::temp_dir();
+            }
+            return shell_path_to_windows(tmpdir, env_vars);
         }
     }
 
     if let Some(rest) = normalized.strip_prefix("/tmp/") {
         if let Some(tmpdir) = env_vars.get("TMPDIR") {
-            return PathBuf::from(tmpdir).join(rest);
+            if tmpdir.replace('\\', "/") == "/tmp" {
+                return std::env::temp_dir().join(rest);
+            }
+            return shell_path_to_windows(tmpdir, env_vars).join(rest);
         }
     }
 

@@ -692,6 +692,9 @@ impl Executor {
                 .map(|path| shell_display_path(&path.to_string_lossy().replace('\\', "/")))
                 .unwrap_or_else(|_| "/".to_string())
         });
+        env_vars
+            .entry("TMPDIR".to_string())
+            .or_insert_with(safe_temp_dir_string);
         env_vars.remove("OLDPWD");
         initialize_shell_level(&mut env_vars);
         mark_initial_exported_vars(&mut env_vars);
@@ -1412,7 +1415,9 @@ impl Executor {
 
         self.apply_child_environment(&mut process);
         for (var_name, var_value) in &command.assignments {
-            process.env(var_name, var_value);
+            if is_valid_process_env(var_name, var_value) {
+                process.env(var_name, var_value);
+            }
         }
         process.stdin(Stdio::piped()).stdout(Stdio::piped());
 
@@ -2428,7 +2433,7 @@ impl Executor {
     fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
         if let Some(value) = cmd.words.last() {
             self.env_vars.insert("_".to_string(), value.clone());
-            env::set_var("_", value);
+            set_process_env("_", value);
         }
     }
 
@@ -2591,7 +2596,7 @@ impl Executor {
         let old_positional_params = self.positional_params.clone();
         self.env_vars
             .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
-        env::set_var("__RUBASH_CURRENT_FUNCTION", name);
+        set_process_env("__RUBASH_CURRENT_FUNCTION", name);
         if let Some(input) = call_stdin {
             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
             self.env_vars
@@ -2647,7 +2652,7 @@ impl Executor {
             Some(value) => {
                 self.env_vars
                     .insert("__RUBASH_CURRENT_FUNCTION".to_string(), value.clone());
-                env::set_var("__RUBASH_CURRENT_FUNCTION", value);
+                set_process_env("__RUBASH_CURRENT_FUNCTION", value);
             }
             None => {
                 self.env_vars.remove("__RUBASH_CURRENT_FUNCTION");
@@ -2770,7 +2775,7 @@ impl Executor {
             match value {
                 Some(value) => {
                     self.env_vars.insert(name.clone(), value.clone());
-                    env::set_var(&name, value);
+                    set_process_env(&name, value);
                 }
                 None => {
                     self.env_vars.remove(&name);
@@ -3281,7 +3286,7 @@ impl Executor {
         }
         for name in local_names_without_assignment(args) {
             self.env_vars.insert(name.clone(), String::new());
-            env::set_var(&name, "");
+            set_process_env(&name, "");
             set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
         }
     }
@@ -3670,10 +3675,23 @@ impl Executor {
         process.env_clear();
         for name in marked_env_names(&self.env_vars, EXPORTED_VARS) {
             if let Some(value) = self.env_vars.get(&name) {
-                process.env(&name, value);
+                if is_valid_process_env(&name, value) {
+                    process.env(&name, self.child_env_value(&name, value));
+                }
             }
         }
         self.apply_exported_functions_to_child(process);
+    }
+
+    fn child_env_value(&self, name: &str, value: &str) -> String {
+        if cfg!(windows) && name == "TMPDIR" {
+            return shell_display_path(
+                &shell_path_to_windows(value, &self.env_vars)
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            );
+        }
+        value.to_string()
     }
 
     fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
@@ -3925,7 +3943,7 @@ impl Executor {
             ran_body = true;
             self.env_vars
                 .insert(for_command.variable.clone(), value.clone());
-            env::set_var(&for_command.variable, value);
+            set_process_env(&for_command.variable, value);
 
             let body = Ast {
                 commands: for_command.body.clone(),
@@ -9754,7 +9772,7 @@ impl Executor {
     fn set_optind(&mut self, optind: usize) {
         let value = optind.to_string();
         self.env_vars.insert("OPTIND".to_string(), value.clone());
-        env::set_var("OPTIND", value);
+        set_process_env("OPTIND", value);
     }
 
     fn execute_enable(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
@@ -10142,13 +10160,13 @@ impl Executor {
             let elapsed = current_epoch_seconds() - start;
             self.env_vars
                 .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
-            env::set_var(base_name, assigned.to_string());
+            set_process_env(base_name, assigned.to_string());
             return true;
         }
         if base_name == "RANDOM" && !append {
             self.random_state
                 .set(value.trim().parse::<u32>().unwrap_or(0));
-            env::set_var(base_name, value);
+            set_process_env(base_name, value);
             return true;
         }
         if base_name == "BASHPID" && !append {
@@ -10225,7 +10243,7 @@ impl Executor {
             mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
         }
         self.env_vars.insert(base_name.to_string(), value.clone());
-        env::set_var(base_name, value);
+        set_process_env(base_name, value);
         true
     }
 
@@ -10337,7 +10355,7 @@ impl Executor {
         for (name, value) in previous.into_iter().rev() {
             if let Some(value) = value {
                 self.env_vars.insert(name.clone(), value.clone());
-                env::set_var(name, value);
+                set_process_env(&name, value);
             } else {
                 self.env_vars.remove(&name);
                 env::remove_var(name);
@@ -13258,30 +13276,46 @@ impl Executor {
                 }
             }
         }
-        let unique = format!(
-            "{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or(0)
-        );
-        let filename = if template.contains("XXXXXX") {
-            template.replace("XXXXXX", &unique)
-        } else {
-            format!("{template}.{unique}")
-        };
         let dir = self
             .env_vars
             .get("TMPDIR")
+            .filter(|value| !value.contains('\0'))
             .cloned()
-            .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-        let path = std::path::Path::new(&dir).join(filename);
-        if directory {
-            std::fs::create_dir(&path).ok()?;
-        } else {
-            std::fs::File::create(&path).ok()?;
+            .unwrap_or_else(safe_temp_dir_string);
+        let dir = shell_path_to_windows(&dir, &self.env_vars);
+        std::fs::create_dir_all(&dir).ok()?;
+        let mut path = None;
+        for attempt in 0..32 {
+            let unique = format!(
+                "{}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_nanos())
+                    .unwrap_or(0),
+                attempt
+            );
+            let filename = if template.contains("XXXXXX") {
+                template.replace("XXXXXX", &unique)
+            } else {
+                format!("{template}.{unique}")
+            };
+            let candidate = dir.join(filename);
+            let created = if directory {
+                std::fs::create_dir_all(&candidate).is_ok()
+            } else {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&candidate)
+                    .is_ok()
+            };
+            if created {
+                path = Some(candidate);
+                break;
+            }
         }
+        let path = path?;
         self.last_command_substitution_status.set(Some(0));
         Some(shell_display_path(
             &path.to_string_lossy().replace('\\', "/"),
@@ -14558,6 +14592,62 @@ impl Executor {
             return Ok(());
         }
 
+        if cmd.words[0] == "cp" {
+            let mut args = Vec::new();
+            for word in &cmd.words[1..] {
+                if word.starts_with('-') {
+                    continue;
+                }
+                args.push(self.expand_word(word));
+            }
+
+            if args.len() < 2 {
+                eprintln!("{}cp: missing file operand", self.diagnostic_prefix());
+                self.exit_code = 1;
+                return Ok(());
+            }
+
+            let destination =
+                shell_path_to_windows(args.last().expect("cp destination"), &self.env_vars);
+            if args.len() > 2 && !destination.is_dir() {
+                eprintln!(
+                    "{}cp: target '{}' is not a directory",
+                    self.diagnostic_prefix(),
+                    args.last().expect("cp destination")
+                );
+                self.exit_code = 1;
+                return Ok(());
+            }
+
+            for source in &args[..args.len() - 1] {
+                let source_path = shell_path_to_windows(source, &self.env_vars);
+                let target_path = if destination.is_dir() {
+                    if let Some(name) = source_path.file_name() {
+                        destination.join(name)
+                    } else {
+                        eprintln!(
+                            "{}cp: cannot stat '{}': No such file or directory",
+                            self.diagnostic_prefix(),
+                            source
+                        );
+                        self.exit_code = 1;
+                        return Ok(());
+                    }
+                } else {
+                    destination.clone()
+                };
+
+                if let Err(error) = fs::copy(&source_path, &target_path) {
+                    eprintln!("{}cp: {error}", self.diagnostic_prefix());
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+            }
+
+            self.exit_code = 0;
+            return Ok(());
+        }
+
         if cmd.words[0] == "rm" {
             for path in cmd.words.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
                 let target = shell_path_to_windows(&self.expand_word(path), &self.env_vars);
@@ -14665,7 +14755,9 @@ impl Executor {
 
         self.apply_child_environment(&mut process);
         for (var_name, var_value) in &cmd.assignments {
-            process.env(var_name, var_value);
+            if is_valid_process_env(var_name, var_value) {
+                process.env(var_name, var_value);
+            }
         }
 
         if cmd.heredoc.is_some() || cmd.here_string.is_some() {
@@ -14722,6 +14814,9 @@ impl Executor {
 
                 match child.wait() {
                     Ok(status) => {
+                        if should_run_with_shell(&program) {
+                            self.filter_external_shell_stderr_noise(cmd)?;
+                        }
                         self.exit_code = status.code().unwrap_or(1);
                     }
                     Err(error) => {
@@ -14749,6 +14844,27 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         self.write_buffered_builtin_output(cmd, &[], stderr)?;
         self.exit_code = status;
+        Ok(())
+    }
+
+    fn filter_external_shell_stderr_noise(&self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        const GIT_BASH_TMP_WARNING: &str =
+            "bash.exe: warning: could not find /tmp, please create!\n";
+        let redirect = cmd
+            .redirect_err
+            .as_ref()
+            .or(cmd.redirect_err_append.as_ref());
+        let Some(redirect) = redirect else {
+            return Ok(());
+        };
+        let target = self.expand_word(&redirect.target);
+        let path = shell_path_to_windows(&target, &self.env_vars);
+        let Ok(contents) = fs::read_to_string(&path) else {
+            return Ok(());
+        };
+        if contents.contains(GIT_BASH_TMP_WARNING) {
+            fs::write(path, contents.replace(GIT_BASH_TMP_WARNING, ""))?;
+        }
         Ok(())
     }
 
@@ -14870,10 +14986,17 @@ impl Executor {
     }
 
     pub fn set_env(&mut self, name: &str, value: &str) {
-        self.env_vars.insert(name.to_string(), value.to_string());
-        env::set_var(name, value);
+        let value = if name == "TMPDIR" && value.contains('\0') {
+            safe_temp_dir_string()
+        } else {
+            value.to_string()
+        };
+        self.env_vars.insert(name.to_string(), value.clone());
+        if is_valid_process_env(name, &value) {
+            set_process_env(name, &value);
+        }
         if name == "__RUBASH_SCRIPT_NAME" {
-            store_indexed_array(&mut self.env_vars, "BASH_SOURCE", vec![value.to_string()]);
+            store_indexed_array(&mut self.env_vars, "BASH_SOURCE", vec![value]);
         }
     }
 
@@ -14907,7 +15030,11 @@ impl Executor {
         }
 
         for (name, value) in &saved_env {
-            env::set_var(name, value);
+            if is_valid_process_env(name, value) {
+                set_process_env(name, value);
+            } else {
+                env::remove_var(name);
+            }
         }
 
         self.env_vars = saved_env;
@@ -14935,7 +15062,7 @@ impl Executor {
             let line = line.to_string();
             self.env_vars
                 .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
-            env::set_var("__RUBASH_CURRENT_LINE", line);
+            set_process_env("__RUBASH_CURRENT_LINE", line);
         }
     }
 
@@ -14943,7 +15070,7 @@ impl Executor {
         let command = bash_command_text(cmd);
         self.env_vars
             .insert("__RUBASH_CURRENT_COMMAND".to_string(), command.clone());
-        env::set_var("__RUBASH_CURRENT_COMMAND", command);
+        set_process_env("__RUBASH_CURRENT_COMMAND", command);
     }
 
     fn set_pipestatus<I>(&mut self, statuses: I)
@@ -17103,7 +17230,7 @@ impl ConditionalArithParser<'_> {
             }
         }
         self.env_vars.insert(name.to_string(), value.clone());
-        env::set_var(name, value);
+        set_process_env(name, value);
     }
 
     fn set_array_element(&mut self, name: &str, index: i128, value: i128) {
@@ -17616,7 +17743,9 @@ fn restore_optional_shell_var(
     match value {
         Some(value) => {
             env_vars.insert(name.to_string(), value.clone());
-            env::set_var(name, value);
+            if is_valid_process_env(name, &value) {
+                set_process_env(name, value);
+            }
         }
         None => {
             env_vars.remove(name);
@@ -17647,6 +17776,31 @@ fn set_var_attrs(env_vars: &mut HashMap<String, String>, name: &str, attrs: VarA
     set_marked_var(env_vars, NAMEREF_VARS, name, attrs.nameref);
     set_marked_var(env_vars, ARRAY_VARS, name, attrs.array);
     set_marked_var(env_vars, ASSOC_VARS, name, attrs.assoc);
+}
+
+fn is_valid_process_env(name: &str, value: &str) -> bool {
+    !name.is_empty() && !name.contains(['=', '\0']) && !value.contains('\0')
+}
+
+fn set_process_env(name: &str, value: impl AsRef<str>) {
+    let value = value.as_ref();
+    if name != "TMPDIR" && is_valid_process_env(name, value) {
+        env::set_var(name, value);
+    }
+}
+
+fn safe_temp_dir_string() -> String {
+    for name in ["TMPDIR", "TEMP", "TMP"] {
+        if let Ok(value) = env::var(name) {
+            if !value.is_empty() && !value.contains('\0') {
+                return value;
+            }
+        }
+    }
+
+    env::current_dir()
+        .map(|path| path.join("target").to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string())
 }
 
 fn set_marked_var(env_vars: &mut HashMap<String, String>, key: &str, name: &str, marked: bool) {
