@@ -13109,6 +13109,61 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_arithmetic_lvalues_resolve_nameref_targets() {
+        let output_path = "target/rubash-arithmetic-nameref-lvalue-output.txt";
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_ARITH_NAMEREF_SCALAR",
+            "RUBASH_ARITH_NAMEREF_SCALAR_REF",
+            "RUBASH_ARITH_NAMEREF_ARRAY",
+            "RUBASH_ARITH_NAMEREF_ARRAY_REF",
+            "RUBASH_ARITH_NAMEREF_ASSOC",
+            "RUBASH_ARITH_NAMEREF_ASSOC_REF",
+            "RUBASH_ARITH_NAMEREF_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_ARITH_NAMEREF_SCALAR=1; \
+             declare -n RUBASH_ARITH_NAMEREF_SCALAR_REF=RUBASH_ARITH_NAMEREF_SCALAR; \
+             (( RUBASH_ARITH_NAMEREF_SCALAR_REF += 2 )); (( ++RUBASH_ARITH_NAMEREF_SCALAR_REF )); \
+             echo scalar:${{RUBASH_ARITH_NAMEREF_SCALAR}}:${{RUBASH_ARITH_NAMEREF_SCALAR_REF}} > {output_path}; \
+             RUBASH_ARITH_NAMEREF_ARRAY=(10 20); \
+             declare -n RUBASH_ARITH_NAMEREF_ARRAY_REF=RUBASH_ARITH_NAMEREF_ARRAY; \
+             (( RUBASH_ARITH_NAMEREF_ARRAY_REF[1] += 5 )); \
+             echo indexed:${{RUBASH_ARITH_NAMEREF_ARRAY[1]}}:${{RUBASH_ARITH_NAMEREF_ARRAY_REF[1]}} >> {output_path}; \
+             declare -A RUBASH_ARITH_NAMEREF_ASSOC=([k]=7); RUBASH_ARITH_NAMEREF_KEY=k; \
+             declare -n RUBASH_ARITH_NAMEREF_ASSOC_REF=RUBASH_ARITH_NAMEREF_ASSOC; \
+             (( RUBASH_ARITH_NAMEREF_ASSOC_REF[$RUBASH_ARITH_NAMEREF_KEY] += 2 )); \
+             echo assoc:${{RUBASH_ARITH_NAMEREF_ASSOC[k]}}:${{RUBASH_ARITH_NAMEREF_ASSOC_REF[k]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "scalar:4:4\nindexed:25:25\nassoc:9:9\n"
+        );
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_ARITH_NAMEREF_SCALAR",
+            "RUBASH_ARITH_NAMEREF_SCALAR_REF",
+            "RUBASH_ARITH_NAMEREF_ARRAY",
+            "RUBASH_ARITH_NAMEREF_ARRAY_REF",
+            "RUBASH_ARITH_NAMEREF_ASSOC",
+            "RUBASH_ARITH_NAMEREF_ASSOC_REF",
+            "RUBASH_ARITH_NAMEREF_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn test_grouped_arithmetic_assignments_have_side_effects() {
         let output_path = "target/rubash-arithmetic-grouped-assign-output.txt";
         let _ = fs::remove_file(output_path);
