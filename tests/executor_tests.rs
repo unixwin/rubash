@@ -3480,6 +3480,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_invalid_array_names_do_not_panic() {
+        let output_path = "target/rubash-declare-invalid-array-names-output.txt";
+        let sink_path = "target/rubash-declare-invalid-array-names-sink.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(sink_path);
+        let input = format!(
+            "declare -r []=asdf > {sink_path}; declare -r a[]=asdf >> {sink_path}; \
+             echo survived > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "survived\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(sink_path);
+    }
+
+    #[test]
     fn test_declare_indexed_array_assignment_resolves_negative_indices() {
         let output_path = "target/rubash-declare-indexed-array-negative-output.txt";
         let _ = fs::remove_file(output_path);
