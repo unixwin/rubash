@@ -2598,15 +2598,21 @@ impl Executor {
     }
 
     fn execute_eval(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        match crate::builtins::eval::execute(&cmd.words[1..])? {
+        let mut stderr = Vec::new();
+        match crate::builtins::eval::execute_with_io(
+            cmd.words[1..].iter().map(String::as_str),
+            &mut stderr,
+        )? {
             crate::builtins::eval::EvalAction::Complete(status) => {
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = status;
                 Ok(())
             }
             crate::builtins::eval::EvalAction::Execute(source) => {
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 let tokens = crate::lexer::tokenize(&source);
                 let mut ast = crate::parser::parse(&tokens);
-                self.apply_eval_stdout_redirect(cmd, &mut ast)?;
+                self.apply_eval_output_redirects(cmd, &mut ast)?;
                 self.execute_ast(&ast)
             }
         }
@@ -2644,30 +2650,55 @@ impl Executor {
         }
     }
 
-    fn apply_eval_stdout_redirect(
+    fn apply_eval_output_redirects(
         &mut self,
         cmd: &CommandNode,
         ast: &mut Ast,
     ) -> Result<(), ExecuteError> {
-        let (redirect, truncate_first) = if let Some(redirect) = &cmd.redirect_out {
-            (redirect, true)
-        } else if let Some(redirect) = &cmd.append {
-            (redirect, false)
-        } else {
-            return Ok(());
-        };
-
-        let target = self.expand_word(&redirect.target);
-        if truncate_first {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
             self.create_redirect_output(&target, redirect.clobber)?;
+            let append_redirect = Redirect {
+                fd: redirect.fd,
+                target,
+                append: true,
+                clobber: false,
+            };
+            apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
+        } else if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let append_redirect = Redirect {
+                fd: redirect.fd,
+                target,
+                append: true,
+                clobber: false,
+            };
+            apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         }
-        let append_redirect = Redirect {
-            fd: redirect.fd,
-            target,
-            append: true,
-            clobber: false,
-        };
-        apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let append_redirect = Redirect {
+                fd: redirect.fd,
+                target,
+                append: true,
+                clobber: false,
+            };
+            apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
+        } else if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            let append_redirect = Redirect {
+                fd: redirect.fd,
+                target,
+                append: true,
+                clobber: false,
+            };
+            apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
+        }
+
         Ok(())
     }
 
@@ -14012,6 +14043,22 @@ fn apply_stdout_append_redirect(commands: &mut [CommandNode], redirect: &Redirec
         if let Some(case_command) = &mut command.case_command {
             for clause in &mut case_command.clauses {
                 apply_stdout_append_redirect(&mut clause.body, redirect);
+            }
+        }
+    }
+}
+
+fn apply_stderr_append_redirect(commands: &mut [CommandNode], redirect: &Redirect) {
+    for command in commands {
+        if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
+            command.redirect_err_append = Some(redirect.clone());
+        }
+        if let Some(for_command) = &mut command.for_command {
+            apply_stderr_append_redirect(&mut for_command.body, redirect);
+        }
+        if let Some(case_command) = &mut command.case_command {
+            for clause in &mut case_command.clauses {
+                apply_stderr_append_redirect(&mut clause.body, redirect);
             }
         }
     }

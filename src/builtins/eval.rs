@@ -20,7 +20,7 @@ pub fn execute(args: &[String]) -> io::Result<EvalAction> {
     execute_with_io(args.iter().map(String::as_str), &mut stderr)
 }
 
-fn execute_with_io<'a, I, E>(args: I, stderr: &mut E) -> io::Result<EvalAction>
+pub(crate) fn execute_with_io<'a, I, E>(args: I, stderr: &mut E) -> io::Result<EvalAction>
 where
     I: IntoIterator<Item = &'a str>,
     E: Write,

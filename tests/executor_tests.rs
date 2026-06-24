@@ -8160,6 +8160,52 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_eval_invalid_option_redirects_stderr() {
+        let status_path = "target/rubash-eval-invalid-option-status.txt";
+        let error_path = "target/rubash-eval-invalid-option-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("eval -Z 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("eval: -Z: invalid option"));
+        assert!(error.contains("eval: usage: eval"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_eval_body_redirects_stderr() {
+        let status_path = "target/rubash-eval-body-error-status.txt";
+        let error_path = "target/rubash-eval-body-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("eval 'no_such_eval_cmd' 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "127\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_eval_cmd: command not found"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_builtin_eval_redirects_entire_output() {
         let output_path = "target/rubash-builtin-eval-redirect-output.txt";
         let _ = fs::remove_file(output_path);
