@@ -69,6 +69,12 @@ where
 fn current_directory(mode: Mode) -> io::Result<Option<String>> {
     let physical = env::current_dir()?;
 
+    if mode == Mode::Physical {
+        if let Some(logical) = windows_posix_bridge_pwd() {
+            return Ok(Some(logical));
+        }
+    }
+
     if mode == Mode::Logical {
         if let Some(logical) = logical_pwd_if_current(&physical) {
             return Ok(Some(logical));
@@ -76,6 +82,15 @@ fn current_directory(mode: Mode) -> io::Result<Option<String>> {
     }
 
     Ok(Some(shell_display_path(&physical)))
+}
+
+fn windows_posix_bridge_pwd() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+
+    let logical = env::var("PWD").ok()?;
+    matches!(logical.as_str(), "/" | "/bin" | "/etc" | "/tmp" | "/usr").then_some(logical)
 }
 
 fn logical_pwd_if_current(physical: &Path) -> Option<String> {
@@ -168,5 +183,20 @@ mod tests {
         assert_eq!(status, EX_USAGE);
         assert!(stdout.is_empty());
         assert!(stderr.contains("invalid option"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn physical_mode_reports_posix_bridge_pwd() {
+        let old_pwd = env::var_os("PWD");
+        env::set_var("PWD", "/usr");
+
+        let (_, stdout, _) = run(&["-P"]);
+
+        assert_eq!(stdout, "/usr\n");
+        match old_pwd {
+            Some(value) => env::set_var("PWD", value),
+            None => env::remove_var("PWD"),
+        }
     }
 }
