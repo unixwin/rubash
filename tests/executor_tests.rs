@@ -1003,6 +1003,30 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_unquoted_command_substitution_word_splits_with_adjacent_text() {
+        let output_path = "target/rubash-comsub-word-split-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "one=one; four=four; five='fi ve'; \
+             printf '[%s]\\n' $one`echo two three`$four > {output_path}; \
+             printf '[%s]\\n' `echo two three`$five >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "[onetwo]\n[threefour]\n[two]\n[threefi]\n[ve]\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_cat_command_substitution_reads_files_and_strips_trailing_newlines() {
         let input_path = "target/rubash-cat-command-substitution-input.txt";
         let output_path = "target/rubash-cat-command-substitution-output.txt";
@@ -13496,6 +13520,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert_eq!(
             fs::read_to_string(output_path).unwrap(),
             "def_ghi ghi abc_def abc\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_pattern_removal_decodes_quoted_pattern_words() {
+        let output_path = "target/rubash-param-pattern-quoted-word-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "pat=$'no\\t'; x=$'no\\tOK'; y=notOK; \
+             echo 1:${{x#$'no\\t'}} 2:O${{x#$'no\\t'O}} 3:${{x#n$'o\\t'}} 4:${{x#'no\t'}} 5:${{x#$pat}} 6:${{y#$'not'}} 7:${{y#'not'}} > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "1:OK 2:OK 3:OK 4:OK 5:OK 6:OK 7:OK\n"
         );
         let _ = fs::remove_file(output_path);
     }
