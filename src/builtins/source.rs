@@ -238,29 +238,46 @@ pub fn execute_simple_if(
         return Ok(None);
     }
 
-    let Some(then_index) = find_word_command(ast, index + 1, "then") else {
+    let inline_then = command.words.iter().position(|word| word == "then");
+    let Some(then_index) = inline_then
+        .map(|_| index)
+        .or_else(|| find_word_command(ast, index + 1, "then"))
+    else {
         return Ok(None);
     };
-    let Some(fi_index) = find_matching_fi(ast, then_index + 1) else {
+    let body_start = if inline_then.is_some() {
+        index + 1
+    } else {
+        then_index + 1
+    };
+    let Some(fi_index) = find_matching_fi(ast, body_start) else {
         return Ok(None);
     };
-    let elif_index = find_if_branch_command(ast, then_index + 1, fi_index, "elif");
-    let else_index = find_if_branch_command(ast, then_index + 1, fi_index, "else");
+    let elif_index = find_if_branch_command(ast, body_start, fi_index, "elif");
+    let else_index = find_if_branch_command(ast, body_start, fi_index, "else");
 
     let condition_words;
     let words = if keyword == "elif" {
         condition_words = {
-            let mut words = command.words.clone();
+            let mut words = inline_then
+                .map(|then_pos| command.words[..then_pos].to_vec())
+                .unwrap_or_else(|| command.words.clone());
             words[0] = "if".to_string();
             words
         };
         &condition_words
     } else {
-        &command.words
+        condition_words = inline_then
+            .map(|then_pos| command.words[..then_pos].to_vec())
+            .unwrap_or_else(|| command.words.clone());
+        &condition_words
     };
-    let condition_true = if let Some(value) =
+    let and_or_condition = if inline_then.is_none() {
         execute_and_or_if_condition(executor, ast, index, then_index)?
-    {
+    } else {
+        None
+    };
+    let condition_true = if let Some(value) = and_or_condition {
         value
     } else if test_if_condition_true(executor, words)? {
         true
@@ -272,10 +289,14 @@ pub fn execute_simple_if(
     if condition_true {
         let body_end = elif_index.or(else_index).unwrap_or(fi_index);
         let mut body_commands = Vec::new();
-        if let Some(command) = command_tail(ast.commands.get(then_index)) {
-            body_commands.push(command);
+        if let Some(then_pos) = inline_then {
+            if let Some(command) = command_tail_from(ast.commands.get(then_index), then_pos + 1) {
+                body_commands.push(command);
+            }
+        } else if let Some(command) = command_tail(ast.commands.get(then_index)) {
+                body_commands.push(command);
         }
-        body_commands.extend(ast.commands[then_index + 1..body_end].iter().cloned());
+        body_commands.extend(ast.commands[body_start..body_end].iter().cloned());
         let body = Ast {
             commands: body_commands,
         };
@@ -414,8 +435,19 @@ fn command_tail(
     if command.words.len() <= 1 {
         return None;
     }
+    command_tail_from(Some(command), 1)
+}
+
+fn command_tail_from(
+    command: Option<&crate::parser::CommandNode>,
+    start: usize,
+) -> Option<crate::parser::CommandNode> {
+    let command = command?;
+    if command.words.len() <= start {
+        return None;
+    }
     let mut tail = command.clone();
-    tail.words = tail.words[1..].to_vec();
+    tail.words = tail.words[start..].to_vec();
     Some(tail)
 }
 
