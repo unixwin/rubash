@@ -13634,6 +13634,10 @@ impl Executor {
             };
         }
 
+        if let Some((left, right)) = conditional_regex_operands(args) {
+            return self.conditional_regex_match_status(left, &right);
+        }
+
         match args {
             [not, rest @ ..] if not == "!" => i32::from(self.execute_conditional(rest) == 0),
             [op, operand, end] if op == "-v" && end == "]]" => i32::from(
@@ -17957,6 +17961,16 @@ fn conditional_outer_parentheses(args: &[String]) -> Option<&[String]> {
     }
 
     (depth == 0 && args[end - 1] == ")").then_some(&args[1..end - 1])
+}
+
+fn conditional_regex_operands(args: &[String]) -> Option<(&str, String)> {
+    let end = conditional_effective_len(args);
+    let op = args[..end].iter().position(|word| word == "=~")?;
+    if op != 1 || op + 1 >= end {
+        return None;
+    }
+
+    Some((args[0].as_str(), args[op + 1..end].join("")))
 }
 
 fn conditional_effective_len(args: &[String]) -> usize {
