@@ -1643,6 +1643,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mapfile_option_errors_match_bash_statuses() {
+        let output_path = "target/rubash-mapfile-option-status-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "mapfile -Z arr; echo invalid:$? > {output_path}; \
+             mapfile -n; echo missing:$? >> {output_path}; \
+             readarray -O nope arr; echo origin:$? >> {output_path}; \
+             mapfile -c 0 -C cb arr; echo quantum:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "invalid:2\nmissing:2\norigin:1\nquantum:1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_mapfile_without_t_preserves_record_newlines() {
         let input = "mapfile arr <<< $'alpha\\nbeta'";
         let tokens = tokenize(input);
