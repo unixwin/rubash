@@ -12425,6 +12425,39 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_declare_nameref_cycle_expands_as_unset_and_rejects_assignment() {
+        let output_path = target_test_path("rubash-nameref-cycle-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        std::env::remove_var("RUBASH_NAMEREF_CYCLE_A");
+        std::env::remove_var("RUBASH_NAMEREF_CYCLE_B");
+        let input = format!(
+            "declare -n RUBASH_NAMEREF_CYCLE_A=RUBASH_NAMEREF_CYCLE_B; \
+             declare -n RUBASH_NAMEREF_CYCLE_B=RUBASH_NAMEREF_CYCLE_A; \
+             printf 'braced=<%s>\\n' \"${{RUBASH_NAMEREF_CYCLE_A-unset}}\" > {shell_output_path}; \
+             printf 'plain=<%s>\\n' \"$RUBASH_NAMEREF_CYCLE_A\" >> {shell_output_path}; \
+             RUBASH_NAMEREF_CYCLE_A=value; \
+             echo assign:$? >> {shell_output_path}; \
+             declare -p RUBASH_NAMEREF_CYCLE_A RUBASH_NAMEREF_CYCLE_B >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "braced=<unset>\nplain=<>\nassign:1\ndeclare -n RUBASH_NAMEREF_CYCLE_A=\"RUBASH_NAMEREF_CYCLE_B\"\ndeclare -n RUBASH_NAMEREF_CYCLE_B=\"RUBASH_NAMEREF_CYCLE_A\"\n"
+        );
+        std::env::remove_var("RUBASH_NAMEREF_CYCLE_A");
+        std::env::remove_var("RUBASH_NAMEREF_CYCLE_B");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_command_comma_sequences_evaluate_in_order() {
         let output_path = "target/rubash-arithmetic-command-comma-output.txt";
         let _ = fs::remove_file(output_path);
