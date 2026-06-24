@@ -1906,11 +1906,14 @@ impl Executor {
                             // parser state and POSIX special-builtin rules.
                             // Upstream builtins.tests expects the script to
                             // continue here with status 2.
-                            eprintln!(
+                            let mut stderr = Vec::new();
+                            writeln!(
+                                &mut stderr,
                                 "{}exit: {}: numeric argument required",
                                 self.diagnostic_prefix(),
                                 status
-                            );
+                            )?;
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                             self.exit_code = 2;
                             return Ok(());
                         }
@@ -7114,35 +7117,16 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<crate::builtins::exit::ExitAction, ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::exit::execute_with_io(
-                cmd.words[1..].iter().map(String::as_str),
-                self.exit_code,
-                &mut file,
-                &mut std::io::stderr().lock(),
-            )?);
-        }
-
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            return Ok(crate::builtins::exit::execute_with_io(
-                cmd.words[1..].iter().map(String::as_str),
-                self.exit_code,
-                &mut file,
-                &mut std::io::stderr().lock(),
-            )?);
-        }
-
-        Ok(crate::builtins::exit::execute(
-            &cmd.words[1..],
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let action = crate::builtins::exit::execute_with_io(
+            cmd.words[1..].iter().map(String::as_str),
             self.exit_code,
-        )?)
+            &mut stdout,
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(action)
     }
 
     fn execute_logout(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {

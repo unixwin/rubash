@@ -8360,6 +8360,52 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_exit_invalid_number_redirects_stderr() {
+        let status_path = "target/rubash-exit-invalid-number-status.txt";
+        let error_path = "target/rubash-exit-invalid-number-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("exit abc 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("exit: abc: numeric argument required"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_exit_too_many_arguments_redirects_stderr() {
+        let status_path = "target/rubash-exit-too-many-status.txt";
+        let error_path = "target/rubash-exit-too-many-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("exit 1 2 2> {error_path}; echo $? > {status_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("exit: too many arguments"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_eval_redirects_entire_output() {
         let output_path = "target/rubash-eval-redirect-output.txt";
         let _ = fs::remove_file(output_path);
