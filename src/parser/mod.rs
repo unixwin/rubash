@@ -984,7 +984,7 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
         command.words.push("((".to_string());
         command.words.push(inner.to_string());
         command.words.push("))".to_string());
-        return Some((command, arithmetic_command_next_index(tokens, start + 1)));
+        return Some(finish_arithmetic_command(command, tokens, start + 1));
     }
 
     let mut i;
@@ -1005,7 +1005,7 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             command.words.push("((".to_string());
             command.words.push(parts.join(" "));
             command.words.push("))".to_string());
-            return Some((command, arithmetic_command_next_index(tokens, i + 1)));
+            return Some(finish_arithmetic_command(command, tokens, i + 1));
         }
 
         if paren_depth == 0 && is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
@@ -1014,7 +1014,7 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             command.words.push("((".to_string());
             command.words.push(parts.join(" "));
             command.words.push("))".to_string());
-            return Some((command, arithmetic_command_next_index(tokens, i + 2)));
+            return Some(finish_arithmetic_command(command, tokens, i + 2));
         }
 
         if is_keyword(tokens, i, "(") {
@@ -1037,6 +1037,11 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
             continue;
         }
 
+        if tokens[i].kind == TokenKind::Semicolon {
+            i += 1;
+            continue;
+        }
+
         parts.push(tokens[i].value.clone());
         i += 1;
     }
@@ -1044,14 +1049,22 @@ fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNo
     None
 }
 
-fn arithmetic_command_next_index(tokens: &[Token], index: usize) -> usize {
-    if tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::Semicolon)
-    {
-        index + 1
-    } else {
-        index
+fn finish_arithmetic_command(
+    mut command: CommandNode,
+    tokens: &[Token],
+    index: usize,
+) -> (CommandNode, usize) {
+    match tokens.get(index).map(|token| &token.kind) {
+        Some(TokenKind::And) => {
+            command.and_or = Some(true);
+            (command, index + 1)
+        }
+        Some(TokenKind::Or) => {
+            command.and_or = Some(false);
+            (command, index + 1)
+        }
+        Some(TokenKind::Semicolon) => (command, index + 1),
+        _ => (command, index),
     }
 }
 

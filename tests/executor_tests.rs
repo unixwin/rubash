@@ -2715,6 +2715,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_indexed_array_arithmetic_subscript_assignment_and_expansion() {
+        let output_path = "target/rubash-array-arith-subscript-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); i=1; arr[i]=ONE; arr[i+1]+=!; printf '%s/%s/%s\\n' \"${{arr[i]}}\" \"${{arr[i+1]}}\" \"${{arr[-1]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ONE/two!/two!\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_indexed_array_assignment_preserves_empty_and_sparse_elements() {
         let output_path = "target/rubash-indexed-array-sparse-assign-output.txt";
         let _ = fs::remove_file(output_path);
@@ -11157,6 +11176,67 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_arithmetic_expands_positional_count() {
+        let output_path = "target/rubash-arithmetic-positional-count-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "function f {{ echo arith:$(( $# )) > {output_path}; for ((i=1; i<=$#; i++)); do echo loop:$i >> {output_path}; done; }}; f a b"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "arith:2\nloop:1\nloop:2\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_command_and_or_short_circuits() {
+        let output_path = "target/rubash-arithmetic-and-or-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "x=0; ((x)) && ((y=1)); echo zero:${{y-unset}}:$? > {output_path}; x=1; ((x)) && ((y=2)); echo one:$y:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "zero:unset:1\none:2:0\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_command_treats_newline_as_whitespace() {
+        let output_path = "target/rubash-arithmetic-newline-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("(( value = 1000 /\n10 )); echo $value > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "100\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_for_loop_break_continue_and_empty_test() {
         let output_path = "target/rubash-arithmetic-for-control-output.txt";
         let _ = fs::remove_file(output_path);
@@ -13675,6 +13755,23 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parameter_substring_accepts_arithmetic_offset() {
+        let output_path = "target/rubash-param-substring-arith-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v=abcdef; n=3; echo ${{v:(-$n)}} ${{v:0:(-$n)}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "def abc\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_substring_does_not_shadow_colon_dash_default() {
         let output_path = "target/rubash-param-substring-default-output.txt";
         let _ = fs::remove_file(output_path);
@@ -13913,6 +14010,23 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "Xcd xxxx\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parameter_replacement_supports_negated_bracket_patterns() {
+        let output_path = "target/rubash-param-replace-negated-class-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("v='a-12b'; echo ${{v//[^0-9]}} ${{v//[^-]}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "12 -\n");
         let _ = fs::remove_file(output_path);
     }
 
