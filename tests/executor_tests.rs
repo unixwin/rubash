@@ -1103,6 +1103,71 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_mktemp_t_command_substitution_succeeds() {
+        let output_path = "target/rubash-mktemp-t-command-substitution-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "tmp=$(mktemp -t cb.XXXXXX) || exit 1\n\
+             test -f \"$tmp\"\n\
+             echo status:$?:$tmp > {output_path}\n\
+             rm -f \"$tmp\""
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        let output = fs::read_to_string(output_path).unwrap();
+        assert!(output.starts_with("status:0:"));
+        assert!(output.contains("cb."));
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_substitution_output_is_not_reexpanded() {
+        let output_path = "target/rubash-command-substitution-no-reexpand-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ value=$(echo $2 | sed 's/\\!\\*/\"$\\@\"/g'); printf '<%s>\\n' \"$value\" > {output_path}; }}; f star 'echo !*'"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<echo \"$@\">\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_escaped_quotes_survive_adjacent_command_substitution() {
+        let output_path = "target/rubash-command-substitution-escaped-quote-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo alias hi=\\'$(echo \"echo hello\" | sed \"s:':'\\\\\\\\'':g\")\\' > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "alias hi='echo hello'\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_last_background_pid_parameter_tracks_background_command() {
         let output_path = "target/rubash-last-background-pid-output.txt";
         let _ = fs::remove_file(output_path);
