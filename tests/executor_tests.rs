@@ -11091,6 +11091,97 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_function_definition_redirect_applies_when_called() {
+        let output_path = target_test_path("rubash-function-definition-redirect-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "rubash_def_redirect_func() {{ echo one; echo two; }} > {shell_output_path}; \
+             test -e {shell_output_path}; echo before:$?; \
+             rubash_def_redirect_func; rubash_def_redirect_func"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "one\ntwo\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_compact_function_definition_redirect_applies_when_called() {
+        let output_path = target_test_path("rubash-compact-function-definition-redirect-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "rubash_compact_def_redirect_func(){{ echo compact; }} > {shell_output_path}; \
+             rubash_compact_def_redirect_func"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "compact\n");
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
+    fn test_short_function_definition_redirect_applies_when_called() {
+        let output_path = "target/rubash-short-function-definition-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("f(){{ echo hi; }} > {output_path}; f");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_function_definition_stdin_redirect_overrides_call_stdin() {
+        let definition_input = target_test_path("rubash-function-definition-stdin-input.txt");
+        let call_input = target_test_path("rubash-function-call-stdin-override-input.txt");
+        let output_path = target_test_path("rubash-function-definition-stdin-output.txt");
+        let shell_definition_input = shell_test_path(&definition_input);
+        let shell_call_input = shell_test_path(&call_input);
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&definition_input);
+        let _ = fs::remove_file(&call_input);
+        let _ = fs::remove_file(&output_path);
+        fs::write(&definition_input, "definition\n").unwrap();
+        fs::write(&call_input, "call\n").unwrap();
+        let input = format!(
+            "rubash_def_stdin_func() {{ read line; echo $line; }} < {shell_definition_input}; \
+             rubash_def_stdin_func < {shell_call_input} > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "definition\n");
+        let _ = fs::remove_file(&definition_input);
+        let _ = fs::remove_file(&call_input);
+        let _ = fs::remove_file(&output_path);
+    }
+
+    #[test]
     fn test_function_call_redirects_stdin_to_body_reads() {
         let input_path = target_test_path("rubash-function-call-stdin-input.txt");
         let output_path = target_test_path("rubash-function-call-stdin-output.txt");

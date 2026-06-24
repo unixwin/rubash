@@ -118,6 +118,17 @@ mod function_tests {
     }
 
     #[test]
+    fn test_compact_function_definition_consumes_trailing_redirects() {
+        let input = "foo(){ echo hi; } > out; echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].function_command.is_some());
+        assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
+
+    #[test]
     fn test_function_keyword_name_can_look_like_assignment() {
         let input = "function foo=bar { echo hi; }";
         let tokens = tokenize(input);
