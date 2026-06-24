@@ -165,6 +165,37 @@ fn script_array_stuff_example_runs_array_workflows() {
 }
 
 #[test]
+fn script_array_to_string_example_joins_arrays() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-s")
+        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            b"source ./array-to-string\n\
+              a=(x y z)\n\
+              array_to_string a s ,\n\
+              printf '<%s>\\n' \"$s\"\n\
+              array_to_string a s\n\
+              printf '<%s>\\n' \"$s\"\n",
+        )
+        .unwrap();
+    let output = child.wait_with_output().expect("wait for rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "<x,y,z>\n<x y z>\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();
