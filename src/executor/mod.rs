@@ -12356,7 +12356,10 @@ impl Executor {
 
     fn stdin_string_for_command(&self, cmd: &CommandNode) -> Option<String> {
         if let Some(body) = &cmd.heredoc {
-            return Some(body.clone());
+            if let Some(body) = body.strip_prefix('\x1e') {
+                return Some(body.to_string());
+            }
+            return Some(self.expand_embedded_parameters(body));
         }
 
         let word = cmd.here_string.as_ref()?;
@@ -13424,14 +13427,15 @@ impl Executor {
         }
 
         if cmd.words[0] == "cat" {
-            if let Some(body) = &cmd.heredoc {
+            if cmd.heredoc.is_some() {
+                let input = self.stdin_string_for_command(cmd).unwrap_or_default();
                 if let Some(redirect) = &cmd.append {
                     let target = self.expand_word(&redirect.target);
                     let mut file = OpenOptions::new()
                         .create(true)
                         .append(true)
                         .open(shell_path_to_windows(&target, &self.env_vars))?;
-                    file.write_all(body.as_bytes())?;
+                    file.write_all(input.as_bytes())?;
                     self.exit_code = 0;
                     return Ok(());
                 }
@@ -13439,7 +13443,7 @@ impl Executor {
                 if let Some(redirect) = &cmd.redirect_out {
                     let target = self.expand_word(&redirect.target);
                     let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                    file.write_all(body.as_bytes())?;
+                    file.write_all(input.as_bytes())?;
                     self.exit_code = 0;
                     return Ok(());
                 }
