@@ -3064,6 +3064,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_quoted_array_star_assignment_preserves_empty_quote_argument_for_eval() {
+        let output_path = "target/rubash-array-star-eval-quotes-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "capture() {{ printf '<%s>|<%s>|<%s>\\n' \"$1\" \"$2\" \"$3\" > {output_path}; }}; \
+             command='String \"\" validateAndParse'; words=($command); words[0]=capture; full=\"${{words[*]}}\"; eval \"$full\""
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<>|<validateAndParse>|<>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
         let output_path = "target/rubash-indexed-array-compound-sparse-output.txt";
         let _ = fs::remove_file(output_path);
