@@ -2287,6 +2287,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_assoc_parameter_expansion_accepts_quoted_keys() {
+        let output_path = "target/rubash-assoc-quoted-key-expansion-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_LOOKUP");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_QUOTED_LOOKUP=([\"two words\"]=\"value here\"); \
+             key=\"two words\"; printf '<%s>\\n' \
+             \"${{RUBASH_ASSOC_QUOTED_LOOKUP[$key]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "<value here>\n");
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_LOOKUP");
+    }
+
+    #[test]
     fn test_assoc_compound_append_accepts_key_value_pairs() {
         let output_path = "target/rubash-assoc-append-pairs-output.txt";
         let _ = fs::remove_file(output_path);
