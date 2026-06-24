@@ -2049,8 +2049,17 @@ impl Executor {
             .and_then(|word| self.function_name_for_command_word(word))
         {
             let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
+            let applied_assignment_values =
+                self.applied_temporary_assignment_values(&cmd.assignments);
             let result = self.execute_function(&function_name, &cmd.words[1..], cmd);
-            self.restore_temporary_assignments(temporary_assignments);
+            if self.posix_mode_enabled() {
+                self.restore_function_temporary_assignments(
+                    temporary_assignments,
+                    applied_assignment_values,
+                );
+            } else {
+                self.restore_temporary_assignments(temporary_assignments);
+            }
             return result;
         }
 
@@ -10542,7 +10551,49 @@ impl Executor {
             || (command == "eval" && cmd.assignments.keys().any(|name| name.ends_with('+')))
             || (command == "declare" && cmd.words.iter().any(|word| word == "-x"))
             || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
-                && matches!(command, "." | "source" | "eval" | ":"))
+                && matches!(command, "." | "source" | "eval" | ":" | "return"))
+    }
+
+    fn posix_mode_enabled(&self) -> bool {
+        self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+    }
+
+    fn applied_temporary_assignment_values(
+        &self,
+        assignments: &HashMap<String, String>,
+    ) -> HashMap<String, Option<String>> {
+        assignments
+            .keys()
+            .map(|name| {
+                let (base_name, _) = assignment_name_and_append(name);
+                (base_name.to_string(), self.env_vars.get(base_name).cloned())
+            })
+            .collect()
+    }
+
+    fn restore_function_temporary_assignments(
+        &mut self,
+        previous: Vec<(String, Option<String>)>,
+        applied: HashMap<String, Option<String>>,
+    ) {
+        for (name, value) in previous.into_iter().rev() {
+            if name != EXPORTED_VARS {
+                let current = self.env_vars.get(&name).cloned();
+                if applied
+                    .get(&name)
+                    .is_some_and(|applied_value| current != *applied_value)
+                {
+                    continue;
+                }
+            }
+            if let Some(value) = value {
+                self.env_vars.insert(name.clone(), value.clone());
+                set_process_env(&name, value);
+            } else {
+                self.env_vars.remove(&name);
+                env::remove_var(name);
+            }
+        }
     }
 
     fn restore_temporary_assignments(&mut self, previous: Vec<(String, Option<String>)>) {
