@@ -106,6 +106,7 @@ fn is_brace_expansion(word: &str) -> bool {
     word.starts_with('{')
         && word.ends_with('}')
         && word.len() >= 3
+        && !word.chars().any(char::is_whitespace)
         && (word[1..word.len() - 1].contains("..") || word.contains(','))
 }
 
@@ -514,31 +515,7 @@ fn has_unclosed_brace_group(input: &str) -> bool {
         return false;
     }
 
-    let tokens = tokenize_plain(input);
-    tokens.iter().enumerate().any(|(index, token)| {
-        token.kind == TokenKind::Keyword
-            && token.value.starts_with('{')
-            && !token.value.trim_end().ends_with('}')
-            && !is_function_body_open_brace(&tokens, index)
-    })
-}
-
-fn is_function_body_open_brace(tokens: &[Token], brace_index: usize) -> bool {
-    let previous = tokens[..brace_index]
-        .iter()
-        .rposition(|token| token.kind != TokenKind::Semicolon);
-    let Some(previous) = previous else {
-        return false;
-    };
-
-    if tokens[previous].value == ")" {
-        return true;
-    }
-
-    previous >= 1
-        && tokens[previous - 1].kind == TokenKind::Keyword
-        && tokens[previous - 1].value == "function"
-        && tokens[previous].kind == TokenKind::Word
+    unquoted_brace_group_depth(input) > 0
 }
 
 fn opens_function_body_after_previous_signature(input: &str, output: &[Token]) -> bool {
@@ -551,6 +528,97 @@ fn opens_function_body_after_previous_signature(input: &str, output: &[Token]) -
         .rev()
         .find(|token| token.kind != TokenKind::Semicolon)
         .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == ")")
+}
+
+fn unquoted_brace_group_depth(input: &str) -> usize {
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single || double {
+            index += 1;
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'{') {
+            index = skip_braced_parameter_in_chars(&chars, index + 2);
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+
+    depth
+}
+
+fn skip_braced_parameter_in_chars(chars: &[char], mut index: usize) -> usize {
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single && !double {
+            if ch == '{' {
+                depth += 1;
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    index
 }
 
 fn skip_heredoc_in_chars(chars: &[char], start: usize) -> usize {

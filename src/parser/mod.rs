@@ -113,6 +113,8 @@ pub struct CommandNode {
     pub case_command: Option<CaseCommand>,
     /// `name() { compound_list; }`
     pub function_command: Option<FunctionCommand>,
+    /// `{ compound_list; }`
+    pub brace_group: Option<Vec<CommandNode>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
 }
@@ -141,6 +143,7 @@ impl CommandNode {
             for_command: None,
             case_command: None,
             function_command: None,
+            brace_group: None,
             line: None,
         }
     }
@@ -713,6 +716,24 @@ fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(Comma
 }
 
 fn parse_brace_group_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    let token = tokens.get(start)?;
+    if token.kind == TokenKind::Keyword
+        && token.value.starts_with('{')
+        && token.value.ends_with('}')
+        && token.value.len() >= 2
+    {
+        let inner = token
+            .value
+            .trim_start_matches('{')
+            .trim_end_matches('}')
+            .trim();
+        let body_tokens = crate::lexer::tokenize(inner);
+        let mut command = CommandNode::new();
+        command.line = Some(token.position);
+        command.brace_group = Some(parse(&body_tokens).commands);
+        return Some(finish_arithmetic_command(command, tokens, start + 1));
+    }
+
     if !is_keyword(tokens, start, "{") {
         return None;
     }
@@ -734,17 +755,9 @@ fn parse_brace_group_command(tokens: &[Token], start: usize) -> Option<(CommandN
         return None;
     }
 
-    let mut body = String::new();
-    for token in &tokens[start + 1..i] {
-        if !body.is_empty() && token.kind != TokenKind::Semicolon {
-            body.push(' ');
-        }
-        body.push_str(&token.value);
-    }
-
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.words.push(format!("{{ {body} }}"));
+    command.brace_group = Some(parse(&tokens[start + 1..i]).commands);
     Some(finish_arithmetic_command(command, tokens, i + 1))
 }
 

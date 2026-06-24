@@ -1198,6 +1198,14 @@ impl Executor {
         &mut self,
         command: &CommandNode,
     ) -> Result<bool, ExecuteError> {
+        if let Some(body) = &command.brace_group {
+            let ast = Ast {
+                commands: body.clone(),
+            };
+            self.execute_ast(&ast)?;
+            return Ok(true);
+        }
+
         // TODO(parse.y/execute_cmd.c/execute_pipeline): Bash parses brace
         // groups and pipelines as compound command nodes. The current lexer
         // can collapse `{ hash -t cat | grep cat >/dev/null; }` into one word;
