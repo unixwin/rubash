@@ -1223,6 +1223,7 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
 
 fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
     let mut nested_case_depth = 0usize;
+    let mut nested_compound_depth = 0usize;
 
     while index < tokens.len() {
         if is_keyword(tokens, index, "case") {
@@ -1240,7 +1241,24 @@ fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
             continue;
         }
 
-        if nested_case_depth == 0 && is_case_terminator(tokens, index) {
+        if is_keyword(tokens, index, "if")
+            || is_keyword(tokens, index, "for")
+            || is_keyword(tokens, index, "while")
+            || is_keyword(tokens, index, "until")
+        {
+            nested_compound_depth += 1;
+            index += 1;
+            continue;
+        }
+
+        if is_keyword(tokens, index, "fi") || is_keyword(tokens, index, "done") {
+            nested_compound_depth = nested_compound_depth.saturating_sub(1);
+            index += 1;
+            continue;
+        }
+
+        if nested_case_depth == 0 && nested_compound_depth == 0 && is_case_terminator(tokens, index)
+        {
             break;
         }
 
