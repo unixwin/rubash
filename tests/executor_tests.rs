@@ -1645,6 +1645,57 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_heredoc_delimiter_word_removes_backslash_newline() {
+        let output_path = "target/rubash-heredoc-delimiter-continuation-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<EO\\\nF\nhi\nEOF");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_heredoc_matches_delimiter_after_backslash_newline() {
+        let output_path = "target/rubash-heredoc-body-delimiter-continuation-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<EOF\nhi\nEO\\\nF");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_unquoted_heredoc_body_continuation_before_delimiter_check() {
+        let output_path = "target/rubash-heredoc-body-continuation-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat > {output_path} <<EOF\nnext\\\nEOF\nEOF");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "nextEOF\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_for_loop_heredoc_append_expands_loop_variable_target() {
         let dir = target_test_path("rubash-for-heredoc-append");
         let _ = fs::remove_dir_all(&dir);
