@@ -14,7 +14,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
 
     if has_path_separator(name) {
         let candidate = shell_path_to_windows(name, env_vars);
-        return candidate.is_file().then_some(candidate);
+        return executable_candidate(&candidate);
     }
 
     for dir in split_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
@@ -190,13 +190,13 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     }
 
     if let Some(rest) = normalized.strip_prefix("/usr/bin/") {
-        if let Some(root) = git_root(env_vars) {
+        if let Some(root) = git_bash_root(env_vars) {
             return root.join("usr").join("bin").join(rest);
         }
     }
 
     if let Some(rest) = normalized.strip_prefix("/bin/") {
-        if let Some(root) = git_root(env_vars) {
+        if let Some(root) = git_bash_root(env_vars) {
             return root.join("usr").join("bin").join(rest);
         }
     }
@@ -254,6 +254,7 @@ fn git_bash_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[cfg(windows)]
     #[test]
@@ -270,5 +271,28 @@ mod tests {
         );
 
         assert_eq!(find_shell(&env_vars), Some(native_exe));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_absolute_usr_bin_command_uses_pathext() {
+        let root = std::env::temp_dir().join("rubash-path-test-git");
+        let bin = root.join("bin");
+        let usr_bin = root.join("usr").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&usr_bin).unwrap();
+        let bash = bin.join("bash.exe");
+        let env = usr_bin.join("env.exe");
+        fs::write(&bash, "").unwrap();
+        fs::write(&env, "").unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "CLAUDE_CODE_GIT_BASH_PATH".to_string(),
+            bash.to_string_lossy().to_string(),
+        );
+
+        assert_eq!(find_user_command("/usr/bin/env", &env_vars), Some(env));
+        let _ = fs::remove_dir_all(root);
     }
 }
