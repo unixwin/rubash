@@ -13704,6 +13704,9 @@ impl Executor {
         let Some(command_name) = cmd.words.first() else {
             return Ok(false);
         };
+        if self.env_vars.contains_key("__RUBASH_SCRIPT_NAME") {
+            return Ok(false);
+        }
         let command_uses_this_shell = command_name.contains("THIS_SH");
         let command_name = self.expand_word(command_name);
         let normalized_command = command_name.replace('\\', "/");
