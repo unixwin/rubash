@@ -11239,6 +11239,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_nested_parameter_assignment_expansion_assigns_outer_rhs() {
+        let output_path = "target/rubash-param-assign-nested-rhs-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset a b; printf 'outer=<%s> a=<%s> b=<%s>\\n' \"${{a:=${{b:=bee}}}}\" \"$a\" \"$b\" > {output_path}; \
+             unset a b; a=old; printf 'skip=<%s> a=<%s> b=<%s>\\n' \"${{a:=${{b:=bee}}}}\" \"$a\" \"${{b-unset}}\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "outer=<bee> a=<bee> b=<bee>\nskip=<old> a=<old> b=<unset>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_assignment_expansion_rejects_readonly_targets() {
         let output_path = target_test_path("rubash-param-assign-readonly-output.txt");
         let shell_output_path = shell_test_path(&output_path);

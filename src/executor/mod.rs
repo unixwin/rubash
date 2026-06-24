@@ -10659,6 +10659,14 @@ impl Executor {
         )
     }
 
+    fn expand_parameter_word_mut(&mut self, word: &str) -> String {
+        tilde_expand::expand_assignment_tilde_value(
+            &self.expand_embedded_parameters_mut(word),
+            &self.home_value(),
+            false,
+        )
+    }
+
     fn expand_quoted_parameter_word(&self, word: &str) -> String {
         // TODO(subst.c/parse.y): Quoted parameter expansion should carry
         // CTLESC/CTLQUOTEMARK state from the parser. This preserves the
@@ -10762,7 +10770,7 @@ impl Executor {
         let mut rest = word;
         while let Some(start) = rest.find("${") {
             rest = &rest[start + 2..];
-            let Some(end) = rest.find('}') else {
+            let Some(end) = matching_parameter_brace(rest) else {
                 break;
             };
             let inner = &rest[..end];
@@ -10780,7 +10788,7 @@ impl Executor {
             {
                 return;
             }
-            let value = self.expand_parameter_word(value);
+            let value = self.expand_parameter_word_mut(value);
             self.apply_shell_assignment(name, value);
             return;
         }
@@ -10789,7 +10797,7 @@ impl Executor {
             if !is_shell_name(name) || self.shell_variable_value(name).is_some() {
                 return;
             }
-            let value = self.expand_parameter_word(value);
+            let value = self.expand_parameter_word_mut(value);
             self.apply_shell_assignment(name, value);
         }
     }
@@ -10816,7 +10824,7 @@ impl Executor {
         let mut rest = word;
         while let Some(start) = rest.find("${") {
             let after_start = &rest[start + 2..];
-            let Some(end) = after_start.find('}') else {
+            let Some(end) = matching_parameter_brace(after_start) else {
                 return None;
             };
             let inner = &after_start[..end];
@@ -10881,7 +10889,7 @@ impl Executor {
         let mut rest = word;
         while let Some(start) = rest.find("${") {
             let after_start = &rest[start + 2..];
-            let Some(end) = after_start.find('}') else {
+            let Some(end) = matching_parameter_brace(after_start) else {
                 return None;
             };
             let inner = &after_start[..end];
@@ -15377,6 +15385,27 @@ fn parse_parameter_assignment_operator(inner: &str) -> Option<(&str, bool)> {
         }
     }
 
+    None
+}
+
+fn matching_parameter_brace(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            depth += 1;
+            index += 2;
+            continue;
+        }
+        if bytes[index] == b'}' {
+            if depth == 0 {
+                return Some(index);
+            }
+            depth -= 1;
+        }
+        index += 1;
+    }
     None
 }
 
