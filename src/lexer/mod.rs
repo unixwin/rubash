@@ -557,6 +557,14 @@ impl<'a> Lexer<'a> {
             // distinguish `a=~/x` from `a="~/x"` without leaking syntax to
             // builtins.
             mark_quoted_assignment_value(&value)
+        } else if kind == TokenKind::Word
+            && is_assignment(&value)
+            && assignment_value_is_quoted(raw)
+        {
+            // A fully quoted assignment-looking argument, such as
+            // `"SHELL=~/bash"`, remains a normal word but its RHS quote state
+            // still suppresses the assignment-word tilde pass.
+            mark_quoted_assignment_value(&value)
         } else if raw.starts_with('"') && raw.ends_with('"') && raw.contains("${") {
             // TODO(parse.y/subst.c): Preserve full quote state on WORD_DESC
             // instead of a sentinel. This narrow marker lets expansion

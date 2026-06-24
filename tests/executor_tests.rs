@@ -198,6 +198,30 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_quoted_assignment_like_argument_suppresses_tilde_expansion() {
+        let output_path = "target/rubash-quoted-assignment-like-arg-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "HOME=/usr/xyz; \
+             echo \"SHELL=~/bash\" > {output_path}; \
+             echo SHELL=~/bash >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "SHELL=~/bash\nSHELL=/usr/xyz/bash\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_and_operator() {
         let input = "true && echo success";
         let tokens = tokenize(input);
