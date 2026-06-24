@@ -6505,23 +6505,7 @@ impl Executor {
                 if let Some(body) = self.functions.get(name) {
                     match mode {
                         TypeDescribeMode::Verbose => {
-                            writeln!(stdout, "{name} is a function")?;
-                            writeln!(stdout, "{name} () ")?;
-                            writeln!(stdout, "{{ ")?;
-                            for command in body {
-                                if command.assignments.contains_key("v") {
-                                    writeln!(stdout, "    v='^A'")?;
-                                    continue;
-                                }
-                                if !command.words.is_empty() {
-                                    writeln!(
-                                        stdout,
-                                        "    {}",
-                                        command.words.join(" ").replace("$(<x1)", "$(< x1)")
-                                    )?;
-                                }
-                            }
-                            writeln!(stdout, "}}")?;
+                            self.write_function_description(name, body, stdout)?
                         }
                         TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
                         TypeDescribeMode::TypeOnly => writeln!(stdout, "function")?,
@@ -6701,12 +6685,9 @@ impl Executor {
                 writeln!(stdout, "    v='^A'")?;
                 continue;
             }
-            if !command.words.is_empty() {
-                writeln!(
-                    stdout,
-                    "    {}",
-                    command.words.join(" ").replace("$(<x1)", "$(< x1)")
-                )?;
+            if let Some(line) = self.function_command_description_line(command) {
+                writeln!(stdout, "    {line}")?;
+                self.write_function_heredoc_body(command, stdout)?;
             }
         }
         writeln!(stdout, "}}")?;
@@ -6731,15 +6712,72 @@ impl Executor {
                 println!("    v='^A'");
                 continue;
             }
-            if command.words.is_empty() {
-                continue;
+            if let Some(line) = self.function_command_description_line(command) {
+                println!("    {line}");
+                let mut stdout = std::io::stdout();
+                let _ = self.write_function_heredoc_body(command, &mut stdout);
             }
-            println!(
-                "    {}",
-                command.words.join(" ").replace("$(<x1)", "$(< x1)")
-            );
         }
         println!("}}");
+    }
+
+    fn function_command_description_line(&self, command: &CommandNode) -> Option<String> {
+        if command.words.is_empty() {
+            return None;
+        }
+
+        let mut line = command.words.join(" ").replace("$(<x1)", "$(< x1)");
+        if command.heredoc.is_none() && !command_has_redirect(command) {
+            return Some(line);
+        }
+
+        if let Some(delimiter) = &command.heredoc_delimiter {
+            line.push_str(" <<");
+            line.push_str(delimiter);
+        }
+        append_function_redirect(&mut line, command.redirect_in.as_ref(), "<");
+        append_function_redirect(
+            &mut line,
+            command.redirect_out.as_ref(),
+            command
+                .redirect_out
+                .as_ref()
+                .filter(|redirect| redirect.clobber)
+                .map(|_| ">|")
+                .unwrap_or(">"),
+        );
+        append_function_redirect(&mut line, command.append.as_ref(), ">>");
+        append_function_redirect(
+            &mut line,
+            command.redirect_err.as_ref(),
+            command
+                .redirect_err
+                .as_ref()
+                .filter(|redirect| redirect.clobber)
+                .map(|_| "2>|")
+                .unwrap_or("2>"),
+        );
+        append_function_redirect(&mut line, command.redirect_err_append.as_ref(), "2>>");
+        Some(line)
+    }
+
+    fn write_function_heredoc_body<W>(
+        &self,
+        command: &CommandNode,
+        stdout: &mut W,
+    ) -> Result<(), ExecuteError>
+    where
+        W: Write,
+    {
+        let (Some(body), Some(delimiter)) = (&command.heredoc, &command.heredoc_delimiter) else {
+            return Ok(());
+        };
+
+        let body = body.strip_prefix('\x1e').unwrap_or(body);
+        write!(stdout, "{body}")?;
+        writeln!(stdout, "{delimiter}")?;
+        writeln!(stdout)?;
+        Ok(())
     }
 
     fn print_upstream_type_function(&self, name: &str, body: &[CommandNode]) -> bool {
@@ -15965,6 +16003,7 @@ fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.redirect_err.is_none()
         && cmd.redirect_err_append.is_none()
         && cmd.heredoc.is_none()
+        && cmd.heredoc_delimiter.is_none()
         && cmd.here_string.is_none()
         && cmd.pipe.is_none()
         && cmd.and_or.is_none()
@@ -15975,6 +16014,27 @@ fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+}
+
+fn command_has_redirect(cmd: &CommandNode) -> bool {
+    cmd.redirect_in.is_some()
+        || cmd.redirect_out.is_some()
+        || cmd.append.is_some()
+        || cmd.redirect_err.is_some()
+        || cmd.redirect_err_append.is_some()
+}
+
+fn append_function_redirect(
+    line: &mut String,
+    redirect: Option<&crate::parser::Redirect>,
+    op: &str,
+) {
+    if let Some(redirect) = redirect {
+        line.push(' ');
+        line.push_str(op);
+        line.push(' ');
+        line.push_str(&redirect.target);
+    }
 }
 
 fn command_has_output_redirects(cmd: &CommandNode) -> bool {
