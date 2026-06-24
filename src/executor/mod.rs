@@ -9433,10 +9433,27 @@ impl Executor {
             return true;
         }
 
-        let Some(index) = index.parse::<usize>().ok() else {
+        let Some(raw_index) = index.parse::<i128>().ok() else {
             return false;
         };
         let current = self.env_vars.get(name).cloned().unwrap_or_default();
+        let index = if raw_index < 0 {
+            let Some(index) = resolve_indexed_array_subscript(&current, raw_index) else {
+                eprintln!(
+                    "{}{}: bad array subscript",
+                    self.diagnostic_prefix(),
+                    cmd.words[0]
+                );
+                self.exit_code = 1;
+                return true;
+            };
+            index
+        } else {
+            let Ok(index) = usize::try_from(raw_index) else {
+                return false;
+            };
+            index
+        };
         let mut entries = indexed_array_entries(&current);
         let current_element = entries.get(&index).cloned().unwrap_or_default();
         let element = if append {

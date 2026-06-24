@@ -1935,6 +1935,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_array_negative_subscript_assignment_updates_from_end() {
+        let output_path = "target/rubash-array-negative-subscript-assign-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(zero one two); arr[-1]=TWO; arr[-2]=ONE; printf '%s %s %s\\n' \"${{arr[0]}}\" \"${{arr[1]}}\" \"${{arr[2]}}\" > {output_path}; arr[-1]+=!; echo \"${{arr[2]}}\" >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "zero ONE TWO\nTWO!\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_adjacent_braced_parameter_expansions_stay_in_one_word() {
         let output_path = "target/rubash-adjacent-braced-param-output.txt";
         let _ = fs::remove_file(output_path);
