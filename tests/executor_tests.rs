@@ -12637,7 +12637,7 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha ALPHA\n");
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "'alpha' ALPHA\n");
         let _ = fs::remove_file(output_path);
     }
 
@@ -12674,6 +12674,50 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         for name in [
             "RUBASH_ASSIGN_TRANSFORM_ARRAY",
             "RUBASH_ASSIGN_TRANSFORM_ASSOC",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
+    fn test_array_value_parameter_transforms_apply_to_elements() {
+        let output_path = "target/rubash-param-array-value-transform-output.txt";
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_VALUE_TRANSFORM_ARRAY",
+            "RUBASH_VALUE_TRANSFORM_ASSOC",
+            "RUBASH_VALUE_TRANSFORM_REF",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_VALUE_TRANSFORM_ARRAY=('a b' c); \
+             declare -A RUBASH_VALUE_TRANSFORM_ASSOC=([k]='v w' [0]=z); \
+             declare -n RUBASH_VALUE_TRANSFORM_REF=RUBASH_VALUE_TRANSFORM_ARRAY; \
+             echo arr_q:${{RUBASH_VALUE_TRANSFORM_ARRAY@Q}} > {output_path}; \
+             echo arr0_q:${{RUBASH_VALUE_TRANSFORM_ARRAY[0]@Q}} >> {output_path}; \
+             echo arr0_u:${{RUBASH_VALUE_TRANSFORM_ARRAY[0]@U}} >> {output_path}; \
+             echo assoc_q:${{RUBASH_VALUE_TRANSFORM_ASSOC@Q}} >> {output_path}; \
+             echo assoc_k_q:${{RUBASH_VALUE_TRANSFORM_ASSOC[k]@Q}} >> {output_path}; \
+             echo ref_q:${{RUBASH_VALUE_TRANSFORM_REF@Q}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "arr_q:'a b'\narr0_q:'a b'\narr0_u:A B\nassoc_q:'z'\nassoc_k_q:'v w'\nref_q:'a b'\n"
+        );
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_VALUE_TRANSFORM_ARRAY",
+            "RUBASH_VALUE_TRANSFORM_ASSOC",
+            "RUBASH_VALUE_TRANSFORM_REF",
         ] {
             std::env::remove_var(name);
         }

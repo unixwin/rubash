@@ -257,7 +257,7 @@ fn test_parameter_transform_applies_to_positional_parameters() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "ALPHA alpha 'two words'\n"
+        "ALPHA 'alpha' 'two words'\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -279,7 +279,7 @@ fn test_parameter_transform_quotes_array_elements() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "'two words' plain\n"
+        "'two words' 'plain'\n"
     );
     let _ = fs::remove_file(output_path);
 }
