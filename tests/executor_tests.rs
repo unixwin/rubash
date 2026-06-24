@@ -12857,6 +12857,25 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_arithmetic_assoc_subscripts_expand_parameter_keys() {
+        let output_path = "target/rubash-arithmetic-assoc-expanded-key-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "declare -A arith_assoc_expanded_key=([\"two words\"]=7 [key]=3); arith_assoc_key='two words'; echo $((arith_assoc_expanded_key[key]+1)) > {output_path}; echo $((arith_assoc_expanded_key[$arith_assoc_key]+1)) >> {output_path}; echo $((arith_assoc_expanded_key[\"$arith_assoc_key\"]+1)) >> {output_path}; (( arith_assoc_expanded_key[$arith_assoc_key] += 2 )); echo ${{arith_assoc_expanded_key[\"two words\"]}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "4\n8\n8\n9\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_grouped_arithmetic_assignments_have_side_effects() {
         let output_path = "target/rubash-arithmetic-grouped-assign-output.txt";
         let _ = fs::remove_file(output_path);
