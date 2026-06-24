@@ -434,6 +434,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_if_condition_bang_inverts_command_without_running_bang() {
+        let output_path = "target/rubash-if-bang-condition-output.txt";
+        let error_path = "target/rubash-if-bang-condition-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "function present() {{ :; }}; if ! type -t present >/dev/null 2>{error_path}; then echo missing > {output_path}; else echo found > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "found\n");
+        assert_eq!(fs::read_to_string(error_path).unwrap_or_default(), "");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_printf_percent_n_assigns_output_count() {
         let output_path = "target/rubash-printf-percent-n-output.txt";
         let _ = fs::remove_file(output_path);

@@ -492,6 +492,10 @@ fn execute_command_if_condition(
 
     let mut condition = command.clone();
     condition.words = condition_words.to_vec();
+    if condition.words.first().map(String::as_str) == Some("!") {
+        condition.inverted = !condition.inverted;
+        condition.words.remove(0);
+    }
     condition.pipe = None;
     condition.and_or = None;
     let ast = Ast {
