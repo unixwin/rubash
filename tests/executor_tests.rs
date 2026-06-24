@@ -944,6 +944,32 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_external_command_substitution_captures_stdout() {
+        let bin_dir = "target/rubash-command-substitution-bin";
+        let helper_path = format!("{bin_dir}/rubash-comsub-helper");
+        let output_path = "target/rubash-external-command-substitution-output.txt";
+        let _ = fs::create_dir_all(bin_dir);
+        let _ = fs::remove_file(&helper_path);
+        let _ = fs::remove_file(output_path);
+        fs::write(&helper_path, "#!/usr/bin/env bash\nprintf 'a\\nb\\n\\n'\n").unwrap();
+        let input = format!(
+            "v=$(rubash-comsub-helper); printf 'v=<%s> len:%s\\n' \"$v\" \"${{#v}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.set_env("PATH", bin_dir);
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<a\nb> len:3\n");
+        let _ = fs::remove_file(helper_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_last_background_pid_parameter_tracks_background_command() {
         let output_path = "target/rubash-last-background-pid-output.txt";
         let _ = fs::remove_file(output_path);
