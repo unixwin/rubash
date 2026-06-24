@@ -13271,6 +13271,50 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_nested_unset_removes_outer_local_and_preserves_global_assignment() {
+        let output_path = "target/rubash-nested-unset-local-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "inner() {{ unset res; echo inner:${{res-res unset}} >> {output_path}; res[0]=X; res[1]=Y; }}; \
+             outer() {{ local res=; inner; echo outer:${{res[@]}} >> {output_path}; }}; \
+             echo main:${{res-unset}} > {output_path}; outer; echo main:${{res-unset}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "main:unset\ninner:res unset\nouter:X Y\nmain:X\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parenthesized_scalar_assignment_remains_scalar() {
+        let output_path = "target/rubash-parenthesized-scalar-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("pattern='([a-z]+)([0-9]+)'; echo \"$pattern\" > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "([a-z]+)([0-9]+)\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_local_assignment_expands_parameter_value() {
         let output_path = "target/rubash-local-param-expansion-output.txt";
         let _ = fs::remove_file(output_path);
