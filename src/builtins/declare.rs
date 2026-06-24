@@ -912,8 +912,12 @@ fn append_assoc_value(current: &str, value: &str) -> String {
             let Some(key) = pair.first() else {
                 continue;
             };
-            let value = pair.get(1).cloned().unwrap_or_default();
-            entries.push((key.clone(), value));
+            let key = unquote_storage_value(key);
+            let value = pair
+                .get(1)
+                .map(|value| unquote_storage_value(value))
+                .unwrap_or_default();
+            entries.push((key, value));
         }
         return format_assoc_storage(entries);
     }
@@ -924,11 +928,11 @@ fn append_assoc_value(current: &str, value: &str) -> String {
                 .strip_prefix('[')
                 .and_then(|left| left.strip_suffix(']'))
             {
-                entries.push((key.to_string(), rhs.to_string()));
+                entries.push((unquote_storage_value(key), unquote_storage_value(rhs)));
                 continue;
             }
         }
-        entries.push(("0".to_string(), token));
+        entries.push(("0".to_string(), unquote_storage_value(&token)));
     }
 
     format_assoc_storage(entries)
@@ -939,10 +943,30 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
         "({})",
         entries
             .into_iter()
-            .map(|(key, value)| format!("[{key}]={value}"))
+            .map(|(key, value)| format!("[{key}]={}", quote_assoc_storage_value(&value)))
             .collect::<Vec<_>>()
             .join(" ")
     )
+}
+
+fn quote_assoc_storage_value(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        if matches!(ch, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn append_array_value(current: &str, value: &str, integer: bool) -> String {
@@ -958,9 +982,10 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
+                let rhs = unquote_storage_value(rhs);
                 entries.insert(
                     index,
-                    (eval_arith_value(&current) + eval_arith_value(rhs)).to_string(),
+                    (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string(),
                 );
                 next_index = index + 1;
                 continue;
@@ -968,11 +993,12 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
         }
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left) {
-                entries.insert(index, rhs.to_string());
+                entries.insert(index, unquote_storage_value(rhs));
                 next_index = index + 1;
                 continue;
             }
         }
+        let token = unquote_storage_value(&token);
         if scalar_append && !entries.is_empty() {
             let current = entries.get(&0).cloned().unwrap_or_default();
             entries.insert(
