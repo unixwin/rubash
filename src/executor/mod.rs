@@ -10908,6 +10908,9 @@ impl Executor {
                 .dynamic_parameter_value(name)
                 .or_else(|| self.shell_variable_value(name));
         }
+        if let Some(value) = self.array_element_parameter_value(name) {
+            return Some(value);
+        }
         self.parameter_error_value(name)
     }
 
@@ -11076,6 +11079,9 @@ impl Executor {
                 }
                 if let Ok(index) = name.parse::<usize>() {
                     return self.positional_params.get(index.saturating_sub(1)).cloned();
+                }
+                if let Some(value) = self.array_element_parameter_value(name) {
+                    return Some(value);
                 }
                 self.env_vars.get(name).cloned()
             }
@@ -15641,6 +15647,7 @@ fn is_parameter_error_name(name: &str) -> bool {
     is_shell_name(name)
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
         || name.parse::<usize>().is_ok()
+        || parse_array_subscript(name).is_some()
 }
 
 fn parameter_substring(value: &str, offset: isize, length: Option<usize>) -> String {
