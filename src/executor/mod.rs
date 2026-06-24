@@ -3961,6 +3961,9 @@ impl Executor {
             if self.unset_array_element(&name) {
                 continue;
             }
+            if self.unset_outer_local_variable(&name) {
+                continue;
+            }
             variable_args.push(name);
         }
 
@@ -3975,6 +3978,28 @@ impl Executor {
         } else {
             variable_status
         })
+    }
+
+    fn unset_outer_local_variable(&mut self, name: &str) -> bool {
+        if is_marked_var(&self.env_vars, READONLY_VARS, name) {
+            return false;
+        }
+        let Some(current_scope_index) = self.local_var_scopes.len().checked_sub(1) else {
+            return false;
+        };
+        let Some(scope_index) = self.visible_local_scope_index(name) else {
+            return false;
+        };
+        if scope_index >= current_scope_index {
+            return false;
+        }
+        let previous = self.local_var_scopes[scope_index].remove(name);
+        let attrs = self.local_attr_scopes[scope_index]
+            .remove(name)
+            .unwrap_or_default();
+        restore_optional_shell_var(&mut self.env_vars, name, previous.flatten());
+        set_var_attrs(&mut self.env_vars, name, attrs);
+        true
     }
 
     fn unset_array_element(&mut self, name: &str) -> bool {
@@ -10506,7 +10531,7 @@ impl Executor {
             value
         };
         let value = self.apply_case_assignment_attributes(base_name, value);
-        if is_array_storage(&value) && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
+        if value.starts_with('\x1d') && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name) {
             mark_env_name(&mut self.env_vars, ARRAY_VARS, base_name);
         }
         self.env_vars.insert(base_name.to_string(), value.clone());
@@ -10564,8 +10589,8 @@ impl Executor {
     }
 
     fn shell_variable_value(&self, name: &str) -> Option<String> {
-        match self.nameref_resolution(name) {
-            NamerefResolution::Target(target) => return self.env_vars.get(&target).cloned(),
+        let name = match self.nameref_resolution(name) {
+            NamerefResolution::Target(target) => target,
             NamerefResolution::Circular => {
                 eprintln!(
                     "{}warning: {}: circular name reference",
@@ -10574,9 +10599,21 @@ impl Executor {
                 );
                 return None;
             }
-            NamerefResolution::NotNameref => {}
+            NamerefResolution::NotNameref => name.to_string(),
+        };
+        self.env_vars
+            .get(&name)
+            .and_then(|value| self.scalar_parameter_value(&name, value))
+    }
+
+    fn scalar_parameter_value(&self, name: &str, value: &str) -> Option<String> {
+        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            return assoc_value_at(value, "0");
         }
-        self.env_vars.get(name).cloned()
+        if is_marked_array_var(&self.env_vars, name) {
+            return array_value_at(value, 0);
+        }
+        Some(value.to_string())
     }
 
     fn eval_integer_assignment_value(&self, value: &str) -> i128 {
