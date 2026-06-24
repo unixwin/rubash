@@ -770,12 +770,20 @@ fn format_assoc_value(value: &str) -> String {
             .iter()
             .find_map(|(entry_key, entry_value)| (entry_key == *key).then_some(entry_value))
         {
-            rendered.push(format!("[{key}]=\"{}\"", quote_double(value)));
+            rendered.push(format!(
+                "[{}]=\"{}\"",
+                quote_assoc_key(key),
+                quote_double(value)
+            ));
         }
     }
     for (key, value) in entries {
         if !order.contains(&key.as_str()) {
-            rendered.push(format!("[{key}]=\"{}\"", quote_double(&value)));
+            rendered.push(format!(
+                "[{}]=\"{}\"",
+                quote_assoc_key(&key),
+                quote_double(&value)
+            ));
         }
     }
     format!("({} )", rendered.join(" "))
@@ -809,9 +817,7 @@ fn parse_assoc_words(value: &str) -> Vec<(String, String)> {
         .filter_map(|part| {
             let (key, value) = part.split_once('=')?;
             Some((
-                key.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string(),
+                unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
                 unquote_storage_value(value),
             ))
         })
@@ -943,10 +949,28 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
         "({})",
         entries
             .into_iter()
-            .map(|(key, value)| format!("[{key}]={}", quote_assoc_storage_value(&value)))
+            .map(|(key, value)| {
+                format!(
+                    "[{}]={}",
+                    quote_assoc_key(&key),
+                    quote_assoc_storage_value(&value)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ")
     )
+}
+
+fn quote_assoc_key(key: &str) -> String {
+    if !key.is_empty()
+        && !key
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\' | ']'))
+    {
+        return key.to_string();
+    }
+
+    quote_assoc_storage_value(key)
 }
 
 fn quote_assoc_storage_value(value: &str) -> String {
