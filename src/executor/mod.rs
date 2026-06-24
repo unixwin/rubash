@@ -15207,12 +15207,17 @@ impl ConditionalArithParser<'_> {
 
         self.skip_ws();
         if !self.consume("[") {
+            let name = self.resolved_lvalue_name(&name);
             return Some(ArithLValue::Scalar(name));
         }
 
-        if is_marked_var(self.env_vars, ASSOC_VARS, &name) {
+        let resolved_name = self.resolved_lvalue_name(&name);
+        if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
             let key = self.parse_assoc_subscript()?;
-            return Some(ArithLValue::Assoc { name, key });
+            return Some(ArithLValue::Assoc {
+                name: resolved_name,
+                key,
+            });
         }
 
         let index = self.parse_comma()?;
@@ -15220,7 +15225,31 @@ impl ConditionalArithParser<'_> {
         if !self.consume("]") {
             return None;
         }
-        Some(ArithLValue::Indexed { name, index })
+        Some(ArithLValue::Indexed {
+            name: resolved_name,
+            index,
+        })
+    }
+
+    fn resolved_lvalue_name(&self, name: &str) -> String {
+        let mut current = name;
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            if !seen.insert(current.to_string()) {
+                return name.to_string();
+            }
+            if !is_marked_var(self.env_vars, NAMEREF_VARS, current) {
+                return current.to_string();
+            }
+            let Some(target) = self.env_vars.get(current) else {
+                return current.to_string();
+            };
+            if !is_shell_name(target) {
+                return current.to_string();
+            }
+            current = target;
+        }
+        name.to_string()
     }
 
     fn parse_assoc_subscript(&mut self) -> Option<String> {
