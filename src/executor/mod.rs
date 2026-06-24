@@ -13612,6 +13612,9 @@ impl Executor {
         if word == "${@}" {
             return Some(self.positional_params.clone());
         }
+        if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
+            return Some(self.positional_params.clone());
+        }
         if let Some(name) = word.strip_prefix("${").and_then(|word| word.strip_suffix('}')) {
             if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                 if var_name == "@" {
@@ -13622,9 +13625,6 @@ impl Executor {
                     ));
                 }
             }
-        }
-        if word == "$@" && kind.map_or(true, |kind| *kind == TokenKind::Word) {
-            return Some(self.positional_params.clone());
         }
         None
     }
@@ -14345,6 +14345,7 @@ impl Executor {
             return false;
         };
         let Some(captures) = regex.captures(left) else {
+            self.clear_bash_rematch();
             return false;
         };
 
@@ -14367,6 +14368,12 @@ impl Executor {
         mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
     }
 
+    fn clear_bash_rematch(&mut self) {
+        self.env_vars
+            .insert("BASH_REMATCH".to_string(), format_indexed_array_storage(BTreeMap::new()));
+        mark_env_name(&mut self.env_vars, ARRAY_VARS, "BASH_REMATCH");
+    }
+
     fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
         let left = self.expand_word(left);
         let right = unescape_remaining_shell_escapes(&self.expand_word(right));
@@ -14375,6 +14382,7 @@ impl Executor {
             return 2;
         };
         let Some(captures) = regex.captures(&left) else {
+            self.clear_bash_rematch();
             return 1;
         };
 
@@ -18836,6 +18844,7 @@ fn restore_numeric_decimal_regex_escapes(pattern: &str) -> String {
     pattern
         .replace("([0-9]*).([0-9]+)", "([0-9]*)\\.([0-9]+)")
         .replace("([0-9]+)(.([0-9]+))?", "([0-9]+)(\\.([0-9]+))?")
+        .replace("(.*).(.*)", "(.*)\\.(.*)")
 }
 
 fn case_pattern_matches_at(
