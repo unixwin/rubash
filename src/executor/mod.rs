@@ -9387,7 +9387,7 @@ impl Executor {
             // TODO(assoc.c/arrayfunc.c): Bash parses associative subscripts
             // with quote removal and expansion. This stores the simple
             // `A[key]=value` form exercised by upstream builtins5.sub.
-            let key = index.trim_matches('\'').trim_matches('"');
+            let key = self.assoc_subscript_key(index);
             let current = self.env_vars.get(name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
             let value = if append {
@@ -9395,7 +9395,7 @@ impl Executor {
                     .iter()
                     .rev()
                     .find_map(|(entry_key, entry_value)| {
-                        (entry_key == key).then_some(entry_value.as_str())
+                        (entry_key == &key).then_some(entry_value.as_str())
                     })
                     .unwrap_or_default();
                 append_scalar_value(current, value)
@@ -9405,11 +9405,11 @@ impl Executor {
             if let Some((_, entry_value)) = entries
                 .iter_mut()
                 .rev()
-                .find(|(entry_key, _)| entry_key == key)
+                .find(|(entry_key, _)| entry_key == &key)
             {
                 *entry_value = value;
             } else {
-                entries.push((key.to_string(), value));
+                entries.push((key, value));
             }
             let new_value = format!(
                 "({})",
@@ -9980,9 +9980,10 @@ impl Executor {
                 }
                 if let Some((array_name, key)) = parse_array_subscript(var_name) {
                     if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                        let key = self.assoc_subscript_key(key);
                         return self
                             .parameter_array_storage(array_name)
-                            .and_then(|value| assoc_value_at(&value, key))
+                            .and_then(|value| assoc_value_at(&value, &key))
                             .map(|value| value.chars().count().to_string())
                             .unwrap_or_else(|| "0".to_string());
                     }
@@ -10130,9 +10131,10 @@ impl Executor {
             }
             if let Some((array_name, key)) = parse_array_subscript(name) {
                 if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+                    let key = self.assoc_subscript_key(key);
                     return self
                         .parameter_array_storage(array_name)
-                        .and_then(|value| assoc_value_at(&value, key))
+                        .and_then(|value| assoc_value_at(&value, &key))
                         .unwrap_or_default();
                 }
             }
@@ -11160,10 +11162,11 @@ impl Executor {
             if !is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
                 return String::new();
             }
+            let key = self.assoc_subscript_key(key);
             let Some(value) = self
                 .env_vars
                 .get(array_name)
-                .and_then(|value| assoc_value_at(value, key))
+                .and_then(|value| assoc_value_at(value, &key))
             else {
                 return String::new();
             };
@@ -11334,8 +11337,9 @@ impl Executor {
                 return String::new();
             };
             if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-                return assoc_value_at(value, key)
-                    .map(|value| format_key_value_transform_part(key, &value, quoted))
+                let key = self.assoc_subscript_key(key);
+                return assoc_value_at(value, &key)
+                    .map(|value| format_key_value_transform_part(&key, &value, quoted))
                     .unwrap_or_default();
             }
             if let Ok(index) = key.parse::<usize>() {
@@ -11445,11 +11449,17 @@ impl Executor {
         let (array_name, key) = parse_array_subscript(expression)?;
         let storage = self.parameter_array_storage(array_name)?;
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
-            return assoc_value_at(&storage, key);
+            let key = self.assoc_subscript_key(key);
+            return assoc_value_at(&storage, &key);
         }
         key.parse::<usize>()
             .ok()
             .and_then(|index| array_value_at(&storage, index))
+    }
+
+    fn assoc_subscript_key(&self, key: &str) -> String {
+        let expanded = self.expand_embedded_parameters(key);
+        strip_matching_quotes(&expanded).to_string()
     }
 
     fn apply_array_element_parameter_assignment(
@@ -11468,16 +11478,17 @@ impl Executor {
         }
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let key = self.assoc_subscript_key(key);
             let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
             if let Some((_, entry_value)) = entries
                 .iter_mut()
                 .rev()
-                .find(|(entry_key, _)| entry_key == key)
+                .find(|(entry_key, _)| entry_key == &key)
             {
                 *entry_value = value;
             } else {
-                entries.push((key.to_string(), value));
+                entries.push((key, value));
             }
             self.env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
