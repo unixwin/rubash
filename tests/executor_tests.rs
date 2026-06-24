@@ -5724,6 +5724,29 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_popd_double_dash_ignores_following_stack_index() {
+        let output_path = "target/rubash-popd-double-dash-index-output.txt";
+        let scratch_path = "target/rubash-popd-double-dash-index-scratch.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(scratch_path);
+        let input = format!(
+            "PWD=/; pushd /tmp > {scratch_path}; pushd /bin >> {scratch_path}; \
+             popd -- +8 > {output_path}; popd -- -8 >> {output_path}; echo $? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "/tmp /\n/\n0\n");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(scratch_path);
+    }
+
+    #[test]
     fn test_popd_n_removes_next_directory_without_cd() {
         let output_path = "target/rubash-popd-n-output.txt";
         let scratch_path = "target/rubash-popd-n-scratch.txt";
