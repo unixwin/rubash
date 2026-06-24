@@ -9990,6 +9990,9 @@ impl Executor {
                         .map(|value| array_parameter_slice(&value, offset, length).join(" "))
                         .unwrap_or_default();
                 }
+                if let Some(value) = self.array_element_parameter_value(var_name) {
+                    return parameter_substring(&value, offset, length);
+                }
                 if is_shell_name(var_name) {
                     return self
                         .env_vars
