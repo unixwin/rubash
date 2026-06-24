@@ -9235,6 +9235,35 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_read_invalid_counts_redirect_stderr() {
+        let output_path = "target/rubash-read-invalid-count-status.txt";
+        let error_path = "target/rubash-read-invalid-count-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "read -n -1 value 2> {error_path}; echo negative:$? > {output_path}; \
+             read -Nabc value 2>> {error_path}; echo compact:$? >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "negative:1\ncompact:1\n"
+        );
+        let error = fs::read_to_string(error_path).unwrap();
+        assert!(error.contains("read: -1: invalid number"));
+        assert!(error.contains("read: abc: invalid number"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_read_combined_rn_reads_raw_limited_characters() {
         let output_path = "target/rubash-read-rn-output.txt";
         let _ = fs::remove_file(output_path);
