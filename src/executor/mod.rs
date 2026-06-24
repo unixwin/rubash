@@ -11070,7 +11070,7 @@ impl Executor {
         if let Some(value) = self.array_element_parameter_value(name) {
             return Some(value);
         }
-        self.parameter_error_value(name)
+        self.parameter_error_value(&name)
     }
 
     fn parameter_expansion_error(&self, cmd: &CommandNode) -> Option<(String, String, i32)> {
@@ -11249,7 +11249,10 @@ impl Executor {
 
     fn parameter_assignment_transform(&self, name: &str) -> String {
         if let Some(array_name) = name.strip_suffix("[*]") {
-            return self.array_assignment_transform(array_name);
+            let Some(array_name) = self.resolved_variable_name(array_name) else {
+                return String::new();
+            };
+            return self.array_assignment_transform(&array_name);
         }
 
         if name.ends_with("[@]") {
@@ -11257,14 +11260,17 @@ impl Executor {
         }
 
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
+            let Some(array_name) = self.resolved_variable_name(array_name) else {
+                return String::new();
+            };
             let Some(value) = self
                 .env_vars
-                .get(array_name)
+                .get(&array_name)
                 .and_then(|value| array_value_at(value, index))
             else {
                 return String::new();
             };
-            let array_flag = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let array_flag = if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
                 "-A"
             } else {
                 "-a"
@@ -11276,13 +11282,16 @@ impl Executor {
         }
 
         if let Some((array_name, key)) = parse_array_subscript(name) {
-            if !is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let Some(array_name) = self.resolved_variable_name(array_name) else {
+                return String::new();
+            };
+            if !is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
                 return String::new();
             }
             let key = self.assoc_subscript_key(key);
             let Some(value) = self
                 .env_vars
-                .get(array_name)
+                .get(&array_name)
                 .and_then(|value| assoc_value_at(value, &key))
             else {
                 return String::new();
@@ -11292,6 +11301,11 @@ impl Executor {
                 shell_single_quote_assignment_value(&value)
             );
         }
+
+        let Some(name) = self.resolved_variable_name(name) else {
+            return String::new();
+        };
+        let name = name.as_str();
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
             return format!("declare -A {name}");
@@ -11390,6 +11404,10 @@ impl Executor {
         let base_name = parse_array_subscript(name)
             .map(|(array_name, _)| array_name)
             .unwrap_or(name);
+        let Some(base_name) = self.resolved_variable_name(base_name) else {
+            return String::new();
+        };
+        let base_name = base_name.as_str();
         if !is_shell_name(base_name) || !self.env_vars.contains_key(base_name) {
             return String::new();
         }
@@ -11429,10 +11447,13 @@ impl Executor {
             .or_else(|| name.strip_suffix("[*]"));
 
         if let Some(array_name) = array_name {
-            let Some(value) = self.env_vars.get(array_name) else {
+            let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
-            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let Some(value) = self.env_vars.get(&array_name) else {
+                return String::new();
+            };
+            if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
                 return assoc_entries(value)
                     .into_iter()
                     .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
@@ -11450,24 +11471,43 @@ impl Executor {
         }
 
         if let Some((array_name, key)) = parse_array_subscript(name) {
-            let Some(value) = self.env_vars.get(array_name) else {
+            let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
-            if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            let Some(value) = self.env_vars.get(&array_name) else {
+                return String::new();
+            };
+            if is_marked_var(&self.env_vars, ASSOC_VARS, &array_name) {
                 let key = self.assoc_subscript_key(key);
                 return assoc_value_at(value, &key)
-                    .map(|value| format_key_value_transform_part(&key, &value, quoted))
+                    .map(|value| shell_single_quote_assignment_value(&value))
                     .unwrap_or_default();
             }
             if let Ok(index) = key.parse::<usize>() {
                 return array_value_at(value, index)
-                    .map(|value| format_key_value_transform_part(key, &value, quoted))
+                    .map(|value| shell_single_quote_assignment_value(&value))
                     .unwrap_or_default();
             }
             return String::new();
         }
 
-        self.parameter_error_value(name)
+        let Some(name) = self.resolved_variable_name(name) else {
+            return String::new();
+        };
+        if let Some(value) = self.env_vars.get(&name) {
+            if is_marked_var(&self.env_vars, ASSOC_VARS, &name) {
+                return assoc_value_at(value, "0")
+                    .map(|value| shell_single_quote_assignment_value(&value))
+                    .unwrap_or_default();
+            }
+            if is_marked_array_var(&self.env_vars, &name) || is_array_storage(value) {
+                return array_value_at(value, 0)
+                    .map(|value| shell_single_quote_assignment_value(&value))
+                    .unwrap_or_default();
+            }
+        }
+
+        self.parameter_error_value(&name)
             .map(|value| shell_single_quote_assignment_value(&value))
             .unwrap_or_default()
     }
