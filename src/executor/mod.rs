@@ -11863,6 +11863,25 @@ impl Executor {
             return command_substitution_word_split(&expanded);
         }
 
+        if words.first().map(String::as_str) == Some("printf") {
+            let expanded_args: Vec<String> = words[1..]
+                .iter()
+                .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+                .collect();
+            let mut env_vars = self.env_vars.clone();
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let _ = crate::builtins::printf::execute_with_io(
+                expanded_args.iter().map(String::as_str),
+                &mut env_vars,
+                &mut stdout,
+                &mut stderr,
+            );
+            return String::from_utf8_lossy(&stdout)
+                .trim_end_matches('\n')
+                .to_string();
+        }
+
         if words.first().map(String::as_str) == Some("umask") {
             return self
                 .env_vars
