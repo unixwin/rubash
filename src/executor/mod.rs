@@ -12297,19 +12297,13 @@ impl Executor {
         // ${parameter:=word}, and ${parameter+word} has quote-aware expansion
         // flags. This covers tilde2.tests while the lexer still discards most
         // quote state.
-        tilde_expand::expand_assignment_tilde_value(
-            &self.expand_embedded_parameters(word),
-            &self.home_value(),
-            false,
-        )
+        let expanded = decode_parameter_word_quotes(&self.expand_embedded_parameters(word));
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.home_value(), false)
     }
 
     fn expand_parameter_word_mut(&mut self, word: &str) -> String {
-        tilde_expand::expand_assignment_tilde_value(
-            &self.expand_embedded_parameters_mut(word),
-            &self.home_value(),
-            false,
-        )
+        let expanded = decode_parameter_word_quotes(&self.expand_embedded_parameters_mut(word));
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.home_value(), false)
     }
 
     fn expand_quoted_parameter_word(&self, word: &str) -> String {
@@ -14379,6 +14373,11 @@ impl Executor {
 
             if ch == '\x1f' {
                 output.push('$');
+                continue;
+            }
+
+            if ch == '\x17' {
+                output.push('\'');
                 continue;
             }
 
@@ -19013,12 +19012,27 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
                 if ch == '"' {
                     break;
                 }
+                if ch == '\\' {
+                    if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) =
+                        chars.get(index).copied()
+                    {
+                        index += 1;
+                        if escaped != '\n' {
+                            output.push(escaped);
+                        }
+                        continue;
+                    }
+                }
                 output.push(ch);
             }
             continue;
         }
 
         match chars[index] {
+            '\x17' => {
+                output.push('\'');
+                index += 1;
+            }
             '\'' => {
                 index += 1;
                 while index < chars.len() {
@@ -19038,6 +19052,17 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
                     if ch == '"' {
                         break;
                     }
+                    if ch == '\\' {
+                        if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) =
+                            chars.get(index).copied()
+                        {
+                            index += 1;
+                            if escaped != '\n' {
+                                output.push(escaped);
+                            }
+                            continue;
+                        }
+                    }
                     output.push(ch);
                 }
             }
@@ -19046,6 +19071,48 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
                     output.push(*ch);
                     index += 2;
                 } else {
+                    index += 1;
+                }
+            }
+            ch => {
+                output.push(ch);
+                index += 1;
+            }
+        }
+    }
+    output
+}
+
+fn decode_parameter_word_quotes(word: &str) -> String {
+    let mut output = String::new();
+    let chars = word.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '\x17' => {
+                output.push('\'');
+                index += 1;
+            }
+            '"' => {
+                index += 1;
+                while index < chars.len() {
+                    let ch = chars[index];
+                    index += 1;
+                    if ch == '"' {
+                        break;
+                    }
+                    output.push(ch);
+                }
+            }
+            '\'' => {
+                if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
+                    let close = index + 1 + close_offset;
+                    for ch in &chars[index + 1..close] {
+                        output.push(*ch);
+                    }
+                    index = close + 1;
+                } else {
+                    output.push('\'');
                     index += 1;
                 }
             }
@@ -19998,6 +20065,7 @@ fn eval_source_for_reparse(source: &str) -> String {
         .replace('\x1d', "")
         .replace('\x1f', "$")
         .replace('\x1a', "`")
+        .replace('\x17', "'")
 }
 
 fn next_random_from_state(state: &Cell<u32>) -> u32 {
