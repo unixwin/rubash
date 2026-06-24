@@ -5463,15 +5463,27 @@ impl Executor {
         builtin_cmd.words = args.to_vec();
 
         if crate::builtins::enable::is_disabled(&self.env_vars, name) {
-            eprintln!(
-                "{}builtin: {name}: not a shell builtin",
-                self.diagnostic_prefix()
-            );
+            self.write_builtin_not_found(cmd, name)?;
             self.exit_code = 1;
             return Ok(());
         }
 
         match name {
+            ":" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code = crate::builtins::colon::colon();
+                Ok(())
+            }
+            "true" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code = crate::builtins::colon::true_builtin();
+                Ok(())
+            }
+            "false" => {
+                self.apply_no_output_builtin_redirects(&builtin_cmd)?;
+                self.exit_code = crate::builtins::colon::false_builtin();
+                Ok(())
+            }
             "echo" => {
                 self.execute_echo(&builtin_cmd)?;
                 self.exit_code = 0;
@@ -5688,8 +5700,22 @@ impl Executor {
                 Ok(())
             }
             "shift" => self.execute_shift_command(&builtin_cmd),
-            _ => self.execute_builtin_direct(args),
+            _ => {
+                self.write_builtin_not_found(cmd, name)?;
+                self.exit_code = 1;
+                Ok(())
+            }
         }
+    }
+
+    fn write_builtin_not_found(&self, cmd: &CommandNode, name: &str) -> Result<(), ExecuteError> {
+        let mut stderr = Vec::new();
+        writeln!(
+            &mut stderr,
+            "{}builtin: {name}: not a shell builtin",
+            self.diagnostic_prefix()
+        )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)
     }
 
     fn apply_no_output_builtin_redirects(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {

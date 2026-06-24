@@ -6250,6 +6250,47 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_builtin_missing_redirects_stderr() {
+        let output_path = "target/rubash-builtin-missing-status.txt";
+        let error_path = "target/rubash-builtin-missing-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("builtin no_such_builtin 2> {error_path}; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("builtin: no_such_builtin: not a shell builtin"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_builtin_colon_redirect_truncates_output_file() {
+        let output_path = "target/rubash-builtin-colon-redirect-output.txt";
+        let _ = fs::remove_file(output_path);
+        fs::write(output_path, "before\n").unwrap();
+        let input = format!("builtin : > {output_path}; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_builtin_type_invokes_type_builtin() {
         let output_path = "target/rubash-builtin-type-output.txt";
         let _ = fs::remove_file(output_path);
