@@ -3565,13 +3565,12 @@ impl Executor {
                 indent_level = indent_level.saturating_sub(1).max(1);
             }
             let indent = "    ".repeat(indent_level);
-            let terminator = if function_definition_command_omits_terminator(command)
-                || index == last_index
-            {
-                ""
-            } else {
-                ";"
-            };
+            let terminator =
+                if function_definition_command_omits_terminator(command) || index == last_index {
+                    ""
+                } else {
+                    ";"
+                };
             if let Some(here_string) = &command.here_string {
                 writeln!(
                     stdout,
@@ -5817,7 +5816,11 @@ impl Executor {
         }
     }
 
-    fn write_builtin_not_found(&mut self, cmd: &CommandNode, name: &str) -> Result<(), ExecuteError> {
+    fn write_builtin_not_found(
+        &mut self,
+        cmd: &CommandNode,
+        name: &str,
+    ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
         writeln!(
             &mut stderr,
@@ -13432,7 +13435,8 @@ impl Executor {
                             }
                         }
                         let expression = self.expand_arithmetic_special_parameters(&expression);
-                        if let Some(value) = eval_conditional_arith_value(&expression, &self.env_vars)
+                        if let Some(value) =
+                            eval_conditional_arith_value(&expression, &self.env_vars)
                         {
                             output.push_str(&value.to_string());
                         }
@@ -13463,11 +13467,7 @@ impl Executor {
                                 double = !double;
                                 source.push(source_ch);
                             }
-                            '<'
-                                if !single
-                                    && !double
-                                    && chars.peek().copied() == Some('<') =>
-                            {
+                            '<' if !single && !double && chars.peek().copied() == Some('<') => {
                                 copy_command_substitution_heredoc(&mut chars, &mut source);
                             }
                             '(' if !single && !double => {
@@ -13974,7 +13974,8 @@ impl Executor {
     }
 
     fn expand_arithmetic_special_parameters(&self, expression: &str) -> String {
-        expression.replace("$#", &self.positional_params.len().to_string())
+        let expression = expression.replace("$#", &self.positional_params.len().to_string());
+        self.expand_embedded_parameters(&expression)
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -16040,9 +16041,17 @@ fn eval_mutable_arith_value_with_random(
     (parser.pos == parser.input.len()).then_some(value)
 }
 
+fn bash_arith(value: i128) -> i128 {
+    value as i64 as i128
+}
+
 fn checked_arithmetic_pow(base: i128, exponent: i128) -> Option<i128> {
     let exponent = u32::try_from(exponent).ok()?;
-    base.checked_pow(exponent)
+    let mut value = 1i128;
+    for _ in 0..exponent {
+        value = bash_arith(value * base);
+    }
+    Some(value)
 }
 
 fn parse_arithmetic_digits(digits: &[u8], base: u32) -> Option<i128> {
@@ -16052,9 +16061,7 @@ fn parse_arithmetic_digits(digits: &[u8], base: u32) -> Option<i128> {
         if digit >= base {
             return None;
         }
-        value = value
-            .checked_mul(i128::from(base))?
-            .checked_add(i128::from(digit))?;
+        value = bash_arith(value * i128::from(base) + i128::from(digit));
     }
     Some(value)
 }
@@ -16249,7 +16256,7 @@ impl ConditionalArithParser<'_> {
                 return Some(left);
             }
             if self.consume("|") {
-                left |= self.parse_bitwise_xor()?;
+                left = bash_arith(left | self.parse_bitwise_xor()?);
             } else {
                 return Some(left);
             }
@@ -16261,7 +16268,7 @@ impl ConditionalArithParser<'_> {
         loop {
             self.skip_ws();
             if self.consume("^") {
-                left ^= self.parse_bitwise_and()?;
+                left = bash_arith(left ^ self.parse_bitwise_and()?);
             } else {
                 return Some(left);
             }
@@ -16276,7 +16283,7 @@ impl ConditionalArithParser<'_> {
                 return Some(left);
             }
             if self.consume("&") {
-                left &= self.parse_comparison()?;
+                left = bash_arith(left & self.parse_comparison()?);
             } else {
                 return Some(left);
             }
@@ -16313,11 +16320,11 @@ impl ConditionalArithParser<'_> {
             if self.consume("<<") {
                 let rhs = self.parse_expr()?;
                 let shift = u32::try_from(rhs).ok()?;
-                value = value.checked_shl(shift).unwrap_or(0);
+                value = bash_arith((value as i64).wrapping_shl(shift) as i128);
             } else if self.consume(">>") {
                 let rhs = self.parse_expr()?;
                 let shift = u32::try_from(rhs).ok()?;
-                value = value.checked_shr(shift).unwrap_or(0);
+                value = bash_arith((value as i64).wrapping_shr(shift) as i128);
             } else {
                 return Some(value);
             }
@@ -16331,11 +16338,11 @@ impl ConditionalArithParser<'_> {
             match self.peek() {
                 Some(b'+') => {
                     self.pos += 1;
-                    value += self.parse_term()?;
+                    value = bash_arith(value + self.parse_term()?);
                 }
                 Some(b'-') => {
                     self.pos += 1;
-                    value -= self.parse_term()?;
+                    value = bash_arith(value - self.parse_term()?);
                 }
                 _ => return Some(value),
             }
@@ -16352,7 +16359,7 @@ impl ConditionalArithParser<'_> {
                         return Some(value);
                     }
                     self.pos += 1;
-                    value *= self.parse_power()?;
+                    value = bash_arith(value * self.parse_power()?);
                 }
                 Some(b'/') => {
                     self.pos += 1;
@@ -16360,12 +16367,15 @@ impl ConditionalArithParser<'_> {
                     if rhs == 0 {
                         return None;
                     }
-                    value /= rhs;
+                    value = bash_arith((value as i64).wrapping_div(rhs as i64) as i128);
                 }
                 Some(b'%') => {
                     self.pos += 1;
                     let rhs = self.parse_power()?;
                     if rhs == 0 {
+                        return None;
+                    }
+                    if value == i128::from(i64::MIN) && rhs == -1 {
                         return None;
                     }
                     value %= rhs;
@@ -16403,7 +16413,7 @@ impl ConditionalArithParser<'_> {
             }
             b'-' => {
                 self.pos += 1;
-                self.parse_factor().map(|value| -value)
+                self.parse_factor().map(|value| bash_arith(-value))
             }
             b'!' => {
                 self.pos += 1;
@@ -16411,7 +16421,7 @@ impl ConditionalArithParser<'_> {
             }
             b'~' => {
                 self.pos += 1;
-                self.parse_factor().map(|value| !value)
+                self.parse_factor().map(|value| bash_arith(!value))
             }
             b'(' => {
                 self.pos += 1;
@@ -16712,7 +16722,7 @@ impl ConditionalArithParser<'_> {
             return Some(0);
         }
         if let Ok(number) = value.parse::<i128>() {
-            return Some(number);
+            return Some(bash_arith(number));
         }
 
         let mut resolving = self.resolving.clone();
@@ -16731,7 +16741,7 @@ impl ConditionalArithParser<'_> {
 
     fn update_lvalue(&mut self, lvalue: &ArithLValue, delta: i128, prefix: bool) -> Option<i128> {
         let current = self.lvalue_value(lvalue)?;
-        let updated = current + delta;
+        let updated = bash_arith(current + delta);
         self.set_lvalue(lvalue, updated);
         Some(if prefix { updated } else { current })
     }
@@ -16740,17 +16750,22 @@ impl ConditionalArithParser<'_> {
         let current = self.lvalue_value(lvalue)?;
         let value = match op {
             "=" => rhs,
-            "+=" => current + rhs,
-            "-=" => current - rhs,
-            "*=" => current * rhs,
+            "+=" => bash_arith(current + rhs),
+            "-=" => bash_arith(current - rhs),
+            "*=" => bash_arith(current * rhs),
             "**=" => checked_arithmetic_pow(current, rhs)?,
-            "<<=" => current.checked_shl(u32::try_from(rhs).ok()?).unwrap_or(0),
-            ">>=" => current.checked_shr(u32::try_from(rhs).ok()?).unwrap_or(0),
-            "&=" => current & rhs,
-            "^=" => current ^ rhs,
-            "|=" => current | rhs,
-            "/=" if rhs != 0 => current / rhs,
-            "%=" if rhs != 0 => current % rhs,
+            "<<=" => bash_arith((current as i64).wrapping_shl(u32::try_from(rhs).ok()?) as i128),
+            ">>=" => bash_arith((current as i64).wrapping_shr(u32::try_from(rhs).ok()?) as i128),
+            "&=" => bash_arith(current & rhs),
+            "^=" => bash_arith(current ^ rhs),
+            "|=" => bash_arith(current | rhs),
+            "/=" if rhs != 0 => bash_arith((current as i64).wrapping_div(rhs as i64) as i128),
+            "%=" if rhs != 0 => {
+                if current == i128::from(i64::MIN) && rhs == -1 {
+                    return None;
+                }
+                current % rhs
+            }
             "/=" | "%=" => return None,
             _ => return None,
         };
@@ -16770,7 +16785,7 @@ impl ConditionalArithParser<'_> {
         if is_noassign_bash_array(name) {
             return;
         }
-        let value = value.to_string();
+        let value = bash_arith(value).to_string();
         if name == "RANDOM" {
             if let Some(state) = self.random_state {
                 state.set(value.parse::<u32>().unwrap_or(0));
@@ -17682,11 +17697,7 @@ fn parameter_substring(value: &str, offset: isize, length: Option<isize>) -> Str
         None => usize::MAX,
     };
 
-    value
-        .chars()
-        .skip(start)
-        .take(take)
-        .collect()
+    value.chars().skip(start).take(take).collect()
 }
 
 fn positional_parameter_substring(
@@ -17708,12 +17719,7 @@ fn positional_parameter_substring(
         None => usize::MAX,
     };
 
-    params
-        .iter()
-        .skip(start)
-        .take(take)
-        .cloned()
-        .collect()
+    params.iter().skip(start).take(take).cloned().collect()
 }
 
 fn array_parameter_slice(value: &str, offset: isize, length: Option<usize>) -> Vec<String> {
@@ -18361,7 +18367,8 @@ fn copy_command_substitution_heredoc(
 }
 
 fn contains_windows_forbidden_posix_filename_char(path: &str) -> bool {
-    path.chars().any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|'))
+    path.chars()
+        .any(|ch| matches!(ch, '*' | '?' | '<' | '>' | '|'))
 }
 
 fn word_has_unquoted_command_substitution(word: &str) -> bool {

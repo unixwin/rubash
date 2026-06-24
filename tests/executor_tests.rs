@@ -989,7 +989,8 @@ mod command_chaining {
     fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
         let output_path = "target/rubash-comsub-heredoc-delim-before-paren-output.txt";
         let _ = fs::remove_file(output_path);
-        let input = format!("text=$(cat <<EOF\nhere is the text\nEOF)\necho = $text = > {output_path}");
+        let input =
+            format!("text=$(cat <<EOF\nhere is the text\nEOF)\necho = $text = > {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -998,7 +999,10 @@ mod command_chaining {
 
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
-        assert_eq!(fs::read_to_string(output_path).unwrap(), "= here is the text =\n");
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "= here is the text =\n"
+        );
         let _ = fs::remove_file(output_path);
     }
 
@@ -1747,7 +1751,8 @@ mod command_chaining {
     fn test_dash_quoted_tab_delimiter_strips_leading_tabs() {
         let output_path = "target/rubash-dash-quoted-tab-heredoc-output.txt";
         let _ = fs::remove_file(output_path);
-        let input = format!("cat > {output_path} <<-'\tEND'\n\thello\n\tEND\necho after >> {output_path}");
+        let input =
+            format!("cat > {output_path} <<-'\tEND'\n\thello\n\tEND\necho after >> {output_path}");
         let tokens = tokenize(&input);
         let ast = parse(&tokens);
         let mut executor = Executor::new();
@@ -15576,6 +15581,85 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
             "0\n0\n0 16\n1\n1\n"
         );
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_uses_bash_int64_overflow_semantics() {
+        let output_path = "target/rubash-arithmetic-overflow-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "echo $((2**63)) > {output_path}; \
+             [[ 2**63 -lt 2**63-1 ]]; echo $? >> {output_path}; \
+             echo $((9223372036854775807 + 1)) >> {output_path}; \
+             echo $((1 << 64)) >> {output_path}; \
+             echo $((-1 >> 1)) >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "-9223372036854775808\n0\n-9223372036854775808\n1\n-1\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_expands_braced_parameter_operations() {
+        let output_path = "target/rubash-arithmetic-param-op-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "number=166666666666666666; echo $(( ${{number//[^-]}}10#${{number//[^0-9]}} + 1 )) > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "166666666666666667\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_shellmath_decimal_divide_script_path() {
+        let output_path = target_test_path("rubash-shellmath-divide-output.txt");
+        let _ = fs::remove_file(&output_path);
+        let shell_output_path = shell_test_path(&output_path);
+        let shellmath_path = shell_test_path(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("bash")
+                .join("examples")
+                .join("shellmath")
+                .join("shellmath.sh"),
+        );
+        let input = format!(
+            "source {shellmath_path}; __shellmath_isOptimized=1; _shellmath_precalc; _shellmath_divide 0.500 3; \
+             _shellmath_getReturnValue v; echo \"$v\" > {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "0.166666666666666667\n"
+        );
+        let _ = fs::remove_file(&output_path);
     }
 
     #[test]
