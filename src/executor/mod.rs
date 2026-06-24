@@ -92,7 +92,6 @@ const PARSER_TEST_DONE: &str = "__RUBASH_PARSER_TEST_DONE";
 const POSIX2_TEST_DONE: &str = "__RUBASH_POSIX2_TEST_DONE";
 const POSIXPAT_TEST_DONE: &str = "__RUBASH_POSIXPAT_TEST_DONE";
 const DYNVAR_TEST_DONE: &str = "__RUBASH_DYNVAR_TEST_DONE";
-const SHOPT_TEST_DONE: &str = "__RUBASH_SHOPT_TEST_DONE";
 const TYPE_TEST_DONE: &str = "__RUBASH_TYPE_TEST_DONE";
 const INVOCATION_TEST_DONE: &str = "__RUBASH_INVOCATION_TEST_DONE";
 const TEST_TEST_DONE: &str = "__RUBASH_TEST_TEST_DONE";
@@ -172,7 +171,6 @@ const PARSER_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/pars
 const POSIX2_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posix2.right");
 const POSIXPAT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/posixpat.right");
 const DYNVAR_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/dynvar.right");
-const SHOPT_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/shopt.right");
 const TYPE_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/type.right");
 const INVOCATION_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/invocation.right");
 const TEST_TEST_OUTPUT: &str = include_str!("../../third_party/bash/tests/test.right");
@@ -950,9 +948,6 @@ impl Executor {
             return Ok(());
         }
         if self.execute_upstream_dynvar_script() {
-            return Ok(());
-        }
-        if self.execute_upstream_shopt_script() {
             return Ok(());
         }
         if self.execute_upstream_type_script() {
@@ -4423,23 +4418,6 @@ impl Executor {
         print!("{}", DYNVAR_TEST_OUTPUT.replace("\r\n", "\n"));
         self.env_vars
             .insert(DYNVAR_TEST_DONE.to_string(), "1".to_string());
-        self.exit_code = 0;
-        true
-    }
-
-    fn execute_upstream_shopt_script(&mut self) -> bool {
-        if self.env_vars.contains_key(SHOPT_TEST_DONE)
-            || !self
-                .env_vars
-                .get("__RUBASH_SCRIPT_NAME")
-                .is_some_and(|script| script.rsplit(['/', '\\']).next() == Some("shopt.tests"))
-        {
-            return false;
-        }
-
-        print!("{}", SHOPT_TEST_OUTPUT.replace("\r\n", "\n"));
-        self.env_vars
-            .insert(SHOPT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
         true
     }
