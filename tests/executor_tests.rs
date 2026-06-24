@@ -11081,6 +11081,63 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_cat_reads_process_substitution_argument() {
+        let output_path = "target/rubash-cat-process-subst-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("cat <(echo process substitution) > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "process substitution\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_cat_reads_shell_style_file_path() {
+        let output_path = "target/rubash-cat-shell-path-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "file=${{TMPDIR}}/rubash-cat-shell-path-$$; echo shell-path > $file; \
+             cat $file > {output_path}; rm -f $file"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "shell-path\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_process_substitution_from_default_parameter_word() {
+        let output_path = "target/rubash-default-process-subst-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("value=; cat ${{value:-<(echo fallback)}} > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "fallback\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_for_loop_body_reads_process_substitution_redirect() {
         let output_path = "target/rubash-for-process-subst-read-output.txt";
         let _ = fs::remove_file(output_path);
