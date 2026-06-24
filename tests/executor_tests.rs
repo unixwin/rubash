@@ -2128,6 +2128,29 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_compound_indexed_array_assignment_preserves_quoted_words() {
+        let output_path = "target/rubash-indexed-array-compound-quotes-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "arr=(one \"two words\" [4]=\"four words\"); \
+             printf '<%s>/<%s>/<%s>\\n' \"${{arr[0]}}\" \"${{arr[1]}}\" \"${{arr[4]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<one>/<two words>/<four words>\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_indexed_array_assignment_preserves_explicit_indices() {
         let output_path = "target/rubash-declare-indexed-array-sparse-output.txt";
         let _ = fs::remove_file(output_path);
@@ -2211,6 +2234,31 @@ mod command_chaining {
         assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta/<>\n");
         let _ = fs::remove_file(output_path);
         std::env::remove_var("RUBASH_ASSOC_PAIRS");
+    }
+
+    #[test]
+    fn test_declare_assoc_compound_assignment_preserves_quoted_words() {
+        let output_path = "target/rubash-declare-assoc-quotes-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_PAIRS");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_QUOTED_PAIRS=(one \"two words\" three \"four words\"); \
+             printf '<%s>/<%s>\\n' \"${{RUBASH_ASSOC_QUOTED_PAIRS[one]}}\" \"${{RUBASH_ASSOC_QUOTED_PAIRS[three]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<two words>/<four words>\n"
+        );
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_PAIRS");
     }
 
     #[test]

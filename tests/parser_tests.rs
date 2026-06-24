@@ -261,4 +261,19 @@ mod quote_removal {
         assert_eq!(ast.commands[0].words, vec!["alias", "foo=\x1cecho "]);
         assert!(ast.commands[0].assignments.is_empty());
     }
+
+    #[test]
+    fn test_declare_compound_assignment_preserves_quoted_word_boundaries() {
+        let input = "declare -A assoc=(one \"two words\" three \"four words\")";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(
+            ast.commands[0].words,
+            vec![
+                "declare",
+                "-A",
+                "assoc=\x1e(one \"two words\" three \"four words\")"
+            ]
+        );
+    }
 }

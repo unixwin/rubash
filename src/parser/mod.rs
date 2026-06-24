@@ -783,6 +783,12 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
     let mut i = start + 2;
     let mut values = Vec::new();
     while i < tokens.len() && !is_keyword(tokens, i, ")") {
+        if let Some((left, rhs)) = compound_subscript_assignment(&tokens[i].value) {
+            values.push(format!("{}{}", left, quote_compound_assignment_word(rhs)));
+            i += 1;
+            continue;
+        }
+
         if tokens[i].value == "[" || tokens[i].value.starts_with('[') {
             let mut subscript = String::new();
             let mut j = i;
@@ -809,7 +815,7 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
                 values.push(format!(
                     "[{subscript}]{}{}",
                     tokens[j].value,
-                    tokens[j + 1].value
+                    quote_compound_assignment_word(&tokens[j + 1].value)
                 ));
                 i = j + 2;
                 continue;
@@ -820,7 +826,7 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
             tokens[i].kind,
             TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
         ) {
-            values.push(tokens[i].value.clone());
+            values.push(quote_compound_assignment_word(&tokens[i].value));
         }
         i += 1;
     }
@@ -830,6 +836,42 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
     }
 
     Some((format!("({})", values.join(" ")), i))
+}
+
+fn compound_subscript_assignment(value: &str) -> Option<(&str, &str)> {
+    if !value.starts_with('[') {
+        return None;
+    }
+
+    for operator in ["]+=", "]="] {
+        let Some(pos) = value.find(operator) else {
+            continue;
+        };
+        let split = pos + operator.len();
+        return Some((&value[..split], &value[split..]));
+    }
+
+    None
+}
+
+fn quote_compound_assignment_word(value: &str) -> String {
+    if !value.is_empty()
+        && !value
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\'))
+    {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        if matches!(ch, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 fn parse_arithmetic_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
