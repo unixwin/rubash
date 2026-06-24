@@ -11937,6 +11937,45 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parenthesized_function_definition_executes_body() {
+        let output_path = "target/rubash-parenthesized-function-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("greet() ( echo hi > {output_path} ); greet");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].function_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_parenthesized_function_body_runs_in_subshell() {
+        let output_path = "target/rubash-parenthesized-function-subshell-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "value=outer; change() ( value=inner; echo $value > {output_path} ); \
+             change; echo $value >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[1].function_command.is_some());
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\nouter\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_for_without_in_iterates_positional_params() {
         let output_path = "target/rubash-for-default-positional-output.txt";
         let _ = fs::remove_file(output_path);

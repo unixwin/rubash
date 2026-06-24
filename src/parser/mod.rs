@@ -882,6 +882,25 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         }
         return Some((command, next_i));
     }
+    if tokens.get(i).is_some_and(|token| token.value == "(") {
+        let (mut body, close_i) = parse_parenthesized_function_body(tokens, i)?;
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
+        let mut next_i = close_i + 1;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+        return Some((command, next_i));
+    }
+
     if tokens.get(i)?.value != "{" {
         return None;
     }
@@ -923,6 +942,41 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn parse_parenthesized_function_body(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
+    if !is_keyword(tokens, start, "(") {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "(") {
+            depth += 1;
+        } else if is_keyword(tokens, i, ")") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let mut body = parse(&tokens[start + 1..i]).commands;
+    if let Some(first) = body.first_mut() {
+        first.subshell = true;
+    }
+    if let Some(last) = body.last_mut() {
+        last.subshell_end = true;
+    }
+    Some((body, i))
 }
 
 fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &mut CommandNode) {
