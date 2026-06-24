@@ -2192,6 +2192,50 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_assoc_compound_assignment_accepts_key_value_pairs() {
+        let output_path = "target/rubash-declare-assoc-pairs-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_PAIRS");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_PAIRS=(one alpha two beta three); \
+             printf '%s/%s/<%s>\\n' \"${{RUBASH_ASSOC_PAIRS[one]}}\" \"${{RUBASH_ASSOC_PAIRS[two]}}\" \"${{RUBASH_ASSOC_PAIRS[three]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta/<>\n");
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_PAIRS");
+    }
+
+    #[test]
+    fn test_assoc_compound_append_accepts_key_value_pairs() {
+        let output_path = "target/rubash-assoc-append-pairs-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_APPEND_PAIRS");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_APPEND_PAIRS=(one alpha); RUBASH_ASSOC_APPEND_PAIRS+=(two beta three); \
+             printf '%s/%s/<%s>\\n' \"${{RUBASH_ASSOC_APPEND_PAIRS[one]}}\" \"${{RUBASH_ASSOC_APPEND_PAIRS[two]}}\" \"${{RUBASH_ASSOC_APPEND_PAIRS[three]}}\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta/<>\n");
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_APPEND_PAIRS");
+    }
+
+    #[test]
     fn test_declare_p_redirects_output() {
         let output_path = "target/rubash-declare-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);

@@ -9577,6 +9577,12 @@ impl Executor {
         } else if compound_assignment
             && value.starts_with('(')
             && value.ends_with(')')
+            && is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
+        {
+            append_assoc_value("()", &value)
+        } else if compound_assignment
+            && value.starts_with('(')
+            && value.ends_with(')')
             && !is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
         {
             append_array_value(
@@ -14239,7 +14245,26 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
 
 fn append_assoc_value(current: &str, value: &str) -> String {
     let mut entries = assoc_entries(current);
-    for token in array_assignment_tokens(value) {
+    let tokens = array_assignment_tokens(value);
+    let explicit_subscripts = tokens.iter().any(|token| {
+        token
+            .split_once('=')
+            .and_then(|(left, _)| left.strip_prefix('[')?.strip_suffix(']'))
+            .is_some()
+    });
+
+    if !explicit_subscripts {
+        for pair in tokens.chunks(2) {
+            let Some(key) = pair.first() else {
+                continue;
+            };
+            let value = pair.get(1).cloned().unwrap_or_default();
+            entries.push((key.clone(), value));
+        }
+        return format_assoc_storage(entries);
+    }
+
+    for token in tokens {
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(key) = left
                 .strip_prefix('[')
