@@ -11122,7 +11122,12 @@ impl Executor {
             }
         }
 
-        self.expand_embedded_parameters(word)
+        let expanded = self.expand_embedded_parameters(word);
+        if word.contains("$(") || word.contains('`') {
+            unescape_remaining_shell_escapes(&expanded)
+        } else {
+            expanded
+        }
     }
 
     fn expand_word_mut(&mut self, word: &str) -> String {
