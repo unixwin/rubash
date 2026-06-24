@@ -1459,6 +1459,14 @@ impl Executor {
             return None;
         }
 
+        if ast
+            .commands
+            .get(index)
+            .is_some_and(|command| is_arithmetic_command_words(&command.words))
+        {
+            return Some((index + 2).min(ast.commands.len()));
+        }
+
         let start_line = ast.commands.get(index + 1).and_then(|command| command.line);
         let mut next_index = index + 1;
         while next_index < ast.commands.len()
@@ -9957,7 +9965,7 @@ impl Executor {
             return true;
         }
 
-        let Some(raw_index) = index.parse::<i128>().ok() else {
+        let Some(raw_index) = eval_conditional_arith_value(index, &self.env_vars) else {
             return false;
         };
         let current = self.env_vars.get(name).cloned().unwrap_or_default();
@@ -10396,7 +10404,8 @@ impl Executor {
             .strip_prefix("$((")
             .and_then(|rest| rest.strip_suffix("))"))
         {
-            if let Some(value) = eval_conditional_arith_value(expression, &self.env_vars) {
+            let expression = self.expand_arithmetic_special_parameters(expression);
+            if let Some(value) = eval_conditional_arith_value(&expression, &self.env_vars) {
                 return value.to_string();
             }
         }
@@ -10589,7 +10598,7 @@ impl Executor {
                     })
                     .unwrap_or_else(|| "0".to_string());
             }
-            if let Some((var_name, offset, length)) = parse_parameter_substring(name) {
+            if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
                 if matches!(var_name, "@" | "*") {
                     return positional_parameter_substring(&self.positional_params, offset, length)
                         .join(" ");
@@ -10600,7 +10609,14 @@ impl Executor {
                 {
                     return self
                         .parameter_array_storage(array_name)
-                        .map(|value| array_parameter_slice(&value, offset, length).join(" "))
+                        .map(|value| {
+                            array_parameter_slice(
+                                &value,
+                                offset,
+                                length.and_then(|length| usize::try_from(length).ok()),
+                            )
+                            .join(" ")
+                        })
                         .unwrap_or_default();
                 }
                 if let Some(value) = self.array_element_parameter_value(var_name) {
@@ -10611,6 +10627,69 @@ impl Executor {
                         .env_vars
                         .get(var_name)
                         .map(|value| parameter_substring(value, offset, length))
+                        .unwrap_or_default();
+                }
+            }
+            if let Some(value) = self.array_element_parameter_value(name) {
+                return value;
+            }
+            if let Some((var_name, pattern, replacement, global)) =
+                parse_parameter_replacement(name)
+            {
+                let pattern = self.expand_embedded_parameters(pattern);
+                let replacement = self.expand_embedded_parameters(replacement);
+                if matches!(var_name, "@" | "*") {
+                    return self
+                        .positional_params
+                        .iter()
+                        .map(|value| {
+                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                }
+                if let Ok(index) = var_name.parse::<usize>() {
+                    return self
+                        .positional_params
+                        .get(index.saturating_sub(1))
+                        .map(|value| {
+                            replace_parameter_pattern(value, &pattern, &replacement, global)
+                        })
+                        .unwrap_or_default();
+                }
+                if let Some(value) = self.array_element_parameter_value(var_name) {
+                    return replace_parameter_pattern(&value, &pattern, &replacement, global);
+                }
+                if let Some(array_name) = var_name
+                    .strip_suffix("[@]")
+                    .or_else(|| var_name.strip_suffix("[*]"))
+                {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .map(|value| {
+                            array_values(value)
+                                .into_iter()
+                                .map(|value| {
+                                    replace_parameter_pattern(
+                                        &value,
+                                        &pattern,
+                                        &replacement,
+                                        global,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        })
+                        .unwrap_or_default();
+                }
+                if is_shell_name(var_name) {
+                    return self
+                        .dynamic_parameter_value(var_name)
+                        .or_else(|| self.env_vars.get(var_name).cloned())
+                        .map(|value| {
+                            replace_parameter_pattern(&value, &pattern, &replacement, global)
+                        })
                         .unwrap_or_default();
                 }
             }
@@ -11114,6 +11193,44 @@ impl Executor {
         String::new()
     }
 
+    fn parse_parameter_substring<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<(&'a str, isize, Option<isize>)> {
+        let (var_name, rest) = name.split_once(':')?;
+        if var_name.is_empty() || matches!(rest.chars().next(), Some('=' | '+' | '?')) {
+            return None;
+        }
+        if rest.starts_with('-') {
+            return None;
+        }
+
+        let (offset, length) = rest.split_once(':').unwrap_or((rest, ""));
+        let offset = offset.trim_start();
+        if offset.is_empty() {
+            return None;
+        }
+
+        let offset = self.eval_parameter_substring_offset(offset)?;
+        let length = if length.is_empty() {
+            None
+        } else {
+            Some(self.eval_parameter_substring_offset(length)?)
+        };
+
+        Some((var_name, offset, length))
+    }
+
+    fn eval_parameter_substring_offset(&self, value: &str) -> Option<isize> {
+        let expression = value
+            .strip_prefix('(')
+            .and_then(|inner| inner.strip_suffix(')'))
+            .unwrap_or(value)
+            .trim();
+        let evaluated = eval_conditional_arith_value(expression, &self.env_vars)?;
+        isize::try_from(evaluated).ok()
+    }
+
     fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
         match name {
             "EPOCHSECONDS" => Some(current_epoch_seconds().to_string()),
@@ -11400,13 +11517,6 @@ impl Executor {
             return String::new();
         }
 
-        if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.parameter_operator_value(var_name).is_some() {
-                return self.expand_embedded_parameters(alternate);
-            }
-            return String::new();
-        }
-
         if let Some(var_name) = name.strip_prefix('#') {
             if let Some(value) = self.array_element_parameter_value(var_name) {
                 return value.chars().count().to_string();
@@ -11415,6 +11525,13 @@ impl Executor {
 
         if let Some(value) = self.array_element_parameter_value(name) {
             return shell_safe_value(&value);
+        }
+
+        if let Some((var_name, alternate)) = name.split_once('+') {
+            if self.parameter_operator_value(var_name).is_some() {
+                return self.expand_embedded_parameters(alternate);
+            }
+            return String::new();
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
@@ -11456,13 +11573,6 @@ impl Executor {
             return String::new();
         }
 
-        if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.parameter_operator_value(var_name).is_some() {
-                return self.expand_embedded_parameters_mut(alternate);
-            }
-            return String::new();
-        }
-
         if let Some(var_name) = name.strip_prefix('#') {
             if let Some(value) = self.array_element_parameter_value(var_name) {
                 return value.chars().count().to_string();
@@ -11471,6 +11581,13 @@ impl Executor {
 
         if let Some(value) = self.array_element_parameter_value(name) {
             return shell_safe_value(&value);
+        }
+
+        if let Some((var_name, alternate)) = name.split_once('+') {
+            if self.parameter_operator_value(var_name).is_some() {
+                return self.expand_embedded_parameters_mut(alternate);
+            }
+            return String::new();
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
@@ -12182,8 +12299,7 @@ impl Executor {
             let key = self.assoc_subscript_key(key);
             return assoc_value_at(&storage, &key);
         }
-        key.parse::<i128>()
-            .ok()
+        eval_conditional_arith_value(key, &self.env_vars)
             .and_then(|index| resolve_indexed_array_subscript(&storage, index))
             .and_then(|index| array_value_at(&storage, index))
     }
@@ -13311,8 +13427,8 @@ impl Executor {
                                 _ => expression.push(expression_ch),
                             }
                         }
-                        if let Some(value) =
-                            eval_conditional_arith_value(&expression, &self.env_vars)
+                        let expression = self.expand_arithmetic_special_parameters(&expression);
+                        if let Some(value) = eval_conditional_arith_value(&expression, &self.env_vars)
                         {
                             output.push_str(&value.to_string());
                         }
@@ -13845,11 +13961,16 @@ impl Executor {
     }
 
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
+        let expression = self.expand_arithmetic_special_parameters(expression);
         eval_mutable_arith_value_with_random(
-            expression,
+            &expression,
             &mut self.env_vars,
             Some(&self.random_state),
         )
+    }
+
+    fn expand_arithmetic_special_parameters(&self, expression: &str) -> String {
+        expression.replace("$#", &self.positional_params.len().to_string())
     }
 
     fn expand_aliases(&self, words: &[String]) -> Vec<String> {
@@ -17413,38 +17534,6 @@ fn decode_parameter_pattern_quotes(pattern: &str) -> String {
     output
 }
 
-fn parse_parameter_substring(name: &str) -> Option<(&str, isize, Option<usize>)> {
-    let (var_name, rest) = name.split_once(':')?;
-    if var_name.is_empty() || matches!(rest.chars().next(), Some('=' | '+' | '?')) {
-        return None;
-    }
-    if rest.starts_with('-') {
-        return None;
-    }
-
-    let (offset, length) = rest.split_once(':').unwrap_or((rest, ""));
-    let offset = offset.trim_start();
-    if offset.is_empty() {
-        return None;
-    }
-    if let Some(negative_offset) = offset.strip_prefix('-') {
-        if negative_offset.is_empty() || !negative_offset.chars().all(|ch| ch.is_ascii_digit()) {
-            return None;
-        }
-    } else if !offset.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-    if !length.is_empty() && !length.chars().all(|ch| ch.is_ascii_digit()) {
-        return None;
-    }
-
-    Some((
-        var_name,
-        offset.parse().ok()?,
-        (!length.is_empty()).then(|| length.parse().ok()).flatten(),
-    ))
-}
-
 fn parse_parameter_error_operator(inner: &str) -> Option<(&str, &str, bool)> {
     if let Some((name, message)) = inner.split_once(":?") {
         if is_parameter_error_name(name) {
@@ -17574,36 +17663,51 @@ fn is_parameter_error_name(name: &str) -> bool {
         || parse_array_subscript(name).is_some()
 }
 
-fn parameter_substring(value: &str, offset: isize, length: Option<usize>) -> String {
+fn parameter_substring(value: &str, offset: isize, length: Option<isize>) -> String {
     let char_count = value.chars().count();
     let start = if offset < 0 {
         char_count.saturating_sub(offset.unsigned_abs())
     } else {
         offset as usize
     };
+    let take = match length {
+        Some(length) if length < 0 => char_count
+            .saturating_sub(start)
+            .saturating_sub(length.unsigned_abs()),
+        Some(length) => usize::try_from(length).unwrap_or(usize::MAX),
+        None => usize::MAX,
+    };
 
     value
         .chars()
         .skip(start)
-        .take(length.unwrap_or(usize::MAX))
+        .take(take)
         .collect()
 }
 
 fn positional_parameter_substring(
     params: &[String],
     offset: isize,
-    length: Option<usize>,
+    length: Option<isize>,
 ) -> Vec<String> {
     let start = if offset < 0 {
         params.len().saturating_sub(offset.unsigned_abs())
     } else {
         (offset as usize).saturating_sub(1)
     };
+    let take = match length {
+        Some(length) if length < 0 => params
+            .len()
+            .saturating_sub(start)
+            .saturating_sub(length.unsigned_abs()),
+        Some(length) => usize::try_from(length).unwrap_or(usize::MAX),
+        None => usize::MAX,
+    };
 
     params
         .iter()
         .skip(start)
-        .take(length.unwrap_or(usize::MAX))
+        .take(take)
         .cloned()
         .collect()
 }
@@ -17642,6 +17746,15 @@ fn replace_parameter_pattern(
 ) -> String {
     if pattern.is_empty() {
         return value.to_string();
+    }
+
+    if global && replacement.is_empty() {
+        if let Some(class) = parse_negated_bracket_filter(pattern) {
+            return value
+                .chars()
+                .filter(|ch| bracket_filter_matches(&class, *ch))
+                .collect();
+        }
     }
 
     if let Some(prefix_pattern) = pattern.strip_prefix('#') {
@@ -17755,6 +17868,43 @@ fn find_parameter_pattern_match(
     None
 }
 
+#[derive(Clone, Copy)]
+enum BracketFilterItem {
+    Char(char),
+    Range(char, char),
+}
+
+fn parse_negated_bracket_filter(pattern: &str) -> Option<Vec<BracketFilterItem>> {
+    let inner = pattern
+        .strip_prefix("[^")
+        .or_else(|| pattern.strip_prefix("[!"))?
+        .strip_suffix(']')?;
+    if inner.is_empty() {
+        return None;
+    }
+
+    let chars = inner.chars().collect::<Vec<_>>();
+    let mut items = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if index + 2 < chars.len() && chars[index + 1] == '-' {
+            items.push(BracketFilterItem::Range(chars[index], chars[index + 2]));
+            index += 3;
+        } else {
+            items.push(BracketFilterItem::Char(chars[index]));
+            index += 1;
+        }
+    }
+    Some(items)
+}
+
+fn bracket_filter_matches(items: &[BracketFilterItem], ch: char) -> bool {
+    items.iter().any(|item| match *item {
+        BracketFilterItem::Char(value) => value == ch,
+        BracketFilterItem::Range(start, end) => start <= ch && ch <= end,
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ParameterTransform {
     Quote,
@@ -17845,6 +17995,9 @@ enum CaseMod {
 }
 
 fn parse_parameter_case_mod(name: &str) -> Option<(&str, CaseMod, &str)> {
+    if name.contains("//") {
+        return None;
+    }
     if let Some((var_name, pattern)) = name.split_once("^^") {
         return Some((var_name, CaseMod::UpperAll, pattern));
     }
@@ -17938,6 +18091,10 @@ fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn is_arithmetic_command_words(words: &[String]) -> bool {
+    matches!(words, [open, _, close] if open == "((" && close == "))")
 }
 
 fn conditional_outer_parentheses(args: &[String]) -> Option<&[String]> {
