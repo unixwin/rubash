@@ -2,6 +2,16 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
+fn shell_test_path(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('\\', "/");
+    if cfg!(windows) && value.len() >= 3 && value.as_bytes()[1] == b':' {
+        let drive = value.as_bytes()[0] as char;
+        format!("/{}{}", drive.to_ascii_lowercase(), &value[2..])
+    } else {
+        value
+    }
+}
+
 #[test]
 fn bash_execution_string_reflects_c_command() {
     let command = "printf '%s\\n' \"$BASH_EXECUTION_STRING\"";
@@ -50,6 +60,25 @@ fn script_file_uses_script_name_and_positional_arguments() {
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         format!("{script}:alpha:2\n")
+    );
+    let _ = fs::remove_file(script_path);
+}
+
+#[test]
+fn script_file_accepts_shell_style_drive_path() {
+    let script_path = Path::new("target").join("rubash-cli-shell-drive-path.sh");
+    fs::create_dir_all("target").unwrap();
+    fs::write(&script_path, "printf '%s\\n' \"$0\"\n").unwrap();
+    let shell_path = shell_test_path(&std::env::current_dir().unwrap().join(&script_path));
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&shell_path)
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{shell_path}\n")
     );
     let _ = fs::remove_file(script_path);
 }
@@ -314,7 +343,11 @@ fn script_errexit_exits_on_assignment_command_substitution_failure() {
 fn script_assignment_command_substitution_success_keeps_running() {
     let script_path = Path::new("target").join("rubash-cli-assignment-comsub-success.sh");
     fs::create_dir_all("target").unwrap();
-    fs::write(&script_path, "set -e\nv=$(printf ok)\nprintf '%s\\n' \"$v\"\n").unwrap();
+    fs::write(
+        &script_path,
+        "set -e\nv=$(printf ok)\nprintf '%s\\n' \"$v\"\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)
@@ -392,7 +425,11 @@ fn script_nested_case_stays_inside_outer_case_body() {
 fn script_backtick_basename_expands_script_name() {
     let script_path = Path::new("target").join("rubash-cli-backtick-basename.sh");
     fs::create_dir_all("target").unwrap();
-    fs::write(&script_path, "prog=`basename $0`\nprintf '%s\\n' \"$prog\"\n").unwrap();
+    fs::write(
+        &script_path,
+        "prog=`basename $0`\nprintf '%s\\n' \"$prog\"\n",
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)

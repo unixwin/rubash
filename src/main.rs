@@ -8,7 +8,7 @@ use rubash::parser::parse;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
-use std::path::Path;
+use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -133,7 +133,7 @@ fn run_command_string(executor: &mut Executor, command: &str) -> i32 {
 }
 
 fn run_script_file(executor: &mut Executor, script: &str, args: &[String]) -> i32 {
-    let path = Path::new(script);
+    let path = script_arg_to_path(script);
     let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
         Err(e) => {
@@ -147,6 +147,36 @@ fn run_script_file(executor: &mut Executor, script: &str, args: &[String]) -> i3
     executor.set_positional_params(args.to_vec());
     let status = run_source(executor, &contents, false);
     finish_shell(executor, status, false)
+}
+
+fn script_arg_to_path(script: &str) -> PathBuf {
+    if !cfg!(windows) {
+        return PathBuf::from(script);
+    }
+
+    let normalized = script.replace('\\', "/");
+    if normalized.len() >= 3
+        && normalized.as_bytes()[0] == b'/'
+        && normalized.as_bytes()[2] == b'/'
+        && normalized.as_bytes()[1].is_ascii_alphabetic()
+    {
+        let drive = normalized.as_bytes()[1] as char;
+        return PathBuf::from(
+            format!("{}:\\{}", drive.to_ascii_uppercase(), &normalized[3..]).replace('/', "\\"),
+        );
+    }
+
+    if normalized == "/tmp" {
+        if let Ok(tmpdir) = env::var("TMPDIR") {
+            return PathBuf::from(tmpdir);
+        }
+    } else if let Some(rest) = normalized.strip_prefix("/tmp/") {
+        if let Ok(tmpdir) = env::var("TMPDIR") {
+            return PathBuf::from(tmpdir).join(rest);
+        }
+    }
+
+    PathBuf::from(script)
 }
 
 fn run_repl(executor: &mut Executor) {

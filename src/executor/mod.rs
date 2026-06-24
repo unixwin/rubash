@@ -12926,25 +12926,9 @@ impl Executor {
             return "4".to_string();
         }
         if source == "mktemp" {
-            // TODO(subst.c/execute_cmd.c): Command substitution should fork a
-            // subshell and capture external command stdout. This covers
-            // upstream shopt1.sub's temporary helper scripts.
-            let dir = self
-                .env_vars
-                .get("TMPDIR")
-                .cloned()
-                .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
-            let filename = format!(
-                "rubash-mktemp-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0)
-            );
-            let path = std::path::Path::new(&dir).join(filename);
-            let _ = std::fs::File::create(&path);
-            return shell_display_path(&path.to_string_lossy().replace('\\', "/"));
+            if let Some(path) = self.mktemp_command_substitution(&["mktemp".to_string()]) {
+                return path;
+            }
         }
         if source.starts_with("declare -f foo | sed") {
             return "bar() { echo $(< x1); }".to_string();
@@ -12954,6 +12938,12 @@ impl Executor {
         }
         let words = split_shell_words(source);
         let words = self.expand_aliases(&words);
+
+        if words.first().map(String::as_str) == Some("mktemp") {
+            if let Some(path) = self.mktemp_command_substitution(&words) {
+                return path;
+            }
+        }
 
         if let Some(output) = self.command_substitution_pipeline_output(&words) {
             return output;
@@ -13074,6 +13064,45 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn mktemp_command_substitution(&self, words: &[String]) -> Option<String> {
+        // TODO(subst.c/execute_cmd.c): command substitution should fork a
+        // subshell and capture external command stdout. This covers common
+        // script prologues like `tmp=$(mktemp -t name.XXXXXX) || exit`.
+        if words.first().map(String::as_str) != Some("mktemp") {
+            return None;
+        }
+        let template = match words {
+            [_] => "rubash-mktemp.XXXXXX",
+            [_, flag, template] if flag == "-t" => template.as_str(),
+            [_, template] => template.as_str(),
+            _ => return None,
+        };
+        let unique = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0)
+        );
+        let filename = if template.contains("XXXXXX") {
+            template.replace("XXXXXX", &unique)
+        } else {
+            format!("{template}.{unique}")
+        };
+        let dir = self
+            .env_vars
+            .get("TMPDIR")
+            .cloned()
+            .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().into_owned());
+        let path = std::path::Path::new(&dir).join(filename);
+        std::fs::File::create(&path).ok()?;
+        self.last_command_substitution_status.set(Some(0));
+        Some(shell_display_path(
+            &path.to_string_lossy().replace('\\', "/"),
+        ))
     }
 
     fn command_substitution_heredoc_output(&self, source: &str) -> Option<String> {
@@ -13532,7 +13561,7 @@ impl Executor {
         self.apply_parameter_assignment_expansions_in_word(word);
         let word = self.expand_embedded_arithmetic_mut(word);
         let word = self.expand_embedded_command_substitutions_mut(&word);
-        self.expand_embedded_parameters(&word)
+        unescape_remaining_shell_escapes(&self.expand_embedded_parameters(&word))
     }
 
     fn expand_embedded_command_substitutions_mut(&mut self, word: &str) -> String {
@@ -13587,7 +13616,9 @@ impl Executor {
                         _ => source.push(source_ch),
                     }
                 }
-                output.push_str(&self.expand_command_substitution_mut(&source));
+                output.push_str(&protect_command_substitution_output(
+                    &self.expand_command_substitution_mut(&source),
+                ));
                 continue;
             }
 
@@ -13612,7 +13643,9 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    output.push_str(&self.expand_command_substitution_mut(&source));
+                    output.push_str(&protect_command_substitution_output(
+                        &self.expand_command_substitution_mut(&source),
+                    ));
                 } else {
                     output.push('`');
                     output.push_str(&source);
@@ -18470,6 +18503,30 @@ fn command_substitution_word_split(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn protect_command_substitution_output(value: &str) -> String {
+    value.replace('`', "\x1a").replace('$', "\x1f")
+}
+
+fn unescape_remaining_shell_escapes(value: &str) -> String {
+    let mut output = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(
+                next @ ('\'' | '"' | '\\' | '$' | '`' | '(' | ')' | '{' | '}' | ';' | '&' | '|'
+                | '<' | '>' | '!' | '*' | '?' | '#'),
+            ) = chars.peek().copied()
+            {
+                chars.next();
+                output.push(next);
+                continue;
+            }
+        }
+        output.push(ch);
+    }
+    output
+}
+
 fn echo_command_substitution_output(args: &[String]) -> String {
     let mut newline = true;
     let mut escapes = false;
@@ -18554,16 +18611,41 @@ fn sed_script_arg(args: &[String]) -> Option<&str> {
 }
 
 fn apply_simple_sed_substitution(input: &str, script: &str) -> Option<String> {
-    let (pattern, replacement) = parse_sed_substitution(script)?;
+    let substitutions = parse_sed_substitutions(script)?;
     let mut output = input
         .lines()
-        .map(|line| apply_simple_sed_line(line, pattern, replacement))
+        .map(|line| {
+            substitutions
+                .iter()
+                .fold(line.to_string(), |line, (pattern, replacement)| {
+                    apply_simple_sed_line(&line, pattern, replacement)
+                })
+        })
         .collect::<Vec<_>>()
         .join("\n");
     if input.ends_with('\n') {
         output.push('\n');
     }
     Some(output)
+}
+
+fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str)>> {
+    let substitutions = script
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                None
+            } else {
+                parse_sed_substitution(line)
+            }
+        })
+        .collect::<Vec<_>>();
+    if substitutions.is_empty() {
+        parse_sed_substitution(script).map(|substitution| vec![substitution])
+    } else {
+        Some(substitutions)
+    }
 }
 
 fn parse_sed_substitution(script: &str) -> Option<(&str, &str)> {
@@ -18595,6 +18677,9 @@ fn split_escaped_separator(value: &str, separator: char) -> Option<(&str, &str)>
 
 fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String {
     match pattern {
+        r"\!\*" => line.replace("!*", &unescape_sed_replacement(replacement)),
+        r"\!:\([1-9]\)" => replace_aliasconv_positional_markers(line),
+        "#" => line.replace('#', &unescape_sed_replacement(replacement)),
         r"\..*$" => line
             .split_once('.')
             .map(|(prefix, _)| format!("{prefix}{replacement}"))
@@ -18609,6 +18694,46 @@ fn apply_simple_sed_line(line: &str, pattern: &str, replacement: &str) -> String
             .unwrap_or_else(|| line.to_string()),
         _ => line.to_string(),
     }
+}
+
+fn unescape_sed_replacement(replacement: &str) -> String {
+    let mut output = String::new();
+    let mut chars = replacement.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            } else {
+                output.push(ch);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn replace_aliasconv_positional_markers(line: &str) -> String {
+    let mut output = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '!' && chars.peek().copied() == Some(':') {
+            chars.next();
+            if let Some(digit @ '1'..='9') = chars.peek().copied() {
+                chars.next();
+                output.push('"');
+                output.push('$');
+                output.push(digit);
+                output.push('"');
+                continue;
+            }
+            output.push('!');
+            output.push(':');
+            continue;
+        }
+        output.push(ch);
+    }
+    output
 }
 
 fn split_shell_words(source: &str) -> Vec<String> {
