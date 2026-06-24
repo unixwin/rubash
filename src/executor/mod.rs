@@ -42,6 +42,7 @@ const FUNCTION_STDIN_OFFSET: &str = "__RUBASH_FUNCTION_STDIN_OFFSET";
 const FD_STDIN_PREFIX: &str = "__RUBASH_FD_STDIN_";
 const FD_STDIN_OFFSET_PREFIX: &str = "__RUBASH_FD_STDIN_OFFSET_";
 const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
+const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -2874,6 +2875,7 @@ impl Executor {
                 &name,
                 attr_scope.get(&name).copied().unwrap_or_default(),
             );
+            remove_local_export_env_value(&mut self.env_vars, &name);
         }
         names
     }
@@ -3358,8 +3360,10 @@ impl Executor {
             if declare_args_request_integer(&args) {
                 args = self.evaluate_declare_integer_assignment_args(&args);
             }
-            self.save_local_names(&args);
-            self.initialize_non_inherited_locals(&args);
+            if !declare_args_request_print(&args) {
+                self.save_local_names(&args);
+                self.initialize_non_inherited_locals(&args);
+            }
             crate::builtins::declare::execute_with_io(
                 &args,
                 &mut self.env_vars,
@@ -3367,6 +3371,7 @@ impl Executor {
                 &mut stderr,
             )?
         };
+        let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
@@ -3376,8 +3381,12 @@ impl Executor {
             return;
         }
         for name in local_names_without_assignment(args) {
-            self.env_vars.insert(name.clone(), String::new());
-            set_process_env(&name, "");
+            if is_marked_var(&self.env_vars, EXPORTED_VARS, &name) {
+                if let Some(value) = self.env_vars.get(&name).cloned() {
+                    set_local_export_env_value(&mut self.env_vars, &name, value);
+                }
+            }
+            self.env_vars.remove(&name);
             set_var_attrs(&mut self.env_vars, &name, VarAttrs::default());
         }
     }
@@ -3769,6 +3778,11 @@ impl Executor {
                 if is_valid_process_env(&name, value) {
                     process.env(&name, self.child_env_value(&name, value));
                 }
+            }
+        }
+        for (name, value) in local_export_env_values(&self.env_vars) {
+            if is_valid_process_env(&name, &value) {
+                process.env(&name, self.child_env_value(&name, &value));
             }
         }
         self.apply_exported_functions_to_child(process);
@@ -10597,9 +10611,8 @@ impl Executor {
             return false;
         };
 
-        command == "export"
+        matches!(command, "export" | "declare" | "typeset" | "readonly")
             || (command == "eval" && cmd.assignments.keys().any(|name| name.ends_with('+')))
-            || (command == "declare" && cmd.words.iter().any(|word| word == "-x"))
             || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
                 && matches!(command, "." | "source" | "eval" | ":" | "return"))
     }
@@ -16542,6 +16555,58 @@ fn marked_env_names(env_vars: &HashMap<String, String>, key: &str) -> Vec<String
         .unwrap_or_default()
 }
 
+fn local_export_env_values(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
+    env_vars
+        .get(LOCAL_EXPORT_ENV)
+        .map(|value| {
+            value
+                .split('\x1f')
+                .filter_map(|entry| entry.split_once('='))
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn set_local_export_env_value(env_vars: &mut HashMap<String, String>, name: &str, value: String) {
+    let mut entries = local_export_env_values(env_vars);
+    if let Some((_, entry_value)) = entries
+        .iter_mut()
+        .find(|(entry_name, _)| entry_name == name)
+    {
+        *entry_value = value;
+    } else {
+        entries.push((name.to_string(), value));
+    }
+    write_local_export_env_values(env_vars, entries);
+}
+
+fn remove_local_export_env_value(env_vars: &mut HashMap<String, String>, name: &str) {
+    let entries = local_export_env_values(env_vars)
+        .into_iter()
+        .filter(|(entry_name, _)| entry_name != name)
+        .collect();
+    write_local_export_env_values(env_vars, entries);
+}
+
+fn write_local_export_env_values(
+    env_vars: &mut HashMap<String, String>,
+    entries: Vec<(String, String)>,
+) {
+    if entries.is_empty() {
+        env_vars.remove(LOCAL_EXPORT_ENV);
+        return;
+    }
+    env_vars.insert(
+        LOCAL_EXPORT_ENV.to_string(),
+        entries
+            .into_iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("\x1f"),
+    );
+}
+
 fn import_exported_functions_from_env(
     env_vars: &HashMap<String, String>,
 ) -> HashMap<String, Vec<CommandNode>> {
@@ -18447,6 +18512,12 @@ fn local_names_without_assignment(args: &[String]) -> Vec<String> {
         }
     }
     names
+}
+
+fn local_stderr_from_declare(stderr: Vec<u8>) -> Vec<u8> {
+    String::from_utf8(stderr)
+        .map(|text| text.replace("declare:", "local:").into_bytes())
+        .unwrap_or_default()
 }
 
 fn restore_optional_env_var(

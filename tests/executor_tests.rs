@@ -4109,6 +4109,36 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_prefix_assignment_persists_as_exported_variable() {
+        let output_path = target_test_path("rubash-declare-prefix-assignment-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "unset RUBASH_PREFIX_DECL RUBASH_PREFIX_OVERRIDE; \
+             RUBASH_PREFIX_DECL=foo declare -r RUBASH_PREFIX_DECL; \
+             RUBASH_PREFIX_OVERRIDE=bar declare -r RUBASH_PREFIX_OVERRIDE=qux; \
+             echo value:$RUBASH_PREFIX_DECL > {shell_output_path}; \
+             echo ${{RUBASH_PREFIX_DECL@A}} >> {shell_output_path}; \
+             echo ${{RUBASH_PREFIX_OVERRIDE@A}} >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "value:foo\ndeclare -rx RUBASH_PREFIX_DECL='foo'\ndeclare -rx RUBASH_PREFIX_OVERRIDE='qux'\n"
+        );
+        std::env::remove_var("RUBASH_PREFIX_DECL");
+        std::env::remove_var("RUBASH_PREFIX_OVERRIDE");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_declare_p_preserves_combined_attribute_order() {
         let output_path = target_test_path("rubash-declare-combined-attrs-output.txt");
         let _ = fs::remove_file(&output_path);
@@ -13451,6 +13481,102 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
             "g::\nf::\nout:scalar:one two\n"
         );
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_p_prints_without_reinitializing_local() {
+        let output_path = target_test_path("rubash-local-p-preserves-attrs-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input = format!(
+            "f() {{ local -a arr=(); local -r arr=0; local -p arr > {shell_output_path}; \
+                    local -i n=0; local -r n=1; local -p n >> {shell_output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "declare -ar arr=([0]=\"0\")\ndeclare -ir n=\"1\"\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_without_assignment_unsets_shell_value_but_preserves_export_env() {
+        let output_path = target_test_path("rubash-local-export-env-output.txt");
+        let script_path = target_test_path("rubash-local-export-env-child.sh");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_script_path = shell_test_path(&script_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&script_path);
+        fs::write(
+            &script_path,
+            "printf '%s\\n' \"${RUBASH_LOCAL_ENV-unset}\"\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+        let input = format!(
+            "unset RUBASH_LOCAL_ENV; export RUBASH_LOCAL_ENV=abc; \
+             f() {{ local RUBASH_LOCAL_ENV; echo local:${{RUBASH_LOCAL_ENV-unset}} > {shell_output_path}; \
+                    {shell_script_path} >> {shell_output_path}; }}; \
+             f; echo outer:$RUBASH_LOCAL_ENV >> {shell_output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(&output_path).unwrap(),
+            "local:unset\nabc\nouter:abc\n"
+        );
+        std::env::remove_var("RUBASH_LOCAL_ENV");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(script_path);
+    }
+
+    #[test]
+    fn test_local_readonly_assignment_reports_local_builtin_name() {
+        let output_path = target_test_path("rubash-local-readonly-error-output.txt");
+        let error_path = target_test_path("rubash-local-readonly-error-stderr.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let shell_error_path = shell_test_path(&error_path);
+        let _ = fs::remove_file(&output_path);
+        let _ = fs::remove_file(&error_path);
+        let input = format!(
+            "readonly RUBASH_LOCAL_RO=outer; \
+             f() {{ local RUBASH_LOCAL_RO=inner 2> {shell_error_path}; echo status:$? > {shell_output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "status:1\n");
+        assert!(fs::read_to_string(&error_path)
+            .unwrap()
+            .contains("local: RUBASH_LOCAL_RO: readonly variable"));
+        std::env::remove_var("RUBASH_LOCAL_RO");
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
     }
 
     #[test]
