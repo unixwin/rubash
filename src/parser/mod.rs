@@ -704,17 +704,17 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
         if let Some(line) = tokens.get(start).map(|token| token.position) {
             set_body_line(&mut body, line);
         }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
         let mut next_i = i + 1;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
         while tokens
             .get(next_i)
             .is_some_and(|token| token.kind == TokenKind::Semicolon)
         {
             next_i += 1;
         }
-
-        let mut command = CommandNode::new();
-        command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(FunctionCommand { name, body });
         return Some((command, next_i));
     }
     if tokens.get(i)?.value != "{" {
@@ -749,18 +749,80 @@ fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode
     if let Some(line) = tokens.get(start).map(|token| token.position) {
         set_body_line(&mut body, line);
     }
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.function_command = Some(FunctionCommand { name, body });
     let mut next_i = i + 1;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
     while tokens
         .get(next_i)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
     {
         next_i += 1;
     }
-
-    let mut command = CommandNode::new();
-    command.line = tokens.get(start).map(|token| token.position);
-    command.function_command = Some(FunctionCommand { name, body });
     Some((command, next_i))
+}
+
+fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &mut CommandNode) {
+    loop {
+        let Some(token) = tokens.get(*index) else {
+            break;
+        };
+        let Some(target) = tokens.get(*index + 1).filter(|next| {
+            matches!(
+                next.kind,
+                TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst
+            )
+        }) else {
+            break;
+        };
+
+        match token.kind {
+            TokenKind::RedirectIn => {
+                command.redirect_in = Some(Redirect {
+                    fd: None,
+                    target: target.value.clone(),
+                    append: false,
+                    clobber: false,
+                });
+            }
+            TokenKind::RedirectOut => {
+                command.redirect_out = Some(Redirect {
+                    fd: None,
+                    target: target.value.clone(),
+                    append: false,
+                    clobber: token.value == ">|",
+                });
+            }
+            TokenKind::Append => {
+                command.append = Some(Redirect {
+                    fd: None,
+                    target: target.value.clone(),
+                    append: true,
+                    clobber: false,
+                });
+            }
+            TokenKind::RedirectErr => {
+                command.redirect_err = Some(Redirect {
+                    fd: Some(2),
+                    target: target.value.clone(),
+                    append: false,
+                    clobber: token.value == "2>|",
+                });
+            }
+            TokenKind::RedirectErrAppend => {
+                command.redirect_err_append = Some(Redirect {
+                    fd: Some(2),
+                    target: target.value.clone(),
+                    append: true,
+                    clobber: false,
+                });
+            }
+            _ => break,
+        }
+
+        *index += 2;
+    }
 }
 
 fn set_body_line(body: &mut [CommandNode], line: usize) {
