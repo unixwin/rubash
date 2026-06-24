@@ -4969,6 +4969,23 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_shopt_list_returns_failure_for_disabled_option() {
+        let output_path = "target/rubash-shopt-list-disabled-status.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("shopt -u expand_aliases; shopt expand_aliases >/dev/null; echo $? > {output_path}; shopt -s expand_aliases; shopt expand_aliases >/dev/null; echo $? >> {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_shopt_redirects_stderr() {
         let error_path = "target/rubash-shopt-stderr-output.txt";
         let status_path = "target/rubash-shopt-stderr-status.txt";
