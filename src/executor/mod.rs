@@ -651,6 +651,7 @@ struct VarAttrs {
 #[derive(Debug)]
 struct SavedGlobalDeclareLocal {
     name: String,
+    scope_index: usize,
     local_value: Option<String>,
     local_attrs: VarAttrs,
 }
@@ -2885,13 +2886,6 @@ impl Executor {
             return Vec::new();
         }
 
-        let Some(scope) = self.local_var_scopes.last() else {
-            return Vec::new();
-        };
-        let Some(attr_scope) = self.local_attr_scopes.last() else {
-            return Vec::new();
-        };
-
         let mut saved_locals = Vec::new();
         let mut seen = HashSet::new();
         for arg in args {
@@ -2904,17 +2898,23 @@ impl Executor {
             let Some(name) = local_assignment_name(arg) else {
                 continue;
             };
-            if !seen.insert(name.to_string()) || !scope.contains_key(name) {
+            if !seen.insert(name.to_string()) {
                 continue;
             }
+            let Some(scope_index) = self.visible_local_scope_index(name) else {
+                continue;
+            };
             saved_locals.push(SavedGlobalDeclareLocal {
                 name: name.to_string(),
+                scope_index,
                 local_value: self.env_vars.get(name).cloned(),
                 local_attrs: capture_var_attrs(&self.env_vars, name),
             });
         }
 
         for saved in &saved_locals {
+            let scope = &self.local_var_scopes[saved.scope_index];
+            let attr_scope = &self.local_attr_scopes[saved.scope_index];
             restore_optional_shell_var(
                 &mut self.env_vars,
                 &saved.name,
@@ -2930,6 +2930,12 @@ impl Executor {
         saved_locals
     }
 
+    fn visible_local_scope_index(&self, name: &str) -> Option<usize> {
+        self.local_var_scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+    }
+
     fn finish_global_declare_for_local_names(
         &mut self,
         saved_locals: Vec<SavedGlobalDeclareLocal>,
@@ -2938,15 +2944,14 @@ impl Executor {
             return;
         }
 
-        let Some(scope) = self.local_var_scopes.last_mut() else {
-            return;
-        };
-        let Some(attr_scope) = self.local_attr_scopes.last_mut() else {
-            return;
-        };
-
         for saved in saved_locals {
+            let Some(scope) = self.local_var_scopes.get_mut(saved.scope_index) else {
+                continue;
+            };
             scope.insert(saved.name.clone(), self.env_vars.get(&saved.name).cloned());
+            let Some(attr_scope) = self.local_attr_scopes.get_mut(saved.scope_index) else {
+                continue;
+            };
             attr_scope.insert(
                 saved.name.clone(),
                 capture_var_attrs(&self.env_vars, &saved.name),
@@ -18351,6 +18356,9 @@ fn local_assignment_name(arg: &str) -> Option<&str> {
     let name = arg.split_once('=').map(|(name, _)| name).unwrap_or(arg);
     let name = name.strip_suffix('+').unwrap_or(name);
     let name = name.split_once('[').map(|(name, _)| name).unwrap_or(name);
+    let name = name
+        .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+        .unwrap_or(name);
     if is_shell_name(name) {
         Some(name)
     } else {
