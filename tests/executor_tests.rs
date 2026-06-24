@@ -2262,6 +2262,31 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_declare_assoc_compound_assignment_preserves_quoted_keys() {
+        let output_path = "target/rubash-declare-assoc-quoted-keys-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_KEYS");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_QUOTED_KEYS=([\"two words\"]=\"value here\"); \
+             declare -p RUBASH_ASSOC_QUOTED_KEYS > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -A RUBASH_ASSOC_QUOTED_KEYS=([\"two words\"]=\"value here\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_QUOTED_KEYS");
+    }
+
+    #[test]
     fn test_assoc_compound_append_accepts_key_value_pairs() {
         let output_path = "target/rubash-assoc-append-pairs-output.txt";
         let _ = fs::remove_file(output_path);

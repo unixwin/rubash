@@ -813,7 +813,8 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
 
             if j + 1 < tokens.len() && matches!(tokens[j].value.as_str(), "=" | "+=") {
                 values.push(format!(
-                    "[{subscript}]{}{}",
+                    "[{}]{}{}",
+                    quote_compound_assignment_word(&subscript),
                     tokens[j].value,
                     quote_compound_assignment_word(&tokens[j + 1].value)
                 ));
@@ -838,7 +839,7 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
     Some((format!("({})", values.join(" ")), i))
 }
 
-fn compound_subscript_assignment(value: &str) -> Option<(&str, &str)> {
+fn compound_subscript_assignment(value: &str) -> Option<(String, &str)> {
     if !value.starts_with('[') {
         return None;
     }
@@ -848,7 +849,16 @@ fn compound_subscript_assignment(value: &str) -> Option<(&str, &str)> {
             continue;
         };
         let split = pos + operator.len();
-        return Some((&value[..split], &value[split..]));
+        let subscript = &value[1..pos];
+        let assignment = if operator == "]=" { "=" } else { "+=" };
+        return Some((
+            format!(
+                "[{}]{}",
+                quote_compound_assignment_word(subscript),
+                assignment
+            ),
+            &value[split..],
+        ));
     }
 
     None

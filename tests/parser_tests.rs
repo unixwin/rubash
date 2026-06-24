@@ -276,4 +276,19 @@ mod quote_removal {
             ]
         );
     }
+
+    #[test]
+    fn test_compound_assignment_preserves_quoted_subscript_boundaries() {
+        let input = "declare -A assoc=([\"two words\"]=\"value here\")";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(
+            ast.commands[0].words,
+            vec![
+                "declare",
+                "-A",
+                "assoc=\x1e([\"two words\"]=\"value here\")"
+            ]
+        );
+    }
 }

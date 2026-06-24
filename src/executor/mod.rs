@@ -9415,7 +9415,7 @@ impl Executor {
                 "({})",
                 entries
                     .into_iter()
-                    .map(|(key, value)| format!("[{key}]={value}"))
+                    .map(|(key, value)| format!("[{}]={value}", quote_assoc_key(&key)))
                     .collect::<Vec<_>>()
                     .join(" ")
             );
@@ -11246,7 +11246,9 @@ impl Executor {
             }
             let rendered = entries
                 .into_iter()
-                .map(|(key, value)| format!("[{key}]={}", quote_array_value(&value)))
+                .map(|(key, value)| {
+                    format!("[{}]={}", quote_assoc_key(&key), quote_array_value(&value))
+                })
                 .collect::<Vec<_>>()
                 .join(" ");
             return format!("declare -A {name}=({rendered} )");
@@ -14291,10 +14293,28 @@ fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
         "({})",
         entries
             .into_iter()
-            .map(|(key, value)| format!("[{key}]={}", quote_assoc_storage_value(&value)))
+            .map(|(key, value)| {
+                format!(
+                    "[{}]={}",
+                    quote_assoc_key(&key),
+                    quote_assoc_storage_value(&value)
+                )
+            })
             .collect::<Vec<_>>()
             .join(" ")
     )
+}
+
+fn quote_assoc_key(key: &str) -> String {
+    if !key.is_empty()
+        && !key
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\' | ']'))
+    {
+        return key.to_string();
+    }
+
+    quote_assoc_storage_value(key)
 }
 
 fn quote_assoc_storage_value(value: &str) -> String {
@@ -14329,9 +14349,7 @@ fn assoc_entries(value: &str) -> Vec<(String, String)> {
         .filter_map(|part| {
             let (key, value) = part.split_once('=')?;
             Some((
-                key.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string(),
+                unquote_storage_value(key.trim_start_matches('[').trim_end_matches(']')),
                 unquote_storage_value(value),
             ))
         })
