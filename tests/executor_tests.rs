@@ -11169,6 +11169,30 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_parameter_assignment_expansion_assigns_inside_quoted_words() {
+        let output_path = "target/rubash-param-assign-quoted-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "unset v w; v=; printf '<%s>:%s\\n' \"${{v:=default}}\" \"$v\" > {output_path}; \
+             printf '<%s>:%s\\n' \"x${{w=word}}y\" \"$w\" >> {output_path}; \
+             unset cmd; ${{cmd:=echo}} command-position:$cmd >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "<default>:default\n<xwordy>:word\ncommand-position:echo\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_parameter_colon_equals_assigns_empty_value() {
         let output_path = "target/rubash-param-colon-equals-output.txt";
         let _ = fs::remove_file(output_path);
