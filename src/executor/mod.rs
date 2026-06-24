@@ -11248,15 +11248,14 @@ impl Executor {
     }
 
     fn parameter_assignment_transform(&self, name: &str) -> String {
-        if let Some(array_name) = name.strip_suffix("[*]") {
+        if let Some(array_name) = name
+            .strip_suffix("[*]")
+            .or_else(|| name.strip_suffix("[@]"))
+        {
             let Some(array_name) = self.resolved_variable_name(array_name) else {
                 return String::new();
             };
             return self.array_assignment_transform(&array_name);
-        }
-
-        if name.ends_with("[@]") {
-            return String::new();
         }
 
         if let Some((array_name, index)) = parse_array_numeric_subscript(name) {
@@ -11308,6 +11307,16 @@ impl Executor {
         let name = name.as_str();
 
         if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
+            if let Some(value) = self
+                .env_vars
+                .get(name)
+                .and_then(|value| assoc_value_at(value, "0"))
+            {
+                return format!(
+                    "declare -A {name}={}",
+                    shell_single_quote_assignment_value(&value)
+                );
+            }
             return format!("declare -A {name}");
         }
 

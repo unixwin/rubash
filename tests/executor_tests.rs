@@ -12642,6 +12642,44 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_array_assignment_transform_matches_at_and_star_forms() {
+        let output_path = "target/rubash-param-array-assignment-transform-output.txt";
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_ASSIGN_TRANSFORM_ARRAY",
+            "RUBASH_ASSIGN_TRANSFORM_ASSOC",
+        ] {
+            std::env::remove_var(name);
+        }
+        let input = format!(
+            "RUBASH_ASSIGN_TRANSFORM_ARRAY=(zero one); declare -A RUBASH_ASSIGN_TRANSFORM_ASSOC=([0]=z); \
+             echo arr_star:${{RUBASH_ASSIGN_TRANSFORM_ARRAY[*]@A}} > {output_path}; \
+             echo arr_at:${{RUBASH_ASSIGN_TRANSFORM_ARRAY[@]@A}} >> {output_path}; \
+             echo assoc_scalar:${{RUBASH_ASSIGN_TRANSFORM_ASSOC@A}} >> {output_path}; \
+             echo assoc_at:${{RUBASH_ASSIGN_TRANSFORM_ASSOC[@]@A}} >> {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "arr_star:declare -a RUBASH_ASSIGN_TRANSFORM_ARRAY=([0]=\"zero\" [1]=\"one\")\narr_at:declare -a RUBASH_ASSIGN_TRANSFORM_ARRAY=([0]=\"zero\" [1]=\"one\")\nassoc_scalar:declare -A RUBASH_ASSIGN_TRANSFORM_ASSOC='z'\nassoc_at:declare -A RUBASH_ASSIGN_TRANSFORM_ASSOC=([0]=\"z\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+        for name in [
+            "RUBASH_ASSIGN_TRANSFORM_ARRAY",
+            "RUBASH_ASSIGN_TRANSFORM_ASSOC",
+        ] {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
         let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
         let _ = fs::remove_file(output_path);
