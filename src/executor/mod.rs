@@ -12386,6 +12386,9 @@ impl Executor {
         // in word expansion.
         let source = source.trim();
         let source = source.strip_prefix("eval ").unwrap_or(source);
+        if let Some(inner) = strip_wrapping_subshell_group(source) {
+            return self.expand_command_substitution_inner(inner);
+        }
         if let Some(path) = source.strip_prefix('<') {
             let path = self.expand_word(path.trim());
             return fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
@@ -15394,6 +15397,7 @@ impl ConditionalArithParser<'_> {
                 (self.peek()? == b')').then(|| self.pos += 1)?;
                 Some(value)
             }
+            b'$' => self.parse_dollar_variable(),
             ch if ch.is_ascii_digit() => self.parse_number(),
             ch if is_shell_name_start(ch as char) => self.parse_variable(),
             _ => None,
@@ -15443,6 +15447,41 @@ impl ConditionalArithParser<'_> {
             10
         };
         parse_arithmetic_digits(text.as_bytes(), base)
+    }
+
+    fn parse_dollar_variable(&mut self) -> Option<i128> {
+        self.pos += 1;
+        if self.consume("{") {
+            let start = self.pos;
+            let first = self.peek()? as char;
+            if !is_shell_name_start(first) {
+                return None;
+            }
+            self.pos += 1;
+            while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
+                self.pos += 1;
+            }
+            let name = std::str::from_utf8(&self.input[start..self.pos])
+                .ok()?
+                .to_string();
+            self.skip_ws();
+            if !self.consume("}") {
+                return None;
+            }
+            return self.variable_value(&name);
+        }
+
+        let start = self.pos;
+        let first = self.peek()? as char;
+        if !is_shell_name_start(first) {
+            return None;
+        }
+        self.pos += 1;
+        while self.peek().is_some_and(|ch| is_shell_name_char(ch as char)) {
+            self.pos += 1;
+        }
+        let name = std::str::from_utf8(&self.input[start..self.pos]).ok()?;
+        self.variable_value(name)
     }
 
     fn parse_variable(&mut self) -> Option<i128> {
@@ -16211,6 +16250,37 @@ fn strip_matching_quotes(value: &str) -> &str {
     } else {
         value
     }
+}
+
+fn strip_wrapping_subshell_group(source: &str) -> Option<&str> {
+    let inner = source.strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (index, ch) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '(' if !single && !double => depth += 1,
+            ')' if !single && !double => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && index + ch.len_utf8() != source.len() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    (depth == 0).then_some(inner.trim())
 }
 
 #[derive(Clone, Copy)]
