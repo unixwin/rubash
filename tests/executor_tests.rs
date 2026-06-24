@@ -11237,6 +11237,25 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_if_condition_honors_arithmetic_and_or_list() {
+        let output_path = "target/rubash-if-arith-and-or-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "if (( 1 )) && (( 0 )); then echo bad > {output_path}; else echo ok > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_arithmetic_for_loop_break_continue_and_empty_test() {
         let output_path = "target/rubash-arithmetic-for-control-output.txt";
         let _ = fs::remove_file(output_path);
@@ -11967,6 +11986,25 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
             fs::read_to_string(output_path).unwrap(),
             "in:local\nout:global\n"
         );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_local_assignment_expands_parameter_value() {
+        let output_path = "target/rubash-local-param-expansion-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "f() {{ [[ '1.000' =~ ^[-]?([0-9]*)\\.([0-9]+)$ ]]; local integerPart=${{BASH_REMATCH[1]:-0}} fractionalPart=${{BASH_REMATCH[2]}}; echo \"$integerPart/$fractionalPart\" > {output_path}; }}; f"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1/000\n");
         let _ = fs::remove_file(output_path);
     }
 
@@ -15717,6 +15755,44 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
         assert!(result.is_ok());
         assert_eq!(executor.last_exit_code(), 0);
         assert_eq!(fs::read_to_string(output_path).unwrap(), "0 2:bad 2 bad\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_if_conditional_regex_groups_set_bash_rematch() {
+        let output_path = "target/rubash-if-conditional-regex-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "if [[ '1.000' =~ ^[-]?([0-9]*)\\.([0-9]+)$ ]]; then echo \"${{BASH_REMATCH[1]}}/${{BASH_REMATCH[2]}}\" > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "1/000\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_if_conditional_regex_preserves_alternation() {
+        let output_path = "target/rubash-if-regex-alternation-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "if [[ shellmath_add =~ shellmath_(add|subtract|multiply|divide)$ ]]; then echo yes > {output_path}; else echo no > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
         let _ = fs::remove_file(output_path);
     }
 
