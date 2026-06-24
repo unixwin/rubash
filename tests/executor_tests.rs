@@ -11809,6 +11809,34 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_case_backslash_patterns_preserve_literal_backslash() {
+        let output_path = "target/rubash-case-backslash-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "x='\\x'; \
+             case $x in \\x) echo bad > {output_path} ;; \\\\x) echo literal > {output_path} ;; *) echo star > {output_path} ;; esac; \
+             case x in \\\\x) echo bad >> {output_path} ;; \\x) echo plain >> {output_path} ;; *) echo star >> {output_path} ;; esac"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        assert_eq!(
+            ast.commands
+                .iter()
+                .filter(|command| command.case_command.is_some())
+                .count(),
+            2
+        );
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "literal\nplain\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_case_fallthrough_executes_next_clause_body() {
         let output_path = "target/rubash-case-fallthrough-output.txt";
         let _ = fs::remove_file(output_path);

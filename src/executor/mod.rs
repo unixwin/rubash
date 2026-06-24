@@ -19009,6 +19009,11 @@ fn case_pattern_matches_at(
     }
 
     match pattern[p_index] {
+        '\x18' => {
+            w_index < word.len()
+                && word[w_index] == '\\'
+                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+        }
         '*' => {
             case_pattern_matches_at(pattern, p_index + 1, word, w_index)
                 || (w_index < word.len()
