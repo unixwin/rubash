@@ -217,6 +217,22 @@ fn script_center_example_reads_file_in_nested_loop() {
 }
 
 #[test]
+fn script_sort_pos_params_example_handles_quoted_positional_args() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("sort-pos-params")
+        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "1\n1\n2\n2\n3\n3\n4\n5\n5\n6\n9\n1 1 2 2 3 3 4 5 5 6 9\n11\na b a c x z\n3\n"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("sort_posparams: argument expected"));
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();
