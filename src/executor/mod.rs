@@ -672,6 +672,7 @@ pub struct Executor {
     last_background_pid: Option<u32>,
     suppress_errexit: usize,
     last_command_substitution_status: Cell<Option<i32>>,
+    stdout_capture: Option<Vec<u8>>,
 }
 
 impl Executor {
@@ -769,6 +770,7 @@ impl Executor {
             last_background_pid: None,
             suppress_errexit: 0,
             last_command_substitution_status: Cell::new(None),
+            stdout_capture: None,
         }
     }
 
@@ -1291,7 +1293,7 @@ impl Executor {
     }
 
     fn execute_pipeline_stage(
-        &self,
+        &mut self,
         command: &CommandNode,
         input: &str,
     ) -> Result<Option<(String, i32)>, ExecuteError> {
@@ -1375,7 +1377,7 @@ impl Executor {
     }
 
     fn execute_external_pipeline_stage(
-        &self,
+        &mut self,
         command: &CommandNode,
         input: &str,
     ) -> Result<Option<(String, i32)>, ExecuteError> {
@@ -5803,7 +5805,7 @@ impl Executor {
         }
     }
 
-    fn write_builtin_not_found(&self, cmd: &CommandNode, name: &str) -> Result<(), ExecuteError> {
+    fn write_builtin_not_found(&mut self, cmd: &CommandNode, name: &str) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
         writeln!(
             &mut stderr,
@@ -7232,10 +7234,16 @@ impl Executor {
             )?);
         }
 
-        Ok(crate::builtins::printf::execute(
-            &cmd.words[1..],
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = crate::builtins::printf::execute_with_io(
+            cmd.words[1..].iter().map(String::as_str),
             &mut self.env_vars,
-        )?)
+            &mut stdout,
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(status)
     }
 
     fn execute_exit(
@@ -7768,7 +7776,7 @@ impl Executor {
         self.finish_read_error(cmd, &stderr, 127)
     }
 
-    fn finish_read_error(&self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
+    fn finish_read_error(&mut self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
         self.write_buffered_builtin_output(cmd, &[], stderr)
             .map(|_| status)
             .unwrap_or(1)
@@ -8251,7 +8259,7 @@ impl Executor {
     }
 
     fn mapfile_missing_option_argument(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         command_name: &str,
         option: &str,
@@ -8267,7 +8275,7 @@ impl Executor {
     }
 
     fn mapfile_invalid_option(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         command_name: &str,
         option: char,
@@ -8289,7 +8297,7 @@ impl Executor {
         );
     }
 
-    fn finish_mapfile_error(&self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
+    fn finish_mapfile_error(&mut self, cmd: &CommandNode, stderr: &[u8], status: i32) -> i32 {
         if self
             .write_buffered_builtin_output(cmd, &[], stderr)
             .is_err()
@@ -8727,7 +8735,7 @@ impl Executor {
     }
 
     fn write_buffered_builtin_output(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         stdout: &[u8],
         stderr: &[u8],
@@ -8743,6 +8751,8 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
             file.write_all(stdout)?;
+        } else if let Some(capture) = &mut self.stdout_capture {
+            capture.write_all(stdout)?;
         } else {
             std::io::stdout().lock().write_all(stdout)?;
         }
@@ -9279,7 +9289,11 @@ impl Executor {
             return Ok(());
         }
 
-        crate::builtins::echo::execute(&echo_args)?;
+        if let Some(capture) = &mut self.stdout_capture {
+            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), capture)?;
+        } else {
+            crate::builtins::echo::execute(&echo_args)?;
+        }
         Ok(())
     }
 
@@ -13397,7 +13411,145 @@ impl Executor {
     fn expand_embedded_parameters_mut(&mut self, word: &str) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let word = self.expand_embedded_arithmetic_mut(word);
+        let word = self.expand_embedded_command_substitutions_mut(&word);
         self.expand_embedded_parameters(&word)
+    }
+
+    fn expand_embedded_command_substitutions_mut(&mut self, word: &str) -> String {
+        let mut output = String::new();
+        let mut chars = word.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '$' && chars.peek().copied() == Some('(') {
+                chars.next();
+                if chars.peek().copied() == Some('(') {
+                    output.push_str("$((");
+                    chars.next();
+                    continue;
+                }
+
+                let mut depth = 1usize;
+                let mut source = String::new();
+                let mut single = false;
+                let mut double = false;
+                let mut escaped = false;
+                for source_ch in chars.by_ref() {
+                    if escaped {
+                        source.push(source_ch);
+                        escaped = false;
+                        continue;
+                    }
+                    if source_ch == '\\' && !single {
+                        source.push(source_ch);
+                        escaped = true;
+                        continue;
+                    }
+                    match source_ch {
+                        '\'' if !double => {
+                            single = !single;
+                            source.push(source_ch);
+                        }
+                        '"' if !single => {
+                            double = !double;
+                            source.push(source_ch);
+                        }
+                        '(' if !single && !double => {
+                            depth += 1;
+                            source.push(source_ch);
+                        }
+                        ')' if !single && !double => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                break;
+                            }
+                            source.push(source_ch);
+                        }
+                        _ => source.push(source_ch),
+                    }
+                }
+                output.push_str(&self.expand_command_substitution_mut(&source));
+                continue;
+            }
+
+            if ch == '`' {
+                let mut source = String::new();
+                let mut escaped = false;
+                let mut closed = false;
+                for source_ch in chars.by_ref() {
+                    if escaped {
+                        source.push(source_ch);
+                        escaped = false;
+                        continue;
+                    }
+                    if source_ch == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if source_ch == '`' {
+                        closed = true;
+                        break;
+                    }
+                    source.push(source_ch);
+                }
+                if closed {
+                    output.push_str(&self.expand_command_substitution_mut(&source));
+                } else {
+                    output.push('`');
+                    output.push_str(&source);
+                }
+                continue;
+            }
+
+            output.push(ch);
+        }
+
+        output
+    }
+
+    fn expand_command_substitution_mut(&mut self, source: &str) -> String {
+        let source = source.trim();
+        let words = self.expand_aliases(&split_shell_words(source));
+        if let Some(output) = self.run_function_command_substitution(&words) {
+            return output;
+        }
+        self.expand_command_substitution(source)
+    }
+
+    fn run_function_command_substitution(&mut self, words: &[String]) -> Option<String> {
+        let name = words.first()?;
+        if !self.functions.contains_key(name) {
+            return None;
+        }
+
+        let args = words[1..]
+            .iter()
+            .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+            .collect::<Vec<_>>();
+        let mut call = CommandNode::new();
+        call.words = words.to_vec();
+
+        let saved_env = self.env_vars.clone();
+        let saved_exit_code = self.exit_code;
+        let saved_capture = self.stdout_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        let result = self.execute_function(name, &args, &call);
+        let output = self.stdout_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_capture;
+        let status = match result {
+            Ok(()) => self.exit_code,
+            Err(ExecuteError::Return(status)) => status,
+            Err(ExecuteError::ExitCode(status)) => status,
+            Err(_) => 1,
+        };
+        self.env_vars = saved_env;
+        self.exit_code = saved_exit_code;
+        self.last_command_substitution_status.set(Some(status));
+
+        Some(
+            String::from_utf8_lossy(&output)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
     }
 
     fn expand_embedded_arithmetic_mut(&mut self, word: &str) -> String {
