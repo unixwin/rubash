@@ -2633,6 +2633,33 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_assoc_scalar_append_assigns_zero_key() {
+        let output_path = "target/rubash-assoc-scalar-append-output.txt";
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_SCALAR_APPEND");
+        let input = format!(
+            "declare -A RUBASH_ASSOC_SCALAR_APPEND=([one]=bar); \
+             RUBASH_ASSOC_SCALAR_APPEND+=zero; \
+             RUBASH_ASSOC_SCALAR_APPEND+=([four]=four); \
+             declare -p RUBASH_ASSOC_SCALAR_APPEND > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "declare -A RUBASH_ASSOC_SCALAR_APPEND=([four]=\"four\" [0]=\"zero\" [one]=\"bar\" )\n"
+        );
+        let _ = fs::remove_file(output_path);
+        std::env::remove_var("RUBASH_ASSOC_SCALAR_APPEND");
+    }
+
+    #[test]
     fn test_declare_p_redirects_output() {
         let output_path = "target/rubash-declare-p-redirect-output.txt";
         let _ = fs::remove_file(output_path);
