@@ -13522,12 +13522,14 @@ impl Executor {
         }
 
         let Some(program) = find_user_command(&cmd.words[0], &self.env_vars) else {
-            eprintln!(
+            let mut stderr = Vec::new();
+            writeln!(
+                &mut stderr,
                 "{}{}: command not found",
                 self.diagnostic_prefix(),
                 cmd.words[0]
-            );
-            self.exit_code = 127;
+            )?;
+            self.finish_external_error(cmd, &stderr, 127)?;
             return Ok(());
         };
 
@@ -13608,17 +13610,30 @@ impl Executor {
                         self.exit_code = status.code().unwrap_or(1);
                     }
                     Err(error) => {
-                        eprintln!("rubash: {}: {}", cmd.words[0], error);
-                        self.exit_code = 126;
+                        let mut stderr = Vec::new();
+                        writeln!(&mut stderr, "rubash: {}: {}", cmd.words[0], error)?;
+                        self.finish_external_error(cmd, &stderr, 126)?;
                     }
                 }
             }
             Err(error) => {
-                eprintln!("rubash: {}: {}", cmd.words[0], error);
-                self.exit_code = 126;
+                let mut stderr = Vec::new();
+                writeln!(&mut stderr, "rubash: {}: {}", cmd.words[0], error)?;
+                self.finish_external_error(cmd, &stderr, 126)?;
             }
         }
 
+        Ok(())
+    }
+
+    fn finish_external_error(
+        &mut self,
+        cmd: &CommandNode,
+        stderr: &[u8],
+        status: i32,
+    ) -> Result<(), ExecuteError> {
+        self.write_buffered_builtin_output(cmd, &[], stderr)?;
+        self.exit_code = status;
         Ok(())
     }
 

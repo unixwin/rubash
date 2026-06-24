@@ -11613,6 +11613,58 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_external_command_not_found_redirects_stderr() {
+        let output_path = "target/rubash-external-notfound-status.txt";
+        let error_path = "target/rubash-external-notfound-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!("no_such_rubash_command 2> {error_path}; echo $? > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "127\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_rubash_command: command not found"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
+    fn test_command_not_found_redirects_stderr_and_creates_stdout_redirect() {
+        let output_path = "target/rubash-command-notfound-output.txt";
+        let status_path = "target/rubash-command-notfound-status.txt";
+        let error_path = "target/rubash-command-notfound-error.txt";
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "command no_such_rubash_command > {output_path} 2> {error_path}; echo $? > {status_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "127\n");
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("no_such_rubash_command: command not found"));
+        let _ = fs::remove_file(output_path);
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_noclobber_can_be_disabled_for_output_overwrite() {
         let output_path = "target/rubash-noclobber-disabled-output.txt";
         let _ = fs::remove_file(output_path);
