@@ -457,6 +457,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_inline_then_executes_if_body_tail() {
+        let output_path = "target/rubash-inline-then-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "if true; then echo yes > {output_path}; else echo no > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_printf_percent_n_assigns_output_count() {
         let output_path = "target/rubash-printf-percent-n-output.txt";
         let _ = fs::remove_file(output_path);
