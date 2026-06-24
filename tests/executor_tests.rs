@@ -1652,6 +1652,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_brace_group_redirects_combined_stdout() {
+        let output_path = target_test_path("rubash-brace-group-redirect-output.txt");
+        let shell_output_path = shell_test_path(&output_path);
+        let _ = fs::remove_file(&output_path);
+        let input =
+            format!("{{ echo alpha; echo beta; }} > {shell_output_path}; cat {shell_output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(&output_path).unwrap(), "alpha\nbeta\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_brace_group_preserves_quoted_bracket_words() {
         let input = "[ $# -lt 1 ] && {\n\
              echo \"zprintf: usage: zprintf format [args ...]\" >&2\n\

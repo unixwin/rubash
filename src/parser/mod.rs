@@ -816,7 +816,7 @@ fn parse_brace_group_command(tokens: &[Token], start: usize) -> Option<(CommandN
         let mut command = CommandNode::new();
         command.line = Some(token.position);
         command.brace_group = Some(parse(&body_tokens).commands);
-        return Some(finish_arithmetic_command(command, tokens, start + 1));
+        return Some(finish_compound_command(command, tokens, start + 1));
     }
 
     if !is_keyword(tokens, start, "{") {
@@ -843,7 +843,7 @@ fn parse_brace_group_command(tokens: &[Token], start: usize) -> Option<(CommandN
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.brace_group = Some(parse(&tokens[start + 1..i]).commands);
-    Some(finish_arithmetic_command(command, tokens, i + 1))
+    Some(finish_compound_command(command, tokens, i + 1))
 }
 
 fn parse_function_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
@@ -1280,6 +1280,26 @@ fn finish_arithmetic_command(
     tokens: &[Token],
     index: usize,
 ) -> (CommandNode, usize) {
+    match tokens.get(index).map(|token| &token.kind) {
+        Some(TokenKind::And) => {
+            command.and_or = Some(true);
+            (command, index + 1)
+        }
+        Some(TokenKind::Or) => {
+            command.and_or = Some(false);
+            (command, index + 1)
+        }
+        Some(TokenKind::Semicolon) => (command, index + 1),
+        _ => (command, index),
+    }
+}
+
+fn finish_compound_command(
+    mut command: CommandNode,
+    tokens: &[Token],
+    mut index: usize,
+) -> (CommandNode, usize) {
+    collect_trailing_redirections(tokens, &mut index, &mut command);
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::And) => {
             command.and_or = Some(true);
