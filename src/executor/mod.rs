@@ -671,6 +671,7 @@ pub struct Executor {
     subshell_depth: Cell<usize>,
     last_background_pid: Option<u32>,
     suppress_errexit: usize,
+    last_command_substitution_status: Cell<Option<i32>>,
 }
 
 impl Executor {
@@ -767,6 +768,7 @@ impl Executor {
             subshell_depth: Cell::new(0),
             last_background_pid: None,
             suppress_errexit: 0,
+            last_command_substitution_status: Cell::new(None),
         }
     }
 
@@ -1859,10 +1861,20 @@ impl Executor {
                 self.exit_code = status;
                 return Err(ExecuteError::ExitCode(status));
             }
-            self.exit_code = 0;
+            let mut status = 0;
             for (name, value) in &cmd.assignments {
-                let expanded_value = self.expand_assignment_value(value);
-                self.apply_shell_assignment(name, expanded_value);
+                let (expanded_value, substitution_status) =
+                    self.expand_assignment_value_with_status(value);
+                if let Some(substitution_status) = substitution_status {
+                    status = substitution_status;
+                }
+                if !self.apply_shell_assignment(name, expanded_value) {
+                    status = 1;
+                }
+            }
+            self.exit_code = status;
+            if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+                return Err(ExecuteError::ExitCode(self.exit_code));
             }
             return Ok(());
         }
@@ -9766,14 +9778,19 @@ impl Executor {
         }
 
         let mut assignments = Vec::new();
+        let mut command_substitution_status = None;
         for word in &cmd.words {
             let Some((name, value)) = split_assignment_word(word) else {
                 return false;
             };
-            assignments.push((name.to_string(), self.expand_assignment_value(value)));
+            let (expanded_value, status) = self.expand_assignment_value_with_status(value);
+            if status.is_some() {
+                command_substitution_status = status;
+            }
+            assignments.push((name.to_string(), expanded_value));
         }
 
-        let mut status = 0;
+        let mut status = command_substitution_status.unwrap_or(0);
         for (name, value) in assignments {
             if !self.apply_shell_assignment(&name, value) {
                 status = 1;
@@ -10276,6 +10293,14 @@ impl Executor {
         // path positions. Keep it centralized here until Rubash ports the
         // `expand_string_assignment`/SHELL_VAR path more directly.
         self.expand_assignment_tilde(&expanded)
+    }
+
+    fn expand_assignment_value_with_status(&mut self, value: &str) -> (String, Option<i32>) {
+        self.last_command_substitution_status.set(None);
+        let expanded = self.expand_assignment_value(value);
+        let status = self.last_command_substitution_status.get();
+        self.last_command_substitution_status.set(None);
+        (expanded, status)
     }
 
     fn do_env(&mut self) {
@@ -12702,6 +12727,7 @@ impl Executor {
     }
 
     fn expand_command_substitution(&self, source: &str) -> String {
+        self.last_command_substitution_status.set(Some(0));
         let old_depth = self.subshell_depth.get();
         self.subshell_depth.set(old_depth + 1);
         let result = self.expand_command_substitution_inner(source);
@@ -12719,6 +12745,14 @@ impl Executor {
         let source = source.strip_prefix("eval ").unwrap_or(source);
         if let Some(inner) = strip_wrapping_subshell_group(source) {
             return self.expand_command_substitution_inner(inner);
+        }
+        if source == "false" {
+            self.last_command_substitution_status.set(Some(1));
+            return String::new();
+        }
+        if matches!(source, "true" | ":") {
+            self.last_command_substitution_status.set(Some(0));
+            return String::new();
         }
         if let Some(path) = source.strip_prefix('<') {
             let path = self.expand_word(path.trim());
@@ -12929,7 +12963,10 @@ impl Executor {
             .iter()
             .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
             .collect();
-        let program = find_user_command(&expanded_words[0], &self.env_vars)?;
+        let Some(program) = find_user_command(&expanded_words[0], &self.env_vars) else {
+            self.last_command_substitution_status.set(Some(127));
+            return Some(String::new());
+        };
         let mut process = if should_run_with_shell(&program) {
             if let Some(shell) = find_shell(&self.env_vars) {
                 let mut command = Command::new(shell);
@@ -12947,9 +12984,8 @@ impl Executor {
 
         self.apply_child_environment(&mut process);
         let output = process.output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
+        let status = output.status.code().unwrap_or(1);
+        self.last_command_substitution_status.set(Some(status));
         Some(
             String::from_utf8_lossy(&output.stdout)
                 .trim_end_matches('\n')
