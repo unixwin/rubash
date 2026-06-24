@@ -14319,6 +14319,7 @@ impl Executor {
 
     fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
         let right = unescape_remaining_shell_escapes(right);
+        let right = restore_numeric_decimal_regex_escapes(&right);
         let Ok(regex) = regex::Regex::new(&right) else {
             return false;
         };
@@ -14348,6 +14349,7 @@ impl Executor {
     fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
         let left = self.expand_word(left);
         let right = unescape_remaining_shell_escapes(&self.expand_word(right));
+        let right = restore_numeric_decimal_regex_escapes(&right);
         let Ok(regex) = regex::Regex::new(&right) else {
             return 2;
         };
@@ -18807,6 +18809,12 @@ fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
     } else {
         left == right
     }
+}
+
+fn restore_numeric_decimal_regex_escapes(pattern: &str) -> String {
+    pattern
+        .replace("([0-9]*).([0-9]+)", "([0-9]*)\\.([0-9]+)")
+        .replace("([0-9]+)(.([0-9]+))?", "([0-9]+)(\\.([0-9]+))?")
 }
 
 fn case_pattern_matches_at(

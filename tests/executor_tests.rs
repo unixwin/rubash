@@ -542,6 +542,25 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_decimal_regex_does_not_match_negative_integer() {
+        let output_path = "target/rubash-decimal-regex-negative-integer-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "n=-9; if [[ \"$n\" =~ ^[-]?([0-9]*)\\.([0-9]+)$ ]]; then echo decimal > {output_path}; elif [[ \"$n\" =~ ^[-]?[0-9]+$ ]]; then echo integer:${{BASH_REMATCH[0]}} > {output_path}; fi"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "integer:-9\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_printf_percent_n_assigns_output_count() {
         let output_path = "target/rubash-printf-percent-n-output.txt";
         let _ = fs::remove_file(output_path);
