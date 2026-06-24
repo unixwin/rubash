@@ -11882,6 +11882,18 @@ impl Executor {
                 .to_string();
         }
 
+        if words.first().map(String::as_str) == Some("cat") {
+            let mut output = String::new();
+            for word in &words[1..] {
+                let path = self.expand_word(word);
+                if let Ok(value) = fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                {
+                    output.push_str(&value);
+                }
+            }
+            return output.trim_end_matches('\n').to_string();
+        }
+
         if words.first().map(String::as_str) == Some("umask") {
             return self
                 .env_vars
