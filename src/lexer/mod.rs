@@ -931,6 +931,11 @@ impl<'a> Lexer<'a> {
                 self.next_token()
             }
             '$' => match self.peek() {
+                Some('\'') => {
+                    self.advance();
+                    self.skip_ansi_c_single();
+                    Some(self.finish_word_token(start, false))
+                }
                 Some('(') => {
                     self.advance();
                     self.skip_cmd_subst();
@@ -1087,6 +1092,10 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             self.skip_cmd_subst();
                         }
+                        Some('\'') => {
+                            self.advance();
+                            self.skip_ansi_c_single();
+                        }
                         _ => {}
                     }
                 }
@@ -1201,6 +1210,15 @@ impl<'a> Lexer<'a> {
     fn skip_single(&mut self) {
         while let Some(c) = self.advance() {
             if c == '\'' {
+                break;
+            }
+        }
+    }
+    fn skip_ansi_c_single(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '\\' {
+                self.advance();
+            } else if c == '\'' {
                 break;
             }
         }
@@ -1419,11 +1437,25 @@ fn remove_shell_quotes(raw: &str) -> String {
             '$' if chars.peek() == Some(&'\'') => {
                 chars.next();
                 let mut quoted = String::new();
+                let mut escaped = false;
                 for quoted_ch in chars.by_ref() {
+                    if escaped {
+                        quoted.push('\\');
+                        quoted.push(quoted_ch);
+                        escaped = false;
+                        continue;
+                    }
+                    if quoted_ch == '\\' {
+                        escaped = true;
+                        continue;
+                    }
                     if quoted_ch == '\'' {
                         break;
                     }
                     quoted.push(quoted_ch);
+                }
+                if escaped {
+                    quoted.push('\\');
                 }
                 out.push_str(&decode_ansi_c_quoted(&quoted));
             }
