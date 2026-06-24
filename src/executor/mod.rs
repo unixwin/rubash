@@ -13513,9 +13513,19 @@ impl Executor {
         }
         if let Some(path) = source.strip_prefix('<') {
             let path = self.expand_word(path.trim());
-            return fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
-                .map(|value| value.trim_end_matches('\n').to_string())
-                .unwrap_or_default();
+            if let Some(path) = self.command_substitution_read_path(&path) {
+                return fs::read_to_string(path)
+                    .map(|value| {
+                        self.last_command_substitution_status.set(Some(0));
+                        value.trim_end_matches('\n').to_string()
+                    })
+                    .unwrap_or_else(|_| {
+                        self.last_command_substitution_status.set(Some(1));
+                        String::new()
+                    });
+            }
+            self.last_command_substitution_status.set(Some(1));
+            return String::new();
         }
         if let Some(output) = self.command_substitution_heredoc_output(source) {
             return output;
@@ -13668,6 +13678,29 @@ impl Executor {
         }
 
         String::new()
+    }
+
+    fn command_substitution_read_path(&self, path: &str) -> Option<PathBuf> {
+        if !path.contains('*') || self.posix_mode_enabled() {
+            return Some(shell_path_to_windows(path, &self.env_vars));
+        }
+
+        let normalized = path.replace('\\', "/");
+        let (dir, pattern) = normalized
+            .rsplit_once('/')
+            .map(|(dir, pattern)| (if dir.is_empty() { "/" } else { dir }, pattern))
+            .unwrap_or((".", normalized.as_str()));
+        let dir_path = shell_path_to_windows(dir, &self.env_vars);
+        let mut matches = fs::read_dir(dir_path)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                case_pattern_matches(pattern, &name).then(|| entry.path())
+            })
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.into_iter().next()
     }
 
     fn mktemp_command_substitution(&self, words: &[String]) -> Option<String> {

@@ -1435,6 +1435,54 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_read_file_command_substitution_expands_glob() {
+        let input_path = "target/rubash-readfile-command-substitution-glob-input.txt";
+        let output_path = "target/rubash-readfile-command-substitution-glob-output.txt";
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+        fs::write(input_path, "globbed\n").unwrap();
+        let input = format!(
+            "v=$(< target/rubash-readfile-command-substitution-glob-*); \
+             printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "v=<globbed> status:0\n"
+        );
+        let _ = fs::remove_file(input_path);
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_read_file_command_substitution_missing_file_sets_status() {
+        let missing_path = "target/rubash-readfile-command-substitution-missing.txt";
+        let output_path = "target/rubash-readfile-command-substitution-missing-output.txt";
+        let _ = fs::remove_file(missing_path);
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "v=$(< {missing_path}); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<> status:1\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_external_command_substitution_captures_stdout() {
         let bin_dir = "target/rubash-command-substitution-bin";
         let helper_path = format!("{bin_dir}/rubash-comsub-helper");
