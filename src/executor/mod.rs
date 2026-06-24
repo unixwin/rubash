@@ -43,6 +43,7 @@ const FD_STDIN_PREFIX: &str = "__RUBASH_FD_STDIN_";
 const FD_STDIN_OFFSET_PREFIX: &str = "__RUBASH_FD_STDIN_OFFSET_";
 const INHERIT_PROCESS_STDIN: &str = "__RUBASH_INHERIT_PROCESS_STDIN";
 const LOCAL_EXPORT_ENV: &str = "__RUBASH_LOCAL_EXPORT_ENV";
+const POSIX_FUNCTION_EXPORT_TOUCHED: &str = "__RUBASH_POSIX_FUNCTION_EXPORT_TOUCHED";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
 const SKIP_POSIXPIPE_TIME_COUNT_REMAINDER: &str = "__RUBASH_SKIP_POSIXPIPE_TIME_COUNT_REMAINDER";
 const PRECEDENCE_TEST_DONE: &str = "__RUBASH_PRECEDENCE_TEST_DONE";
@@ -2055,6 +2056,7 @@ impl Executor {
             let temporary_assignments = self.apply_temporary_assignments(&cmd.assignments);
             let applied_assignment_values =
                 self.applied_temporary_assignment_values(&cmd.assignments);
+            let old_posix_export_touched = self.env_vars.remove(POSIX_FUNCTION_EXPORT_TOUCHED);
             let result = self.execute_function(&function_name, &cmd.words[1..], cmd);
             if self.posix_mode_enabled() {
                 self.restore_function_temporary_assignments(
@@ -2064,6 +2066,11 @@ impl Executor {
             } else {
                 self.restore_temporary_assignments(temporary_assignments);
             }
+            restore_optional_env_var(
+                &mut self.env_vars,
+                POSIX_FUNCTION_EXPORT_TOUCHED,
+                old_posix_export_touched,
+            );
             return result;
         }
 
@@ -3400,6 +3407,7 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(status);
         }
+        self.mark_posix_function_export_touches(&cmd.words[1..]);
 
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
@@ -3463,6 +3471,27 @@ impl Executor {
             &cmd.words[1..],
             &mut self.env_vars,
         )?)
+    }
+
+    fn mark_posix_function_export_touches(&mut self, args: &[String]) {
+        if self.function_depth == 0 || !self.posix_mode_enabled() {
+            return;
+        }
+        let mut names_started = false;
+        for arg in args {
+            if arg == "--" {
+                names_started = true;
+                continue;
+            }
+            if !names_started && arg.starts_with('-') && arg != "-" {
+                continue;
+            }
+            names_started = true;
+            let Some(name) = local_assignment_name(arg) else {
+                continue;
+            };
+            mark_env_name(&mut self.env_vars, POSIX_FUNCTION_EXPORT_TOUCHED, name);
+        }
     }
 
     fn execute_export_functions<W, E>(
@@ -10678,6 +10707,9 @@ impl Executor {
     ) {
         for (name, value) in previous.into_iter().rev() {
             if name != EXPORTED_VARS {
+                if is_marked_var(&self.env_vars, POSIX_FUNCTION_EXPORT_TOUCHED, &name) {
+                    continue;
+                }
                 let current = self.env_vars.get(&name).cloned();
                 if applied
                     .get(&name)
