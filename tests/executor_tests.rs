@@ -1718,6 +1718,28 @@ mod command_chaining {
     }
 
     #[test]
+    fn test_while_loop_reads_stdin_and_fd_heredocs() {
+        let output_path = "target/rubash-while-fd-heredoc-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!(
+            "while read line1; do read line2 <&3; echo $line1 - $line2 >> {output_path}; done <<EOF1 3<<EOF2\none\ntwo\nthree\nEOF1\nalpha\nbeta\ngamma\nEOF2"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(
+            fs::read_to_string(output_path).unwrap(),
+            "one - alpha\ntwo - beta\nthree - gamma\n"
+        );
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
     fn test_lineno_assignment_does_not_override_dynamic_value() {
         let output_path = "target/rubash-lineno-assignment-output.txt";
         let _ = fs::remove_file(output_path);

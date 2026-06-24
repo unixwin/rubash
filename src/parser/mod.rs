@@ -13,6 +13,14 @@ pub struct Redirect {
     pub clobber: bool,
 }
 
+/// Represents a here-document redirection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HereDocRedirect {
+    pub fd: Option<u32>,
+    pub delimiter: String,
+    pub body: Option<String>,
+}
+
 /// Represents a narrow `for` compound command.
 #[derive(Debug, Clone)]
 pub struct ForCommand {
@@ -83,6 +91,8 @@ pub struct CommandNode {
     pub heredoc: Option<String>,
     /// Here-document delimiter word, used when reprinting functions.
     pub heredoc_delimiter: Option<String>,
+    /// All here-document redirections in parse order.
+    pub heredoc_redirects: Vec<HereDocRedirect>,
     /// Here-string stdin word
     pub here_string: Option<String>,
     /// Pipe to next command
@@ -120,6 +130,7 @@ impl CommandNode {
             redirect_err_append: None,
             heredoc: None,
             heredoc_delimiter: None,
+            heredoc_redirects: Vec::new(),
             here_string: None,
             pipe: None,
             background: false,
@@ -359,7 +370,16 @@ pub fn parse(tokens: &[Token]) -> Ast {
             TokenKind::HereDoc => {
                 note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
-                    current_cmd.heredoc_delimiter = Some(tokens[i + 1].value.clone());
+                    let fd = take_heredoc_fd_prefix(&mut current_cmd);
+                    let delimiter = tokens[i + 1].value.clone();
+                    current_cmd.heredoc_redirects.push(HereDocRedirect {
+                        fd,
+                        delimiter: delimiter.clone(),
+                        body: None,
+                    });
+                    if fd.is_none() {
+                        current_cmd.heredoc_delimiter = Some(delimiter);
+                    }
                     i += 1;
                 }
             }
@@ -380,7 +400,19 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
             TokenKind::HereDocBody => {
                 note_command_line(&mut current_cmd, token);
-                current_cmd.heredoc = Some(token.value.clone());
+                if let Some(redirect) = current_cmd
+                    .heredoc_redirects
+                    .iter_mut()
+                    .find(|redirect| redirect.body.is_none())
+                {
+                    redirect.body = Some(token.value.clone());
+                    if redirect.fd.is_none() {
+                        current_cmd.heredoc = Some(token.value.clone());
+                        current_cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
+                    }
+                } else {
+                    current_cmd.heredoc = Some(token.value.clone());
+                }
             }
             TokenKind::And | TokenKind::Or => {
                 if command_is_open_conditional(&current_cmd) {
@@ -1145,6 +1177,18 @@ fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     cmd.word_kinds.push(token.kind.clone());
 }
 
+fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
+    let fd = cmd
+        .words
+        .last()
+        .filter(|word| !word.is_empty() && word.chars().all(|ch| ch.is_ascii_digit()))?
+        .parse::<u32>()
+        .ok()?;
+    cmd.words.pop();
+    cmd.word_kinds.pop();
+    Some(fd)
+}
+
 fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
     tokens
         .get(index)
@@ -1156,6 +1200,7 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.assignments.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
+        && cmd.heredoc_redirects.is_empty()
         && cmd.here_string.is_none()
         && cmd.redirect_in.is_none()
         && cmd.redirect_out.is_none()
@@ -1231,6 +1276,26 @@ mod unit_tests {
         assert_eq!(ast.commands.len(), 1);
         assert_eq!(ast.commands[0].heredoc_delimiter.as_deref(), Some("EOF"));
         assert_eq!(ast.commands[0].heredoc.as_deref(), Some("body\n"));
+    }
+
+    #[test]
+    fn test_parse_multiple_heredoc_redirects_with_fd() {
+        let tokens = tokenize("done <<EOF1 3<<EOF2\none\nEOF1\ntwo\nEOF2");
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, vec!["done"]);
+        assert_eq!(ast.commands[0].heredoc_redirects.len(), 2);
+        assert_eq!(ast.commands[0].heredoc_redirects[0].fd, None);
+        assert_eq!(
+            ast.commands[0].heredoc_redirects[0].body.as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(ast.commands[0].heredoc_redirects[1].fd, Some(3));
+        assert_eq!(
+            ast.commands[0].heredoc_redirects[1].body.as_deref(),
+            Some("two\n")
+        );
     }
 
     #[test]
