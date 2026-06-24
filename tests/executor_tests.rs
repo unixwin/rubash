@@ -7867,6 +7867,48 @@ declare -irx RUBASH_DECLARE_IRX=\"7\"\n"
     }
 
     #[test]
+    fn test_command_builtin_invokes_builtin_builtin() {
+        let output_path = "target/rubash-command-builtin-output.txt";
+        let _ = fs::remove_file(output_path);
+        let input = format!("command builtin echo hello > {output_path}");
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\n");
+        let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn test_command_builtin_redirects_disabled_builtin_diagnostic() {
+        let status_path = "target/rubash-command-builtin-disabled-status.txt";
+        let error_path = "target/rubash-command-builtin-disabled-error.txt";
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+        let input = format!(
+            "enable -n true; command builtin true 2> {error_path}; echo $? > {status_path}"
+        );
+        let tokens = tokenize(&input);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let result = executor.execute_ast(&ast);
+
+        assert!(result.is_ok());
+        assert_eq!(executor.last_exit_code(), 0);
+        assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+        assert!(fs::read_to_string(error_path)
+            .unwrap()
+            .contains("builtin: true: not a shell builtin"));
+        let _ = fs::remove_file(status_path);
+        let _ = fs::remove_file(error_path);
+    }
+
+    #[test]
     fn test_command_trap_redirects_output() {
         let output_path = "target/rubash-command-trap-output.txt";
         let _ = fs::remove_file(output_path);
