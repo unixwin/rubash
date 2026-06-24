@@ -81,6 +81,8 @@ pub struct CommandNode {
     pub redirect_err_append: Option<Redirect>,
     /// Here-document stdin body
     pub heredoc: Option<String>,
+    /// Here-document delimiter word, used when reprinting functions.
+    pub heredoc_delimiter: Option<String>,
     /// Here-string stdin word
     pub here_string: Option<String>,
     /// Pipe to next command
@@ -117,6 +119,7 @@ impl CommandNode {
             redirect_err: None,
             redirect_err_append: None,
             heredoc: None,
+            heredoc_delimiter: None,
             here_string: None,
             pipe: None,
             background: false,
@@ -356,6 +359,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
             TokenKind::HereDoc => {
                 note_command_line(&mut current_cmd, token);
                 if i + 1 < tokens.len() {
+                    current_cmd.heredoc_delimiter = Some(tokens[i + 1].value.clone());
                     i += 1;
                 }
             }
@@ -1151,6 +1155,7 @@ fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()
         && cmd.heredoc.is_none()
+        && cmd.heredoc_delimiter.is_none()
         && cmd.here_string.is_none()
         && cmd.redirect_in.is_none()
         && cmd.redirect_out.is_none()
@@ -1216,6 +1221,16 @@ mod unit_tests {
         let tokens: Vec<Token> = vec![];
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_heredoc_delimiter() {
+        let tokens = tokenize("cat <<EOF\nbody\nEOF");
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].heredoc_delimiter.as_deref(), Some("EOF"));
+        assert_eq!(ast.commands[0].heredoc.as_deref(), Some("body\n"));
     }
 
     #[test]

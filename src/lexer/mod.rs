@@ -251,11 +251,7 @@ fn ends_with_unquoted_backslash(input: &str) -> bool {
         }
     }
 
-    let trailing_backslashes = input
-        .chars()
-        .rev()
-        .take_while(|ch| *ch == '\\')
-        .count();
+    let trailing_backslashes = input.chars().rev().take_while(|ch| *ch == '\\').count();
     !single && trailing_backslashes % 2 == 1
 }
 
