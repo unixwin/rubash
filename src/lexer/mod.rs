@@ -1473,6 +1473,10 @@ fn remove_shell_quotes(raw: &str) -> String {
             }
             '"' => {
                 while let Some(quoted) = chars.next() {
+                    if quoted == '$' && chars.peek() == Some(&'{') {
+                        copy_braced_parameter_after_dollar(&mut out, &mut chars);
+                        continue;
+                    }
                     match quoted {
                         '"' => break,
                         '\\' => {
@@ -1541,6 +1545,10 @@ fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
             }
             '"' => {
                 while let Some(quoted) = chars.next() {
+                    if quoted == '$' && chars.peek() == Some(&'{') {
+                        copy_braced_parameter_after_dollar(&mut out, &mut chars);
+                        continue;
+                    }
                     match quoted {
                         '"' => break,
                         '`' => {
@@ -1587,6 +1595,33 @@ fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
     }
 
     out
+}
+
+fn copy_braced_parameter_after_dollar(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    out.push('$');
+    if chars.next() != Some('{') {
+        return;
+    }
+    out.push('{');
+    let mut depth = 1usize;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if ch == '$' && chars.peek() == Some(&'{') {
+            chars.next();
+            out.push('{');
+            depth += 1;
+            continue;
+        }
+        if ch == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                break;
+            }
+        }
+    }
 }
 
 fn decode_ansi_c_quoted(value: &str) -> String {
