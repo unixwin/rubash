@@ -2447,6 +2447,14 @@ impl Executor {
             && expanded.split_whitespace().nth(1).is_some()
     }
 
+    fn expand_for_word_values(&self, word: &str) -> Vec<String> {
+        let expanded = self.expand_word(word);
+        if for_word_has_unquoted_expansion(word) {
+            return expanded.split_whitespace().map(str::to_string).collect();
+        }
+        vec![expanded]
+    }
+
     fn define_function(
         &mut self,
         cmd: &CommandNode,
@@ -2822,6 +2830,7 @@ impl Executor {
             }
             crate::builtins::eval::EvalAction::Execute(source) => {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                let source = eval_source_for_reparse(&source);
                 let tokens = crate::lexer::tokenize(&source);
                 let mut ast = crate::parser::parse(&tokens);
                 self.apply_command_output_redirects(cmd, &mut ast)?;
@@ -3859,7 +3868,7 @@ impl Executor {
             for_command
                 .words
                 .iter()
-                .map(|word| self.expand_word(word))
+                .flat_map(|word| self.expand_for_word_values(word))
                 .collect()
         };
         let mut ran_body = false;
@@ -11239,7 +11248,8 @@ impl Executor {
             .and_then(|inner| inner.strip_suffix(')'))
             .unwrap_or(value)
             .trim();
-        let evaluated = eval_conditional_arith_value(expression, &self.env_vars)?;
+        let expression = self.expand_arithmetic_special_parameters(expression);
+        let evaluated = eval_conditional_arith_value(&expression, &self.env_vars)?;
         isize::try_from(evaluated).ok()
     }
 
@@ -13436,13 +13446,7 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
-                    let mut name = String::new();
-                    for name_ch in chars.by_ref() {
-                        if name_ch == '}' {
-                            break;
-                        }
-                        name.push(name_ch);
-                    }
+                    let name = collect_braced_parameter_name(&mut chars);
                     output.push_str(&self.expand_word(&format!("${{{name}}}")));
                 }
                 Some('(') => {
@@ -15741,6 +15745,13 @@ fn append_array_value(current: &str, value: &str, integer: bool) -> String {
         }
 
         let token = unquote_storage_value(&token);
+        if let Some(expanded_array) = token.strip_prefix('\x1d') {
+            for value in expanded_array.split_whitespace() {
+                entries.insert(next_index, value.to_string());
+                next_index += 1;
+            }
+            continue;
+        }
         if scalar_append && !entries.is_empty() {
             let current = entries.get(&0).cloned().unwrap_or_default();
             entries.insert(
@@ -18448,6 +18459,13 @@ fn word_has_unquoted_command_substitution(word: &str) -> bool {
     false
 }
 
+fn for_word_has_unquoted_expansion(word: &str) -> bool {
+    if word.starts_with('\x1b') || word.starts_with('\x1d') {
+        return false;
+    }
+    word.starts_with('$') || word_has_unquoted_command_substitution(word)
+}
+
 fn bash_aliases_assignment_name(word: &str) -> Option<String> {
     // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic associative array
     // backed by the alias table. This narrow path reports invalid alias names
@@ -18491,6 +18509,14 @@ fn current_epoch_micros() -> i64 {
         .unwrap_or(0)
 }
 
+fn eval_source_for_reparse(source: &str) -> String {
+    source
+        .replace('\x1e', "")
+        .replace('\x1d', "")
+        .replace('\x1f', "$")
+        .replace('\x1a', "`")
+}
+
 fn next_random_from_state(state: &Cell<u32>) -> u32 {
     let next = state.get().wrapping_mul(1_103_515_245).wrapping_add(12_345);
     state.set(next);
@@ -18510,6 +18536,30 @@ fn command_substitution_word_split(value: &str) -> String {
 
 fn protect_command_substitution_output(value: &str) -> String {
     value.replace('`', "\x1a").replace('$', "\x1f")
+}
+
+fn collect_braced_parameter_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut name = String::new();
+    let mut nested = 0usize;
+    while let Some(ch) = chars.next() {
+        if ch == '$' && chars.peek().copied() == Some('{') {
+            chars.next();
+            nested += 1;
+            name.push('$');
+            name.push('{');
+            continue;
+        }
+        if ch == '}' {
+            if nested == 0 {
+                break;
+            }
+            nested -= 1;
+            name.push(ch);
+            continue;
+        }
+        name.push(ch);
+    }
+    name
 }
 
 fn unescape_remaining_shell_escapes(value: &str) -> String {

@@ -108,6 +108,40 @@ fn script_aliasconv_example_converts_aliases() {
 }
 
 #[test]
+fn script_arrayops_example_manipulates_arrays() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-s")
+        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(
+            b"source arrayops.bash\n\
+              arr=(a b)\n\
+              apush arr c d\n\
+              alen arr\n\
+              aref arr 0 2 3\n\
+              apop arr 2\n\
+              declare -p arr\n\
+              alen arr\n\
+              aref arr 0 1\n",
+        )
+        .unwrap();
+    let output = child.wait_with_output().expect("wait for rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "4\na\nc\nd\ndeclare -a arr=([0]=\"a\" [1]=\"b\")\n2\na\nb\n"
+    );
+}
+
+#[test]
 fn double_dash_allows_script_file_after_options() {
     let script_path = Path::new("target").join("rubash-cli-double-dash-script.sh");
     fs::create_dir_all("target").unwrap();
