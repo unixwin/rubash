@@ -237,7 +237,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
                             if let Some((compound_value, next_i)) =
                                 collect_compound_assignment(tokens, i)
                             {
-                                var_value = compound_value;
+                                var_value = format!("\x1e{compound_value}");
                                 i = next_i;
                             }
                         }
@@ -783,6 +783,39 @@ fn collect_compound_assignment(tokens: &[Token], start: usize) -> Option<(String
     let mut i = start + 2;
     let mut values = Vec::new();
     while i < tokens.len() && !is_keyword(tokens, i, ")") {
+        if tokens[i].value == "[" || tokens[i].value.starts_with('[') {
+            let mut subscript = String::new();
+            let mut j = i;
+            if tokens[j].value == "[" {
+                j += 1;
+                while j < tokens.len() && tokens[j].value != "]" {
+                    subscript.push_str(&tokens[j].value);
+                    j += 1;
+                }
+                if j >= tokens.len() || tokens[j].value != "]" {
+                    return None;
+                }
+                j += 1;
+            } else if let Some(inner) = tokens[j]
+                .value
+                .strip_prefix('[')
+                .and_then(|value| value.strip_suffix(']'))
+            {
+                subscript.push_str(inner);
+                j += 1;
+            }
+
+            if j + 1 < tokens.len() && matches!(tokens[j].value.as_str(), "=" | "+=") {
+                values.push(format!(
+                    "[{subscript}]{}{}",
+                    tokens[j].value,
+                    tokens[j + 1].value
+                ));
+                i = j + 2;
+                continue;
+            }
+        }
+
         if matches!(
             tokens[i].kind,
             TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
