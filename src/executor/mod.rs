@@ -11815,6 +11815,12 @@ impl Executor {
         // in word expansion.
         let source = source.trim();
         let source = source.strip_prefix("eval ").unwrap_or(source);
+        if let Some(path) = source.strip_prefix('<') {
+            let path = self.expand_word(path.trim());
+            return fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                .map(|value| value.trim_end_matches('\n').to_string())
+                .unwrap_or_default();
+        }
         if source.contains("128") && source.contains('+') && source.contains('1') {
             return "129".to_string();
         }
