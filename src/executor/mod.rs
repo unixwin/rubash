@@ -9688,6 +9688,7 @@ impl Executor {
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        self.apply_parameter_assignment_expansions_in_word(value);
 
         if let Some(expanded) = self.expand_backtick_substitution(value) {
             return expanded;
