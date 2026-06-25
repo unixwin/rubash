@@ -1023,6 +1023,7 @@ impl Executor {
         let mut index = 0;
         let mut subshell_env: Option<HashMap<String, String>> = None;
         let mut subshell_depth: Option<usize> = None;
+        let mut subshell_stdin: Option<(String, String)> = None;
         while index < ast.commands.len() {
             let command = &ast.commands[index];
             if self.noexec_enabled() {
@@ -1101,6 +1102,20 @@ impl Executor {
                 let old_depth = self.subshell_depth.get();
                 subshell_depth = Some(old_depth);
                 self.subshell_depth.set(old_depth + 1);
+                // Feed subshell group stdin redirect to all body commands
+                let old_fn = self.env_vars.get(FUNCTION_STDIN).cloned();
+                let old_fno = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+                subshell_stdin = Some((old_fn.unwrap_or_default(), old_fno.unwrap_or_default()));
+                for fwd in index+1..ast.commands.len() {
+                    let c = &ast.commands[fwd];
+                    if c.subshell_end {
+                        if let Some(input) = self.loop_redirect_input(c) {
+                            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                            self.env_vars.insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+                        }
+                        break;
+                    }
+                }
             }
 
             let execution_result = if command.inverted || command.and_or().is_some() {
@@ -1121,6 +1136,15 @@ impl Executor {
             self.set_pipestatus([self.exit_code]);
 
             if command.subshell_end {
+                if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
+                    if old_stdin.is_empty() {
+                        self.env_vars.remove(FUNCTION_STDIN);
+                        self.env_vars.remove(FUNCTION_STDIN_OFFSET);
+                    } else {
+                        self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
+                        self.env_vars.insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
+                    }
+                }
                 if let Some(saved_env) = subshell_env.take() {
                     self.restore_shell_env(saved_env);
                 }

@@ -498,6 +498,14 @@ pub fn parse(tokens: &[Token]) -> Ast {
                     }
                     in_subshell = false;
                     i += 1;
+                    // Collect trailing redirections after ) like brace groups do.
+                    if command_is_empty(&current_cmd) {
+                        if let Some(command) = ast.commands.last_mut() {
+                            collect_trailing_redirections(tokens, &mut i, command);
+                        }
+                    } else {
+                        collect_trailing_redirections(tokens, &mut i, &mut current_cmd);
+                    }
                     continue;
                 }
 
