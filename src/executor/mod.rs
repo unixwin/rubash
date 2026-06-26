@@ -4,6 +4,9 @@
 
 pub(crate) mod path;
 
+mod glob;
+use glob::pathname_expand_word;
+
 use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
 use crate::lexer::TokenKind;
@@ -2145,6 +2148,18 @@ impl Executor {
             })
             .collect();
         variable_expanded.word_kinds = Vec::new();
+        // Pathname expansion (globbing) - expand *, ?, [...] in words
+        // Skip for [[ ]] and [ ] test commands where ? and * are pattern operators
+        let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
+        if !is_test_cmd {
+            variable_expanded.words = variable_expanded.words
+                .into_iter()
+                .flat_map(|word| match pathname_expand_word(&word) {
+                    Some(matches) => matches,
+                    None => vec![word],
+                })
+                .collect();
+        }
 
         let expanded;
         let cmd = {
