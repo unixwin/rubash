@@ -2654,6 +2654,14 @@ impl Executor {
                         self.exit_code = self.execute_arithmetic_command(cmd);
                         Ok(())
                     }
+                    "dirname" => {
+                        self.exit_code = self.execute_dirname(cmd);
+                        Ok(())
+                    }
+                    "basename" => {
+                        self.exit_code = self.execute_basename(cmd);
+                        Ok(())
+                    }
                     _ if self.functions.contains_key(word.as_str()) => {
                         self.execute_function(word, &cmd.words[1..], cmd)
                     }
@@ -6325,6 +6333,14 @@ impl Executor {
                     crate::builtins::test::execute(&cmd.words[1..], true, &self.env_vars)?;
                 Ok(())
             }
+            "dirname" => {
+                self.exit_code = self.execute_dirname(cmd);
+                Ok(())
+            }
+            "basename" => {
+                self.exit_code = self.execute_basename(cmd);
+                Ok(())
+            }
             _ => self.execute_external(cmd),
         }
     }
@@ -8126,6 +8142,93 @@ impl Executor {
             crate::builtins::logout::execute_with_io(&self.diagnostic_prefix(), &mut stderr)?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn execute_dirname(&mut self, cmd: &CommandNode) -> i32 {
+        let mut paths = Vec::new();
+        for arg in &cmd.words[1..] {
+            if !arg.starts_with('-') {
+                paths.push(self.expand_word(arg));
+            }
+        }
+        if paths.is_empty() {
+            eprintln!("{}dirname: missing operand", self.diagnostic_prefix());
+            return 1;
+        }
+        for path in &paths {
+            let normalized = path.replace('\\', "/");
+            let dir = if let Some(pos) = normalized.rfind('/') {
+                let d = &normalized[..pos];
+                if d.is_empty() { "/" } else { d }
+            } else {
+                "."
+            };
+            println!("{}", dir);
+        }
+        0
+    }
+
+    fn execute_basename(&mut self, cmd: &CommandNode) -> i32 {
+        let mut args = Vec::new();
+        let mut suffix: Option<String> = None;
+        let mut i = 1;
+        while i < cmd.words.len() {
+            match cmd.words[i].as_str() {
+                "-a" | "--multiple" => { i += 1; }
+                "-s" | "--suffix" => {
+                    suffix = cmd.words.get(i + 1).map(|w| self.expand_word(w));
+                    i += 2;
+                }
+                "-z" | "--zero" => { i += 1; }
+                "--" => { i += 1; break; }
+                arg if arg.starts_with('-') && arg.len() > 1 => { i += 1; }
+                _ => {
+                    args.push(self.expand_word(&cmd.words[i]));
+                    i += 1;
+                }
+            }
+        }
+        while i < cmd.words.len() {
+            args.push(self.expand_word(&cmd.words[i]));
+            i += 1;
+        }
+        if args.is_empty() {
+            eprintln!("{}basename: missing operand", self.diagnostic_prefix());
+            return 1;
+        }
+        fn strip_name(name: &str, suf: &str) -> String {
+            if suf.len() < name.len() && name.ends_with(suf) {
+                name[..name.len() - suf.len()].to_string()
+            } else {
+                name.to_string()
+            }
+        }
+        if suffix.is_none() && args.len() == 2 {
+            let normalized = args[0].replace('\\', "/");
+            let name = if let Some(pos) = normalized.rfind('/') {
+                &normalized[pos + 1..]
+            } else {
+                &normalized
+            };
+            let name = if name.is_empty() { "/" } else { name };
+            println!("{}", strip_name(name, &args[1]));
+        } else {
+            for arg in &args {
+                let normalized = arg.replace('\\', "/");
+                let name = if let Some(pos) = normalized.rfind('/') {
+                    &normalized[pos + 1..]
+                } else {
+                    &normalized
+                };
+                let name = if name.is_empty() { "/" } else { name };
+                if let Some(suf) = &suffix {
+                    println!("{}", strip_name(name, suf));
+                } else {
+                    println!("{}", name);
+                }
+            }
+        }
+        0
     }
 
     fn execute_cd(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
