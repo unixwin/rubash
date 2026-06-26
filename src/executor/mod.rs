@@ -14633,7 +14633,21 @@ impl Executor {
                     }
                     output
                 }),
-            _ => None,
+            _ => {
+                // Generic external command first stage
+                let cmd_name = self.expand_word(&words[0]);
+                let expanded_args: Vec<String> = words[1..]
+                    .iter()
+                    .map(|w| self.expand_word(w))
+                    .collect();
+                use std::process::{Command, Stdio};
+                let output = Command::new(&cmd_name)
+                    .args(&expanded_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output().ok()?;
+                Some(String::from_utf8_lossy(&output.stdout).into_owned())
+            }
         }
     }
 
@@ -14660,7 +14674,27 @@ impl Executor {
                 }
                 Some(output)
             }
-            _ => None,
+            _ => {
+                // Generic external command filter - run command with stdin
+                let cmd_name = self.expand_word(&words[0]);
+                let expanded_args: Vec<String> = words[1..]
+                    .iter()
+                    .map(|w| self.expand_word(w))
+                    .collect();
+                use std::process::{Command, Stdio};
+                use std::io::Write;
+                let child = Command::new(&cmd_name)
+                    .args(&expanded_args)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn().ok()?;
+                child.stdin.as_ref()?.write_all(input.as_bytes()).ok()?;
+                let output = child.wait_with_output().ok()?;
+                Some(String::from_utf8_lossy(&output.stdout)
+                    .trim_end_matches('\n')
+                    .to_string())
+            }
         }
     }
 
