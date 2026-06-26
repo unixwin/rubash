@@ -21,6 +21,23 @@ jobs:
       - name: Run cargo tests
         run: cargo test
 
+  shell-functionality:
+    name: Shell functionality tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build rubash
+        run: cargo build
+
+      - name: Run shell functionality tests
+        run: bash tests/run_all_tests.sh
+
   bash-upstream-progress:
     name: Bash upstream test progress
     runs-on: ubuntu-latest
