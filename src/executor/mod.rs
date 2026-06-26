@@ -2720,6 +2720,10 @@ impl Executor {
         if for_word_has_unquoted_expansion(word) {
             return expanded.split_whitespace().map(str::to_string).collect();
         }
+        // Apply glob expansion for for-loop words
+        if let Some(matches) = glob::pathname_expand_word(&expanded) {
+            return matches;
+        }
         vec![expanded]
     }
 
