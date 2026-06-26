@@ -12,7 +12,7 @@ use crate::expand::tilde::tilde as tilde_expand;
 use crate::lexer::TokenKind;
 use crate::parser::{
     ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand,
-    FunctionCommand, Redirect,
+    FunctionCommand, Redirect, SelectCommand,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2065,6 +2065,10 @@ impl Executor {
 
         if let Some(for_command) = &cmd.for_command {
             return self.execute_for_command_with_redirects(for_command, cmd);
+        }
+
+        if let Some(select_command) = &cmd.select_command {
+            return self.execute_select_command(select_command);
         }
 
         if let Some(case_command) = &cmd.case_command {
@@ -4449,6 +4453,129 @@ impl Executor {
 
         let target = self.expand_word(&redirect.target);
         fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok()
+    }
+
+    fn execute_select_command(&mut self, select_command: &SelectCommand) -> Result<(), ExecuteError> {
+        // `select name [in words ...]; do body; done`
+        // Displays a numbered menu of words, prompts for selection, and executes body
+        // with the selected word assigned to the variable.
+        let values: Vec<String> = select_command
+            .words
+            .iter()
+            .flat_map(|word| self.expand_for_word_values(word))
+            .collect();
+
+        if values.is_empty() {
+            self.exit_code = 0;
+            return Ok(());
+        }
+
+        let ps3 = self
+            .env_vars
+            .get("PS3")
+            .cloned()
+            .unwrap_or_else(|| "#? ".to_string());
+
+        loop {
+            // Display menu
+            for (i, value) in values.iter().enumerate() {
+                eprintln!("{}{}", i + 1, value);
+            }
+
+            // Display prompt
+            eprint!("{}", ps3);
+
+            // Read user input
+            let mut input = String::new();
+            match std::io::stdin().read_line(&mut input) {
+                Ok(0) => {
+                    // EOF
+                    eprintln!();
+                    self.exit_code = 0;
+                    return Ok(());
+                }
+                Ok(_) => {
+                    input = input.trim().to_string();
+                }
+                Err(_) => {
+                    self.exit_code = 1;
+                    return Ok(());
+                }
+            }
+
+            // If input is empty, re-display menu
+            if input.is_empty() {
+                continue;
+            }
+
+            // Parse selection number
+            match input.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= values.len() => {
+                    // Valid selection
+                    self.env_vars
+                        .insert(select_command.variable.clone(), values[n - 1].clone());
+                    set_process_env(&select_command.variable, values[n - 1].clone());
+
+                    let body = Ast {
+                        commands: select_command.body.clone(),
+                    };
+                    self.loop_depth += 1;
+                    let result = self.execute_ast(&body);
+                    self.loop_depth -= 1;
+                    match result {
+                        Ok(()) => {}
+                        Err(ExecuteError::Break(level)) if level <= 1 => {
+                            self.exit_code = 0;
+                            break;
+                        }
+                        Err(ExecuteError::Break(level)) => {
+                            return Err(ExecuteError::Break(level - 1));
+                        }
+                        Err(ExecuteError::Continue(level)) if level <= 1 => {
+                            self.exit_code = 0;
+                            continue;
+                        }
+                        Err(ExecuteError::Continue(level)) => {
+                            return Err(ExecuteError::Continue(level - 1));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                _ => {
+                    // Invalid selection - set variable to empty
+                    self.env_vars
+                        .insert(select_command.variable.clone(), String::new());
+
+                    let body = Ast {
+                        commands: select_command.body.clone(),
+                    };
+                    self.loop_depth += 1;
+                    let result = self.execute_ast(&body);
+                    self.loop_depth -= 1;
+                    match result {
+                        Ok(()) => {}
+                        Err(ExecuteError::Break(level)) if level <= 1 => {
+                            self.exit_code = 0;
+                            break;
+                        }
+                        Err(ExecuteError::Break(level)) => {
+                            return Err(ExecuteError::Break(level - 1));
+                        }
+                        Err(ExecuteError::Continue(level)) if level <= 1 => {
+                            self.exit_code = 0;
+                            continue;
+                        }
+                        Err(ExecuteError::Continue(level)) => {
+                            return Err(ExecuteError::Continue(level - 1));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+
+        self.exit_code = 0;
+        Ok(())
     }
 
     fn execute_arithmetic_for_command(
