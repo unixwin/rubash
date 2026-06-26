@@ -1519,7 +1519,7 @@ impl Executor {
                 if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
                     Ok(Some((input.replace('\n', &args[1]), 0)))
                 } else {
-                    Ok(None)
+                    self.execute_external_pipeline_stage(command, input)
                 }
             }
             _ => {
