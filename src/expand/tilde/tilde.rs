@@ -11,8 +11,11 @@ pub const QUOTED_ASSIGNMENT_VALUE: char = '\x1c';
 pub fn home_value(env_vars: &HashMap<String, String>) -> String {
     env_vars
         .get("HOME")
+        .filter(|v| !v.is_empty())
         .cloned()
-        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| std::env::var("HOME").ok().filter(|v| !v.is_empty()))
+        .or_else(|| env_vars.get("USERPROFILE").cloned().filter(|v| !v.is_empty()))
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|v| !v.is_empty()))
         .unwrap_or_default()
 }
 
