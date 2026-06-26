@@ -252,7 +252,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
         }
 
         match token.kind {
-            TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst => {
+            TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst | TokenKind::BraceExpand => {
                 current_cmd.subshell |= in_subshell;
                 note_command_line(&mut current_cmd, token);
                 push_command_word(&mut current_cmd, token);

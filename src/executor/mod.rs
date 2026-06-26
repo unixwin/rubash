@@ -2137,6 +2137,13 @@ impl Executor {
                 {
                     return values;
                 }
+                // Brace expansion: {a,b,c} and {1..3}
+                if self.is_brace_expand_enabled() && !word.contains("${") {
+                    let braced = crate::expand::braces::expand_braces(word);
+                    if braced.len() > 1 {
+                        return braced;
+                    }
+                }
                 let expanded = self.expand_word_mut(word);
                 if expanded.is_empty() && self.removes_unquoted_null_word(cmd, index) {
                     Vec::new()
@@ -12335,7 +12342,10 @@ impl Executor {
         }
     }
 
-    fn expand_word_mut(&mut self, word: &str) -> String {
+    fn is_brace_expand_enabled(&self) -> bool {
+        crate::builtins::set::shell_option_enabled(&self.env_vars, "braceexpand")
+    }
+        fn expand_word_mut(&mut self, word: &str) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
 
         if let Some(word) = word.strip_prefix('\x1b') {
