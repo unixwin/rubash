@@ -520,9 +520,6 @@ pub fn parse(tokens: &[Token]) -> Ast {
             TokenKind::Eof => {
                 break;
             }
-            _ => {
-                // Skip other token types (keywords, variables, etc.)
-            }
         }
 
         i += 1;
