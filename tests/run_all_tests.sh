@@ -7,9 +7,49 @@ echo "=========================================="
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOTAL=0
 PASSED=0
 FAILED=0
+
+# 查找 rubash 可执行文件
+find_rubash() {
+    # 1. 检查环境变量
+    if [ -n "$RUBASH_PATH" ] && [ -x "$RUBASH_PATH" ]; then
+        echo "$RUBASH_PATH"
+        return 0
+    fi
+
+    # 2. 检查 cargo build 输出
+    local debug_path="$PROJECT_DIR/target/debug/rubash"
+    local release_path="$PROJECT_DIR/target/release/rubash"
+
+    if [ -x "$debug_path" ]; then
+        echo "$debug_path"
+        return 0
+    elif [ -x "$release_path" ]; then
+        echo "$release_path"
+        return 0
+    fi
+
+    # 3. 检查 PATH 中的 rubash
+    if command -v rubash >/dev/null 2>&1; then
+        echo "rubash"
+        return 0
+    fi
+
+    # 4. 回退到 bash
+    echo "bash"
+    return 1
+}
+
+RUBASH=$(find_rubash)
+if [ "$RUBASH" = "bash" ]; then
+    echo "警告: 未找到 rubash，使用系统 bash 运行测试"
+else
+    echo "使用 rubash: $RUBASH"
+fi
+echo ""
 
 run_test() {
     local test_file="$1"
@@ -18,7 +58,7 @@ run_test() {
     echo "运行测试: $test_name"
     echo "------------------------------------------"
 
-    if bash "$test_file" 2>&1; then
+    if $RUBASH "$test_file" 2>&1; then
         echo "✓ $test_name 通过"
         PASSED=$((PASSED + 1))
     else
