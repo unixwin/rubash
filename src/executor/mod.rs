@@ -111,6 +111,7 @@ mod pipeline_stages;
 mod read_helpers;
 mod read_split;
 mod sed_alias_helpers;
+mod select_exec;
 mod support_names;
 
 use assignment_helpers::*;
