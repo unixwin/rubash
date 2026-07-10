@@ -10,24 +10,15 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     let mut name: Option<String> = None;
     let lookahead = tokens.get(i);
     if let Some(lookahead) = lookahead {
-        // Check if this token is a brace group or subshell - if so, no name
-        let is_brace = lookahead.kind == TokenKind::BraceExpand
-            || (lookahead.kind == TokenKind::Keyword
-                && lookahead.value.starts_with('{')
-                && lookahead.value.ends_with('}')
-                && lookahead.value.len() > 1);
-        let is_subshell = lookahead.kind == TokenKind::Keyword && lookahead.value == "(";
+        let is_brace = is_brace_group_token(lookahead) || is_keyword(tokens, i, "{");
+        let is_subshell = is_keyword(tokens, i, "(");
 
         if !is_brace && !is_subshell {
             // This might be a name. Check if the token *after* it is a brace group or subshell.
             let next_after = tokens.get(i + 1);
             let next_is_compound = next_after.is_some_and(|t| {
-                t.kind == TokenKind::BraceExpand
-                    || (t.kind == TokenKind::Keyword
-                        && ((t.value.starts_with('{')
-                            && t.value.ends_with('}')
-                            && t.value.len() > 1)
-                            || t.value == "("))
+                is_brace_group_token(t)
+                    || (t.kind == TokenKind::Keyword && (t.value == "{" || t.value == "("))
             });
             if next_is_compound {
                 name = Some(lookahead.value.clone());
@@ -40,19 +31,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     // Parse the body
     if let Some(token) = tokens.get(i) {
         // Brace group body (single token from lexer)
-        if token.kind == TokenKind::BraceExpand
-            || (token.kind == TokenKind::Keyword
-                && token.value.starts_with('{')
-                && token.value.ends_with('}')
-                && token.value.len() > 1)
-        {
-            let inner = token
-                .value
-                .trim_start_matches('{')
-                .trim_end_matches('}')
-                .trim();
-            let body_tokens = crate::lexer::tokenize(inner);
-            let body = parse(&body_tokens).commands;
+        if is_brace_group_token(token) {
+            let body = parse_inline_brace_body(token);
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
             command.coproc_command = Some(CoprocCommand {
@@ -71,15 +51,35 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             return Some((command, next_i));
         }
 
+        if is_keyword(tokens, i, "{") {
+            let (body, close_i) = parse_split_brace_body(tokens, i)?;
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.coproc_command = Some(CoprocCommand {
+                name,
+                words: Vec::new(),
+                body: Some(body),
+            });
+            let mut next_i = close_i + 1;
+            collect_trailing_redirections(tokens, &mut next_i, &mut command);
+            while tokens
+                .get(next_i)
+                .is_some_and(|t| t.kind == TokenKind::Semicolon)
+            {
+                next_i += 1;
+            }
+            return Some((command, next_i));
+        }
+
         // Subshell body: ( ... )
-        if token.kind == TokenKind::Keyword && token.value == "(" {
+        if is_keyword(tokens, i, "(") {
             i += 1; // consume `(`
             let body_start = i;
             let mut depth = 1usize;
             while i < tokens.len() {
-                if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "(" {
+                if is_keyword(tokens, i, "(") {
                     depth += 1;
-                } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == ")" {
+                } else if is_keyword(tokens, i, ")") {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -144,4 +144,47 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn is_brace_group_token(token: &Token) -> bool {
+    token.kind == TokenKind::BraceExpand
+        || (token.kind == TokenKind::Keyword
+            && token.value.starts_with('{')
+            && token.value.ends_with('}')
+            && token.value.len() > 1)
+}
+
+fn parse_inline_brace_body(token: &Token) -> Vec<CommandNode> {
+    let inner = token
+        .value
+        .trim_start_matches('{')
+        .trim_end_matches('}')
+        .trim();
+    let body_tokens = crate::lexer::tokenize(inner);
+    parse(&body_tokens).commands
+}
+
+fn parse_split_brace_body(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, usize)> {
+    if !is_keyword(tokens, start, "{") {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "{") {
+            depth += 1;
+        } else if is_keyword(tokens, i, "}") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    Some((parse(&tokens[start + 1..i]).commands, i))
 }

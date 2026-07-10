@@ -5,6 +5,8 @@
 use rubash::lexer::tokenize;
 use rubash::parser::parse;
 
+#[path = "parser_coproc_tests.rs"]
+mod coproc_tests;
 #[path = "parser_redirection_tests.rs"]
 mod redirection_tests;
 
