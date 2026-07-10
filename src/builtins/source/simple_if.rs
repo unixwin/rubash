@@ -11,6 +11,15 @@ pub fn execute_simple_if(
     ast: &Ast,
     index: usize,
 ) -> Result<Option<usize>, ExecuteError> {
+    execute_simple_if_inner(executor, ast, index, false)
+}
+
+fn execute_simple_if_inner(
+    executor: &mut Executor,
+    ast: &Ast,
+    index: usize,
+    output_redirects_applied: bool,
+) -> Result<Option<usize>, ExecuteError> {
     // TODO(parse.y/execute_cmd.c/test.def/expr.c): This recognizes narrow
     // source-test `if` forms until the parser has IF_COM and arithmetic
     // command nodes. Bash parses these as compound commands with test or
@@ -50,6 +59,17 @@ pub fn execute_simple_if(
     let Some(fi_index) = find_matching_fi(ast, branch_scan_start) else {
         return Ok(None);
     };
+
+    let fi_command = ast.commands.get(fi_index).expect("fi index is valid");
+    if !output_redirects_applied && command_has_output_redirects(fi_command) {
+        let mut redirected = Ast {
+            commands: ast.commands[index..=fi_index].to_vec(),
+        };
+        executor.apply_command_output_redirects(fi_command, &mut redirected)?;
+        execute_simple_if_inner(executor, &redirected, 0, true)?;
+        return Ok(Some(fi_index + 1));
+    }
+
     let elif_index = find_if_branch_command(ast, branch_scan_start, fi_index, "elif");
     let else_index = find_if_branch_command(ast, branch_scan_start, fi_index, "else");
 
@@ -102,7 +122,7 @@ pub fn execute_simple_if(
     }
 
     if let Some(elif_index) = elif_index {
-        return execute_simple_if(executor, ast, elif_index);
+        return execute_simple_if_inner(executor, ast, elif_index, output_redirects_applied);
     }
 
     if let Some(else_index) = else_index {
@@ -120,6 +140,13 @@ pub fn execute_simple_if(
 
     executor.set_exit_code(0);
     Ok(Some(fi_index + 1))
+}
+
+fn command_has_output_redirects(command: &CommandNode) -> bool {
+    command.redirect_out.is_some()
+        || command.append.is_some()
+        || command.redirect_err.is_some()
+        || command.redirect_err_append.is_some()
 }
 
 fn execute_and_or_if_condition(
