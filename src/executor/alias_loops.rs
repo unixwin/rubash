@@ -9,7 +9,17 @@ impl Executor {
         let Some(command) = ast.commands.get(index) else {
             return Ok(None);
         };
-        let Some(keyword) = command.words.first().map(String::as_str) else {
+        let Some(first_word) = command.words.first().map(String::as_str) else {
+            return Ok(None);
+        };
+        let loop_words = if matches!(first_word, "while" | "until") {
+            command.words.clone()
+        } else if self.alias_expansion_enabled() {
+            self.expand_aliases(&command.words)
+        } else {
+            return Ok(None);
+        };
+        let Some(keyword) = loop_words.first().map(String::as_str) else {
             return Ok(None);
         };
         let until = match keyword {
@@ -17,7 +27,7 @@ impl Executor {
             "until" => true,
             _ => return Ok(None),
         };
-        if command.words.len() < 2 {
+        if loop_words.len() < 2 {
             return Ok(None);
         }
 
@@ -36,7 +46,7 @@ impl Executor {
         };
 
         let mut condition = command.clone();
-        condition.words = condition.words[1..].to_vec();
+        condition.words = loop_words[1..].to_vec();
         condition.pipe = None;
         normalize_leading_assignment_words(&mut condition);
 

@@ -89,3 +89,43 @@ fn test_until_command_here_string_feeds_body_read() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "got:alpha\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_while_command_executes_loop() {
+    let output_path = "target/rubash-alias-while-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias w=while; n=0; \
+         w test $n -lt 2; do echo loop:$n >> {output_path}; (( n++ )); done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "loop:0\nloop:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_until_command_executes_loop() {
+    let output_path = "target/rubash-alias-until-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias u=until; n=0; \
+         u test $n -ge 2; do echo loop:$n >> {output_path}; (( n++ )); done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "loop:0\nloop:1\n");
+    let _ = fs::remove_file(output_path);
+}
