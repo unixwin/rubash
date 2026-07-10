@@ -252,3 +252,45 @@ fn test_function_call_redirects_stdin_to_body_reads() {
     let _ = fs::remove_file(&input_path);
     let _ = fs::remove_file(&output_path);
 }
+
+#[test]
+fn test_function_call_here_string_feeds_body_read() {
+    let output_path = target_test_path("rubash-function-call-here-string-output.txt");
+    let _ = fs::remove_file(&output_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let input = format!(
+        "rubash_stdin_func() {{ read line; echo $line; }}; \
+         rubash_stdin_func <<< alpha > {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(&output_path);
+}
+
+#[test]
+fn test_function_definition_here_string_overrides_call_stdin() {
+    let output_path = target_test_path("rubash-function-definition-here-string-output.txt");
+    let _ = fs::remove_file(&output_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let input = format!(
+        "rubash_def_stdin_func() {{ read line; echo $line; }} <<< definition; \
+         rubash_def_stdin_func <<< call > {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "definition\n");
+    let _ = fs::remove_file(&output_path);
+}
