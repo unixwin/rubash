@@ -1,0 +1,161 @@
+use super::*;
+use crate::lexer::{Token, TokenKind};
+
+pub(super) fn parse_function_command(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(CommandNode, usize)> {
+    // TODO(parse.y/execute_cmd.c): Bash has full function_def grammar,
+    // including `function name`, redirections, nested compound commands, and
+    // parser-state-sensitive reserved words. This maps the upstream builtins
+    // `name() { ...; }` and `function name { ...; }` forms onto a function
+    // command node.
+    let keyword_form = is_keyword(tokens, start, "function");
+    let (name_index, mut i) = if keyword_form {
+        (start + 1, start + 2)
+    } else {
+        (start, start + 1)
+    };
+    let name = tokens.get(name_index)?.value.clone();
+    if !(is_function_name(&name) || (keyword_form && is_function_keyword_name(&name))) {
+        return None;
+    }
+
+    if tokens.get(i).is_some_and(|token| token.value == "(") {
+        if tokens.get(i + 1)?.value != ")" {
+            return None;
+        }
+        i += 2;
+    } else if !keyword_form {
+        return None;
+    }
+
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        i += 1;
+    }
+    if let Some(group) = tokens
+        .get(i)
+        .map(|token| token.value.as_str())
+        .filter(|value| value.starts_with('{') && value.ends_with('}'))
+    {
+        // TODO(parse.y): The lexer can currently preserve a full brace group
+        // as one token. Recognize it as a function body for `name() { ...; }`
+        // until the parser owns brace groups structurally.
+        let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
+        let body_tokens = crate::lexer::tokenize(inner);
+        let mut body = parse(&body_tokens).commands;
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
+        let mut next_i = i + 1;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+        return Some((command, next_i));
+    }
+    if tokens.get(i).is_some_and(|token| token.value == "(") {
+        let (mut body, close_i) = parse_parenthesized_function_body(tokens, i)?;
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
+        let mut next_i = close_i + 1;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+        return Some((command, next_i));
+    }
+
+    if tokens.get(i)?.value != "{" {
+        return None;
+    }
+    i += 1;
+    while tokens
+        .get(i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        i += 1;
+    }
+
+    let body_start = i;
+    let mut depth = 1usize;
+    while i < tokens.len() {
+        if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "{" {
+            depth += 1;
+        } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "}" {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let body = parse(&tokens[body_start..i]).commands;
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.function_command = Some(FunctionCommand { name, body });
+    let mut next_i = i + 1;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    while tokens
+        .get(next_i)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        next_i += 1;
+    }
+    Some((command, next_i))
+}
+
+pub(super) fn parse_parenthesized_function_body(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
+    if !is_keyword(tokens, start, "(") {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut i = start + 1;
+    while i < tokens.len() {
+        if is_keyword(tokens, i, "(") {
+            depth += 1;
+        } else if is_keyword(tokens, i, ")") {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i += 1;
+    }
+    if i >= tokens.len() {
+        return None;
+    }
+
+    let mut body = parse(&tokens[start + 1..i]).commands;
+    if let Some(first) = body.first_mut() {
+        first.subshell = true;
+    }
+    if let Some(last) = body.last_mut() {
+        last.subshell_end = true;
+    }
+    Some((body, i))
+}
