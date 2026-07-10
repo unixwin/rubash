@@ -3,6 +3,7 @@
 //! Contains free functions and `Executor` methods for working with
 //! indexed arrays, array storage, and array subscripts.
 
+mod executor;
 mod mapfile;
 mod storage;
 
@@ -231,84 +232,4 @@ pub(super) fn is_noassign_bash_array(name: &str) -> bool {
         name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
     )
-}
-
-impl Executor {
-    pub(super) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
-        self.env_vars
-            .get(name)
-            .map(|value| array_values(value))
-            .unwrap_or_default()
-    }
-
-    pub(super) fn array_assignment_transform(&self, name: &str) -> String {
-        let Some(value) = self.env_vars.get(name) else {
-            return String::new();
-        };
-
-        if is_marked_var(&self.env_vars, ASSOC_VARS, name) {
-            let entries = assoc_entries(value);
-            if entries.is_empty() {
-                return format!("declare -A {name}");
-            }
-            let rendered = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    format!("[{}]={}", quote_assoc_key(&key), quote_array_value(&value))
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            return format!("declare -A {name}=({rendered} )");
-        }
-
-        if is_marked_array_var(&self.env_vars, name) || is_array_storage(value) {
-            let rendered = indexed_array_entries(value)
-                .into_iter()
-                .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
-                .collect::<Vec<_>>()
-                .join(" ");
-            return format!("declare -a {name}=({rendered})");
-        }
-
-        String::new()
-    }
-
-    pub(super) fn array_element_parameter_value(&self, expression: &str) -> Option<String> {
-        let (array_name, key) = parse_array_subscript(expression)?;
-        let storage_name = self.resolved_variable_name(array_name)?;
-        let storage = self.parameter_array_storage(array_name)?;
-        if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
-            let key = self.assoc_subscript_key(key);
-            return assoc_value_at(&storage, &key);
-        }
-        let key = strip_matching_quotes(&self.expand_embedded_parameters(key)).to_string();
-        eval_conditional_arith_value(&key, &self.env_vars)
-            .and_then(|index| resolve_indexed_array_subscript(&storage, index))
-            .and_then(|index| array_value_at(&storage, index))
-    }
-
-    pub(super) fn array_length(&self, name: &str) -> usize {
-        if name == "GROUPS" {
-            return self.groups_words().len();
-        }
-        self.parameter_array_storage(name)
-            .map(|value| array_values(&value).len())
-            .unwrap_or(0)
-    }
-
-    pub(super) fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
-        let word = word
-            .strip_prefix('"')
-            .and_then(|word| word.strip_suffix('"'))
-            .unwrap_or(word);
-        let word = word.strip_prefix('\x1d').unwrap_or(word);
-        let name = word.strip_prefix("${")?.strip_suffix("[@]}")?;
-        if is_noassign_bash_array(name)
-            || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
-        {
-            return None;
-        }
-        self.parameter_array_storage(name)
-            .map(|value| array_values(&value))
-    }
 }
