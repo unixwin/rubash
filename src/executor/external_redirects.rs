@@ -104,39 +104,14 @@ impl Executor {
             self.write_external_stdout_to_stderr(cmd, stdout)?;
         }
         if self.external_stderr_copies_to_stdout(cmd) {
-            self.write_external_stderr_to_stdout(cmd, stderr)?;
+            self.write_external_stderr_to_stdout(stderr)?;
         }
         Ok(())
     }
 
-    fn write_external_stderr_to_stdout(
-        &self,
-        cmd: &CommandNode,
-        stderr: &[u8],
-    ) -> Result<(), ExecuteError> {
+    fn write_external_stderr_to_stdout(&self, stderr: &[u8]) -> Result<(), ExecuteError> {
         if stderr.is_empty() {
             return Ok(());
-        }
-
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                file.write_all(stderr)?;
-                return Ok(());
-            }
-        }
-
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
-            if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
-                file.write_all(stderr)?;
-                return Ok(());
-            }
         }
 
         std::io::stdout().lock().write_all(stderr)?;
