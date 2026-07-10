@@ -8,6 +8,7 @@ mod classification;
 mod continuation;
 mod heredoc;
 mod heredoc_scan;
+mod number_redirect;
 mod quotes;
 mod scanner;
 mod skip;

@@ -55,6 +55,16 @@ fn test_redirect_input() {
 }
 
 #[test]
+fn test_input_redirect_fd_prefix_without_space() {
+    let input = "cat 0<input.txt";
+    let tokens = tokenize(input);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[1].kind, TokenKind::RedirectIn);
+    assert_eq!(tokens[1].value, "0<");
+    assert_eq!(tokens[2].value, "input.txt");
+}
+
+#[test]
 fn test_read_write_redirect() {
     let input = "cat <> input.txt";
     let tokens = tokenize(input);

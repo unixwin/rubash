@@ -78,9 +78,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 push_command_word(&mut state.current_cmd, token);
             } else {
                 note_command_line(&mut state.current_cmd, token);
+                let fd = redirect_operator_fd(&token.value).or_else(|| {
+                    take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
+                });
                 if let Some((target, next_i)) = process_substitution_redirect_target(tokens, *i) {
                     state.current_cmd.redirect_in = Some(Redirect {
-                        fd: None,
+                        fd,
                         target,
                         append: false,
                         clobber: false,
@@ -95,7 +98,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
                 {
                     state.current_cmd.redirect_in = Some(Redirect {
-                        fd: None,
+                        fd,
                         target: tokens[*i + 1].value.clone(),
                         append: false,
                         clobber: false,
@@ -138,7 +141,8 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         TokenKind::HereDoc => {
             note_command_line(&mut state.current_cmd, token);
             if *i + 1 < tokens.len() {
-                let fd = take_heredoc_fd_prefix(&mut state.current_cmd);
+                let fd = redirect_operator_fd(&token.value)
+                    .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter = tokens[*i + 1].value.clone();
                 state.current_cmd.heredoc_redirects.push(HereDocRedirect {
                     fd,

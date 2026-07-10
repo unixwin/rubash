@@ -10,6 +10,7 @@ impl Executor {
         let mut raw = false;
         let mut scalar_names = Vec::new();
         let mut prompt: Option<String> = None;
+        let mut read_fd: Option<u32> = None;
         let mut index = 1;
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
@@ -73,7 +74,11 @@ impl Executor {
                     exact_char_limit = true;
                     index += 2;
                 }
-                "-i" | "-t" | "-u" => {
+                "-u" => {
+                    read_fd = cmd.words.get(index + 1).and_then(|word| word.parse().ok());
+                    index += 2;
+                }
+                "-i" | "-t" => {
                     index += 2;
                 }
                 "-p" => {
@@ -180,6 +185,9 @@ impl Executor {
                     && matches!(word.as_bytes().get(1).copied(), Some(b'i' | b't' | b'u'))
                     && word.len() > 2 =>
                 {
+                    if let Some(fd) = word.strip_prefix("-u").and_then(|word| word.parse().ok()) {
+                        read_fd = Some(fd);
+                    }
                     index += 1;
                 }
                 word if word.starts_with("-p") && word.len() > 2 => {
@@ -213,7 +221,7 @@ impl Executor {
             }
 
             let value = if let Some(line) =
-                self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
+                self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit)
             {
                 let values = if raw {
                     split_read_array_words(&line, self.env_vars.get("IFS").map(String::as_str))
@@ -247,7 +255,7 @@ impl Executor {
             }
 
             let status = if let Some(line) =
-                self.read_input_for_command(cmd, delimiter, char_limit, exact_char_limit)
+                self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit)
             {
                 self.assign_read_scalar_names(&scalar_names, &line, raw);
                 0

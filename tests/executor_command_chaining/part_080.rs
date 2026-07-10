@@ -158,3 +158,43 @@ fn test_read_write_redirect_on_colon_creates_file() {
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_stdin_redirect_fd_prefix_without_space_feeds_external_stdin() {
+    let input_path = "target/rubash-stdin-fd-prefix-input.txt";
+    let output_path = "target/rubash-stdin-fd-prefix-output.txt";
+    fs::write(input_path, "prefixed\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat 0<{input_path} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "prefixed\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_u_uses_numbered_input_redirect_fd() {
+    let input_path = "target/rubash-read-u-numbered-fd-input.txt";
+    let output_path = "target/rubash-read-u-numbered-fd-output.txt";
+    fs::write(input_path, "fd-line\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -u 3 value 3<{input_path}; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "fd-line\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}

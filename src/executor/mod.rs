@@ -6,7 +6,6 @@ pub(crate) mod path;
 mod glob;
 
 mod upstream_scripts;
-
 mod arithmetic;
 use arithmetic::{
     arithmetic_division_by_zero_token, eval_arith_value, eval_conditional_arith_value,
@@ -74,6 +73,7 @@ mod public_accessors;
 mod pwd_loop_builtins;
 mod read_builtin;
 mod read_io;
+mod read_redirected_fd;
 mod shell_options;
 mod shift_echo_builtins;
 mod source_type_state;

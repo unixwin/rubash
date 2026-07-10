@@ -52,8 +52,10 @@ pub(super) fn collect_trailing_redirections(
 
         match token.kind {
             TokenKind::RedirectIn => {
+                let fd = redirect_operator_fd(&token.value)
+                    .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
                 command.redirect_in = Some(Redirect {
-                    fd: None,
+                    fd,
                     target: target.value.clone(),
                     append: false,
                     clobber: false,

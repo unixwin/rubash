@@ -165,6 +165,9 @@ impl<'a> Lexer<'a> {
                     Some(Token::new(TokenKind::RedirectOut, ">", start))
                 }
             }
+            '0'..='9' if self.peek().is_some_and(|ch| ch.is_ascii_digit()) => {
+                Some(self.finish_number_token(start))
+            }
             '0'..='9' if c != '2' && self.peek() == Some('>') => {
                 self.advance();
                 if self.peek() == Some('>') {
@@ -179,6 +182,9 @@ impl<'a> Lexer<'a> {
                 } else {
                     Some(Token::new(TokenKind::RedirectOut, self.slice(start), start))
                 }
+            }
+            '0'..='9' if c != '2' && self.peek() == Some('<') => {
+                Some(self.finish_number_token(start))
             }
             '2' => {
                 if self.peek() == Some('>') {
@@ -195,6 +201,8 @@ impl<'a> Lexer<'a> {
                     } else {
                         Some(Token::new(TokenKind::RedirectErr, "2>", start))
                     }
+                } else if self.peek() == Some('<') {
+                    Some(self.finish_number_token(start))
                 } else {
                     self.skip_word();
                     Some(Token::new(TokenKind::Word, self.slice(start), start))

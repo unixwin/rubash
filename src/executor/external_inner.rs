@@ -202,7 +202,9 @@ impl Executor {
             } else {
                 File::open(path)?
             };
-            process.stdin(Stdio::from(file));
+            if redirect.fd.unwrap_or(0) == 0 {
+                process.stdin(Stdio::from(file));
+            }
         }
 
         if let Some(ref redirect) = cmd.redirect_out {

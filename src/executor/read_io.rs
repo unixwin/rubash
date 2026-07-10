@@ -15,11 +15,24 @@ impl Executor {
     pub(in crate::executor) fn read_input_for_command(
         &mut self,
         cmd: &CommandNode,
+        read_fd: Option<u32>,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
+        if let Some(fd) = read_fd {
+            if let Some(line) =
+                self.read_redirected_fd(cmd, fd, delimiter, char_limit, exact_char_limit)
+            {
+                return Some(line);
+            }
+            return self.read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit);
+        }
+
         if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) != 0 {
+                return None;
+            }
             if let Some(source) = redirect
                 .target
                 .strip_prefix("<(")

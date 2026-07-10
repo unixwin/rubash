@@ -232,6 +232,9 @@ impl Executor {
         }
 
         if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) != 0 {
+                return None;
+            }
             let target = self.expand_word(&redirect.target);
             let path = shell_path_to_windows(&target, &self.env_vars);
             if redirect.append {

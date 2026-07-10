@@ -79,6 +79,18 @@ fn test_input_redirect_without_space() {
 }
 
 #[test]
+fn test_input_redirect_fd_prefix_without_space() {
+    let input = "cat 0<input.txt";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["cat"]);
+    assert_eq!(command.redirect_in.as_ref().unwrap().fd, Some(0));
+    assert_eq!(command.redirect_in.as_ref().unwrap().target, "input.txt");
+}
+
+#[test]
 fn test_read_write_redirect_maps_to_stdin() {
     let input = "cat <> input.txt";
     let tokens = tokenize(input);

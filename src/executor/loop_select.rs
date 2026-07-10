@@ -77,6 +77,9 @@ impl Executor {
 
     pub(in crate::executor) fn loop_redirect_input(&mut self, cmd: &CommandNode) -> Option<String> {
         let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd.unwrap_or(0) != 0 {
+            return None;
+        }
         if let Some(source) = redirect
             .target
             .strip_prefix("<(")

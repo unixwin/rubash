@@ -222,6 +222,9 @@ impl Executor {
         let Some(redirect) = &call_cmd.redirect_in else {
             return Ok(None);
         };
+        if redirect.fd.unwrap_or(0) != 0 {
+            return Ok(None);
+        }
         let target = self.expand_word(&redirect.target);
         Ok(Some(fs::read_to_string(shell_path_to_windows(
             &target,
