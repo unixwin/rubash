@@ -113,7 +113,7 @@ impl Executor {
                 for fwd in index + 1..ast.commands.len() {
                     let c = &ast.commands[fwd];
                     if c.subshell_end {
-                        if let Some(input) = self.loop_redirect_input(c) {
+                        if let Some(input) = self.command_input_redirect(c) {
                             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
                             self.env_vars
                                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());

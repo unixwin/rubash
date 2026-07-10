@@ -26,7 +26,10 @@ impl Executor {
         result
     }
 
-    fn command_input_redirect(&mut self, cmd: &CommandNode) -> Option<String> {
+    pub(in crate::executor) fn command_input_redirect(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<String> {
         if let Some(input) = self.loop_redirect_input(cmd) {
             return Some(input);
         }
