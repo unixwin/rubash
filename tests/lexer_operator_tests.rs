@@ -112,3 +112,21 @@ fn test_combined_stdout_stderr_append_redirect() {
     assert_eq!(tokens[2].kind, TokenKind::Append);
     assert_eq!(tokens[2].value, "&>>");
 }
+
+#[test]
+fn test_redirect_stderr_close_fd() {
+    let tokens = tokenize("echo error 2>&-");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::RedirectErr);
+    assert_eq!(tokens[2].value, "2>&");
+    assert_eq!(tokens[3].value, "-");
+}
+
+#[test]
+fn test_redirect_stdout_close_fd_with_prefix() {
+    let tokens = tokenize("echo hidden 1>&-");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::RedirectOut);
+    assert_eq!(tokens[2].value, "1>&");
+    assert_eq!(tokens[3].value, "-");
+}

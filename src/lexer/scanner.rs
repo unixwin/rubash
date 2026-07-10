@@ -170,6 +170,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('>') {
                     self.advance();
                     Some(Token::new(TokenKind::Append, self.slice(start), start))
+                } else if self.peek() == Some('&') {
+                    self.advance();
+                    Some(Token::new(TokenKind::RedirectOut, self.slice(start), start))
                 } else if self.peek() == Some('|') {
                     self.advance();
                     Some(Token::new(TokenKind::RedirectOut, self.slice(start), start))
@@ -183,6 +186,9 @@ impl<'a> Lexer<'a> {
                     if self.peek() == Some('>') {
                         self.advance();
                         Some(Token::new(TokenKind::RedirectErrAppend, "2>>", start))
+                    } else if self.peek() == Some('&') {
+                        self.advance();
+                        Some(Token::new(TokenKind::RedirectErr, "2>&", start))
                     } else if self.peek() == Some('|') {
                         self.advance();
                         Some(Token::new(TokenKind::RedirectErr, "2>|", start))

@@ -78,3 +78,43 @@ fn test_stderr_fd_copy_after_stdout_append_captures_brace_group() {
     assert!(output.contains("no_such_fd_copy_append_cmd: command not found"));
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_stderr_fd_close_does_not_run_dash_command_or_create_file() {
+    let output_path = "target/rubash-stderr-fd-close-output.txt";
+    let closed_path = "&-";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(closed_path);
+    let input = format!("echo out 2>&- > {output_path}; echo status:$? >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "out\nstatus:0\n");
+    assert!(!std::path::Path::new(closed_path).exists());
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_stdout_fd_close_does_not_create_file() {
+    let output_path = "target/rubash-stdout-fd-close-output.txt";
+    let closed_path = "&-";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(closed_path);
+    let input = format!("echo hidden 1>&-; echo shown > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "shown\n");
+    assert!(!std::path::Path::new(closed_path).exists());
+    let _ = fs::remove_file(output_path);
+}

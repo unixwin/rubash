@@ -21,30 +21,36 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            self.create_redirect_output(&target, redirect.clobber)?;
+            if !is_closed_redirect_target(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
         }
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            if !is_closed_redirect_target(&target) {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+            }
         }
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if !is_null_device(&target) {
+            if !is_closed_redirect_target(&target) && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
-            OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            if !is_closed_redirect_target(&target) {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+            }
         }
 
         Ok(())

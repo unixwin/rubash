@@ -19,6 +19,10 @@ pub(in crate::executor) fn is_null_device(path: &str) -> bool {
     matches!(path, "/dev/null" | "NUL")
 }
 
+pub(in crate::executor) fn is_closed_redirect_target(path: &str) -> bool {
+    path == "&-"
+}
+
 pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
     let fd = target.strip_prefix('&')?;
     (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))

@@ -210,7 +210,7 @@ impl Executor {
                 )?;
                 return Ok(());
             }
-            if is_null_device(&target) {
+            if is_closed_redirect_target(&target) || is_null_device(&target) {
                 crate::builtins::echo::write_echo(
                     echo_args.iter().map(String::as_str),
                     &mut std::io::sink(),
@@ -235,6 +235,13 @@ impl Executor {
                 crate::builtins::echo::write_echo(
                     echo_args.iter().map(String::as_str),
                     &mut std::io::stdout().lock(),
+                )?;
+                return Ok(());
+            }
+            if is_closed_redirect_target(&target) {
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut std::io::sink(),
                 )?;
                 return Ok(());
             }

@@ -154,3 +154,24 @@ fn test_stderr_fd_copy_before_stdout_redirect_keeps_fd_target() {
     assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
     assert!(command.redirect_err_append.is_none());
 }
+
+#[test]
+fn test_stderr_fd_close_redirect() {
+    let tokens = tokenize("echo error 2>&-");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_err.as_ref().unwrap().target, "&-");
+    assert_eq!(command.words, ["echo", "error"]);
+}
+
+#[test]
+fn test_stdout_fd_close_redirect_with_prefix() {
+    let tokens = tokenize("echo hidden 1>&-");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "&-");
+    assert_eq!(command.redirect_out.as_ref().unwrap().fd, Some(1));
+    assert_eq!(command.words, ["echo", "hidden"]);
+}

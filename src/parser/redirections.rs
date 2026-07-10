@@ -124,7 +124,7 @@ pub(super) fn redirect_operator_fd(operator: &str) -> Option<u32> {
 }
 
 pub(super) fn redirect_target(operator: &str, target: &str) -> String {
-    if operator == ">&" {
+    if operator.ends_with(">&") {
         format!("&{target}")
     } else {
         target.to_string()

@@ -198,34 +198,50 @@ impl Executor {
 
         if let Some(ref redirect) = cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            let file = self.create_redirect_output(&target, redirect.clobber)?;
-            process.stdout(Stdio::from(file));
+            if is_closed_redirect_target(&target) {
+                process.stdout(Stdio::null());
+            } else {
+                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                process.stdout(Stdio::from(file));
+            }
         }
 
         if let Some(ref redirect) = cmd.append {
             let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            file.seek(SeekFrom::End(0))?;
-            process.stdout(Stdio::from(file));
+            if is_closed_redirect_target(&target) {
+                process.stdout(Stdio::null());
+            } else {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                file.seek(SeekFrom::End(0))?;
+                process.stdout(Stdio::from(file));
+            }
         }
 
         if let Some(ref redirect) = cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            let file = self.create_redirect_output(&target, redirect.clobber)?;
-            process.stderr(Stdio::from(file));
+            if is_closed_redirect_target(&target) {
+                process.stderr(Stdio::null());
+            } else {
+                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                process.stderr(Stdio::from(file));
+            }
         }
 
         if let Some(ref redirect) = cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .open(shell_path_to_windows(&target, &self.env_vars))?;
-            file.seek(SeekFrom::End(0))?;
-            process.stderr(Stdio::from(file));
+            if is_closed_redirect_target(&target) {
+                process.stderr(Stdio::null());
+            } else {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+                file.seek(SeekFrom::End(0))?;
+                process.stderr(Stdio::from(file));
+            }
         }
 
         Ok(())

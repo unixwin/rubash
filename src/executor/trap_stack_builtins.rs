@@ -9,7 +9,8 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            if redirect_target_fd(&target) == Some(2) {
+            if is_closed_redirect_target(&target) {
+            } else if redirect_target_fd(&target) == Some(2) {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
@@ -19,7 +20,8 @@ impl Executor {
             }
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
-            if redirect_target_fd(&target) == Some(2) {
+            if is_closed_redirect_target(&target) {
+            } else if redirect_target_fd(&target) == Some(2) {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
@@ -38,7 +40,8 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if redirect_target_fd(&target) == Some(1) {
+            if is_closed_redirect_target(&target) {
+            } else if redirect_target_fd(&target) == Some(1) {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(stderr)?;
                 } else {
@@ -50,7 +53,8 @@ impl Executor {
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
-            if redirect_target_fd(&target) == Some(1) {
+            if is_closed_redirect_target(&target) {
+            } else if redirect_target_fd(&target) == Some(1) {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(stderr)?;
                 } else {

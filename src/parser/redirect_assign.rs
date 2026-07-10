@@ -47,7 +47,8 @@ pub(super) fn assign_redirect_err_target(
     command: &mut CommandNode,
 ) -> Option<usize> {
     let target = redirect_target_token(tokens, index)?;
-    if target.value == "&1" {
+    let target_value = redirect_target(&tokens[index].value, &target.value);
+    if target_value == "&1" {
         if let Some(redirect) = command
             .append
             .clone()
@@ -65,7 +66,7 @@ pub(super) fn assign_redirect_err_target(
 
     command.redirect_err = Some(Redirect {
         fd: Some(2),
-        target: target.value.clone(),
+        target: target_value,
         append: false,
         clobber: tokens[index].value == "2>|",
     });
