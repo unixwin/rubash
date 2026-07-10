@@ -15,8 +15,10 @@ use arithmetic::{
 
 mod arrays;
 use arrays::*;
+mod alias_loop_match;
 mod alias_loops;
 mod alias_reparse;
+mod alias_select;
 mod alias_set_builtins;
 mod arithmetic_aliases;
 mod array_assignment_exec;
@@ -75,14 +77,11 @@ mod shell_options;
 mod shift_echo_builtins;
 mod source_type_state;
 mod temporary_assignments;
-
 mod variable_state;
-
 mod trap_stack_builtins;
 mod type_builtin;
 mod type_describe;
 mod type_functions;
-
 mod declare_local;
 mod export_builtin;
 mod function_calls;

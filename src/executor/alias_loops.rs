@@ -88,43 +88,41 @@ impl Executor {
 
         let mut ran_body = false;
         let mut last_body_status = 0;
-        let loop_result = self.with_command_input_redirects(done_command, |executor| {
-            loop {
-                let condition_ast = Ast {
-                    commands: condition_commands.clone(),
-                };
-                if let Err(error) = executor
-                    .with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
-                {
-                    break Err(error);
+        let loop_result = self.with_command_input_redirects(done_command, |executor| loop {
+            let condition_ast = Ast {
+                commands: condition_commands.clone(),
+            };
+            if let Err(error) =
+                executor.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
+            {
+                break Err(error);
+            }
+            let condition_matched = executor.exit_code == 0;
+            if condition_matched == until {
+                break Ok(());
+            }
+
+            ran_body = true;
+            executor.loop_depth += 1;
+            let result = executor.execute_ast(&body);
+            executor.loop_depth -= 1;
+            match result {
+                Ok(()) => {
+                    last_body_status = executor.exit_code;
                 }
-                let condition_matched = executor.exit_code == 0;
-                if condition_matched == until {
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    executor.exit_code = 0;
                     break Ok(());
                 }
-
-                ran_body = true;
-                executor.loop_depth += 1;
-                let result = executor.execute_ast(&body);
-                executor.loop_depth -= 1;
-                match result {
-                    Ok(()) => {
-                        last_body_status = executor.exit_code;
-                    }
-                    Err(ExecuteError::Break(level)) if level <= 1 => {
-                        executor.exit_code = 0;
-                        break Ok(());
-                    }
-                    Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
-                    Err(ExecuteError::Continue(level)) if level <= 1 => {
-                        executor.exit_code = 0;
-                        continue;
-                    }
-                    Err(ExecuteError::Continue(level)) => {
-                        break Err(ExecuteError::Continue(level - 1));
-                    }
-                    Err(error) => break Err(error),
+                Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    executor.exit_code = 0;
+                    continue;
                 }
+                Err(ExecuteError::Continue(level)) => {
+                    break Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => break Err(error),
             }
         });
 
@@ -234,54 +232,5 @@ impl Executor {
         };
         self.execute_for_command(&for_command)?;
         Ok(Some(done_index + 1))
-    }
-
-    fn find_matching_done_command(
-        &self,
-        ast: &Ast,
-        start: usize,
-        initial_depth: usize,
-    ) -> Option<usize> {
-        let mut nested_loop_depth = initial_depth;
-        for index in start..ast.commands.len() {
-            let command = &ast.commands[index];
-            if self.command_starts_alias_loop(command) {
-                nested_loop_depth += 1;
-                continue;
-            }
-            if command.words.first().map(String::as_str) == Some("done") {
-                if nested_loop_depth == 0 {
-                    return Some(index);
-                }
-                nested_loop_depth -= 1;
-            }
-        }
-        None
-    }
-
-    fn command_starts_alias_loop(&self, command: &CommandNode) -> bool {
-        self.words_start_alias_loop(&command.words)
-    }
-
-    fn embedded_do_loop_depth(&self, command: &CommandNode) -> usize {
-        if command.words.first().map(String::as_str) == Some("do")
-            && self.words_start_alias_loop(&command.words[1..])
-        {
-            1
-        } else {
-            0
-        }
-    }
-
-    fn words_start_alias_loop(&self, words: &[String]) -> bool {
-        let words = if self.alias_expansion_enabled() {
-            self.expand_aliases(words)
-        } else {
-            words.to_vec()
-        };
-        matches!(
-            words.first().map(String::as_str),
-            Some("for" | "while" | "until" | "select")
-        )
     }
 }

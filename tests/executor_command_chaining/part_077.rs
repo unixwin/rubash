@@ -107,6 +107,47 @@ fn test_select_explicit_empty_in_does_not_use_positional_params() {
 }
 
 #[test]
+fn test_alias_introduced_select_command_executes_choice() {
+    let output_path = "target/rubash-alias-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias s=select; \
+         s item in alpha beta; do echo chosen:$item; break; done <<< '2' > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "chosen:beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_select_without_in_uses_positional_params() {
+    let output_path = "target/rubash-alias-select-positional-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias s=select; \
+         s item; do echo chosen:$item; break; done <<< '1' > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+    executor.set_positional_params(vec!["alpha".to_string()]);
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "chosen:alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_pipeline_modifier_executes_full_pipeline() {
     let output_path = "target/rubash-time-pipeline-output.txt";
     let _ = fs::remove_file(output_path);
