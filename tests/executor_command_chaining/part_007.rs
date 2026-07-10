@@ -64,6 +64,22 @@ fn test_brace_group_here_string_feeds_body_read() {
 }
 
 #[test]
+fn test_brace_group_stdout_fd_copy_does_not_create_literal_target() {
+    let literal_fd_path = "&2";
+    let _ = fs::remove_file(literal_fd_path);
+    let tokens = tokenize("{ echo grouped; } >&2");
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert!(fs::metadata(literal_fd_path).is_err());
+    let _ = fs::remove_file(literal_fd_path);
+}
+
+#[test]
 fn test_subshell_input_redirect_feeds_body_reads() {
     let input_path = target_test_path("rubash-subshell-input.txt");
     let output_path = target_test_path("rubash-subshell-input-output.txt");

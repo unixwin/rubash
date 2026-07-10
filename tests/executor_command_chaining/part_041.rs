@@ -126,6 +126,22 @@ fn test_eval_appends_entire_output() {
 }
 
 #[test]
+fn test_eval_stdout_fd_copy_does_not_create_literal_target() {
+    let literal_fd_path = "&2";
+    let _ = fs::remove_file(literal_fd_path);
+    let tokens = tokenize("eval 'echo grouped' >&2");
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert!(fs::metadata(literal_fd_path).is_err());
+    let _ = fs::remove_file(literal_fd_path);
+}
+
+#[test]
 fn test_eval_expands_assignment_lhs_to_array_name() {
     let output_path = "target/rubash-eval-array-lhs-output.txt";
     let _ = fs::remove_file(output_path);

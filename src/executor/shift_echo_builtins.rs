@@ -189,6 +189,20 @@ impl Executor {
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
+            if target == "&2" {
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut std::io::stderr().lock(),
+                )?;
+                return Ok(());
+            }
+            if target == "&1" {
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut std::io::stdout().lock(),
+                )?;
+                return Ok(());
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)

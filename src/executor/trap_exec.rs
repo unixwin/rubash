@@ -70,7 +70,9 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
-            self.create_redirect_output(&target, redirect.clobber)?;
+            if redirect_target_fd(&target).is_none() {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 target,
@@ -91,7 +93,7 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
-            if !is_null_device(&target) {
+            if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
             let append_redirect = Redirect {
