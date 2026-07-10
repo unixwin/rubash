@@ -28,7 +28,7 @@ impl Executor {
             return Some(self.execute_select_command(cmd, select_command));
         }
         if let Some(case_command) = &cmd.case_command {
-            return Some(self.execute_case_command(case_command));
+            return Some(self.execute_case_command_with_redirects(cmd, case_command));
         }
         if let Some(coproc_cmd) = &cmd.coproc_command {
             return Some(self.execute_coproc_command(cmd, coproc_cmd));

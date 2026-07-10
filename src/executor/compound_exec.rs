@@ -209,4 +209,62 @@ impl Executor {
         self.exit_code = 0;
         Ok(())
     }
+
+    pub(in crate::executor) fn execute_case_command_with_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        case_command: &CaseCommand,
+    ) -> Result<(), ExecuteError> {
+        let mut case_command = case_command.clone();
+        self.apply_case_command_redirects(cmd, &mut case_command)?;
+        self.execute_case_command(&case_command)
+    }
+
+    fn apply_case_command_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        case_command: &mut CaseCommand,
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if redirect_target_fd(&target).is_none() {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            for clause in &mut case_command.clauses {
+                apply_stdout_append_redirect(&mut clause.body, &append_redirect);
+            }
+        } else if let Some(redirect) = &cmd.append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            for clause in &mut case_command.clauses {
+                apply_stdout_append_redirect(&mut clause.body, &append_redirect);
+            }
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = target;
+            append_redirect.append = true;
+            append_redirect.clobber = false;
+            for clause in &mut case_command.clauses {
+                apply_stderr_append_redirect(&mut clause.body, &append_redirect);
+            }
+        } else if let Some(redirect) = &cmd.redirect_err_append {
+            let mut append_redirect = redirect.clone();
+            append_redirect.target = self.expand_word(&redirect.target);
+            for clause in &mut case_command.clauses {
+                apply_stderr_append_redirect(&mut clause.body, &append_redirect);
+            }
+        }
+
+        Ok(())
+    }
 }
