@@ -86,6 +86,72 @@ fn c_external_stderr_fd_copy_keeps_original_stdout_before_redirect() {
     let _ = fs::remove_dir_all(bin_dir);
 }
 
+#[test]
+fn c_external_combined_redirect_preserves_stderr_first_output() {
+    let bin_dir = external_fd_copy_bin_dir();
+    let script_path = bin_dir.join("emitboth");
+    let output_path = Path::new("target").join("rubash-cli-external-combined-output.txt");
+    let _ = fs::remove_dir_all(&bin_dir);
+    let _ = fs::remove_file(&output_path);
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(&script_path, "echo external-error >&2\necho external-out\n").unwrap();
+    make_executable(&script_path);
+    let path = path_with_bin_first(&bin_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("PATH", path)
+        .arg("-c")
+        .arg(format!(
+            "emitboth &> {}",
+            output_path.to_string_lossy().replace('\\', "/")
+        ))
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "external-error\nexternal-out\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(bin_dir);
+}
+
+#[test]
+fn c_external_combined_append_preserves_existing_and_both_streams() {
+    let bin_dir = external_fd_copy_bin_dir();
+    let script_path = bin_dir.join("emitboth");
+    let output_path = Path::new("target").join("rubash-cli-external-combined-append.txt");
+    let _ = fs::remove_dir_all(&bin_dir);
+    fs::write(&output_path, "first\n").unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(&script_path, "echo external-error >&2\necho external-out\n").unwrap();
+    make_executable(&script_path);
+    let path = path_with_bin_first(&bin_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("PATH", path)
+        .arg("-c")
+        .arg(format!(
+            "emitboth &>> {}",
+            output_path.to_string_lossy().replace('\\', "/")
+        ))
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "first\nexternal-error\nexternal-out\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(bin_dir);
+}
+
 fn external_fd_copy_bin_dir() -> std::path::PathBuf {
     Path::new("target").join("rubash-cli-external-fd-copy-bin")
 }

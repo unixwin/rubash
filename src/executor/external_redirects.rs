@@ -7,9 +7,50 @@ impl Executor {
         process: &mut Command,
     ) -> Result<(), ExecuteError> {
         self.apply_external_stdin_redirect(cmd, process)?;
+        if self.apply_external_combined_output_redirect(cmd, process)? {
+            return Ok(());
+        }
         self.apply_external_stdout_redirect(cmd, process)?;
         self.apply_external_stderr_redirect(cmd, process)?;
         Ok(())
+    }
+
+    fn apply_external_combined_output_redirect(
+        &self,
+        cmd: &CommandNode,
+        process: &mut Command,
+    ) -> Result<bool, ExecuteError> {
+        if let (Some(stdout_redirect), Some(stderr_redirect)) =
+            (&cmd.redirect_out, &cmd.redirect_err_append)
+        {
+            let stdout_target = self.expand_word(&stdout_redirect.target);
+            let stderr_target = self.expand_word(&stderr_redirect.target);
+            if stdout_target == stderr_target {
+                let file = self.create_redirect_output(&stdout_target, stdout_redirect.clobber)?;
+                process.stderr(Stdio::from(file.try_clone()?));
+                process.stdout(Stdio::from(file));
+                return Ok(true);
+            }
+        }
+
+        if let (Some(stdout_redirect), Some(stderr_redirect)) =
+            (&cmd.append, &cmd.redirect_err_append)
+        {
+            let stdout_target = self.expand_word(&stdout_redirect.target);
+            let stderr_target = self.expand_word(&stderr_redirect.target);
+            if stdout_target == stderr_target {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .open(shell_path_to_windows(&stdout_target, &self.env_vars))?;
+                file.seek(SeekFrom::End(0))?;
+                process.stderr(Stdio::from(file.try_clone()?));
+                process.stdout(Stdio::from(file));
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     fn apply_external_stdout_redirect(
