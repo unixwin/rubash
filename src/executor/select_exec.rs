@@ -29,15 +29,23 @@ impl Executor {
             return Ok(());
         }
 
+        self.with_command_input_redirects(cmd, |executor| {
+            executor.execute_select_loop(&select_command, &values)
+        })
+    }
+
+    fn execute_select_loop(
+        &mut self,
+        select_command: &SelectCommand,
+        values: &[String],
+    ) -> Result<(), ExecuteError> {
         let ps3 = self
             .env_vars
             .get("PS3")
             .cloned()
             .unwrap_or_else(|| "#? ".to_string());
-        let has_stdin = self.env_vars.contains_key(FUNCTION_STDIN)
-            || cmd.here_string.is_some()
-            || cmd.heredoc_redirects.iter().any(|r| r.body.is_some());
-        let mut stdin_offset = self.prepare_select_stdin(cmd, has_stdin);
+        let has_stdin = self.env_vars.contains_key(FUNCTION_STDIN);
+        let mut stdin_offset = self.select_stdin_offset(has_stdin);
 
         loop {
             for (i, value) in values.iter().enumerate() {
@@ -72,28 +80,7 @@ impl Executor {
         Ok(())
     }
 
-    fn prepare_select_stdin(&mut self, cmd: &CommandNode, has_stdin: bool) -> usize {
-        if has_stdin && !self.env_vars.contains_key(FUNCTION_STDIN) {
-            if let Some(ref here_string) = cmd.here_string {
-                let input = self.expand_word(here_string);
-                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.env_vars
-                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-            } else if let Some(input) = cmd
-                .heredoc_redirects
-                .iter()
-                .rev()
-                .find(|r| r.fd.is_none())
-                .and_then(|r| r.body.clone())
-            {
-                let input = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&input))
-                    .to_string();
-                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.env_vars
-                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-            }
-        }
-
+    fn select_stdin_offset(&self, has_stdin: bool) -> usize {
         if has_stdin {
             self.env_vars
                 .get(FUNCTION_STDIN_OFFSET)
