@@ -25,12 +25,12 @@ impl Executor {
             .first()
             .and_then(|command| command.case_command.as_ref())
         {
-            self.execute_case_command(case_command)?;
+            self.execute_case_command_with_redirects(command, case_command)?;
             return Ok(Some(index + 1));
         }
 
         if let Some(case_command) = case_command_from_words(&words) {
-            self.execute_case_command(&case_command)?;
+            self.execute_case_command_with_redirects(command, &case_command)?;
             return Ok(Some(index + 1));
         }
 
