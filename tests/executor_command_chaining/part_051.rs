@@ -42,6 +42,26 @@ fn test_case_test_next_terminator_matches_later_clause() {
 }
 
 #[test]
+fn test_case_optional_pattern_list_paren_with_alternates() {
+    let output_path = "target/rubash-case-paren-alternates-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "case y in (x|y) echo matched > {output_path} ;; *) echo missed > {output_path} ;; esac"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].case_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "matched\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_keyword_definition_executes_body() {
     let output_path = "target/rubash-function-keyword-output.txt";
     let _ = fs::remove_file(output_path);

@@ -24,6 +24,10 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
             break;
         }
 
+        if is_keyword(tokens, i, "(") {
+            i += 1;
+        }
+
         let mut patterns = Vec::new();
         let mut current_pattern = String::new();
         let mut in_extglob = 0i32;
