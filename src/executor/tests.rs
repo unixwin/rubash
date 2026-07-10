@@ -1,5 +1,5 @@
 mod unit_tests {
-    use super::*;
+    use crate::executor::Executor;
     use crate::lexer::tokenize;
     use crate::parser::parse;
 
