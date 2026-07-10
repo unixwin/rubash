@@ -41,7 +41,10 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.redirect_err_append.is_none()
         && cmd.for_command.is_none()
         && cmd.case_command.is_none()
+        && cmd.select_command.is_none()
         && cmd.function_command.is_none()
+        && cmd.brace_group.is_none()
+        && cmd.coproc_command.is_none()
 }
 
 pub(super) fn command_is_open_conditional(cmd: &CommandNode) -> bool {

@@ -115,6 +115,25 @@ fn test_for_command_here_string_feeds_body_read() {
 }
 
 #[test]
+fn test_for_command_keeps_brace_group_body_command() {
+    let output_path = "target/rubash-for-brace-group-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("for item in one; do {{ echo $item; }} done > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let body = &ast.commands[0].for_command.as_ref().unwrap().body;
+    assert!(body.iter().any(|command| command.brace_group.is_some()));
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "one\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_arithmetic_for_command_input_redirect_feeds_body_read() {
     let input_path = "target/rubash-arithmetic-for-command-input.txt";
     let output_path = "target/rubash-arithmetic-for-command-input-output.txt";
