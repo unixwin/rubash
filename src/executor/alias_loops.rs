@@ -198,6 +198,11 @@ impl Executor {
         if words.first().map(String::as_str) != Some("for") {
             return Ok(None);
         }
+        if let Some(next_index) =
+            self.execute_alias_introduced_arithmetic_for(ast, command_index, &words)?
+        {
+            return Ok(Some(next_index));
+        }
         if words.len() < 4 || words.get(2).map(String::as_str) != Some("in") {
             return Ok(None);
         }

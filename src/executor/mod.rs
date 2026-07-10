@@ -3,7 +3,6 @@
 //! Executes parsed AST commands.
 
 pub(crate) mod path;
-
 mod glob;
 
 mod upstream_scripts;
@@ -15,6 +14,7 @@ use arithmetic::{
 
 mod arrays;
 use arrays::*;
+mod alias_arithmetic_for;
 mod alias_case;
 mod alias_loop_match;
 mod alias_loops;
