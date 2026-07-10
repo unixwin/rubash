@@ -264,3 +264,23 @@ fn test_alias_introduced_for_keeps_nested_alias_while_body() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "a:0\nb:0\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_for_accepts_brace_group_body() {
+    let output_path = "target/rubash-alias-for-brace-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias f=for; \
+         f item in alpha beta; {{ echo $item; }} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}

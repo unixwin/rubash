@@ -175,7 +175,7 @@ impl Executor {
         while ast
             .commands
             .get(do_index)
-            .is_some_and(|command| command.words.is_empty())
+            .is_some_and(|command| command.words.is_empty() && command.brace_group.is_none())
         {
             do_index += 1;
         }
@@ -205,6 +205,18 @@ impl Executor {
         let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
         };
+        if let Some(body) = do_command.brace_group.clone() {
+            let for_command = ForCommand {
+                variable: words[1].clone(),
+                words: words[3..].to_vec(),
+                default_positional: false,
+                arithmetic: None,
+                body,
+            };
+            self.execute_for_command_with_redirects(&for_command, do_command)?;
+            return Ok(Some(do_index + 1));
+        }
+
         if do_command.words.first().map(String::as_str) != Some("do") {
             return Ok(None);
         }

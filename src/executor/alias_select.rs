@@ -34,15 +34,9 @@ impl Executor {
         while ast
             .commands
             .get(do_index)
-            .is_some_and(|command| command.words.is_empty())
+            .is_some_and(|command| command.words.is_empty() && command.brace_group.is_none())
         {
             do_index += 1;
-        }
-        let Some(do_command) = ast.commands.get(do_index) else {
-            return Ok(None);
-        };
-        if do_command.words.first().map(String::as_str) != Some("do") {
-            return Ok(None);
         }
 
         let variable = words[1].clone();
@@ -53,6 +47,22 @@ impl Executor {
         } else {
             return Ok(None);
         };
+        let Some(do_command) = ast.commands.get(do_index) else {
+            return Ok(None);
+        };
+        if let Some(body) = do_command.brace_group.clone() {
+            let select_command = SelectCommand {
+                variable,
+                words: select_words,
+                default_positional,
+                body,
+            };
+            self.execute_select_command(do_command, &select_command)?;
+            return Ok(Some(do_index + 1));
+        }
+        if do_command.words.first().map(String::as_str) != Some("do") {
+            return Ok(None);
+        }
 
         let initial_depth = self.embedded_do_loop_depth(do_command);
         let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
