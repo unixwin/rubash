@@ -217,7 +217,9 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut case_command = case_command.clone();
         self.apply_case_command_redirects(cmd, &mut case_command)?;
-        self.execute_case_command(&case_command)
+        self.with_command_input_redirects(cmd, |executor| {
+            executor.execute_case_command(&case_command)
+        })
     }
 
     fn apply_case_command_redirects(
