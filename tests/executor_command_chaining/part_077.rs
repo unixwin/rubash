@@ -65,3 +65,40 @@ fn test_select_command_input_redirect_feeds_choice() {
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_time_pipeline_modifier_executes_full_pipeline() {
+    let output_path = "target/rubash-time-pipeline-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time -p echo alpha | wc -l > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words[0], "time");
+    assert!(ast.commands[0].pipe.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_time_pipeline_modifier_preserves_pipeline_status() {
+    let output_path = "target/rubash-time-pipeline-status-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time echo alpha | grep beta > {output_path}; echo $? >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].pipe.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    let _ = fs::remove_file(output_path);
+}

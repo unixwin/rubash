@@ -76,11 +76,17 @@ impl Executor {
             return Ok(None);
         }
 
+        let time_prefix = time_pipeline_prefix(first);
         let mut input = String::new();
         let mut statuses = Vec::new();
-        for command in &commands {
-            self.set_current_command(command);
-            let Some((next_input, next_status)) = self.execute_pipeline_stage(command, &input)?
+        for (stage_index, command) in commands.iter().enumerate() {
+            let stage = time_prefix
+                .as_ref()
+                .filter(|_| stage_index == 0)
+                .map(|prefix| &prefix.command)
+                .unwrap_or(command);
+            self.set_current_command(stage);
+            let Some((next_input, next_status)) = self.execute_pipeline_stage(stage, &input)?
             else {
                 return Ok(None);
             };
@@ -90,7 +96,13 @@ impl Executor {
 
         let final_command = commands.last().expect("pipeline has at least one stage");
         self.write_pipeline_output(final_command, &input)?;
-        let status = self.pipeline_exit_status(&statuses);
+        if time_prefix.is_some() {
+            print_posix_time();
+        }
+        let mut status = self.pipeline_exit_status(&statuses);
+        if time_prefix.as_ref().is_some_and(|prefix| prefix.inverted) {
+            status = invert_exit_status(status);
+        }
         self.exit_code = if first.inverted {
             invert_exit_status(status)
         } else {
@@ -213,4 +225,41 @@ impl Executor {
             }
         }
     }
+}
+
+struct TimePipelinePrefix {
+    command: CommandNode,
+    inverted: bool,
+}
+
+fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
+    if command.words.first().map(String::as_str) != Some("time") {
+        return None;
+    }
+
+    let mut index = 1;
+    let mut inverted = false;
+    while let Some(word) = command.words.get(index).map(String::as_str) {
+        match word {
+            "-p" | "--" => index += 1,
+            "!" => {
+                inverted = !inverted;
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    if index >= command.words.len() {
+        return None;
+    }
+
+    let mut stripped = command.clone();
+    stripped.words = command.words[index..].to_vec();
+    if command.word_kinds.len() == command.words.len() {
+        stripped.word_kinds = command.word_kinds[index..].to_vec();
+    }
+    Some(TimePipelinePrefix {
+        command: stripped,
+        inverted,
+    })
 }
