@@ -2,7 +2,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
-#[path = "cli_errexit_tests.rs"]
+#[path = "errexit.rs"]
 mod errexit;
 
 #[test]

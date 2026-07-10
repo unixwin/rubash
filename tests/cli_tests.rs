@@ -1,9 +1,9 @@
 use std::process::Command;
 use std::{fs, path::Path};
 
-#[path = "cli_example_tests.rs"]
+#[path = "cli_tests/examples.rs"]
 mod examples;
-#[path = "cli_script_tests.rs"]
+#[path = "cli_tests/scripts.rs"]
 mod scripts;
 
 fn shell_test_path(path: &Path) -> String {
