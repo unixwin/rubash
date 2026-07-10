@@ -65,6 +65,24 @@ fn test_input_redirect_fd_prefix_without_space() {
 }
 
 #[test]
+fn test_input_fd_copy_redirect() {
+    let tokens = tokenize("read value <&3");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::RedirectIn);
+    assert_eq!(tokens[2].value, "<&");
+    assert_eq!(tokens[3].value, "3");
+}
+
+#[test]
+fn test_input_fd_close_redirect_with_prefix() {
+    let tokens = tokenize("read value 0<&-");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::RedirectIn);
+    assert_eq!(tokens[2].value, "0<&");
+    assert_eq!(tokens[3].value, "-");
+}
+
+#[test]
 fn test_read_write_redirect() {
     let input = "cat <> input.txt";
     let tokens = tokenize(input);

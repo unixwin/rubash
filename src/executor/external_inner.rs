@@ -184,28 +184,7 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
     ) -> Result<(), ExecuteError> {
-        if cmd.heredoc.is_some() || cmd.here_string.is_some() {
-            // TODO(redir.c/parse.y): This implements the simple stdin pipe for
-            // here-documents. GNU Bash stores REDIRECT nodes, tracks quoted
-            // delimiters, strips tabs for <<-, and conditionally expands the
-            // body before do_redirections applies it.
-            process.stdin(Stdio::piped());
-        } else if let Some(ref redirect) = cmd.redirect_in {
-            let target = self.expand_word(&redirect.target);
-            let path = shell_path_to_windows(&target, &self.env_vars);
-            let file = if redirect.append {
-                OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .open(path)?
-            } else {
-                File::open(path)?
-            };
-            if redirect.fd.unwrap_or(0) == 0 {
-                process.stdin(Stdio::from(file));
-            }
-        }
+        self.apply_external_stdin_redirect(cmd, process)?;
 
         if let Some(ref redirect) = cmd.redirect_out {
             let target = self.expand_word(&redirect.target);

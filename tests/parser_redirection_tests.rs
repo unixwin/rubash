@@ -91,6 +91,28 @@ fn test_input_redirect_fd_prefix_without_space() {
 }
 
 #[test]
+fn test_input_fd_copy_redirect_maps_target_fd() {
+    let tokens = tokenize("read value <&3");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_in.as_ref().unwrap().fd, None);
+    assert_eq!(command.redirect_in.as_ref().unwrap().target, "&3");
+    assert_eq!(command.words, ["read", "value"]);
+}
+
+#[test]
+fn test_input_fd_close_redirect_with_prefix() {
+    let tokens = tokenize("read value 0<&-");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_in.as_ref().unwrap().fd, Some(0));
+    assert_eq!(command.redirect_in.as_ref().unwrap().target, "&-");
+    assert_eq!(command.words, ["read", "value"]);
+}
+
+#[test]
 fn test_read_write_redirect_maps_to_stdin() {
     let input = "cat <> input.txt";
     let tokens = tokenize(input);

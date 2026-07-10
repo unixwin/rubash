@@ -56,7 +56,7 @@ pub(super) fn collect_trailing_redirections(
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
                 command.redirect_in = Some(Redirect {
                     fd,
-                    target: target.value.clone(),
+                    target: input_redirect_target(&token.value, &target.value),
                     append: false,
                     clobber: false,
                 });
@@ -136,6 +136,14 @@ pub(super) fn redirect_operator_fd(operator: &str) -> Option<u32> {
 
 pub(super) fn redirect_target(operator: &str, target: &str) -> String {
     if operator.ends_with(">&") {
+        format!("&{target}")
+    } else {
+        target.to_string()
+    }
+}
+
+pub(super) fn input_redirect_target(operator: &str, target: &str) -> String {
+    if operator.ends_with("<&") {
         format!("&{target}")
     } else {
         target.to_string()

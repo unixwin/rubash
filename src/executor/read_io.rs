@@ -26,11 +26,18 @@ impl Executor {
             {
                 return Some(line);
             }
-            return self.read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit);
+            return self
+                .read_virtual_fd_stdin(fd, delimiter, char_limit, exact_char_limit)
+                .or_else(|| {
+                    self.read_heredoc_fd_input(cmd, fd, delimiter, char_limit, exact_char_limit)
+                });
         }
 
         if let Some(redirect) = &cmd.redirect_in {
             if redirect.fd.unwrap_or(0) != 0 {
+                return None;
+            }
+            if is_closed_redirect_target(&self.expand_word(&redirect.target)) {
                 return None;
             }
             if let Some(source) = redirect
@@ -55,6 +62,13 @@ impl Executor {
                     {
                         return Some(line);
                     }
+                    return self.read_heredoc_fd_input(
+                        cmd,
+                        fd,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                    );
                 }
             }
         }
@@ -256,37 +270,5 @@ impl Executor {
             char_limit,
             exact_char_limit,
         ))
-    }
-
-    pub(in crate::executor) fn assign_read_scalar_names(
-        &mut self,
-        names: &[String],
-        line: &str,
-        raw: bool,
-    ) {
-        if names.len() == 1 {
-            let value = if raw {
-                line.to_string()
-            } else {
-                unescape_read_backslashes(line)
-            };
-            self.env_vars.insert(names[0].clone(), value);
-            return;
-        }
-
-        let ifs = self
-            .env_vars
-            .get("IFS")
-            .map(String::as_str)
-            .unwrap_or(" \t\n");
-        let fields = if raw {
-            read_scalar_fields(line, names.len(), ifs)
-        } else {
-            read_scalar_fields_with_backslashes(line, names.len(), ifs)
-        };
-        for (index, name) in names.iter().enumerate() {
-            let value = fields.get(index).cloned().unwrap_or_default();
-            self.env_vars.insert(name.clone(), value);
-        }
     }
 }

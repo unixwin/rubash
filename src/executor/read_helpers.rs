@@ -225,3 +225,37 @@ pub(in crate::executor) fn split_escaped_words(line: &str, separator: char) -> V
     }
     words
 }
+
+impl Executor {
+    pub(in crate::executor) fn assign_read_scalar_names(
+        &mut self,
+        names: &[String],
+        line: &str,
+        raw: bool,
+    ) {
+        if names.len() == 1 {
+            let value = if raw {
+                line.to_string()
+            } else {
+                unescape_read_backslashes(line)
+            };
+            self.env_vars.insert(names[0].clone(), value);
+            return;
+        }
+
+        let ifs = self
+            .env_vars
+            .get("IFS")
+            .map(String::as_str)
+            .unwrap_or(" \t\n");
+        let fields = if raw {
+            read_scalar_fields(line, names.len(), ifs)
+        } else {
+            read_scalar_fields_with_backslashes(line, names.len(), ifs)
+        };
+        for (index, name) in names.iter().enumerate() {
+            let value = fields.get(index).cloned().unwrap_or_default();
+            self.env_vars.insert(name.clone(), value);
+        }
+    }
+}

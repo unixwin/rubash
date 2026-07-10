@@ -43,6 +43,10 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 Token::new(TokenKind::RedirectOut, self.slice(start), start)
             }
+            Some('&') => {
+                self.advance();
+                Token::new(TokenKind::RedirectIn, self.slice(start), start)
+            }
             Some('<') => {
                 self.advance();
                 if matches!(self.peek(), Some('<' | '-')) {

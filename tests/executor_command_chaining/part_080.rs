@@ -198,3 +198,37 @@ fn test_read_u_uses_numbered_input_redirect_fd() {
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_input_fd_copy_reads_virtual_fd() {
+    let output_path = "target/rubash-input-fd-copy-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read first <&3 3<<EOF; echo $first > {output_path}\nfrom-fd\nEOF");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "from-fd\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_input_fd_close_makes_read_fail_without_hanging() {
+    let output_path = "target/rubash-input-fd-close-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read value <&-; echo status:$?:$value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "status:1:\n");
+    let _ = fs::remove_file(output_path);
+}

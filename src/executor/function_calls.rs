@@ -226,6 +226,9 @@ impl Executor {
             return Ok(None);
         }
         let target = self.expand_word(&redirect.target);
+        if is_closed_redirect_target(&target) {
+            return Ok(None);
+        }
         Ok(Some(fs::read_to_string(shell_path_to_windows(
             &target,
             &self.env_vars,

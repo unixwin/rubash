@@ -21,7 +21,8 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
-            if redirect.append {
+            if is_closed_redirect_target(&target) {
+            } else if redirect.append {
                 OpenOptions::new()
                     .create(true)
                     .read(true)

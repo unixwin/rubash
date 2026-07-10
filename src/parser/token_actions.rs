@@ -99,7 +99,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 {
                     state.current_cmd.redirect_in = Some(Redirect {
                         fd,
-                        target: tokens[*i + 1].value.clone(),
+                        target: input_redirect_target(&token.value, &tokens[*i + 1].value),
                         append: false,
                         clobber: false,
                     });

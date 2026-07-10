@@ -13,6 +13,39 @@ struct OutputProcessSubstitution {
 }
 
 impl Executor {
+    pub(in crate::executor) fn apply_external_stdin_redirect(
+        &self,
+        cmd: &CommandNode,
+        process: &mut Command,
+    ) -> Result<(), ExecuteError> {
+        if cmd.heredoc.is_some() || cmd.here_string.is_some() {
+            process.stdin(Stdio::piped());
+        } else if let Some(ref redirect) = cmd.redirect_in {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                if redirect.fd.unwrap_or(0) == 0 {
+                    process.stdin(Stdio::null());
+                }
+                return Ok(());
+            }
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            let file = if redirect.append {
+                OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)?
+            } else {
+                File::open(path)?
+            };
+            if redirect.fd.unwrap_or(0) == 0 {
+                process.stdin(Stdio::from(file));
+            }
+        }
+
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_external(
         &mut self,
         cmd: &CommandNode,

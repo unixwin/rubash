@@ -80,6 +80,9 @@ impl Executor {
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }
+        if is_closed_redirect_target(&self.expand_word(&redirect.target)) {
+            return None;
+        }
         if let Some(source) = redirect
             .target
             .strip_prefix("<(")

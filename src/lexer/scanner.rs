@@ -149,6 +149,10 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Some(Token::new(TokenKind::RedirectOut, "<>", start))
                 }
+                Some('&') => {
+                    self.advance();
+                    Some(Token::new(TokenKind::RedirectIn, "<&", start))
+                }
                 _ => Some(Token::new(TokenKind::RedirectIn, "<", start)),
             },
             '>' => {

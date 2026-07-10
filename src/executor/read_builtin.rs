@@ -259,6 +259,9 @@ impl Executor {
             {
                 self.assign_read_scalar_names(&scalar_names, &line, raw);
                 0
+            } else if read_fd.is_some() || command_closes_stdin(cmd) {
+                self.assign_read_scalar_names(&scalar_names, "", raw);
+                1
             } else if self.env_vars.contains_key(FUNCTION_STDIN) {
                 // FUNCTION_STDIN is exhausted - EOF on heredoc/redirect
                 self.assign_read_scalar_names(&scalar_names, "", raw);
@@ -285,4 +288,10 @@ impl Executor {
         );
         self.finish_read_error(cmd, &stderr, 127)
     }
+}
+
+fn command_closes_stdin(cmd: &CommandNode) -> bool {
+    cmd.redirect_in
+        .as_ref()
+        .is_some_and(|redirect| redirect.fd.unwrap_or(0) == 0 && redirect.target == "&-")
 }

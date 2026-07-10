@@ -236,6 +236,9 @@ impl Executor {
                 return None;
             }
             let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                return None;
+            }
             let path = shell_path_to_windows(&target, &self.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
