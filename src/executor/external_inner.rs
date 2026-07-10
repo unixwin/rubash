@@ -192,7 +192,16 @@ impl Executor {
             process.stdin(Stdio::piped());
         } else if let Some(ref redirect) = cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
-            let file = File::open(shell_path_to_windows(&target, &self.env_vars))?;
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            let file = if redirect.append {
+                OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(path)?
+            } else {
+                File::open(path)?
+            };
             process.stdin(Stdio::from(file));
         }
 

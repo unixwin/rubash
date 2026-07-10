@@ -60,7 +60,16 @@ pub(super) fn collect_trailing_redirections(
                 });
             }
             TokenKind::RedirectOut => {
-                assign_output_redirect(command, &token.value, &target.value, None);
+                if token.value == "<>" {
+                    command.redirect_in = Some(Redirect {
+                        fd: None,
+                        target: target.value.clone(),
+                        append: true,
+                        clobber: false,
+                    });
+                } else {
+                    assign_output_redirect(command, &token.value, &target.value, None);
+                }
             }
             TokenKind::Append => {
                 assign_append_redirect(command, &token.value, &target.value, None);

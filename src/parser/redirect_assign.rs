@@ -25,6 +25,15 @@ pub(super) fn assign_redirect_out_target(
     let target = redirect_target_token(tokens, index)?;
     let fd = redirect_operator_fd(&tokens[index].value)
         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+    if tokens[index].value == "<>" {
+        command.redirect_in = Some(Redirect {
+            fd,
+            target: target.value.clone(),
+            append: true,
+            clobber: false,
+        });
+        return Some(index + 1);
+    }
     assign_output_redirect(command, &tokens[index].value, &target.value, fd);
     Some(index + 1)
 }

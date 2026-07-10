@@ -233,7 +233,15 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
-            return fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok();
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            if redirect.append {
+                let _ = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path);
+            }
+            return fs::read_to_string(path).ok();
         }
 
         let word = cmd.here_string.as_ref()?;

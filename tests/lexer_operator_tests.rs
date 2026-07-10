@@ -55,6 +55,15 @@ fn test_redirect_input() {
 }
 
 #[test]
+fn test_read_write_redirect() {
+    let input = "cat <> input.txt";
+    let tokens = tokenize(input);
+    assert_eq!(tokens.len(), 3);
+    assert_eq!(tokens[1].kind, TokenKind::RedirectOut);
+    assert_eq!(tokens[1].value, "<>");
+}
+
+#[test]
 fn test_append_redirect() {
     let input = "echo hello >> file.txt";
     let tokens = tokenize(input);

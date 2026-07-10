@@ -19,6 +19,19 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_in {
+            let target = self.expand_word(&redirect.target);
+            if redirect.append {
+                OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+            } else {
+                File::open(shell_path_to_windows(&target, &self.env_vars))?;
+            }
+        }
+
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             if !is_closed_redirect_target(&target) {

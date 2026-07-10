@@ -86,6 +86,14 @@ impl Executor {
         }
 
         let target = self.expand_word(&redirect.target);
-        fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok()
+        let path = shell_path_to_windows(&target, &self.env_vars);
+        if redirect.append {
+            let _ = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path);
+        }
+        fs::read_to_string(path).ok()
     }
 }

@@ -79,6 +79,18 @@ fn test_input_redirect_without_space() {
 }
 
 #[test]
+fn test_read_write_redirect_maps_to_stdin() {
+    let input = "cat <> input.txt";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_in.as_ref().unwrap().target, "input.txt");
+    assert!(command.redirect_in.as_ref().unwrap().append);
+    assert!(command.redirect_out.is_none());
+}
+
+#[test]
 fn test_append_redirect() {
     let input = "echo hello >> file.txt";
     let tokens = tokenize(input);
