@@ -184,3 +184,23 @@ fn test_alias_introduced_case_keeps_pattern_alternates() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_case_keeps_extglob_pattern_alternates() {
+    let output_path = "target/rubash-alias-case-extglob-alternates-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases extglob; alias c=case; \
+         c foobar in @(foo|bar)) echo no ;; @(foo|foobar)) echo yes ;; *) echo star ;; esac > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}

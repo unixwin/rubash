@@ -27,6 +27,12 @@ pub(super) fn collect_alias_case_patterns<'a>(
     words: &'a [String],
     pattern_index: usize,
 ) -> Option<AliasCasePatterns<'a>> {
+    if let Some(patterns) =
+        collect_alias_case_extglob_patterns(ast, command, command_index, words, pattern_index)
+    {
+        return Some(patterns);
+    }
+
     let mut patterns = vec![words.get(pattern_index)?.clone()];
     let mut current_command = command;
     let mut current_command_index = command_index;
@@ -50,6 +56,54 @@ pub(super) fn collect_alias_case_patterns<'a>(
         words: current_words,
         body_start,
     })
+}
+
+fn collect_alias_case_extglob_patterns<'a>(
+    ast: &'a Ast,
+    command: &'a CommandNode,
+    command_index: usize,
+    words: &'a [String],
+    pattern_index: usize,
+) -> Option<AliasCasePatterns<'a>> {
+    let prefix = words.get(pattern_index)?;
+    if !alias_case_extglob_prefix(prefix)
+        || command.pipe.is_none()
+        || pattern_index + 1 >= words.len()
+    {
+        return None;
+    }
+
+    let mut pattern = format!("{prefix}(");
+    pattern.push_str(&words[pattern_index + 1..].join(""));
+
+    let mut current_command_index = command_index;
+    loop {
+        let next_index = current_command_index + 1;
+        let next_command = ast.commands.get(next_index)?;
+        pattern.push('|');
+
+        if next_command.pipe.is_some() {
+            pattern.push_str(&next_command.words.join(""));
+            current_command_index = next_index;
+            continue;
+        }
+
+        pattern.push_str(next_command.words.first()?);
+        pattern.push(')');
+        return Some(AliasCasePatterns {
+            patterns: vec![pattern],
+            command: next_command,
+            command_index: next_index,
+            words: &next_command.words,
+            body_start: 1,
+        });
+    }
+}
+
+fn alias_case_extglob_prefix(word: &str) -> bool {
+    word.chars()
+        .last()
+        .is_some_and(|ch| matches!(ch, '@' | '*' | '+' | '?' | '!'))
 }
 
 pub(super) fn collect_alias_case_body<'a>(
