@@ -34,7 +34,10 @@ pub(super) fn eval_arith_value(value: &str) -> i128 {
         .sum()
 }
 
-pub(super) fn eval_conditional_arith_value(value: &str, env_vars: &HashMap<String, String>) -> Option<i128> {
+pub(super) fn eval_conditional_arith_value(
+    value: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<i128> {
     let mut env_vars = env_vars.clone();
     eval_mutable_arith_value(value, &mut env_vars)
 }
