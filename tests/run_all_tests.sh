@@ -22,13 +22,21 @@ find_rubash() {
 
     # 2. 检查 cargo build 输出
     local debug_path="$PROJECT_DIR/target/debug/rubash"
+    local debug_exe_path="$PROJECT_DIR/target/debug/rubash.exe"
     local release_path="$PROJECT_DIR/target/release/rubash"
+    local release_exe_path="$PROJECT_DIR/target/release/rubash.exe"
 
     if [ -x "$debug_path" ]; then
         echo "$debug_path"
         return 0
+    elif [ -x "$debug_exe_path" ]; then
+        echo "$debug_exe_path"
+        return 0
     elif [ -x "$release_path" ]; then
         echo "$release_path"
+        return 0
+    elif [ -x "$release_exe_path" ]; then
+        echo "$release_exe_path"
         return 0
     fi
 
