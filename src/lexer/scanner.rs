@@ -102,6 +102,8 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('=') {
                     self.skip_word();
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
+                } else if self.peek() == Some('(') {
+                    Some(self.finish_word_token(start, false))
                 } else {
                     Some(Token::new(TokenKind::Keyword, "!", start))
                 }
