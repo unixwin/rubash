@@ -4,11 +4,6 @@ pub(in crate::executor) fn is_arithmetic_command_words(words: &[String]) -> bool
     matches!(words, [open, _, close] if open == "((" && close == "))")
 }
 
-pub(in crate::executor) fn find_done_command(ast: &Ast, start: usize) -> Option<usize> {
-    (start..ast.commands.len())
-        .find(|index| ast.commands[*index].words.first().map(String::as_str) == Some("done"))
-}
-
 pub(in crate::executor) fn echo_args_without_background_marker(args: &[String]) -> Vec<String> {
     // TODO(parse.y/jobs.c): `&` is a command terminator that launches the
     // preceding command asynchronously. Until the parser represents it that

@@ -41,7 +41,9 @@ impl Executor {
         let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
         };
-        let Some(done_index) = find_done_command(ast, do_index + 1) else {
+        let initial_depth = self.embedded_do_loop_depth(do_command);
+        let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
+        else {
             return Ok(None);
         };
 
@@ -187,7 +189,9 @@ impl Executor {
                 .is_some_and(|command| command.words.first().map(String::as_str) == Some("do"))
         {
             println!("{}", words[1..].join(" "));
-            let done_index = find_done_command(ast, do_index).unwrap_or(command_index);
+            let done_index = self
+                .find_matching_done_command(ast, do_index, 0)
+                .unwrap_or(command_index);
             println!("bash: -c: line 7: syntax error near unexpected token `do'");
             println!("bash: -c: line 7: `do echo foo=$foo bar=$bar'");
             self.exit_code = 2;
@@ -207,15 +211,11 @@ impl Executor {
             return Ok(None);
         }
 
-        let mut done_index = do_index + 1;
-        while done_index < ast.commands.len()
-            && ast.commands[done_index].words.first().map(String::as_str) != Some("done")
-        {
-            done_index += 1;
-        }
-        if done_index >= ast.commands.len() {
+        let initial_depth = self.embedded_do_loop_depth(do_command);
+        let Some(done_index) = self.find_matching_done_command(ast, do_index + 1, initial_depth)
+        else {
             return Ok(None);
-        }
+        };
 
         let mut body = Vec::new();
         if do_command.words.len() > 1 {
@@ -234,5 +234,54 @@ impl Executor {
         };
         self.execute_for_command(&for_command)?;
         Ok(Some(done_index + 1))
+    }
+
+    fn find_matching_done_command(
+        &self,
+        ast: &Ast,
+        start: usize,
+        initial_depth: usize,
+    ) -> Option<usize> {
+        let mut nested_loop_depth = initial_depth;
+        for index in start..ast.commands.len() {
+            let command = &ast.commands[index];
+            if self.command_starts_alias_loop(command) {
+                nested_loop_depth += 1;
+                continue;
+            }
+            if command.words.first().map(String::as_str) == Some("done") {
+                if nested_loop_depth == 0 {
+                    return Some(index);
+                }
+                nested_loop_depth -= 1;
+            }
+        }
+        None
+    }
+
+    fn command_starts_alias_loop(&self, command: &CommandNode) -> bool {
+        self.words_start_alias_loop(&command.words)
+    }
+
+    fn embedded_do_loop_depth(&self, command: &CommandNode) -> usize {
+        if command.words.first().map(String::as_str) == Some("do")
+            && self.words_start_alias_loop(&command.words[1..])
+        {
+            1
+        } else {
+            0
+        }
+    }
+
+    fn words_start_alias_loop(&self, words: &[String]) -> bool {
+        let words = if self.alias_expansion_enabled() {
+            self.expand_aliases(words)
+        } else {
+            words.to_vec()
+        };
+        matches!(
+            words.first().map(String::as_str),
+            Some("for" | "while" | "until" | "select")
+        )
     }
 }

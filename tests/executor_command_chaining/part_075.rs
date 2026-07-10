@@ -129,3 +129,23 @@ fn test_alias_introduced_until_command_executes_loop() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "loop:0\nloop:1\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_while_keeps_nested_alias_for_body() {
+    let output_path = "target/rubash-alias-while-nested-for-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias w=while; alias f=for; n=0; \
+         w test $n -lt 1; do f item in a b; do echo $item >> {output_path}; done; (( ++n )); done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nb\n");
+    let _ = fs::remove_file(output_path);
+}

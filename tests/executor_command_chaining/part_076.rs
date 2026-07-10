@@ -202,3 +202,23 @@ fn test_arithmetic_for_command_input_redirect_feeds_body_read() {
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_for_keeps_nested_alias_while_body() {
+    let output_path = "target/rubash-alias-for-nested-while-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias f=for; alias w=while; \
+         f item in a b; do n=0; w test $n -lt 1; do echo $item:$n >> {output_path}; (( ++n )); done; done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a:0\nb:0\n");
+    let _ = fs::remove_file(output_path);
+}
