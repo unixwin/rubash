@@ -134,6 +134,48 @@ fn test_for_command_keeps_brace_group_body_command() {
 }
 
 #[test]
+fn test_for_command_keeps_nested_select_body() {
+    let output_path = "target/rubash-for-nested-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "for item in outer; do select choice in inner; do echo $item:$choice; break; done <<< 1; done > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let body = &ast.commands[0].for_command.as_ref().unwrap().body;
+    assert!(body.iter().any(|command| command.select_command.is_some()));
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "outer:inner\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_arithmetic_for_command_keeps_nested_select_body() {
+    let output_path = "target/rubash-arithmetic-for-nested-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "for (( i = 0; i < 1; i++ )); do select choice in inner; do echo $i:$choice; break; done <<< 1; done > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let body = &ast.commands[0].for_command.as_ref().unwrap().body;
+    assert!(body.iter().any(|command| command.select_command.is_some()));
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0:inner\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_arithmetic_for_command_input_redirect_feeds_body_read() {
     let input_path = "target/rubash-arithmetic-for-command-input.txt";
     let output_path = "target/rubash-arithmetic-for-command-input-output.txt";

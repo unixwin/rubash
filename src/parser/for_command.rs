@@ -57,6 +57,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         if is_keyword(tokens, i, "for")
             || is_keyword(tokens, i, "while")
             || is_keyword(tokens, i, "until")
+            || is_keyword(tokens, i, "select")
         {
             depth += 1;
         } else if is_keyword(tokens, i, "done") {

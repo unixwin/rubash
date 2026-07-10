@@ -82,6 +82,7 @@ pub(super) fn parse_arithmetic_for_command(
         if is_keyword(tokens, i, "for")
             || is_keyword(tokens, i, "while")
             || is_keyword(tokens, i, "until")
+            || is_keyword(tokens, i, "select")
         {
             depth += 1;
         } else if is_keyword(tokens, i, "done") {
