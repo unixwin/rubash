@@ -1,9 +1,9 @@
 use super::*;
 
 pub(in crate::executor) fn print_posix_time() {
-    println!("real 0.00");
-    println!("user 0.00");
-    println!("sys 0.00");
+    eprintln!("real 0.00");
+    eprintln!("user 0.00");
+    eprintln!("sys 0.00");
 }
 
 pub(in crate::executor) fn read_char_limit_argument<S>(

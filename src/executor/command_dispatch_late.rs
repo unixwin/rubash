@@ -117,7 +117,7 @@ impl Executor {
                 Ok(())
             }
             "time" => {
-                self.execute_time_command(&cmd.words[1..])?;
+                self.execute_time_command_node(cmd)?;
                 Ok(())
             }
             "trap" => {

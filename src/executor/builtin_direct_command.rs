@@ -234,7 +234,7 @@ impl Executor {
                 Ok(())
             }
             "time" => {
-                self.execute_time_command(&builtin_cmd.words[1..])?;
+                self.execute_time_command_node(&builtin_cmd)?;
                 Ok(())
             }
             "trap" => {

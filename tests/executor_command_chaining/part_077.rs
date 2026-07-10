@@ -102,3 +102,41 @@ fn test_time_pipeline_modifier_preserves_pipeline_status() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_time_command_redirects_timed_command_stdout() {
+    let output_path = "target/rubash-time-command-redirect-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time -p echo hi > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words[0], "time");
+    assert!(ast.commands[0].redirect_out.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_time_command_inverts_timed_status_with_redirect() {
+    let output_path = "target/rubash-time-command-invert-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time ! false > {output_path}; echo $? >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "!", "false"]);
+    assert!(ast.commands[0].redirect_out.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+    let _ = fs::remove_file(output_path);
+}

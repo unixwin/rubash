@@ -130,6 +130,41 @@ impl Executor {
         Ok(())
     }
 
+    pub(in crate::executor) fn execute_time_command_node(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        let mut index = 1;
+        let mut inverted = false;
+        while let Some(word) = cmd.words.get(index).map(String::as_str) {
+            match word {
+                "-p" | "--" => index += 1,
+                "!" => {
+                    inverted = !inverted;
+                    index += 1;
+                }
+                _ => break,
+            }
+        }
+        if index >= cmd.words.len() {
+            print_posix_time();
+            self.exit_code = 0;
+            return Ok(());
+        }
+
+        let mut timed = cmd.clone();
+        timed.words = cmd.words[index..].to_vec();
+        if cmd.word_kinds.len() == cmd.words.len() {
+            timed.word_kinds = cmd.word_kinds[index..].to_vec();
+        }
+        self.execute_command(&timed)?;
+        print_posix_time();
+        if inverted {
+            self.exit_code = invert_exit_status(self.exit_code);
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_echo(
         &mut self,
         cmd: &CommandNode,
