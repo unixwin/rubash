@@ -55,28 +55,6 @@ impl Executor {
             commands: body_commands,
         };
         self.apply_command_output_redirects(done_command, &mut body)?;
-        let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        if let Some(input) = done_command
-            .heredoc_redirects
-            .iter()
-            .rev()
-            .find(|redirect| redirect.fd.is_none())
-            .and_then(|redirect| redirect.body.clone())
-        {
-            let input =
-                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&input)).to_string();
-            self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-            self.env_vars
-                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-        } else if let Some(redirect) = &done_command.redirect_in {
-            let target = self.expand_word(&redirect.target);
-            if let Ok(input) = fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)) {
-                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.env_vars
-                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-            }
-        }
         let mut saved_fd_inputs = Vec::new();
         for redirect in &done_command.heredoc_redirects {
             let (Some(fd), Some(body)) = (redirect.fd, redirect.body.clone()) else {
@@ -98,50 +76,46 @@ impl Executor {
 
         let mut ran_body = false;
         let mut last_body_status = 0;
-        let loop_result = loop {
-            let condition_ast = Ast {
-                commands: condition_commands.clone(),
-            };
-            if let Err(error) =
-                self.with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
-            {
-                break Err(error);
-            }
-            let condition_matched = self.exit_code == 0;
-            if condition_matched == until {
-                break Ok(());
-            }
-
-            ran_body = true;
-            self.loop_depth += 1;
-            let result = self.execute_ast(&body);
-            self.loop_depth -= 1;
-            match result {
-                Ok(()) => {
-                    last_body_status = self.exit_code;
+        let loop_result = self.with_command_input_redirects(done_command, |executor| {
+            loop {
+                let condition_ast = Ast {
+                    commands: condition_commands.clone(),
+                };
+                if let Err(error) = executor
+                    .with_errexit_suppressed(|executor| executor.execute_ast(&condition_ast))
+                {
+                    break Err(error);
                 }
-                Err(ExecuteError::Break(level)) if level <= 1 => {
-                    self.exit_code = 0;
+                let condition_matched = executor.exit_code == 0;
+                if condition_matched == until {
                     break Ok(());
                 }
-                Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
-                Err(ExecuteError::Continue(level)) if level <= 1 => {
-                    self.exit_code = 0;
-                    continue;
-                }
-                Err(ExecuteError::Continue(level)) => {
-                    break Err(ExecuteError::Continue(level - 1));
-                }
-                Err(error) => break Err(error),
-            }
-        };
 
-        restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
-        restore_optional_env_var(
-            &mut self.env_vars,
-            FUNCTION_STDIN_OFFSET,
-            old_function_stdin_offset,
-        );
+                ran_body = true;
+                executor.loop_depth += 1;
+                let result = executor.execute_ast(&body);
+                executor.loop_depth -= 1;
+                match result {
+                    Ok(()) => {
+                        last_body_status = executor.exit_code;
+                    }
+                    Err(ExecuteError::Break(level)) if level <= 1 => {
+                        executor.exit_code = 0;
+                        break Ok(());
+                    }
+                    Err(ExecuteError::Break(level)) => break Err(ExecuteError::Break(level - 1)),
+                    Err(ExecuteError::Continue(level)) if level <= 1 => {
+                        executor.exit_code = 0;
+                        continue;
+                    }
+                    Err(ExecuteError::Continue(level)) => {
+                        break Err(ExecuteError::Continue(level - 1));
+                    }
+                    Err(error) => break Err(error),
+                }
+            }
+        });
+
         for (input_key, old_input, offset_key, old_offset) in saved_fd_inputs {
             restore_optional_env_var(&mut self.env_vars, &input_key, old_input);
             restore_optional_env_var(&mut self.env_vars, &offset_key, old_offset);
