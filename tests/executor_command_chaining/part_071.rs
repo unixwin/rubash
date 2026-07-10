@@ -122,6 +122,7 @@ fn test_shellmath_decimal_divide_script_path() {
     let shell_output_path = shell_test_path(&output_path);
     let shellmath_path = shell_test_path(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("third_party")
             .join("bash")
             .join("examples")
             .join("shellmath")
