@@ -8,12 +8,14 @@ use std::io::{self, Write};
 
 mod escape;
 mod float;
+mod identifier;
 mod number;
 mod spec;
 mod time;
 mod value;
 
 use escape::expand_format_escape;
+use identifier::valid_identifier;
 use spec::{parse_format_spec, resolve_dynamic_format_args, valid_format_specifier};
 use time::format_time_value;
 use value::format_value;
@@ -289,16 +291,6 @@ fn next_arg<'a>(args: &'a [&str], arg_index: &mut usize) -> &'a str {
     let value = args.get(*arg_index).copied().unwrap_or("");
     *arg_index += 1;
     value
-}
-
-fn valid_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 #[cfg(test)]
