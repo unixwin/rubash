@@ -130,3 +130,27 @@ fn test_combined_stdout_stderr_append_redirect() {
         "out.txt"
     );
 }
+
+#[test]
+fn test_stderr_fd_copy_inherits_previous_stdout_redirect() {
+    let tokens = tokenize("echo both > out.txt 2>&1");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        "out.txt"
+    );
+}
+
+#[test]
+fn test_stderr_fd_copy_before_stdout_redirect_keeps_fd_target() {
+    let tokens = tokenize("echo both 2>&1 > out.txt");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_err.as_ref().unwrap().target, "&1");
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+    assert!(command.redirect_err_append.is_none());
+}

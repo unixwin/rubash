@@ -123,30 +123,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
         TokenKind::RedirectErr => {
             note_command_line(&mut state.current_cmd, token);
-            if *i + 1 < tokens.len()
-                && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
-            {
-                state.current_cmd.redirect_err = Some(Redirect {
-                    fd: Some(2),
-                    target: tokens[*i + 1].value.clone(),
-                    append: false,
-                    clobber: token.value == "2>|",
-                });
-                *i += 1;
+            if let Some(next_i) = assign_redirect_err_target(tokens, *i, &mut state.current_cmd) {
+                *i = next_i;
             }
         }
         TokenKind::RedirectErrAppend => {
             note_command_line(&mut state.current_cmd, token);
-            if *i + 1 < tokens.len()
-                && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
+            if let Some(next_i) =
+                assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
             {
-                state.current_cmd.redirect_err_append = Some(Redirect {
-                    fd: Some(2),
-                    target: tokens[*i + 1].value.clone(),
-                    append: true,
-                    clobber: false,
-                });
-                *i += 1;
+                *i = next_i;
             }
         }
         TokenKind::HereDoc => {

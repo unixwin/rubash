@@ -66,20 +66,10 @@ pub(super) fn collect_trailing_redirections(
                 assign_append_redirect(command, &token.value, &target.value, None);
             }
             TokenKind::RedirectErr => {
-                command.redirect_err = Some(Redirect {
-                    fd: Some(2),
-                    target: target.value.clone(),
-                    append: false,
-                    clobber: token.value == "2>|",
-                });
+                assign_redirect_err_target(tokens, *index, command);
             }
             TokenKind::RedirectErrAppend => {
-                command.redirect_err_append = Some(Redirect {
-                    fd: Some(2),
-                    target: target.value.clone(),
-                    append: true,
-                    clobber: false,
-                });
+                assign_redirect_err_append_target(tokens, *index, command);
             }
             TokenKind::HereString => {
                 command.here_string = Some(target.value.clone());
@@ -100,119 +90,6 @@ pub(super) fn collect_trailing_redirections(
         }
 
         *index += 2;
-    }
-}
-
-pub(super) fn assign_redirect_out_target(
-    tokens: &[Token],
-    index: usize,
-    command: &mut CommandNode,
-) -> Option<usize> {
-    if let Some((target, next_i)) = output_process_substitution_redirect_target(tokens, index) {
-        command.redirect_out = Some(Redirect {
-            fd: None,
-            target,
-            append: false,
-            clobber: false,
-        });
-        return Some(next_i);
-    }
-
-    if let Some((target, next_i)) = output_process_substitution_word_target(tokens, index) {
-        command.words.push(target);
-        command.word_kinds.push(TokenKind::Word);
-        return Some(next_i);
-    }
-
-    if index + 1 < tokens.len()
-        && matches!(
-            tokens[index + 1].kind,
-            TokenKind::Word | TokenKind::Variable
-        )
-    {
-        let fd = redirect_operator_fd(&tokens[index].value)
-            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
-        command.redirect_out = Some(Redirect {
-            fd,
-            target: redirect_target(&tokens[index].value, &tokens[index + 1].value),
-            append: false,
-            clobber: tokens[index].value == ">|",
-        });
-        if tokens[index].value == "&>" {
-            command.redirect_err_append = Some(Redirect {
-                fd: Some(2),
-                target: tokens[index + 1].value.clone(),
-                append: true,
-                clobber: false,
-            });
-        }
-        return Some(index + 1);
-    }
-
-    None
-}
-
-pub(super) fn assign_append_target(
-    tokens: &[Token],
-    index: usize,
-    command: &mut CommandNode,
-) -> Option<usize> {
-    if index + 1 < tokens.len()
-        && matches!(
-            tokens[index + 1].kind,
-            TokenKind::Word | TokenKind::Variable
-        )
-    {
-        let fd = redirect_operator_fd(&tokens[index].value)
-            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
-        assign_append_redirect(command, &tokens[index].value, &tokens[index + 1].value, fd);
-        return Some(index + 1);
-    }
-
-    None
-}
-
-fn assign_output_redirect(
-    command: &mut CommandNode,
-    operator: &str,
-    target: &str,
-    fd: Option<u32>,
-) {
-    command.redirect_out = Some(Redirect {
-        fd,
-        target: redirect_target(operator, target),
-        append: false,
-        clobber: operator == ">|",
-    });
-    if operator == "&>" {
-        command.redirect_err_append = Some(Redirect {
-            fd: Some(2),
-            target: target.to_string(),
-            append: true,
-            clobber: false,
-        });
-    }
-}
-
-fn assign_append_redirect(
-    command: &mut CommandNode,
-    operator: &str,
-    target: &str,
-    fd: Option<u32>,
-) {
-    command.append = Some(Redirect {
-        fd,
-        target: target.to_string(),
-        append: true,
-        clobber: false,
-    });
-    if operator == "&>>" {
-        command.redirect_err_append = Some(Redirect {
-            fd: Some(2),
-            target: target.to_string(),
-            append: true,
-            clobber: false,
-        });
     }
 }
 
