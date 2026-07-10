@@ -153,6 +153,40 @@ fn test_printf_command_substitution_strips_trailing_newlines() {
 }
 
 #[test]
+fn test_time_command_substitution_captures_timed_stdout() {
+    let output_path = "target/rubash-time-command-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("v=$(time -p echo hi); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<hi> status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_time_command_substitution_inverts_status() {
+    let output_path = "target/rubash-time-command-substitution-invert-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("v=$(time ! false); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<> status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_adjacent_command_substitutions_stay_in_one_word() {
     let output_path = "target/rubash-adjacent-command-subst-output.txt";
     let _ = fs::remove_file(output_path);

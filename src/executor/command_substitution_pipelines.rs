@@ -132,6 +132,97 @@ impl Executor {
         Some(output.trim_end_matches('\n').to_string())
     }
 
+    pub(in crate::executor) fn timed_command_substitution_output(
+        &self,
+        words: &[String],
+    ) -> Option<String> {
+        if words.first().map(String::as_str) != Some("time") {
+            return None;
+        }
+
+        let mut index = 1;
+        let mut inverted = false;
+        while let Some(word) = words.get(index).map(String::as_str) {
+            match word {
+                "-p" | "--" | "time" => index += 1,
+                "!" => {
+                    inverted = !inverted;
+                    index += 1;
+                }
+                _ => break,
+            }
+        }
+
+        let output = self.timed_command_substitution_inner(&words[index..])?;
+        print_posix_time();
+        let status = self.last_command_substitution_status.get().unwrap_or(0);
+        self.last_command_substitution_status
+            .set(Some(if inverted { invert_exit_status(status) } else { status }));
+        Some(output)
+    }
+
+    fn timed_command_substitution_inner(&self, words: &[String]) -> Option<String> {
+        match words.first().map(String::as_str) {
+            None | Some(":") | Some("true") => {
+                self.last_command_substitution_status.set(Some(0));
+                Some(String::new())
+            }
+            Some("false") => {
+                self.last_command_substitution_status.set(Some(1));
+                Some(String::new())
+            }
+            Some("echo") => {
+                let args = words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect::<Vec<_>>();
+                self.last_command_substitution_status.set(Some(0));
+                Some(echo_command_substitution_output(&args))
+            }
+            Some("printf") => {
+                let expanded_args = words[1..]
+                    .iter()
+                    .map(|word| strip_matching_quotes(&self.expand_word(word)).to_string())
+                    .collect::<Vec<_>>();
+                let mut env_vars = self.env_vars.clone();
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let status = crate::builtins::printf::execute_with_io(
+                    expanded_args.iter().map(String::as_str),
+                    &mut env_vars,
+                    &mut stdout,
+                    &mut stderr,
+                )
+                .unwrap_or(1);
+                self.last_command_substitution_status.set(Some(status));
+                Some(
+                    String::from_utf8_lossy(&stdout)
+                        .trim_end_matches('\n')
+                        .to_string(),
+                )
+            }
+            Some(_) if words.iter().any(|word| word == "|") => {
+                let output = self.command_substitution_pipeline_output(words)?;
+                self.last_command_substitution_status.set(Some(0));
+                Some(output)
+            }
+            Some("cat") => {
+                let mut output = String::new();
+                for word in &words[1..] {
+                    let path = self.expand_word(word);
+                    if let Ok(value) =
+                        fs::read_to_string(shell_path_to_windows(&path, &self.env_vars))
+                    {
+                        output.push_str(&value);
+                    }
+                }
+                self.last_command_substitution_status.set(Some(0));
+                Some(output.trim_end_matches('\n').to_string())
+            }
+            Some(_) => self.run_external_command_substitution(words),
+        }
+    }
+
     pub(in crate::executor) fn command_substitution_pipeline_first_stage(
         &self,
         words: &[String],

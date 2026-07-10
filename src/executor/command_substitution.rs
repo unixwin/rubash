@@ -80,6 +80,10 @@ impl Executor {
             }
         }
 
+        if let Some(output) = self.timed_command_substitution_output(&words) {
+            return output;
+        }
+
         if let Some(output) = self.command_substitution_pipeline_output(&words) {
             return output;
         }
