@@ -166,7 +166,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         | TokenKind::Assignment
                 )
             {
-                state.current_cmd.here_string = Some(tokens[*i + 1].value.clone());
+                assign_here_string_redirect(
+                    &mut state.current_cmd,
+                    &token.value,
+                    &tokens[*i + 1].value,
+                );
                 *i += 1;
             }
         }

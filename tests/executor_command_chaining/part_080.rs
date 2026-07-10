@@ -232,3 +232,20 @@ fn test_input_fd_close_makes_read_fail_without_hanging() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "status:1:\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_read_u_reads_fd_here_string() {
+    let output_path = "target/rubash-read-u-fd-here-string-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -u 3 value 3<<<alpha; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}

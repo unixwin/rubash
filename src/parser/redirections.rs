@@ -83,7 +83,7 @@ pub(super) fn collect_trailing_redirections(
                 assign_redirect_err_append_target(tokens, *index, command);
             }
             TokenKind::HereString => {
-                command.here_string = Some(target.value.clone());
+                assign_here_string_redirect(command, &token.value, &target.value);
             }
             TokenKind::HereDoc => {
                 // Heredoc delimiter - the body should already be in a HereDocBody token
@@ -106,6 +106,19 @@ pub(super) fn collect_trailing_redirections(
 
 pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
     take_redirect_fd_prefix(cmd)
+}
+
+pub(super) fn assign_here_string_redirect(command: &mut CommandNode, operator: &str, target: &str) {
+    let fd = redirect_operator_fd(operator);
+    if let Some(fd) = fd {
+        command.heredoc_redirects.push(HereDocRedirect {
+            fd: Some(fd),
+            delimiter: "<<<".to_string(),
+            body: Some(format!("\x1d{target}")),
+        });
+    } else {
+        command.here_string = Some(target.to_string());
+    }
 }
 
 pub(super) fn take_adjacent_redirect_fd_prefix(

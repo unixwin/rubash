@@ -64,6 +64,17 @@ impl Executor {
             .find(|redirect| redirect.fd == Some(fd))?
             .body
             .as_deref()?;
+        if let Some(word) = body.strip_prefix('\x1d') {
+            let mut input =
+                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
+            input.push('\n');
+            return Some(trim_read_input(
+                input,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+            ));
+        }
         let input =
             strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string();
         Some(trim_read_input(

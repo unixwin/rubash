@@ -83,6 +83,15 @@ fn test_input_fd_close_redirect_with_prefix() {
 }
 
 #[test]
+fn test_here_string_fd_prefix_without_space() {
+    let tokens = tokenize("read -u 3 value 3<<<alpha");
+    assert_eq!(tokens.len(), 6);
+    assert_eq!(tokens[4].kind, TokenKind::HereString);
+    assert_eq!(tokens[4].value, "3<<<");
+    assert_eq!(tokens[5].value, "alpha");
+}
+
+#[test]
 fn test_read_write_redirect() {
     let input = "cat <> input.txt";
     let tokens = tokenize(input);

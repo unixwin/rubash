@@ -152,6 +152,22 @@ fn test_here_string_redirect() {
 }
 
 #[test]
+fn test_here_string_fd_prefix_maps_to_fd_input() {
+    let input = "read -u 3 value 3<<<alpha";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert!(command.here_string.is_none());
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    assert_eq!(command.heredoc_redirects[0].fd, Some(3));
+    assert_eq!(
+        command.heredoc_redirects[0].body.as_deref(),
+        Some("\x1dalpha")
+    );
+}
+
+#[test]
 fn test_combined_stdout_stderr_redirect() {
     let tokens = tokenize("echo both &> out.txt");
     let ast = parse(&tokens);
