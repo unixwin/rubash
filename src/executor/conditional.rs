@@ -6,18 +6,31 @@
 
 use std::collections::BTreeMap;
 
-use super::{
-    mark_env_name, pattern_contains_glob, unescape_remaining_shell_escapes, ARRAY_VARS,
-    Executor,
-};
+use super::{mark_env_name, unescape_remaining_shell_escapes, Executor, ARRAY_VARS};
 use crate::executor::arithmetic::eval_mutable_arith_value_with_random;
 use crate::executor::arrays::format_indexed_array_storage;
+
+mod args;
+mod extglob;
+mod pattern;
+
+use args::{
+    conditional_logical_index, conditional_outer_parentheses,
+    conditional_pattern_or_string_matches, conditional_regex_operands, is_conditional_file_binary,
+    is_conditional_file_unary, reassemble_extglob_args, restore_numeric_decimal_regex_escapes,
+};
+
+pub(super) use args::simple_grep_pattern_matches;
+pub(in crate::executor) use extglob::extglob_case_pattern_matches;
+pub(super) use pattern::case_pattern_matches;
 
 impl Executor {
     pub(super) fn execute_conditional(&mut self, args: &[String]) -> i32 {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
         // logic. Keep extending this bridge with test.c-compatible primitives.
+        let args = reassemble_extglob_args(args);
+        let args = args.as_slice();
         if let Some(inner) = conditional_outer_parentheses(args) {
             return self.execute_conditional(inner);
         }
@@ -106,8 +119,11 @@ impl Executor {
     pub(super) fn conditional_string_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
+        let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob");
         match op {
+            "=" | "==" if extglob => extglob_case_pattern_matches(&right, &left),
             "=" | "==" => conditional_pattern_or_string_matches(&left, &right),
+            "!=" if extglob => !extglob_case_pattern_matches(&right, &left),
             "!=" => !conditional_pattern_or_string_matches(&left, &right),
             "=~" => self.conditional_regex_match(&left, &right),
             "<" => left < right,
@@ -199,12 +215,7 @@ impl Executor {
         0
     }
 
-    pub(super) fn conditional_numeric_binary(
-        &mut self,
-        left: &str,
-        op: &str,
-        right: &str,
-    ) -> bool {
+    pub(super) fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
         let Some(left) = eval_mutable_arith_value_with_random(
@@ -231,207 +242,4 @@ impl Executor {
             _ => false,
         }
     }
-}
-
-pub(super) fn case_pattern_matches(pattern: &str, word: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let word: Vec<char> = word.chars().collect();
-    case_pattern_matches_at(&pattern, 0, &word, 0)
-}
-
-pub(super) fn is_conditional_file_unary(op: &str) -> bool {
-    matches!(
-        op,
-        "-a" | "-b"
-            | "-c"
-            | "-d"
-            | "-e"
-            | "-f"
-            | "-g"
-            | "-h"
-            | "-L"
-            | "-k"
-            | "-p"
-            | "-r"
-            | "-s"
-            | "-S"
-            | "-t"
-            | "-u"
-            | "-w"
-            | "-x"
-            | "-O"
-            | "-G"
-            | "-N"
-    )
-}
-
-pub(super) fn is_conditional_file_binary(op: &str) -> bool {
-    matches!(op, "-nt" | "-ot" | "-ef")
-}
-
-pub(super) fn conditional_logical_index(args: &[String], op: &str) -> Option<usize> {
-    let end = conditional_effective_len(args);
-    let mut depth = 0usize;
-    for index in (0..end).rev() {
-        match args[index].as_str() {
-            ")" => depth += 1,
-            "(" => depth = depth.saturating_sub(1),
-            value if value == op && depth == 0 && index > 0 && index + 1 < end => {
-                return Some(index);
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-pub(super) fn conditional_outer_parentheses(args: &[String]) -> Option<&[String]> {
-    let end = conditional_effective_len(args);
-    if end < 2 || args.first().map(String::as_str) != Some("(") {
-        return None;
-    }
-
-    let mut depth = 0usize;
-    for (index, arg) in args[..end].iter().enumerate() {
-        match arg.as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 && index != end - 1 {
-                    return None;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    (depth == 0 && args[end - 1] == ")").then_some(&args[1..end - 1])
-}
-
-pub(super) fn conditional_regex_operands(args: &[String]) -> Option<(&str, String)> {
-    let end = conditional_effective_len(args);
-    let op = args[..end].iter().position(|word| word == "=~")?;
-    if op != 1 || op + 1 >= end {
-        return None;
-    }
-
-    Some((args[0].as_str(), args[op + 1..end].join("")))
-}
-
-pub(super) fn conditional_effective_len(args: &[String]) -> usize {
-    args.len() - usize::from(args.last().map(String::as_str) == Some("]]"))
-}
-
-pub(super) fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
-    if pattern_contains_glob(right) {
-        case_pattern_matches(right, left)
-    } else {
-        left == right
-    }
-}
-
-pub(super) fn simple_grep_pattern_matches(line: &str, pattern: &str) -> bool {
-    if let Some(pattern) = pattern.strip_prefix('^') {
-        line.starts_with(pattern)
-    } else {
-        line.contains(pattern)
-    }
-}
-
-pub(super) fn restore_numeric_decimal_regex_escapes(pattern: &str) -> String {
-    pattern
-        .replace("([0-9]*).([0-9]+)", "([0-9]*)\\.([0-9]+)")
-        .replace("([0-9]+)(.([0-9]+))?", "([0-9]+)(\\.([0-9]+))?")
-        .replace("(.*).(.*)", "(.*)\\.(.*)")
-}
-
-fn case_pattern_matches_at(
-    pattern: &[char],
-    p_index: usize,
-    word: &[char],
-    w_index: usize,
-) -> bool {
-    if p_index == pattern.len() {
-        return w_index == word.len();
-    }
-
-    match pattern[p_index] {
-        '\x18' => {
-            w_index < word.len()
-                && word[w_index] == '\\'
-                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
-        }
-        '*' => {
-            case_pattern_matches_at(pattern, p_index + 1, word, w_index)
-                || (w_index < word.len()
-                    && case_pattern_matches_at(pattern, p_index, word, w_index + 1))
-        }
-        '?' => {
-            w_index < word.len() && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
-        }
-        '[' => {
-            let Some((matches_class, next_index)) =
-                case_bracket_expression_matches(pattern, p_index, word.get(w_index).copied())
-            else {
-                return w_index < word.len()
-                    && pattern[p_index] == word[w_index]
-                    && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1);
-            };
-
-            matches_class && case_pattern_matches_at(pattern, next_index, word, w_index + 1)
-        }
-        '\\' if p_index + 1 < pattern.len() => {
-            w_index < word.len()
-                && pattern[p_index + 1] == word[w_index]
-                && case_pattern_matches_at(pattern, p_index + 2, word, w_index + 1)
-        }
-        literal => {
-            w_index < word.len()
-                && literal == word[w_index]
-                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
-        }
-    }
-}
-
-fn case_bracket_expression_matches(
-    pattern: &[char],
-    start: usize,
-    candidate: Option<char>,
-) -> Option<(bool, usize)> {
-    let mut index = start + 1;
-    if index >= pattern.len() {
-        return None;
-    }
-
-    let negated = matches!(pattern[index], '!' | '^');
-    if negated {
-        index += 1;
-    }
-
-    let mut matched = false;
-    let mut saw_member = false;
-    let candidate = candidate?;
-    while index < pattern.len() {
-        if pattern[index] == ']' && saw_member {
-            return Some((if negated { !matched } else { matched }, index + 1));
-        }
-
-        let current = pattern[index];
-        if index + 2 < pattern.len() && pattern[index + 1] == '-' && pattern[index + 2] != ']' {
-            let end = pattern[index + 2];
-            if current <= candidate && candidate <= end {
-                matched = true;
-            }
-            saw_member = true;
-            index += 3;
-        } else {
-            if current == candidate {
-                matched = true;
-            }
-            saw_member = true;
-            index += 1;
-        }
-    }
-
-    None
 }
