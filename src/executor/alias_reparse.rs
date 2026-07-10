@@ -51,7 +51,7 @@ impl Executor {
         ast: &'a Ast,
         index: usize,
         command: &'a CommandNode,
-        words: &[String],
+        words: &'a [String],
     ) -> Option<(CaseCommand, &'a CommandNode, usize)> {
         let word = words.get(1)?.clone();
         let mut header_index = 2;
@@ -68,19 +68,24 @@ impl Executor {
         let mut current_words = words;
         let mut current_command_index = index;
         let (redirect_command, next_index) = loop {
-            let pattern = current_words.get(pattern_index)?.clone();
-            let mut body = Vec::new();
-            let body_start = pattern_index + 1;
-            let boundary = collect_alias_case_body(
+            let patterns = collect_alias_case_patterns(
                 ast,
                 current_command,
                 current_command_index,
                 current_words,
-                body_start,
+                pattern_index,
+            )?;
+            let mut body = Vec::new();
+            let boundary = collect_alias_case_body(
+                ast,
+                patterns.command,
+                patterns.command_index,
+                patterns.words,
+                patterns.body_start,
                 &mut body,
             )?;
             clauses.push(CaseClause {
-                patterns: vec![pattern],
+                patterns: patterns.patterns,
                 body,
                 terminator: boundary.terminator,
             });

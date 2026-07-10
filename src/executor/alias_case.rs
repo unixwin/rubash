@@ -12,6 +12,46 @@ pub(super) struct AliasCaseBoundary<'a> {
     pub(super) ended_case: bool,
 }
 
+pub(super) struct AliasCasePatterns<'a> {
+    pub(super) patterns: Vec<String>,
+    pub(super) command: &'a CommandNode,
+    pub(super) command_index: usize,
+    pub(super) words: &'a [String],
+    pub(super) body_start: usize,
+}
+
+pub(super) fn collect_alias_case_patterns<'a>(
+    ast: &'a Ast,
+    command: &'a CommandNode,
+    command_index: usize,
+    words: &'a [String],
+    pattern_index: usize,
+) -> Option<AliasCasePatterns<'a>> {
+    let mut patterns = vec![words.get(pattern_index)?.clone()];
+    let mut current_command = command;
+    let mut current_command_index = command_index;
+    let mut current_words = words;
+    let mut body_start = pattern_index + 1;
+
+    while current_command.pipe.is_some() && body_start >= current_words.len() {
+        let next_index = current_command_index + 1;
+        let next_command = ast.commands.get(next_index)?;
+        patterns.push(next_command.words.first()?.clone());
+        current_command = next_command;
+        current_command_index = next_index;
+        current_words = &next_command.words;
+        body_start = 1;
+    }
+
+    Some(AliasCasePatterns {
+        patterns,
+        command: current_command,
+        command_index: current_command_index,
+        words: current_words,
+        body_start,
+    })
+}
+
 pub(super) fn collect_alias_case_body<'a>(
     ast: &'a Ast,
     command: &'a CommandNode,
