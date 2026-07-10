@@ -63,6 +63,13 @@ impl Executor {
         for_command: &ForCommand,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        let mut for_command = for_command.clone();
+        let mut body = Ast {
+            commands: for_command.body,
+        };
+        self.apply_command_output_redirects(cmd, &mut body)?;
+        for_command.body = body.commands;
+
         let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
         let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         if let Some(input) = self.loop_redirect_input(cmd) {
@@ -71,7 +78,7 @@ impl Executor {
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         }
 
-        let result = self.execute_for_command(for_command);
+        let result = self.execute_for_command(&for_command);
         restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
         restore_optional_env_var(
             &mut self.env_vars,

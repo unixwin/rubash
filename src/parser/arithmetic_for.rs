@@ -115,5 +115,7 @@ pub(super) fn parse_arithmetic_for_command(
         }),
         body,
     });
-    Some((command, i + 1))
+    let mut next_i = i + 1;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    Some((command, next_i))
 }
