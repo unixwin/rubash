@@ -80,6 +80,49 @@ fn test_cat_reads_process_substitution_stdin_redirect() {
 }
 
 #[test]
+fn test_output_process_substitution_redirect_feeds_command_stdin() {
+    let output_path = "target/rubash-output-process-subst-redirect-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("echo hi > >(cat > {output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(
+        ast.commands[0].redirect_out.as_ref().unwrap().target,
+        ">(cat > target/rubash-output-process-subst-redirect-output.txt)"
+    );
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_output_process_substitution_word_feeds_command_stdin() {
+    let input_path = "target/rubash-output-process-subst-word-input.txt";
+    let mirror_path = "target/rubash-output-process-subst-word-mirror.txt";
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(mirror_path);
+    fs::write(input_path, "data\n").unwrap();
+    let input = format!("cp {input_path} >(cat > {mirror_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words[2], format!(">(cat > {mirror_path})"));
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(mirror_path).unwrap(), "data\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(mirror_path);
+}
+
+#[test]
 fn test_process_substitution_does_not_see_temporary_assignment() {
     let output_path = "target/rubash-process-subst-temp-assignment-output.txt";
     let _ = fs::remove_file(output_path);

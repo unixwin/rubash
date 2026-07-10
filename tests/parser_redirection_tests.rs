@@ -34,6 +34,29 @@ fn test_clobber_output_redirect() {
 }
 
 #[test]
+fn test_output_process_substitution_redirect() {
+    let input = "echo hello > >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["echo", "hello"]);
+    assert_eq!(
+        ast.commands[0].redirect_out.as_ref().unwrap().target,
+        ">(cat > out.txt)"
+    );
+}
+
+#[test]
+fn test_output_process_substitution_word() {
+    let input = "tee >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["tee", ">(cat > out.txt)"]);
+    assert!(ast.commands[0].redirect_out.is_none());
+}
+
+#[test]
 fn test_input_redirect() {
     let input = "cat < input.txt";
     let tokens = tokenize(input);

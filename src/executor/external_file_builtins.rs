@@ -154,6 +154,11 @@ impl Executor {
         }
 
         if cmd.words.len() <= 1 {
+            if let Some(input) = self.read_function_stdin('\0', None, false) {
+                self.write_cat_output(cmd, input.as_bytes())?;
+                self.exit_code = 0;
+                return Ok(true);
+            }
             return Ok(false);
         }
 

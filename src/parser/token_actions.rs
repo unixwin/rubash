@@ -109,19 +109,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 push_command_word(&mut state.current_cmd, token);
             } else {
                 note_command_line(&mut state.current_cmd, token);
-                if *i + 1 < tokens.len()
-                    && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
+                if let Some(next_i) = assign_redirect_out_target(tokens, *i, &mut state.current_cmd)
                 {
-                    let fd = redirect_operator_fd(&token.value).or_else(|| {
-                        take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
-                    });
-                    state.current_cmd.redirect_out = Some(Redirect {
-                        fd,
-                        target: redirect_target(&token.value, &tokens[*i + 1].value),
-                        append: false,
-                        clobber: token.value == ">|",
-                    });
-                    *i += 1;
+                    *i = next_i;
                 }
             }
         }

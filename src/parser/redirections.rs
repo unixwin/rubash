@@ -23,6 +23,21 @@ pub(super) fn collect_trailing_redirections(
             }
         }
 
+        if token.kind == TokenKind::RedirectOut {
+            if let Some((target, next_i)) =
+                output_process_substitution_redirect_target(tokens, *index)
+            {
+                command.redirect_out = Some(Redirect {
+                    fd: None,
+                    target,
+                    append: false,
+                    clobber: false,
+                });
+                *index = next_i + 1;
+                continue;
+            }
+        }
+
         let Some(target) = tokens.get(*index + 1).filter(|next| {
             matches!(
                 next.kind,
@@ -96,6 +111,47 @@ pub(super) fn collect_trailing_redirections(
 
         *index += 2;
     }
+}
+
+pub(super) fn assign_redirect_out_target(
+    tokens: &[Token],
+    index: usize,
+    command: &mut CommandNode,
+) -> Option<usize> {
+    if let Some((target, next_i)) = output_process_substitution_redirect_target(tokens, index) {
+        command.redirect_out = Some(Redirect {
+            fd: None,
+            target,
+            append: false,
+            clobber: false,
+        });
+        return Some(next_i);
+    }
+
+    if let Some((target, next_i)) = output_process_substitution_word_target(tokens, index) {
+        command.words.push(target);
+        command.word_kinds.push(TokenKind::Word);
+        return Some(next_i);
+    }
+
+    if index + 1 < tokens.len()
+        && matches!(
+            tokens[index + 1].kind,
+            TokenKind::Word | TokenKind::Variable
+        )
+    {
+        let fd = redirect_operator_fd(&tokens[index].value)
+            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+        command.redirect_out = Some(Redirect {
+            fd,
+            target: redirect_target(&tokens[index].value, &tokens[index + 1].value),
+            append: false,
+            clobber: tokens[index].value == ">|",
+        });
+        return Some(index + 1);
+    }
+
+    None
 }
 
 pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {

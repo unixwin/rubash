@@ -4,7 +4,7 @@ impl Executor {
     pub(in crate::executor) fn execute_materialized_command(
         &mut self,
         cmd: &CommandNode,
-        process_substitution_files: Vec<PathBuf>,
+        process_substitution_files: ProcessSubstitutionFiles,
     ) -> Result<(), ExecuteError> {
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
         if self.posix_function_declare_prefix_assignments_are_local(cmd) {
@@ -16,6 +16,7 @@ impl Executor {
         }
 
         let result = self.execute_prepared_command(cmd);
+        self.finish_process_substitutions(process_substitution_files)?;
         if cmd.background && result.is_ok() {
             self.last_background_pid = Some(std::process::id());
             self.exit_code = 0;
@@ -23,7 +24,6 @@ impl Executor {
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
         }
-        self.cleanup_process_substitution_files(process_substitution_files);
         self.update_underscore_parameter(cmd);
         if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));
