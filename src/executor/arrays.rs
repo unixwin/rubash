@@ -3,15 +3,26 @@
 //! Contains free functions and `Executor` methods for working with
 //! indexed arrays, array storage, and array subscripts.
 
-use std::collections::{BTreeMap, HashMap};
+mod mapfile;
+mod storage;
+
+pub(super) use mapfile::split_mapfile_input;
+pub(super) use storage::{
+    array_indices, array_value_at, array_values, format_indexed_array_storage,
+    indexed_array_entries, is_array_storage, is_marked_array_var, normalize_array_expanded_value,
+    parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
+    quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
+};
+
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 
 use super::{
     assoc_entries, assoc_value_at, case_pattern_matches, eval_arith_value,
-    eval_conditional_arith_value, is_marked_var, is_shell_name, mark_env_name,
-    pattern_contains_glob, quote_assoc_key, split_storage_words, strip_matching_quotes,
-    unquote_storage_value, ARRAY_VARS, ASSOC_VARS, Executor,
+    eval_conditional_arith_value, is_marked_var, is_shell_name, pattern_contains_glob,
+    quote_assoc_key, split_storage_words, strip_matching_quotes, unquote_storage_value, Executor,
+    ASSOC_VARS,
 };
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
@@ -23,14 +34,6 @@ pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
         return false;
     };
     is_shell_name(name) && index.ends_with(']')
-}
-
-pub(super) fn normalize_array_expanded_value(value: String) -> String {
-    if value.contains('"') && value.chars().all(|ch| matches!(ch, '\\' | '"')) {
-        "\"\"".to_string()
-    } else {
-        value
-    }
 }
 
 pub(super) fn append_scalar_value(current: &str, value: &str) -> String {
@@ -204,7 +207,11 @@ pub(super) fn array_assignment_tokens(value: &str) -> Vec<String> {
     split_storage_words(inner).collect()
 }
 
-pub(super) fn array_parameter_slice(value: &str, offset: isize, length: Option<usize>) -> Vec<String> {
+pub(super) fn array_parameter_slice(
+    value: &str,
+    offset: isize,
+    length: Option<usize>,
+) -> Vec<String> {
     let values = array_values(value);
     let start = if offset < 0 {
         values.len().saturating_sub(offset.unsigned_abs())
@@ -219,267 +226,11 @@ pub(super) fn array_parameter_slice(value: &str, offset: isize, length: Option<u
         .collect()
 }
 
-pub(super) fn array_values(value: &str) -> Vec<String> {
-    // TODO(array.c/assoc.c/subst.c): This is a lossy representation used while
-    // arrays are still stored in the scalar variable table.
-    if let Some(rendered) = value.strip_prefix('\x1d') {
-        return rendered_array_values(rendered);
-    }
-
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return if value.is_empty() {
-            Vec::new()
-        } else {
-            vec![value.to_string()]
-        };
-    };
-
-    if inner.is_empty() {
-        return Vec::new();
-    }
-
-    split_storage_words(inner)
-        .map(|part| {
-            let value = part
-                .split_once('=')
-                .map(|(_, value)| value)
-                .map(unquote_storage_value)
-                .unwrap_or_else(|| unquote_storage_value(&part));
-            normalize_array_expanded_value(value)
-        })
-        .collect()
-}
-
-pub(super) fn indexed_array_entries(value: &str) -> BTreeMap<usize, String> {
-    if let Some(rendered) = value.strip_prefix('\x1d') {
-        return rendered_array_entries(rendered);
-    }
-
-    array_values(value).into_iter().enumerate().collect()
-}
-
-pub(super) fn array_indices(value: &str) -> Vec<String> {
-    indexed_array_entries(value)
-        .keys()
-        .map(usize::to_string)
-        .collect()
-}
-
-pub(super) fn array_value_at(value: &str, index: usize) -> Option<String> {
-    let mut entries = indexed_array_entries(value);
-    entries.remove(&index).map(normalize_array_expanded_value)
-}
-
-pub(super) fn resolve_indexed_array_subscript(value: &str, index: i128) -> Option<usize> {
-    if index >= 0 {
-        return usize::try_from(index).ok();
-    }
-
-    let max_index = indexed_array_entries(value).keys().next_back().copied()?;
-    let resolved = i128::try_from(max_index)
-        .ok()?
-        .checked_add(1)?
-        .checked_add(index)?;
-    usize::try_from(resolved).ok()
-}
-
-pub(super) fn parse_array_integer_subscript(name: &str) -> Option<(&str, i128)> {
-    let (array_name, subscript) = parse_array_subscript(name)?;
-    let index = subscript.parse::<i128>().ok()?;
-    Some((array_name, index))
-}
-
-pub(super) fn parse_array_numeric_subscript(name: &str) -> Option<(&str, usize)> {
-    let (array_name, subscript) = parse_array_subscript(name)?;
-    let index = subscript.parse::<usize>().ok()?;
-    Some((array_name, index))
-}
-
-pub(super) fn parse_array_subscript(name: &str) -> Option<(&str, &str)> {
-    let (array_name, subscript) = name.split_once('[')?;
-    Some((array_name, subscript.strip_suffix(']')?))
-}
-
-pub(super) fn rendered_array_entries(value: &str) -> BTreeMap<usize, String> {
-    let Some(inner) = value
-        .strip_prefix('(')
-        .and_then(|value| value.strip_suffix(')'))
-    else {
-        return BTreeMap::new();
-    };
-
-    rendered_array_parts(inner)
-        .into_iter()
-        .filter_map(|part| {
-            let (key, value) = part.as_str().split_once('=')?;
-            let index = key
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<usize>()
-                .ok()?;
-            Some((index, decode_rendered_array_value(value)))
-        })
-        .collect()
-}
-
-pub(super) fn format_indexed_array_storage(entries: BTreeMap<usize, String>) -> String {
-    let rendered = entries
-        .into_iter()
-        .map(|(index, value)| format!("[{index}]={}", quote_array_value(&value)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("\x1d({rendered})")
-}
-
-pub(super) fn store_indexed_array(
-    env_vars: &mut HashMap<String, String>,
-    name: &str,
-    values: Vec<String>,
-) {
-    let entries = values.into_iter().enumerate().collect();
-    env_vars.insert(name.to_string(), format_indexed_array_storage(entries));
-    mark_env_name(env_vars, ARRAY_VARS, name);
-}
-
 pub(super) fn is_noassign_bash_array(name: &str) -> bool {
     matches!(
         name,
         "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME"
     )
-}
-
-pub(super) fn split_mapfile_input(
-    input: &str,
-    delimiter: Option<char>,
-    trim_delimiter: bool,
-) -> Vec<String> {
-    let Some(delimiter) = delimiter else {
-        return input
-            .split_inclusive('\n')
-            .map(|line| {
-                if trim_delimiter {
-                    line.trim_end_matches('\n')
-                        .trim_end_matches('\r')
-                        .to_string()
-                } else {
-                    line.to_string()
-                }
-            })
-            .collect();
-    };
-
-    let mut values = Vec::new();
-    let mut current = String::new();
-    for ch in input.chars() {
-        current.push(ch);
-        if ch == delimiter {
-            if trim_delimiter {
-                current.pop();
-            }
-            values.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        values.push(current);
-    }
-    values
-}
-
-pub(super) fn rendered_array_values(value: &str) -> Vec<String> {
-    rendered_array_entries(value).into_values().collect()
-}
-
-pub(super) fn rendered_array_parts(inner: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut chars = inner.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match quote {
-            Some(quote_ch) => {
-                current.push(ch);
-                if ch == '\\' {
-                    if let Some(next) = chars.next() {
-                        current.push(next);
-                    }
-                } else if ch == quote_ch {
-                    quote = None;
-                }
-            }
-            None if ch == '"' || ch == '\'' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            None if ch.is_whitespace() => {
-                if !current.is_empty() {
-                    parts.push(std::mem::take(&mut current));
-                }
-            }
-            None => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() {
-        parts.push(current);
-    }
-
-    parts
-}
-
-pub(super) fn decode_rendered_array_value(value: &str) -> String {
-    if let Some(inner) = value
-        .strip_prefix("$'")
-        .and_then(|value| value.strip_suffix('\''))
-    {
-        return inner
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\'", "'")
-            .replace("\\\\", "\\");
-    }
-
-    unquote_storage_value(value)
-}
-
-pub(super) fn quote_array_value(value: &str) -> String {
-    if value.contains(['\n', '\r', '\'']) {
-        return format!(
-            "$'{}'",
-            value
-                .replace('\\', "\\\\")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\'', "\\'")
-        );
-    }
-
-    format!(
-        "\"{}\"",
-        value
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('$', "\\$")
-            .replace('`', "\\`")
-    )
-}
-
-pub(super) fn is_array_storage(value: &str) -> bool {
-    value.starts_with('(') && value.ends_with(')') || value.starts_with('\x1d')
-}
-
-pub(super) fn is_marked_array_var(env_vars: &HashMap<String, String>, name: &str) -> bool {
-    const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
-    const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
-    [ARRAY_VARS, ASSOC_VARS].iter().any(|key| {
-        env_vars
-            .get(*key)
-            .map(|value| value.split('\x1f').any(|marked| marked == name))
-            .unwrap_or(false)
-    })
 }
 
 impl Executor {
