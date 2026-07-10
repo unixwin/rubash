@@ -15,7 +15,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     let mut words = Vec::new();
 
     // Optional `in words...`
-    if is_keyword(tokens, i, "in") {
+    let default_positional = if is_keyword(tokens, i, "in") {
         i += 1;
         while i < tokens.len() && !is_keyword(tokens, i, "do") {
             if tokens[i].kind == TokenKind::Semicolon {
@@ -30,15 +30,17 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             }
             i += 1;
         }
-    }
-
-    // Skip optional semicolons before `do`
-    while tokens
-        .get(i)
-        .is_some_and(|token| token.kind == TokenKind::Semicolon)
-    {
-        i += 1;
-    }
+        false
+    } else {
+        // Skip optional semicolons before `do`
+        while tokens
+            .get(i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            i += 1;
+        }
+        true
+    };
 
     if !is_keyword(tokens, i, "do") {
         return None;
@@ -78,6 +80,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     command.select_command = Some(SelectCommand {
         variable,
         words,
+        default_positional,
         body,
     });
     let mut next_i = i + 1;

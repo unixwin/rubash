@@ -67,6 +67,46 @@ fn test_select_command_input_redirect_feeds_choice() {
 }
 
 #[test]
+fn test_select_without_in_uses_positional_params() {
+    let output_path = "target/rubash-select-default-positional-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("select item; do echo chosen:$item; break; done <<< '2' > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let select = ast.commands[0].select_command.as_ref().unwrap();
+    assert!(select.default_positional);
+    let mut executor = Executor::new();
+    executor.set_positional_params(vec!["alpha".to_string(), "beta".to_string()]);
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "chosen:beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_select_explicit_empty_in_does_not_use_positional_params() {
+    let output_path = "target/rubash-select-empty-in-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("select item in; do echo bad; done <<< '1' > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let select = ast.commands[0].select_command.as_ref().unwrap();
+    assert!(!select.default_positional);
+    let mut executor = Executor::new();
+    executor.set_positional_params(vec!["alpha".to_string()]);
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_pipeline_modifier_executes_full_pipeline() {
     let output_path = "target/rubash-time-pipeline-output.txt";
     let _ = fs::remove_file(output_path);

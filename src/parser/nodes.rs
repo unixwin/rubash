@@ -61,6 +61,7 @@ pub enum CaseTerminator {
 pub struct SelectCommand {
     pub variable: String,
     pub words: Vec<String>,
+    pub default_positional: bool,
     pub body: Vec<CommandNode>,
 }
 

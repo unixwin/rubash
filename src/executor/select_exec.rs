@@ -18,11 +18,15 @@ impl Executor {
         self.apply_command_output_redirects(cmd, &mut body)?;
         select_command.body = body.commands;
 
-        let values: Vec<String> = select_command
-            .words
-            .iter()
-            .flat_map(|word| self.expand_for_word_values(word))
-            .collect();
+        let values: Vec<String> = if select_command.default_positional {
+            self.positional_params.clone()
+        } else {
+            select_command
+                .words
+                .iter()
+                .flat_map(|word| self.expand_for_word_values(word))
+                .collect()
+        };
 
         if values.is_empty() {
             self.exit_code = 0;
