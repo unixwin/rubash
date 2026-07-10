@@ -102,8 +102,7 @@ fn test_if_command_redirects_then_body_stdout() {
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     assert!(ast.commands.iter().any(|command| {
-        command.words.first().map(String::as_str) == Some("fi")
-            && command.redirect_out.is_some()
+        command.words.first().map(String::as_str) == Some("fi") && command.redirect_out.is_some()
     }));
     let mut executor = Executor::new();
 
@@ -153,7 +152,7 @@ fn test_if_command_redirects_condition_stdout() {
 fn test_if_command_redirects_body_stderr() {
     let error_path = "target/rubash-if-command-redirect-error.txt";
     let _ = fs::remove_file(error_path);
-    let input = format!("if true; then __rubash_missing_command__; fi 2> {error_path}");
+    let input = format!("if true; then echo err >&2; fi 2> {error_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -161,9 +160,7 @@ fn test_if_command_redirects_body_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 127);
-    assert!(fs::read_to_string(error_path)
-        .unwrap()
-        .contains("__rubash_missing_command__: command not found"));
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "err\n");
     let _ = fs::remove_file(error_path);
 }

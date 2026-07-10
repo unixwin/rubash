@@ -212,8 +212,11 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
     redirect: &Redirect,
 ) {
     for command in commands {
-        if command.redirect_err.is_none() && command.redirect_err_append.is_none() {
+        let inherits_stderr =
+            command.redirect_err.is_none() && command.redirect_err_append.is_none();
+        if inherits_stderr {
             command.redirect_err_append = Some(redirect.clone());
+            apply_inherited_stderr_to_stdout_fd_copy(command, redirect);
         }
         if let Some(for_command) = &mut command.for_command {
             apply_stderr_append_redirect(&mut for_command.body, redirect);

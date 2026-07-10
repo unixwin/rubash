@@ -110,6 +110,7 @@ mod pipeline_stages;
 
 mod read_helpers;
 mod read_split;
+mod redirect_inherit;
 mod sed_alias_helpers;
 mod select_exec;
 mod support_names;
@@ -129,6 +130,7 @@ use parameter_replace::*;
 use parse_helpers::*;
 use read_helpers::*;
 use read_split::*;
+use redirect_inherit::*;
 use sed_alias_helpers::*;
 use support_names::*;
 
