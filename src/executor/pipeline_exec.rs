@@ -8,22 +8,8 @@ impl Executor {
         if let Some(body) = &command.brace_group {
             let mut body = body.clone();
             self.apply_brace_group_redirects(command, &mut body)?;
-            let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
-            let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-            if let Some(input) = self.loop_redirect_input(command) {
-                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.env_vars
-                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-            }
             let ast = Ast { commands: body };
-            let result = self.execute_ast(&ast);
-            restore_optional_env_var(&mut self.env_vars, FUNCTION_STDIN, old_function_stdin);
-            restore_optional_env_var(
-                &mut self.env_vars,
-                FUNCTION_STDIN_OFFSET,
-                old_function_stdin_offset,
-            );
-            result?;
+            self.with_command_input_redirects(command, |executor| executor.execute_ast(&ast))?;
             return Ok(true);
         }
 

@@ -45,6 +45,25 @@ fn test_brace_group_input_redirect_feeds_body_reads() {
 }
 
 #[test]
+fn test_brace_group_here_string_feeds_body_read() {
+    let output_path = target_test_path("rubash-brace-group-herestring-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input =
+        format!("{{ read value; echo got:$value; }} <<< alpha > {shell_output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "got:alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_subshell_input_redirect_feeds_body_reads() {
     let input_path = target_test_path("rubash-subshell-input.txt");
     let output_path = target_test_path("rubash-subshell-input-output.txt");
