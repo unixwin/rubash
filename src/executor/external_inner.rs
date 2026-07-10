@@ -179,64 +179,6 @@ impl Executor {
         }
     }
 
-    fn apply_external_redirects(
-        &self,
-        cmd: &CommandNode,
-        process: &mut Command,
-    ) -> Result<(), ExecuteError> {
-        self.apply_external_stdin_redirect(cmd, process)?;
-
-        if let Some(ref redirect) = cmd.redirect_out {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-                process.stdout(Stdio::null());
-            } else {
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
-                process.stdout(Stdio::from(file));
-            }
-        }
-
-        if let Some(ref redirect) = cmd.append {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-                process.stdout(Stdio::null());
-            } else {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
-                file.seek(SeekFrom::End(0))?;
-                process.stdout(Stdio::from(file));
-            }
-        }
-
-        if let Some(ref redirect) = cmd.redirect_err {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-                process.stderr(Stdio::null());
-            } else {
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
-                process.stderr(Stdio::from(file));
-            }
-        }
-
-        if let Some(ref redirect) = cmd.redirect_err_append {
-            let target = self.expand_word(&redirect.target);
-            if is_closed_redirect_target(&target) {
-                process.stderr(Stdio::null());
-            } else {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(shell_path_to_windows(&target, &self.env_vars))?;
-                file.seek(SeekFrom::End(0))?;
-                process.stderr(Stdio::from(file));
-            }
-        }
-
-        Ok(())
-    }
-
     fn spawn_external_process(
         &mut self,
         cmd: &CommandNode,
@@ -251,14 +193,31 @@ impl Executor {
                     }
                 }
 
-                match child.wait() {
-                    Ok(status) => {
-                        if should_run_with_shell(program) {
-                            self.filter_external_shell_stderr_noise(cmd)?;
+                if self.external_needs_fd_copy_capture(cmd) {
+                    match child.wait_with_output() {
+                        Ok(output) => {
+                            self.write_external_fd_copy_output(
+                                cmd,
+                                &output.stdout,
+                                &output.stderr,
+                            )?;
+                            if should_run_with_shell(program) {
+                                self.filter_external_shell_stderr_noise(cmd)?;
+                            }
+                            self.exit_code = output.status.code().unwrap_or(1);
                         }
-                        self.exit_code = status.code().unwrap_or(1);
+                        Err(error) => self.report_external_spawn_error(cmd, error)?,
                     }
-                    Err(error) => self.report_external_spawn_error(cmd, error)?,
+                } else {
+                    match child.wait() {
+                        Ok(status) => {
+                            if should_run_with_shell(program) {
+                                self.filter_external_shell_stderr_noise(cmd)?;
+                            }
+                            self.exit_code = status.code().unwrap_or(1);
+                        }
+                        Err(error) => self.report_external_spawn_error(cmd, error)?,
+                    }
                 }
             }
             Err(error) => self.report_external_spawn_error(cmd, error)?,

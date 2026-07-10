@@ -4,7 +4,6 @@
 
 pub(crate) mod path;
 mod glob;
-
 mod upstream_scripts;
 mod arithmetic;
 use arithmetic::{
@@ -53,6 +52,7 @@ mod expand_word;
 mod external_file_builtins;
 mod external_finish;
 mod external_inner;
+mod external_redirects;
 mod external_setup;
 mod getopts_enable;
 mod init;

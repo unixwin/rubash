@@ -3,6 +3,8 @@ use std::{fs, path::Path};
 
 #[path = "cli_tests/examples.rs"]
 mod examples;
+#[path = "cli_tests/fd_redirects.rs"]
+mod fd_redirects;
 #[path = "cli_tests/scripts.rs"]
 mod scripts;
 
