@@ -60,20 +60,10 @@ pub(super) fn collect_trailing_redirections(
                 });
             }
             TokenKind::RedirectOut => {
-                command.redirect_out = Some(Redirect {
-                    fd: None,
-                    target: redirect_target(&token.value, &target.value),
-                    append: false,
-                    clobber: token.value == ">|",
-                });
+                assign_output_redirect(command, &token.value, &target.value, None);
             }
             TokenKind::Append => {
-                command.append = Some(Redirect {
-                    fd: None,
-                    target: target.value.clone(),
-                    append: true,
-                    clobber: false,
-                });
+                assign_append_redirect(command, &token.value, &target.value, None);
             }
             TokenKind::RedirectErr => {
                 command.redirect_err = Some(Redirect {
@@ -148,10 +138,82 @@ pub(super) fn assign_redirect_out_target(
             append: false,
             clobber: tokens[index].value == ">|",
         });
+        if tokens[index].value == "&>" {
+            command.redirect_err_append = Some(Redirect {
+                fd: Some(2),
+                target: tokens[index + 1].value.clone(),
+                append: true,
+                clobber: false,
+            });
+        }
         return Some(index + 1);
     }
 
     None
+}
+
+pub(super) fn assign_append_target(
+    tokens: &[Token],
+    index: usize,
+    command: &mut CommandNode,
+) -> Option<usize> {
+    if index + 1 < tokens.len()
+        && matches!(
+            tokens[index + 1].kind,
+            TokenKind::Word | TokenKind::Variable
+        )
+    {
+        let fd = redirect_operator_fd(&tokens[index].value)
+            .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+        assign_append_redirect(command, &tokens[index].value, &tokens[index + 1].value, fd);
+        return Some(index + 1);
+    }
+
+    None
+}
+
+fn assign_output_redirect(
+    command: &mut CommandNode,
+    operator: &str,
+    target: &str,
+    fd: Option<u32>,
+) {
+    command.redirect_out = Some(Redirect {
+        fd,
+        target: redirect_target(operator, target),
+        append: false,
+        clobber: operator == ">|",
+    });
+    if operator == "&>" {
+        command.redirect_err_append = Some(Redirect {
+            fd: Some(2),
+            target: target.to_string(),
+            append: true,
+            clobber: false,
+        });
+    }
+}
+
+fn assign_append_redirect(
+    command: &mut CommandNode,
+    operator: &str,
+    target: &str,
+    fd: Option<u32>,
+) {
+    command.append = Some(Redirect {
+        fd,
+        target: target.to_string(),
+        append: true,
+        clobber: false,
+    });
+    if operator == "&>>" {
+        command.redirect_err_append = Some(Redirect {
+            fd: Some(2),
+            target: target.to_string(),
+            append: true,
+            clobber: false,
+        });
+    }
 }
 
 pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {

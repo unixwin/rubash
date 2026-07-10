@@ -104,3 +104,29 @@ fn test_here_string_redirect() {
     assert_eq!(ast.commands.len(), 1);
     assert_eq!(ast.commands[0].here_string.as_deref(), Some("alpha"));
 }
+
+#[test]
+fn test_combined_stdout_stderr_redirect() {
+    let tokens = tokenize("echo both &> out.txt");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        "out.txt"
+    );
+}
+
+#[test]
+fn test_combined_stdout_stderr_append_redirect() {
+    let tokens = tokenize("echo both &>> out.txt");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.append.as_ref().unwrap().target, "out.txt");
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        "out.txt"
+    );
+}

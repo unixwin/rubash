@@ -90,6 +90,14 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('&') {
                     self.advance();
                     Some(Token::new(TokenKind::And, "&&", start))
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    if self.peek() == Some('>') {
+                        self.advance();
+                        Some(Token::new(TokenKind::Append, "&>>", start))
+                    } else {
+                        Some(Token::new(TokenKind::RedirectOut, "&>", start))
+                    }
                 } else if self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
                     self.skip_word();
                     Some(Token::new(TokenKind::Word, self.slice(start), start))

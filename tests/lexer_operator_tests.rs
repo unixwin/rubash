@@ -96,3 +96,19 @@ fn test_clobber_redirect_stderr() {
     assert_eq!(tokens[2].kind, TokenKind::RedirectErr);
     assert_eq!(tokens[2].value, "2>|");
 }
+
+#[test]
+fn test_combined_stdout_stderr_redirect() {
+    let tokens = tokenize("echo both &> out.txt");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::RedirectOut);
+    assert_eq!(tokens[2].value, "&>");
+}
+
+#[test]
+fn test_combined_stdout_stderr_append_redirect() {
+    let tokens = tokenize("echo both &>> out.txt");
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[2].kind, TokenKind::Append);
+    assert_eq!(tokens[2].value, "&>>");
+}

@@ -117,19 +117,8 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
         TokenKind::Append => {
             note_command_line(&mut state.current_cmd, token);
-            if *i + 1 < tokens.len()
-                && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
-            {
-                let fd = redirect_operator_fd(&token.value).or_else(|| {
-                    take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
-                });
-                state.current_cmd.append = Some(Redirect {
-                    fd,
-                    target: tokens[*i + 1].value.clone(),
-                    append: true,
-                    clobber: false,
-                });
-                *i += 1;
+            if let Some(next_i) = assign_append_target(tokens, *i, &mut state.current_cmd) {
+                *i = next_i;
             }
         }
         TokenKind::RedirectErr => {
