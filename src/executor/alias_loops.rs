@@ -50,10 +50,11 @@ impl Executor {
             body_commands.push(body_command);
         }
         body_commands.extend(ast.commands[do_index + 1..done_index].iter().cloned());
-        let body = Ast {
+        let done_command = ast.commands.get(done_index).expect("done index is valid");
+        let mut body = Ast {
             commands: body_commands,
         };
-        let done_command = ast.commands.get(done_index).expect("done index is valid");
+        self.apply_command_output_redirects(done_command, &mut body)?;
         let old_function_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
         let old_function_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         if let Some(input) = done_command
