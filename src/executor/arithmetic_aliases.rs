@@ -48,7 +48,7 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn expand_aliases(&self, words: &[String]) -> Vec<String> {
+    pub(crate) fn expand_aliases(&self, words: &[String]) -> Vec<String> {
         let mut expanded = Vec::new();
         let mut expand_next = true;
 

@@ -27,14 +27,26 @@ fn execute_simple_if_inner(
     let Some(command) = ast.commands.get(index) else {
         return Ok(None);
     };
-    let Some(keyword) = command.words.first().map(String::as_str) else {
+    let Some(first_word) = command.words.first().map(String::as_str) else {
+        return Ok(None);
+    };
+    let expanded_words;
+    let command_words = if matches!(first_word, "if" | "elif") {
+        &command.words
+    } else if executor.alias_expansion_enabled() {
+        expanded_words = executor.expand_aliases(&command.words);
+        &expanded_words
+    } else {
+        return Ok(None);
+    };
+    let Some(keyword) = command_words.first().map(String::as_str) else {
         return Ok(None);
     };
     if !matches!(keyword, "if" | "elif") {
         return Ok(None);
     }
 
-    let inline_then = command.words.iter().position(|word| word == "then");
+    let inline_then = command_words.iter().position(|word| word == "then");
     let Some(then_index) = inline_then
         .map(|_| index)
         .or_else(|| find_word_command(ast, index + 1, "then"))
@@ -84,16 +96,16 @@ fn execute_simple_if_inner(
     let words = if keyword == "elif" {
         condition_words = {
             let mut words = inline_then
-                .map(|then_pos| command.words[..then_pos].to_vec())
-                .unwrap_or_else(|| command.words.clone());
+                .map(|then_pos| command_words[..then_pos].to_vec())
+                .unwrap_or_else(|| command_words.clone());
             words[0] = "if".to_string();
             words
         };
         &condition_words
     } else {
         condition_words = inline_then
-            .map(|then_pos| command.words[..then_pos].to_vec())
-            .unwrap_or_else(|| command.words.clone());
+            .map(|then_pos| command_words[..then_pos].to_vec())
+            .unwrap_or_else(|| command_words.clone());
         &condition_words
     };
     let and_or_condition = if inline_then.is_none() {
@@ -108,7 +120,9 @@ fn execute_simple_if_inner(
     } else if let Some(value) = arithmetic_if_condition_value(executor, words) {
         value
     } else {
-        execute_command_if_condition(executor, command)?
+        let mut condition_command = command.clone();
+        condition_command.words = words.to_vec();
+        execute_command_if_condition(executor, &condition_command)?
     };
     if condition_true {
         let body_end = elif_index.or(else_index).unwrap_or(fi_index);

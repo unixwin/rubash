@@ -1,7 +1,7 @@
 use super::*;
 
 impl Executor {
-    pub(in crate::executor) fn alias_expansion_enabled(&self) -> bool {
+    pub(crate) fn alias_expansion_enabled(&self) -> bool {
         self.env_vars
             .get("__RUBASH_SHOPT_STATE")
             .is_some_and(|value| value.split('\x1f').any(|name| name == "expand_aliases"))

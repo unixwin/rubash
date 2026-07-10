@@ -203,3 +203,41 @@ fn test_if_command_here_string_feeds_condition() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "got:alpha\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_if_executes_then_branch() {
+    let output_path = "target/rubash-alias-if-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases\nalias i=if\ni true; then echo yes > {output_path}; else echo no > {output_path}; fi"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_if_executes_else_branch() {
+    let output_path = "target/rubash-alias-if-else-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases\nalias i=if\ni false; then echo yes > {output_path}; else echo no > {output_path}; fi"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "no\n");
+    let _ = fs::remove_file(output_path);
+}
