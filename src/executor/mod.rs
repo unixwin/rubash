@@ -30,6 +30,7 @@ mod command_dispatch;
 mod command_dispatch_late;
 mod command_dispatch_primary;
 mod command_execute;
+mod command_input_scope;
 mod command_no_alias;
 mod command_no_alias_late;
 mod command_prepare;

@@ -1,4 +1,3 @@
-use super::execution::execute_text;
 use super::flow::{
     command_tail, command_tail_from, command_tail_starts_if, find_if_branch_command,
     find_matching_fi, find_word_command, normalize_inline_compound_commands,
@@ -11,7 +10,7 @@ pub fn execute_simple_if(
     ast: &Ast,
     index: usize,
 ) -> Result<Option<usize>, ExecuteError> {
-    execute_simple_if_inner(executor, ast, index, false)
+    execute_simple_if_inner(executor, ast, index, false, false)
 }
 
 fn execute_simple_if_inner(
@@ -19,6 +18,7 @@ fn execute_simple_if_inner(
     ast: &Ast,
     index: usize,
     output_redirects_applied: bool,
+    input_redirects_applied: bool,
 ) -> Result<Option<usize>, ExecuteError> {
     // TODO(parse.y/execute_cmd.c/test.def/expr.c): This recognizes narrow
     // source-test `if` forms until the parser has IF_COM and arithmetic
@@ -66,7 +66,14 @@ fn execute_simple_if_inner(
             commands: ast.commands[index..=fi_index].to_vec(),
         };
         executor.apply_command_output_redirects(fi_command, &mut redirected)?;
-        execute_simple_if_inner(executor, &redirected, 0, true)?;
+        execute_simple_if_inner(executor, &redirected, 0, true, input_redirects_applied)?;
+        return Ok(Some(fi_index + 1));
+    }
+
+    if !input_redirects_applied && command_has_input_redirects(fi_command) {
+        executor.with_command_input_redirects(fi_command, |executor| {
+            execute_simple_if_inner(executor, ast, index, output_redirects_applied, true)
+        })?;
         return Ok(Some(fi_index + 1));
     }
 
@@ -122,7 +129,13 @@ fn execute_simple_if_inner(
     }
 
     if let Some(elif_index) = elif_index {
-        return execute_simple_if_inner(executor, ast, elif_index, output_redirects_applied);
+        return execute_simple_if_inner(
+            executor,
+            ast,
+            elif_index,
+            output_redirects_applied,
+            input_redirects_applied,
+        );
     }
 
     if let Some(else_index) = else_index {
@@ -147,6 +160,15 @@ fn command_has_output_redirects(command: &CommandNode) -> bool {
         || command.append.is_some()
         || command.redirect_err.is_some()
         || command.redirect_err_append.is_some()
+}
+
+fn command_has_input_redirects(command: &CommandNode) -> bool {
+    command.redirect_in.is_some()
+        || command.here_string.is_some()
+        || command
+            .heredoc_redirects
+            .iter()
+            .any(|redirect| redirect.fd.is_none() && redirect.body.is_some())
 }
 
 fn execute_and_or_if_condition(
@@ -185,39 +207,6 @@ fn execute_and_or_if_condition(
 
 fn is_arithmetic_condition_words(words: &[String]) -> bool {
     matches!(words, [open, _, close] if open == "((" && close == "))")
-}
-
-pub fn execute_pipe_into_source(
-    executor: &mut Executor,
-    ast: &Ast,
-    index: usize,
-) -> Result<Option<usize>, ExecuteError> {
-    // TODO(execute_cmd.c/redir.c/source.def): Bash connects the left command
-    // stdout to the right command stdin. This handles
-    // `echo "echo three - OK" | . /dev/stdin` from source6.sub by sourcing the
-    // generated shell text in the current shell.
-    let Some(left) = ast.commands.get(index) else {
-        return Ok(None);
-    };
-    if left.pipe.is_none() {
-        return Ok(None);
-    }
-    let Some(right) = ast.commands.get(index + 1) else {
-        return Ok(None);
-    };
-    if !matches!(
-        right.words.as_slice(),
-        [name, path] if matches!(name.as_str(), "." | "source") && path == "/dev/stdin"
-    ) {
-        return Ok(None);
-    }
-    if left.words.first().map(String::as_str) != Some("echo") {
-        return Ok(None);
-    }
-
-    let source = left.words[1..].join(" ");
-    execute_text(executor, &source)?;
-    Ok(Some(index + 2))
 }
 
 fn arithmetic_if_condition_value(executor: &mut Executor, words: &[String]) -> Option<bool> {
