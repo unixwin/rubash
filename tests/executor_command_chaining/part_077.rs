@@ -24,6 +24,28 @@ fn test_select_command_redirects_body_stdout() {
 }
 
 #[test]
+fn test_select_command_accepts_brace_group_body() {
+    let output_path = "target/rubash-select-brace-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "select item in alpha beta; {{ echo chosen:$item; break; }} <<< '2' > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].select_command.is_some());
+    assert!(ast.commands[0].here_string.is_some());
+    assert!(ast.commands[0].redirect_out.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "chosen:beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_select_command_redirect_creates_file_for_empty_word_list() {
     let output_path = "target/rubash-select-command-redirect-empty-output.txt";
     let _ = fs::remove_file(output_path);
@@ -71,6 +93,26 @@ fn test_select_without_in_uses_positional_params() {
     let output_path = "target/rubash-select-default-positional-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!("select item; do echo chosen:$item; break; done <<< '2' > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let select = ast.commands[0].select_command.as_ref().unwrap();
+    assert!(select.default_positional);
+    let mut executor = Executor::new();
+    executor.set_positional_params(vec!["alpha".to_string(), "beta".to_string()]);
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "chosen:beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_select_brace_body_without_in_uses_positional_params() {
+    let output_path = "target/rubash-select-brace-body-positional-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("select item; {{ echo chosen:$item; break; }} <<< '2' > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let select = ast.commands[0].select_command.as_ref().unwrap();
