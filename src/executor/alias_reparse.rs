@@ -1,3 +1,4 @@
+use super::alias_case::*;
 use super::*;
 
 impl Executor {
@@ -60,53 +61,42 @@ impl Executor {
         if header_index >= words.len() {
             return None;
         }
-        let pattern = words.get(header_index + 1)?.clone();
+        let mut clauses = Vec::new();
 
-        let mut body = Vec::new();
-        let first_body_words = words.get(header_index + 2..).unwrap_or_default();
-        if let Some(boundary) = case_boundary_index_in_words(first_body_words) {
-            push_case_body_words(command, &first_body_words[..boundary], &mut body);
-            return Some((
-                CaseCommand {
-                    word,
-                    clauses: vec![CaseClause {
-                        patterns: vec![pattern],
-                        body,
-                        terminator: CaseTerminator::Break,
-                    }],
-                },
-                command,
-                index + 1,
-            ));
-        }
-        push_case_body_words(command, first_body_words, &mut body);
-
-        let mut redirect_command = command;
-        let mut next_index = index + 1;
-        for command_index in index + 1..ast.commands.len() {
-            let next_command = ast.commands.get(command_index)?;
-            if let Some(boundary) = case_boundary_word_index(next_command) {
-                push_case_body_words(next_command, &next_command.words[..boundary], &mut body);
-                redirect_command = next_command;
-                next_index = command_index + 1;
-                break;
+        let mut pattern_index = header_index + 1;
+        let mut current_command = command;
+        let mut current_words = words;
+        let mut current_command_index = index;
+        let (redirect_command, next_index) = loop {
+            let pattern = current_words.get(pattern_index)?.clone();
+            let mut body = Vec::new();
+            let body_start = pattern_index + 1;
+            let boundary = collect_alias_case_body(
+                ast,
+                current_command,
+                current_command_index,
+                current_words,
+                body_start,
+                &mut body,
+            )?;
+            clauses.push(CaseClause {
+                patterns: vec![pattern],
+                body,
+                terminator: boundary.terminator,
+            });
+            if boundary.ended_case {
+                break (boundary.command, boundary.command_index + 1);
             }
-            body.push(next_command.clone());
-            next_index = command_index + 1;
-        }
+            let same_command = boundary.command_index == current_command_index;
+            current_command = boundary.command;
+            if !same_command {
+                current_words = &boundary.command.words;
+            }
+            current_command_index = boundary.command_index;
+            pattern_index = boundary.next_word_index;
+        };
 
-        Some((
-            CaseCommand {
-                word,
-                clauses: vec![CaseClause {
-                    patterns: vec![pattern],
-                    body,
-                    terminator: CaseTerminator::Break,
-                }],
-            },
-            redirect_command,
-            next_index,
-        ))
+        Some((CaseCommand { word, clauses }, redirect_command, next_index))
     }
 
     fn alias_case_source<'a>(
@@ -194,45 +184,4 @@ impl Executor {
         result?;
         Ok(Some(next_index))
     }
-}
-
-fn command_contains_word(command: &CommandNode, word: &str) -> bool {
-    command.words.iter().any(|candidate| candidate == word)
-}
-
-fn command_words_text(command: &CommandNode) -> String {
-    command.words.join(" ")
-}
-
-fn case_boundary_word_index(command: &CommandNode) -> Option<usize> {
-    case_boundary_index_in_words(&command.words)
-}
-
-fn case_boundary_index_in_words(words: &[String]) -> Option<usize> {
-    words
-        .iter()
-        .position(|word| matches!(word.as_str(), ";;" | ";&" | ";;&" | "esac"))
-}
-
-fn push_case_body_words(command: &CommandNode, words: &[String], body: &mut Vec<CommandNode>) {
-    if words.is_empty() {
-        return;
-    }
-    let mut body_command = command.clone();
-    body_command.words = words.to_vec();
-    body_command.word_kinds = Vec::new();
-    clear_command_redirects(&mut body_command);
-    body.push(body_command);
-}
-
-fn clear_command_redirects(command: &mut CommandNode) {
-    command.redirect_in = None;
-    command.redirect_out = None;
-    command.append = None;
-    command.redirect_err = None;
-    command.redirect_err_append = None;
-    command.heredoc = None;
-    command.heredoc_delimiter = None;
-    command.heredoc_redirects.clear();
-    command.here_string = None;
 }

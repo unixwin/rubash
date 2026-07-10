@@ -15,6 +15,7 @@ use arithmetic::{
 
 mod arrays;
 use arrays::*;
+mod alias_case;
 mod alias_loop_match;
 mod alias_loops;
 mod alias_reparse;
