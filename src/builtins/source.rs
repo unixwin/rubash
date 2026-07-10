@@ -8,6 +8,7 @@
 
 mod execution;
 mod flow;
+mod if_alias;
 mod invocation;
 mod pipe_source;
 mod simple_if;

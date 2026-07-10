@@ -1,6 +1,7 @@
-use super::flow::{
-    command_tail, command_tail_from, command_tail_starts_if, find_if_branch_command,
-    find_matching_fi, find_word_command, normalize_inline_compound_commands,
+use super::flow::{command_tail, command_tail_from, normalize_inline_compound_commands};
+use super::if_alias::{
+    command_tail_starts_if, control_words, find_if_branch_command, find_matching_fi,
+    find_word_command,
 };
 use crate::executor::{ExecuteError, Executor};
 use crate::parser::{Ast, CommandNode};
@@ -27,29 +28,15 @@ fn execute_simple_if_inner(
     let Some(command) = ast.commands.get(index) else {
         return Ok(None);
     };
-    let Some(first_word) = command.words.first().map(String::as_str) else {
+    let Some(command_words) = control_words(executor, command, &["if", "elif"]) else {
         return Ok(None);
     };
-    let expanded_words;
-    let command_words = if matches!(first_word, "if" | "elif") {
-        &command.words
-    } else if executor.alias_expansion_enabled() {
-        expanded_words = executor.expand_aliases(&command.words);
-        &expanded_words
-    } else {
-        return Ok(None);
-    };
-    let Some(keyword) = command_words.first().map(String::as_str) else {
-        return Ok(None);
-    };
-    if !matches!(keyword, "if" | "elif") {
-        return Ok(None);
-    }
+    let keyword = command_words[0].as_str();
 
     let inline_then = command_words.iter().position(|word| word == "then");
     let Some(then_index) = inline_then
         .map(|_| index)
-        .or_else(|| find_word_command(ast, index + 1, "then"))
+        .or_else(|| find_word_command(executor, ast, index + 1, "then"))
     else {
         return Ok(None);
     };
@@ -62,13 +49,13 @@ fn execute_simple_if_inner(
         && ast
             .commands
             .get(then_index)
-            .is_some_and(|command| command_tail_starts_if(command, 1))
+            .is_some_and(|command| command_tail_starts_if(executor, command, 1))
     {
         then_index
     } else {
         body_start
     };
-    let Some(fi_index) = find_matching_fi(ast, branch_scan_start) else {
+    let Some(fi_index) = find_matching_fi(executor, ast, branch_scan_start) else {
         return Ok(None);
     };
 
@@ -89,15 +76,15 @@ fn execute_simple_if_inner(
         return Ok(Some(fi_index + 1));
     }
 
-    let elif_index = find_if_branch_command(ast, branch_scan_start, fi_index, "elif");
-    let else_index = find_if_branch_command(ast, branch_scan_start, fi_index, "else");
+    let elif_index = find_if_branch_command(executor, ast, branch_scan_start, fi_index, "elif");
+    let else_index = find_if_branch_command(executor, ast, branch_scan_start, fi_index, "else");
 
     let condition_words;
     let words = if keyword == "elif" {
         condition_words = {
             let mut words = inline_then
                 .map(|then_pos| command_words[..then_pos].to_vec())
-                .unwrap_or_else(|| command_words.clone());
+                .unwrap_or_else(|| command_words.to_vec());
             words[0] = "if".to_string();
             words
         };
@@ -105,7 +92,7 @@ fn execute_simple_if_inner(
     } else {
         condition_words = inline_then
             .map(|then_pos| command_words[..then_pos].to_vec())
-            .unwrap_or_else(|| command_words.clone());
+            .unwrap_or_else(|| command_words.to_vec());
         &condition_words
     };
     let and_or_condition = if inline_then.is_none() {
