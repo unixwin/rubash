@@ -1,0 +1,253 @@
+use super::super::*;
+use std::fs;
+
+#[test]
+fn test_random_assignment_reseeds_sequence() {
+    let output_path = "target/rubash-random-seed-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "RANDOM=42; first=$RANDOM; RANDOM=42; second=$RANDOM; printf '%s:%s\\n' \"$first\" \"$second\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let (first, second) = output.trim_end().split_once(':').unwrap();
+    assert_eq!(first, second);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_random_expands_inside_arithmetic_expressions() {
+    let output_path = "target/rubash-random-arithmetic-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "RANDOM=42; first=$((RANDOM)); RANDOM=42; second=$((RANDOM)); printf '%s:%s\\n' \"$first\" \"$second\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let (first, second) = output.trim_end().split_once(':').unwrap();
+    assert_eq!(first, second);
+    assert!(first.parse::<u32>().unwrap() <= 32767);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_random_advances_inside_arithmetic_command() {
+    let output_path = "target/rubash-random-arithmetic-command-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "RANDOM=42; (( first=RANDOM, second=RANDOM )); printf '%s:%s\\n' \"$first\" \"$second\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let (first, second) = output.trim_end().split_once(':').unwrap();
+    assert_ne!(first, second);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_bashpid_expands_to_current_shell_pid() {
+    let output_path = "target/rubash-bashpid-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '%s:%s\\n' \"$BASHPID\" \"$$\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let (bashpid, shell_pid) = output.trim_end().split_once(':').unwrap();
+    assert_eq!(bashpid, shell_pid);
+    assert_eq!(bashpid.parse::<u32>().unwrap(), std::process::id());
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_bashpid_assignment_does_not_override_dynamic_value() {
+    let output_path = "target/rubash-bashpid-assignment-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("BASHPID=1; printf '%s\\n' \"$BASHPID\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap().trim_end(),
+        std::process::id().to_string()
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_bashpid_changes_in_command_substitution() {
+    let output_path = "target/rubash-bashpid-command-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "printf '%s:%s:%s:%s\\n' \"$$\" \"$BASHPID\" \"$(echo $BASHPID)\" \"$( (echo $BASHPID) )\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let parts: Vec<_> = output.trim_end().split(':').collect();
+    assert_eq!(parts.len(), 4);
+    assert_eq!(parts[0], parts[1]);
+    assert_ne!(parts[0], parts[2]);
+    assert_ne!(parts[0], parts[3]);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_printf_command_substitution_strips_trailing_newlines() {
+    let output_path = "target/rubash-printf-command-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(printf 'a\\n\\n'); printf 'trail:<%s> len:%s\\n' \"$v\" \"${{#v}}\" > {output_path}; \
+         w=$(printf 'a\\nb\\n'); printf 'mid:<%s> len:%s\\n' \"$w\" \"${{#w}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "trail:<a> len:1\nmid:<a\nb> len:3\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_adjacent_command_substitutions_stay_in_one_word() {
+    let output_path = "target/rubash-adjacent-command-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "echo $(printf left):$(printf right) > {output_path}; echo `printf tick`:`printf tock` >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "left:right\ntick:tock\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_command_substitution_captures_heredoc_pipeline() {
+    let output_path = "target/rubash-comsub-heredoc-pipeline-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "TEST=$(cat <<EOF | sort -u\nabc\ngeh\ndef\nabc\nEOF\n); echo $TEST > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "abc def geh\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_backtick_command_substitution_captures_heredoc() {
+    let output_path = "target/rubash-backtick-comsub-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("foo=`cat <<EOF\nhi\nEOF`\necho \"$foo\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_command_substitution_captures_heredoc_with_parentheses() {
+    let output_path = "target/rubash-comsub-heredoc-parens-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "text=$(cat <<EOF\nthese balanced parens ( ) are not a problem\nEOF\n); echo $text > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "these balanced parens ( ) are not a problem\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
+    let output_path = "target/rubash-comsub-heredoc-delim-before-paren-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("text=$(cat <<EOF\nhere is the text\nEOF)\necho = $text = > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "= here is the text =\n"
+    );
+    let _ = fs::remove_file(output_path);
+}

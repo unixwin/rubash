@@ -1,0 +1,260 @@
+use super::super::*;
+use std::fs;
+
+#[test]
+fn test_bash_aliases_preserves_values_with_spaces() {
+    let output_path = "target/rubash-bash-aliases-spaces-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "alias qux='/usr/local/bin/qux -l'; \
+         BASH_ALIASES[blat]='cd /blat ; echo $PWD'; \
+         printf '%s\\n' \"${{BASH_ALIASES[qux]}}\" \"${{BASH_ALIASES[blat]}}\" > {output_path}; \
+         declare -p BASH_ALIASES >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "/usr/local/bin/qux -l\ncd /blat ; echo $PWD\ndeclare -A BASH_ALIASES=([blat]=\"cd /blat ; echo \\$PWD\" [qux]=\"/usr/local/bin/qux -l\" )\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_unset_indexed_array_element() {
+    let output_path = "target/rubash-unset-array-element-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one two); unset 'arr[1]'; echo ${{!arr[@]}} / ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0 2 / zero two\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_unset_indexed_array_negative_subscript() {
+    let output_path = "target/rubash-unset-array-negative-subscript-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one two); unset 'arr[-1]'; echo ${{!arr[@]}} / ${{arr[@]}} > {output_path}; \
+         arr=(zero one two); unset 'arr[-2]'; echo ${{!arr[@]}} / ${{arr[@]}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0 1 / zero one\n0 2 / zero two\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_unset_indexed_array_arithmetic_subscript() {
+    let output_path = "target/rubash-unset-array-arith-subscript-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one two); alen=${{#arr[@]}}; unset 'arr[$alen-1]'; echo ${{!arr[@]}} / ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0 1 / zero one\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_indexed_array_arithmetic_subscript_assignment_and_expansion() {
+    let output_path = "target/rubash-array-arith-subscript-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one two); i=1; arr[i]=ONE; arr[i+1]+=!; printf '%s/%s/%s\\n' \"${{arr[i]}}\" \"${{arr[i+1]}}\" \"${{arr[-1]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "ONE/two!/two!\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_indexed_array_assignment_preserves_empty_and_sparse_elements() {
+    let output_path = "target/rubash-indexed-array-sparse-assign-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(); arr[0]=; arr[2]=two; arr[2]+=!; \
+         printf '<%s>|<%s>|<%s>|%s\\n' \"${{arr[0]}}\" \"${{arr[1]-missing}}\" \"${{arr[2]}}\" \"${{!arr[@]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<>|<missing>|<two!>|0 2\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_eval_multiple_indexed_array_element_assignments() {
+    let output_path = "target/rubash-eval-multi-array-assign-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "declare -a arr; eval \"arr[0]=zero arr[1]=one\"; printf '%s %s\\n' \"${{arr[0]}}\" \"${{arr[1]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "zero one\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_unquoted_parameter_compound_array_assignment_preserves_quote_chars() {
+    let output_path = "target/rubash-array-param-quotes-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "command='String \"\" validateAndParse NaN'; words=($command); printf '<%s>|<%s>|<%s>|<%s>\\n' \"${{words[0]}}\" \"${{words[1]}}\" \"${{words[2]}}\" \"${{words[3]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<String>|<\"\">|<validateAndParse>|<NaN>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_quoted_array_star_assignment_preserves_empty_quote_argument_for_eval() {
+    let output_path = "target/rubash-array-star-eval-quotes-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "capture() {{ printf '<%s>|<%s>|<%s>\\n' \"$1\" \"$2\" \"$3\" > {output_path}; }}; \
+         command='String \"\" validateAndParse'; words=($command); words[0]=capture; full=\"${{words[*]}}\"; eval \"$full\""
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<>|<validateAndParse>|<>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_compound_indexed_array_assignment_preserves_explicit_indices() {
+    let output_path = "target/rubash-indexed-array-compound-sparse-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=([2]=two [0]=zero middle); arr+=([5]=five tail); \
+         printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0 1 2 5 6 / zero middle two five tail\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_compound_indexed_array_assignment_resolves_negative_indices() {
+    let output_path = "target/rubash-indexed-array-compound-negative-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=([2]=two [5]=five); arr+=([-1]=FIVE [-4]=TWO); \
+         printf '%s / %s\\n' \"${{!arr[*]}}\" \"${{arr[*]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2 5 / TWO FIVE\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_compound_indexed_array_assignment_preserves_quoted_words() {
+    let output_path = "target/rubash-indexed-array-compound-quotes-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(one \"two words\" [4]=\"four words\"); \
+         printf '<%s>/<%s>/<%s>\\n' \"${{arr[0]}}\" \"${{arr[1]}}\" \"${{arr[4]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<one>/<two words>/<four words>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}

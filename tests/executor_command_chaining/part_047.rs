@@ -1,0 +1,246 @@
+use super::super::*;
+use std::fs;
+
+#[test]
+fn test_read_empty_ifs_does_not_split() {
+    let output_path = "target/rubash-read-empty-ifs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("IFS= read first rest <<< 'alpha beta'; echo $first:$rest > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha beta:\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_process_substitution_from_function_output() {
+    let output_path = "target/rubash-read-process-subst-function-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "producer() {{ local RUBASH_PS_VALUE=inner; echo a/b/c/d; }}; \
+         IFS=/ read first second third rest < <(producer); \
+         printf '%s:%s:%s:%s:%s\\n' \"$first\" \"$second\" \"$third\" \"$rest\" \"${{RUBASH_PS_VALUE-unset}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a:b:c:d:unset\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_cat_reads_process_substitution_argument() {
+    let output_path = "target/rubash-cat-process-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat <(echo process substitution) > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "process substitution\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_cat_reads_process_substitution_stdin_redirect() {
+    let output_path = "target/rubash-cat-process-subst-stdin-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat < <(echo redirected stdin) > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "redirected stdin\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_process_substitution_does_not_see_temporary_assignment() {
+    let output_path = "target/rubash-process-subst-temp-assignment-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "unset RUBASH_PS_TEMP; RUBASH_PS_TEMP=inner cat < <(echo $RUBASH_PS_TEMP:1) > {output_path}; \
+         echo after:${{RUBASH_PS_TEMP-unset}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        ":1\nafter:unset\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_cat_reads_shell_style_file_path() {
+    let output_path = "target/rubash-cat-shell-path-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "file=${{TMPDIR}}/rubash-cat-shell-path-$$; echo shell-path > $file; \
+         cat $file > {output_path}; rm -f $file"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "shell-path\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_process_substitution_from_default_parameter_word() {
+    let output_path = "target/rubash-default-process-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("value=; cat ${{value:-<(echo fallback)}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "fallback\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_for_loop_body_reads_process_substitution_redirect() {
+    let output_path = "target/rubash-for-process-subst-read-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "producer() {{ echo a:b:c:d; }}; \
+         for item in once; do IFS=: read first second third rest; done < <(producer); \
+         printf '%s-%s-%s-%s\\n' \"$first\" \"$second\" \"$third\" \"$rest\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a-b-c-d\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_without_name_assigns_reply() {
+    let output_path = "target/rubash-read-reply-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("unset REPLY; read <<< hello; echo $REPLY > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "hello\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_n_reads_limited_characters() {
+    let output_path = "target/rubash-read-n-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -n 3 value <<< abcdef; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "abc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_n_compact_option_reads_limited_characters() {
+    let output_path = "target/rubash-read-n-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -n3 value <<< abcdef; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "abc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_n_zero_succeeds_with_empty_value() {
+    let output_path = "target/rubash-read-n-zero-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -n 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<>:0");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_upper_n_zero_succeeds_with_empty_value() {
+    let output_path = "target/rubash-read-upper-n-zero-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -N 0 value <<< abc; printf '<%s>:%s' \"$value\" $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<>:0");
+    let _ = fs::remove_file(output_path);
+}

@@ -1,0 +1,257 @@
+use super::super::*;
+use std::fs;
+
+#[test]
+fn test_conditional_string_order_operators_are_not_redirects() {
+    let output_path = "target/rubash-conditional-string-order-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "left=abc; right=def; [[ $left < $right ]]; echo $? > {output_path}; [[ $right > $left ]]; echo $? >> {output_path}; [[ $right < $left ]]; echo $? >> {output_path}; [[ $left > $right ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n0\n1\n1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_string_equality_uses_shell_patterns() {
+    let output_path = "target/rubash-conditional-pattern-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abcdef; pattern='a*'; [[ $value == a* ]]; echo $? > {output_path}; [[ $value = a?c* ]]; echo $? >> {output_path}; [[ $value == a[b-d]cdef ]]; echo $? >> {output_path}; [[ $value != z* ]]; echo $? >> {output_path}; [[ $value != a* ]]; echo $? >> {output_path}; [[ $value == $pattern ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0\n0\n0\n0\n1\n0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_regex_match_sets_bash_rematch() {
+    let output_path = "target/rubash-conditional-regex-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}; [[ $value =~ '[' ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0 abc123 abc 123\n1\n2\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_bare_regex_groups_set_bash_rematch() {
+    let output_path = "target/rubash-conditional-bare-regex-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ '2:bad' =~ ^([0-9]+):(.*) ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0 2:bad 2 bad\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_if_conditional_regex_groups_set_bash_rematch() {
+    let output_path = "target/rubash-if-conditional-regex-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "if [[ '1.000' =~ ^[-]?([0-9]*)\\.([0-9]+)$ ]]; then echo \"${{BASH_REMATCH[1]}}/${{BASH_REMATCH[2]}}\" > {output_path}; fi"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1/000\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_if_conditional_regex_preserves_alternation() {
+    let output_path = "target/rubash-if-regex-alternation-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "if [[ shellmath_add =~ shellmath_(add|subtract|multiply|divide)$ ]]; then echo yes > {output_path}; else echo no > {output_path}; fi"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_logical_operators_stay_inside_expression() {
+    let output_path = "target/rubash-conditional-logical-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abc; empty=; [[ -n $value && -z $empty ]]; echo $? > {output_path}; [[ -n $empty || $value = abc ]]; echo $? >> {output_path}; [[ -n $empty || -z $value && $value = abc ]]; echo $? >> {output_path}; [[ ! -n $empty && $value = abc ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n0\n1\n0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_parentheses_group_logical_expressions() {
+    let output_path = "target/rubash-conditional-parentheses-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abc; empty=; [[ -n $value || -n $empty && -z $value ]]; echo $? > {output_path}; [[ ( -n $value || -n $empty ) && -z $value ]]; echo $? >> {output_path}; [[ ! ( -n $empty || -z $value ) ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_file_unary_checks_paths() {
+    let output_path = "target/rubash-conditional-file-unary-output.txt";
+    let file_path = "target/rubash-conditional-file-unary.txt";
+    let dir_path = "target/rubash-conditional-file-unary-dir";
+    let missing_path = "target/rubash-conditional-file-unary-missing";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(file_path);
+    let _ = fs::remove_dir_all(dir_path);
+    fs::write(file_path, "data").unwrap();
+    fs::create_dir_all(dir_path).unwrap();
+    let input = format!(
+        "[[ -e {file_path} ]]; echo $? > {output_path}; [[ -f {file_path} ]]; echo $? >> {output_path}; [[ -d {dir_path} ]]; echo $? >> {output_path}; [[ -s {file_path} ]]; echo $? >> {output_path}; [[ -e {missing_path} ]]; echo $? >> {output_path}; [[ -d {file_path} ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0\n0\n0\n0\n1\n1\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(file_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
+fn test_conditional_file_binary_checks_paths() {
+    let output_path = "target/rubash-conditional-file-binary-output.txt";
+    let older_path = "target/rubash-conditional-file-binary-older.txt";
+    let newer_path = "target/rubash-conditional-file-binary-newer.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(older_path);
+    let _ = fs::remove_file(newer_path);
+    fs::write(older_path, "old").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    fs::write(newer_path, "new").unwrap();
+    let input = format!(
+        "[[ {newer_path} -nt {older_path} ]]; echo $? > {output_path}; [[ {older_path} -ot {newer_path} ]]; echo $? >> {output_path}; [[ {older_path} -ef {older_path} ]]; echo $? >> {output_path}; test {newer_path} -nt {older_path}; echo $? >> {output_path}; [[ {older_path} -nt {newer_path} ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n0\n0\n0\n1\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(older_path);
+    let _ = fs::remove_file(newer_path);
+}
+
+#[test]
+fn test_test_builtin_parenthesizes_logical_expressions() {
+    let output_path = "target/rubash-test-parentheses-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "test \\( x = x -o '' \\) -a ''; echo $? > {output_path}; test \\( x = y -o ok = ok \\) -a yes = yes; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_negates_supported_expressions() {
+    let output_path = "target/rubash-conditional-negation-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abc; empty=; [[ ! -n $value ]]; echo $? > {output_path}; [[ ! -n $empty ]]; echo $? >> {output_path}; [[ ! 3 -gt 4 ]]; echo $? >> {output_path}; [[ ! $value = abc ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n0\n0\n1\n");
+    let _ = fs::remove_file(output_path);
+}
