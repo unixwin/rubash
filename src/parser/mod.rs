@@ -75,6 +75,17 @@ pub struct FunctionCommand {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents `coproc [NAME] command [args...]` or `coproc [NAME] { body; }`
+#[derive(Debug, Clone)]
+pub struct CoprocCommand {
+    /// Optional name (defaults to COPROC)
+    pub name: Option<String>,
+    /// The command words (for simple commands)
+    pub words: Vec<String>,
+    /// Brace group body (for compound commands)
+    pub body: Option<Vec<CommandNode>>,
+}
+
 /// Represents a parsed command
 #[derive(Debug, Clone)]
 pub struct CommandNode {
@@ -125,6 +136,7 @@ pub struct CommandNode {
     pub function_command: Option<FunctionCommand>,
     /// `{ compound_list; }`
     pub brace_group: Option<Vec<CommandNode>>,
+    pub coproc_command: Option<CoprocCommand>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
 }
@@ -155,6 +167,7 @@ impl CommandNode {
             select_command: None,
             function_command: None,
             brace_group: None,
+            coproc_command: None,
             line: None,
         }
     }
@@ -238,6 +251,18 @@ pub fn parse(tokens: &[Token]) -> Ast {
             }
         }
 
+        if token.kind == TokenKind::Keyword
+            && token.value == "coproc"
+            && command_is_empty(&current_cmd)
+        {
+            if let Some((coproc_cmd, next_i)) = parse_coproc_command(tokens, i) {
+                ast.commands.push(coproc_cmd);
+                current_cmd = CommandNode::new();
+                i = next_i;
+                continue;
+            }
+        }
+
         if command_is_empty(&current_cmd)
             && ((token.kind == TokenKind::Keyword && token.value == "(")
                 || token.value.starts_with("(("))
@@ -275,7 +300,10 @@ pub fn parse(tokens: &[Token]) -> Ast {
         }
 
         match token.kind {
-            TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst | TokenKind::BraceExpand => {
+            TokenKind::Word
+            | TokenKind::Variable
+            | TokenKind::CommandSubst
+            | TokenKind::BraceExpand => {
                 current_cmd.subshell |= in_subshell;
                 note_command_line(&mut current_cmd, token);
                 push_command_word(&mut current_cmd, token);
@@ -798,6 +826,151 @@ fn parse_select_command(tokens: &[Token], start: usize) -> Option<(CommandNode, 
     Some((command, next_i))
 }
 
+fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    // Parse `coproc [NAME] command [args...]` or `coproc [NAME] { body; }` or `coproc [NAME] ( body )`
+    let mut i = start + 1; // skip `coproc`
+
+    // Determine if next token is a name followed by a compound command,
+    // or if the next token is itself the command.
+    let mut name: Option<String> = None;
+    let lookahead = tokens.get(i);
+    if let Some(lookahead) = lookahead {
+        // Check if this token is a brace group or subshell - if so, no name
+        let is_brace = lookahead.kind == TokenKind::BraceExpand
+            || (lookahead.kind == TokenKind::Keyword
+                && lookahead.value.starts_with('{')
+                && lookahead.value.ends_with('}')
+                && lookahead.value.len() > 1);
+        let is_subshell = lookahead.kind == TokenKind::Keyword && lookahead.value == "(";
+
+        if !is_brace && !is_subshell {
+            // This might be a name. Check if the token *after* it is a brace group or subshell.
+            let next_after = tokens.get(i + 1);
+            let next_is_compound = next_after.is_some_and(|t| {
+                t.kind == TokenKind::BraceExpand
+                    || (t.kind == TokenKind::Keyword
+                        && ((t.value.starts_with('{')
+                            && t.value.ends_with('}')
+                            && t.value.len() > 1)
+                            || t.value == "("))
+            });
+            if next_is_compound {
+                name = Some(lookahead.value.clone());
+                i += 1; // consume the name
+            }
+            // Otherwise: no name, the token is part of the simple command
+        }
+    }
+
+    // Parse the body
+    if let Some(token) = tokens.get(i) {
+        // Brace group body (single token from lexer)
+        if token.kind == TokenKind::BraceExpand
+            || (token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.ends_with('}')
+                && token.value.len() > 1)
+        {
+            let inner = token
+                .value
+                .trim_start_matches('{')
+                .trim_end_matches('}')
+                .trim();
+            let body_tokens = crate::lexer::tokenize(inner);
+            let body = parse(&body_tokens).commands;
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.coproc_command = Some(CoprocCommand {
+                name,
+                words: Vec::new(),
+                body: Some(body),
+            });
+            let mut next_i = i + 1;
+            collect_trailing_redirections(tokens, &mut next_i, &mut command);
+            while tokens
+                .get(next_i)
+                .is_some_and(|t| t.kind == TokenKind::Semicolon)
+            {
+                next_i += 1;
+            }
+            return Some((command, next_i));
+        }
+
+        // Subshell body: ( ... )
+        if token.kind == TokenKind::Keyword && token.value == "(" {
+            i += 1; // consume `(`
+            let body_start = i;
+            let mut depth = 1usize;
+            while i < tokens.len() {
+                if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "(" {
+                    depth += 1;
+                } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == ")" {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if i < tokens.len() {
+                let body = parse(&tokens[body_start..i]).commands;
+                let mut command = CommandNode::new();
+                command.line = tokens.get(start).map(|t| t.position);
+                command.coproc_command = Some(CoprocCommand {
+                    name,
+                    words: Vec::new(),
+                    body: Some(body),
+                });
+                let mut next_i = i + 1;
+                collect_trailing_redirections(tokens, &mut next_i, &mut command);
+                while tokens
+                    .get(next_i)
+                    .is_some_and(|t| t.kind == TokenKind::Semicolon)
+                {
+                    next_i += 1;
+                }
+                return Some((command, next_i));
+            }
+        }
+    }
+
+    // Simple command: collect remaining tokens as words
+    let mut words = Vec::new();
+    while i < tokens.len() {
+        match tokens[i].kind {
+            TokenKind::Word
+            | TokenKind::Variable
+            | TokenKind::BraceExpand
+            | TokenKind::CommandSubst => {
+                words.push(tokens[i].value.clone());
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+
+    if words.is_empty() {
+        return None;
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.coproc_command = Some(CoprocCommand {
+        name,
+        words,
+        body: None,
+    });
+    let mut next_i = i;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    while tokens
+        .get(next_i)
+        .is_some_and(|t| t.kind == TokenKind::Semicolon)
+    {
+        next_i += 1;
+    }
+    Some((command, next_i))
+}
+
 fn parse_arithmetic_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     let mut i = if tokens.get(start + 1)?.value == "((" {
         start + 2
@@ -1135,7 +1308,10 @@ fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &
         let Some(target) = tokens.get(*index + 1).filter(|next| {
             matches!(
                 next.kind,
-                TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst
+                TokenKind::Word
+                    | TokenKind::Variable
+                    | TokenKind::CommandSubst
+                    | TokenKind::HereDocBody
             )
         }) else {
             break;
@@ -1181,6 +1357,21 @@ fn collect_trailing_redirections(tokens: &[Token], index: &mut usize, command: &
                     append: true,
                     clobber: false,
                 });
+            }
+            TokenKind::HereString => {
+                command.here_string = Some(target.value.clone());
+            }
+            TokenKind::HereDoc => {
+                // Heredoc delimiter - the body should already be in a HereDocBody token
+                if let Some(body_token) = tokens.get(*index + 2) {
+                    if body_token.kind == TokenKind::HereDocBody {
+                        command.heredoc = Some(body_token.value.clone());
+                        command.heredoc_delimiter = Some(target.value.clone());
+                        *index += 3;
+                        continue;
+                    }
+                }
+                command.heredoc_delimiter = Some(target.value.clone());
             }
             _ => break,
         }
@@ -1466,13 +1657,61 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
         }
 
         let mut patterns = Vec::new();
-        while i < tokens.len() && !is_keyword(tokens, i, ")") {
+        let mut current_pattern = String::new();
+        let mut in_extglob = 0i32;
+        while i < tokens.len() {
+            // Check if this is a ) that ends the case pattern (not inside extglob)
+            if is_keyword(tokens, i, ")") && in_extglob == 0 {
+                patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
+                current_pattern.clear();
+                break;
+            }
             match tokens[i].kind {
                 TokenKind::Word | TokenKind::Assignment => {
-                    patterns.push(mark_case_pattern_literal_backslashes(&tokens[i].value));
+                    let text = &tokens[i].value;
+                    // Check if this word ends with an extglob operator before (
+                    if i + 1 < tokens.len()
+                        && is_keyword(tokens, i + 1, "(")
+                        && ends_with_extglob_operator(text)
+                    {
+                        // Collect the full extglob pattern
+                        let extglob = collect_extglob_pattern(tokens, &mut i);
+                        current_pattern.push_str(&extglob);
+                    } else {
+                        current_pattern.push_str(text);
+                    }
                 }
                 TokenKind::Variable => {
-                    patterns.push(tokens[i].value.clone());
+                    current_pattern.push_str(&tokens[i].value);
+                }
+                // Handle `!(` as extglob negation pattern
+                TokenKind::Keyword
+                    if tokens[i].value == "!"
+                        && i + 1 < tokens.len()
+                        && is_keyword(tokens, i + 1, "(") =>
+                {
+                    let extglob = collect_extglob_pattern_from_bang(tokens, &mut i);
+                    current_pattern.push_str(&extglob);
+                }
+                TokenKind::Keyword if tokens[i].value == "(" => {
+                    current_pattern.push('(');
+                    in_extglob += 1;
+                }
+                TokenKind::Keyword if tokens[i].value == ")" => {
+                    current_pattern.push(')');
+                    in_extglob -= 1;
+                    if in_extglob < 0 {
+                        in_extglob = 0;
+                    }
+                }
+                TokenKind::Pipe => {
+                    // Pipe separates case patterns (not inside extglob)
+                    if in_extglob == 0 {
+                        patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
+                        current_pattern.clear();
+                    } else {
+                        current_pattern.push('|');
+                    }
                 }
                 _ => {}
             }
@@ -1510,6 +1749,99 @@ fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, us
 
 fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {
     pattern.replace('\\', "\x18")
+}
+
+/// Check if a pattern string ends with an extglob operator character before (
+fn ends_with_extglob_operator(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .last()
+        .is_some_and(|ch| matches!(ch, '@' | '*' | '+' | '?' | '!'))
+}
+
+/// Collect a full extglob pattern from tokens, starting at the current position.
+/// The current token should be a word ending with an extglob operator (e.g., "foo+"),
+/// and the next token should be "(".
+/// Returns the complete extglob pattern string.
+/// After return, `i` points to the last token consumed (the closing ")").
+fn collect_extglob_pattern(tokens: &[Token], i: &mut usize) -> String {
+    let mut pattern = tokens[*i].value.clone();
+    *i += 1;
+
+    // Consume the "("
+    if *i < tokens.len() && is_keyword(tokens, *i, "(") {
+        pattern.push('(');
+        *i += 1;
+
+        // Collect until matching ")"
+        let mut depth = 1i32;
+        while *i < tokens.len() && depth > 0 {
+            match tokens[*i].kind {
+                TokenKind::Keyword if tokens[*i].value == "(" => {
+                    depth += 1;
+                    pattern.push('(');
+                }
+                TokenKind::Keyword if tokens[*i].value == ")" => {
+                    depth -= 1;
+                    pattern.push(')');
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Pipe => {
+                    pattern.push('|');
+                }
+                _ => {
+                    pattern.push_str(&tokens[*i].value);
+                }
+            }
+            *i += 1;
+        }
+    }
+
+    pattern
+}
+
+/// Collect a full extglob pattern from tokens when the current token is `!` (Keyword).
+/// The next token should be "(".
+/// Returns the complete extglob pattern string (e.g., "!(a|b)").
+/// After return, `i` points to the closing ")" token.
+fn collect_extglob_pattern_from_bang(tokens: &[Token], i: &mut usize) -> String {
+    let mut pattern = "!".to_string();
+    *i += 1; // skip the `!`
+
+    // Consume the "("
+    if *i < tokens.len() && is_keyword(tokens, *i, "(") {
+        pattern.push('(');
+        *i += 1;
+
+        // Collect until matching ")"
+        let mut depth = 1i32;
+        while *i < tokens.len() && depth > 0 {
+            match tokens[*i].kind {
+                TokenKind::Keyword if tokens[*i].value == "(" => {
+                    depth += 1;
+                    pattern.push('(');
+                }
+                TokenKind::Keyword if tokens[*i].value == ")" => {
+                    depth -= 1;
+                    pattern.push(')');
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Pipe => {
+                    pattern.push('|');
+                }
+                _ => {
+                    pattern.push_str(&tokens[*i].value);
+                }
+            }
+            *i += 1;
+        }
+    }
+
+    pattern
 }
 
 fn case_body_end(tokens: &[Token], mut index: usize) -> usize {

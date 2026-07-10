@@ -156,6 +156,10 @@ pub(crate) fn take_exit_trap(env_vars: &mut HashMap<String, String>) -> Option<S
     action
 }
 
+pub(crate) fn get_trap_action(env_vars: &HashMap<String, String>, signal: &str) -> Option<String> {
+    env_vars.get(&trap_key(signal)).cloned()
+}
+
 struct NormalizedSignals {
     signals: Vec<String>,
     invalid: bool,

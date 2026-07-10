@@ -76,7 +76,6 @@ enum NamerefResolution {
     NotNameref,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TypeDescribeMode {
     Verbose,
@@ -393,12 +392,13 @@ impl Executor {
                 let old_fn = self.env_vars.get(FUNCTION_STDIN).cloned();
                 let old_fno = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
                 subshell_stdin = Some((old_fn.unwrap_or_default(), old_fno.unwrap_or_default()));
-                for fwd in index+1..ast.commands.len() {
+                for fwd in index + 1..ast.commands.len() {
                     let c = &ast.commands[fwd];
                     if c.subshell_end {
                         if let Some(input) = self.loop_redirect_input(c) {
                             self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                            self.env_vars.insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+                            self.env_vars
+                                .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
                         }
                         break;
                     }
@@ -422,6 +422,24 @@ impl Executor {
             }
             self.set_pipestatus([self.exit_code]);
 
+            // Execute ERR trap if command failed and not in &&/||/! context
+            if self.exit_code != 0
+                && !command.inverted
+                && command.and_or().is_none()
+                && self.suppress_errexit == 0
+            {
+                if let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "ERR")
+                {
+                    if !action.is_empty() {
+                        let saved_exit = self.exit_code;
+                        let tokens = crate::lexer::tokenize(&action);
+                        let ast = crate::parser::parse(&tokens);
+                        let _ = self.execute_ast(&ast);
+                        self.exit_code = saved_exit;
+                    }
+                }
+            }
+
             if command.subshell_end {
                 if let Some((old_stdin, old_offset)) = subshell_stdin.take() {
                     if old_stdin.is_empty() {
@@ -429,7 +447,8 @@ impl Executor {
                         self.env_vars.remove(FUNCTION_STDIN_OFFSET);
                     } else {
                         self.env_vars.insert(FUNCTION_STDIN.to_string(), old_stdin);
-                        self.env_vars.insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
+                        self.env_vars
+                            .insert(FUNCTION_STDIN_OFFSET.to_string(), old_offset);
                     }
                 }
                 if let Some(saved_env) = subshell_env.take() {
@@ -1277,11 +1296,15 @@ impl Executor {
         }
 
         if let Some(select_command) = &cmd.select_command {
-            return self.execute_select_command(select_command);
+            return self.execute_select_command(cmd, select_command);
         }
 
         if let Some(case_command) = &cmd.case_command {
             return self.execute_case_command(case_command);
+        }
+
+        if let Some(coproc_cmd) = &cmd.coproc_command {
+            return self.execute_coproc_command(cmd, coproc_cmd);
         }
 
         if let Some(function_command) = &cmd.function_command {
@@ -1372,9 +1395,10 @@ impl Executor {
         // Skip for [[ ]] and [ ] test commands where ? and * are pattern operators
         let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
         if !is_test_cmd {
-            variable_expanded.words = variable_expanded.words
+            variable_expanded.words = variable_expanded
+                .words
                 .into_iter()
-                .flat_map(|word| match pathname_expand_word(&word) {
+                .flat_map(|word| match pathname_expand_word(&word, &self.env_vars) {
                     Some(matches) => matches,
                     None => vec![word],
                 })
@@ -1942,7 +1966,7 @@ impl Executor {
             return expanded.split_whitespace().map(str::to_string).collect();
         }
         // Apply glob expansion for for-loop words
-        if let Some(matches) = glob::pathname_expand_word(&expanded) {
+        if let Some(matches) = glob::pathname_expand_word(&expanded, &self.env_vars) {
             return matches;
         }
         vec![expanded]
@@ -3586,7 +3610,11 @@ impl Executor {
         fs::read_to_string(shell_path_to_windows(&target, &self.env_vars)).ok()
     }
 
-    fn execute_select_command(&mut self, select_command: &SelectCommand) -> Result<(), ExecuteError> {
+    fn execute_select_command(
+        &mut self,
+        cmd: &CommandNode,
+        select_command: &SelectCommand,
+    ) -> Result<(), ExecuteError> {
         // `select name [in words ...]; do body; done`
         // Displays a numbered menu of words, prompts for selection, and executes body
         // with the selected word assigned to the variable.
@@ -3607,6 +3635,40 @@ impl Executor {
             .cloned()
             .unwrap_or_else(|| "#? ".to_string());
 
+        // Check for stdin from here-string, here-doc, or redirect
+        let has_stdin = self.env_vars.contains_key(FUNCTION_STDIN)
+            || cmd.here_string.is_some()
+            || cmd.heredoc_redirects.iter().any(|r| r.body.is_some());
+        let mut stdin_offset = 0usize;
+        if has_stdin && !self.env_vars.contains_key(FUNCTION_STDIN) {
+            // Set up stdin from here-string or here-doc
+            if let Some(ref here_string) = cmd.here_string {
+                let input = self.expand_word(here_string);
+                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                self.env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            } else if let Some(input) = cmd
+                .heredoc_redirects
+                .iter()
+                .rev()
+                .find(|r| r.fd.is_none())
+                .and_then(|r| r.body.clone())
+            {
+                let input = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&input))
+                    .to_string();
+                self.env_vars.insert(FUNCTION_STDIN.to_string(), input);
+                self.env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
+            }
+        }
+        if has_stdin {
+            stdin_offset = self
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+        }
+
         loop {
             // Display menu
             for (i, value) in values.iter().enumerate() {
@@ -3618,20 +3680,46 @@ impl Executor {
 
             // Read user input
             let mut input = String::new();
-            match std::io::stdin().read_line(&mut input) {
-                Ok(0) => {
+            if has_stdin {
+                // Read from FUNCTION_STDIN (heredoc/redirect)
+                let stdin_content = self
+                    .env_vars
+                    .get(FUNCTION_STDIN)
+                    .cloned()
+                    .unwrap_or_default();
+                if stdin_offset >= stdin_content.len() {
                     // EOF
                     eprintln!();
                     self.exit_code = 0;
                     return Ok(());
                 }
-                Ok(_) => {
-                    input = input.trim().to_string();
+                let remaining = &stdin_content[stdin_offset..];
+                if let Some(newline_pos) = remaining.find('\n') {
+                    input = remaining[..newline_pos].to_string();
+                    stdin_offset += newline_pos + 1;
+                } else {
+                    input = remaining.to_string();
+                    stdin_offset = stdin_content.len();
                 }
-                Err(_) => {
-                    self.exit_code = 1;
-                    return Ok(());
+                self.env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), stdin_offset.to_string());
+            } else {
+                match std::io::stdin().read_line(&mut input) {
+                    Ok(0) => {
+                        // EOF
+                        eprintln!();
+                        self.exit_code = 0;
+                        return Ok(());
+                    }
+                    Ok(_) => {
+                        input = input.trim().to_string();
+                    }
+                    Err(_) => {
+                        self.exit_code = 1;
+                        return Ok(());
+                    }
                 }
+                input = input.trim().to_string();
             }
 
             // If input is empty, re-display menu
@@ -3775,19 +3863,123 @@ impl Executor {
         Ok(())
     }
 
+    fn execute_coproc_command(
+        &mut self,
+        _cmd: &CommandNode,
+        coproc_cmd: &crate::parser::CoprocCommand,
+    ) -> Result<(), ExecuteError> {
+        let array_name = coproc_cmd
+            .name
+            .clone()
+            .unwrap_or_else(|| "COPROC".to_string());
+        use std::process::{Command, Stdio};
+        let exe = std::env::current_exe().unwrap_or_else(|_| "rubash".into());
+
+        let mut child = if let Some(body) = &coproc_cmd.body {
+            // Compound command body: coproc [NAME] { body; } or ( body )
+            let body_text = body
+                .iter()
+                .map(|c| c.words.join(" "))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let mut child = Command::new(&exe);
+            child.arg("--").arg("-c").arg(&body_text);
+            child
+        } else if !coproc_cmd.words.is_empty() {
+            // Simple command: coproc [NAME] command [args...]
+            let words: Vec<&str> = coproc_cmd.words.iter().map(|w| w.as_str()).collect();
+            let mut child = Command::new(&exe);
+            child.arg("--");
+            for w in &words {
+                child.arg(w);
+            }
+            child
+        } else {
+            eprintln!(
+                "{}coproc: usage: coproc [NAME] command [args...]",
+                self.diagnostic_prefix()
+            );
+            self.exit_code = 1;
+            return Ok(());
+        };
+
+        for (key, value) in &self.env_vars {
+            if !key.starts_with("__RUBASH_") {
+                child.env(key, value);
+            }
+        }
+
+        // Create pipes for bidirectional communication
+        let stdin_result = std::io::pipe();
+        let stdout_result = std::io::pipe();
+
+        if let (Ok((stdin_reader, stdin_writer)), Ok((stdout_reader, stdout_writer))) =
+            (stdin_result, stdout_result)
+        {
+            child.stdin(stdin_writer);
+            child.stdout(stdout_reader);
+            child.stderr(Stdio::inherit());
+
+            match child.spawn() {
+                Ok(child_proc) => {
+                    // stdin_writer and stdout_reader were moved into the child process
+                    // stdin_reader and stdout_writer are now unusable (drop them)
+                    drop(stdin_reader);
+                    drop(stdout_writer);
+
+                    let pid = child_proc.id();
+                    // Store the file descriptors in env for COPROC array
+                    let stdin_key = format!("__RUBASH_COPROC_STDIN_{}", pid);
+                    let stdout_key = format!("__RUBASH_COPROC_STDOUT_{}", pid);
+                    self.env_vars.insert(stdin_key, "pipe".to_string());
+                    self.env_vars.insert(stdout_key, "pipe".to_string());
+
+                    let array_value = format!("({} {})", 0, 1);
+                    self.env_vars.insert(array_name.clone(), array_value);
+                    mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &array_name);
+                    self.env_vars
+                        .insert(format!("{}_PID", array_name), pid.to_string());
+                    self.exit_code = 0;
+                }
+                Err(e) => {
+                    eprintln!("{}coproc: failed to spawn: {}", self.diagnostic_prefix(), e);
+                    self.exit_code = 126;
+                }
+            }
+        } else {
+            eprintln!("{}coproc: failed to create pipes", self.diagnostic_prefix());
+            self.exit_code = 1;
+        }
+
+        Ok(())
+    }
+
     fn execute_case_command(&mut self, case_command: &CaseCommand) -> Result<(), ExecuteError> {
         // TODO(parse.y/execute_cmd.c/pathexp.c): Bash case execution uses the
         // full pattern matcher, fall-through operators, expansion flags, and
         // compound-list control flow. This handles the common shell glob
         // operators used by simple `case` clauses.
         let word = self.expand_case_word(&case_command.word);
+        // Strip surrounding quotes from word (bash behavior: quotes are literal in case patterns)
+        let word = strip_surrounding_quotes(&word);
         let mut fall_through = false;
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
             let matched = fall_through
                 || clause.patterns.iter().any(|pattern| {
-                    let pattern = decode_parameter_pattern_quotes(&self.expand_word(pattern));
-                    case_pattern_matches(&pattern, &word)
+                    let expanded = self.expand_word(pattern);
+                    let decoded = decode_parameter_pattern_quotes(&expanded);
+                    let stripped = strip_surrounding_quotes(&decoded);
+                    if stripped.contains("@(")
+                        || stripped.contains("*(")
+                        || stripped.contains("+(")
+                        || stripped.contains("?(")
+                        || stripped.contains("!(")
+                    {
+                        crate::executor::conditional::extglob_case_pattern_matches(&pattern, &word)
+                    } else {
+                        case_pattern_matches(&pattern, &word)
+                    }
                 });
             if matched {
                 let body = Ast {
@@ -5938,7 +6130,11 @@ impl Executor {
             let normalized = path.replace('\\', "/");
             let dir = if let Some(pos) = normalized.rfind('/') {
                 let d = &normalized[..pos];
-                if d.is_empty() { "/" } else { d }
+                if d.is_empty() {
+                    "/"
+                } else {
+                    d
+                }
             } else {
                 "."
             };
@@ -5953,14 +6149,23 @@ impl Executor {
         let mut i = 1;
         while i < cmd.words.len() {
             match cmd.words[i].as_str() {
-                "-a" | "--multiple" => { i += 1; }
+                "-a" | "--multiple" => {
+                    i += 1;
+                }
                 "-s" | "--suffix" => {
                     suffix = cmd.words.get(i + 1).map(|w| self.expand_word(w));
                     i += 2;
                 }
-                "-z" | "--zero" => { i += 1; }
-                "--" => { i += 1; break; }
-                arg if arg.starts_with('-') && arg.len() > 1 => { i += 1; }
+                "-z" | "--zero" => {
+                    i += 1;
+                }
+                "--" => {
+                    i += 1;
+                    break;
+                }
+                arg if arg.starts_with('-') && arg.len() > 1 => {
+                    i += 1;
+                }
                 _ => {
                     args.push(self.expand_word(&cmd.words[i]));
                     i += 1;
@@ -6266,6 +6471,7 @@ impl Executor {
         let mut exact_char_limit = false;
         let mut raw = false;
         let mut scalar_names = Vec::new();
+        let mut prompt: Option<String> = None;
         let mut index = 1;
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
@@ -6333,10 +6539,14 @@ impl Executor {
                     index += 2;
                 }
                 "-p" => {
+                    prompt = cmd.words.get(index + 1).cloned();
                     index += 2;
                 }
                 "-r" => {
                     raw = true;
+                    index += 1;
+                }
+                "-s" => {
                     index += 1;
                 }
                 word if word.starts_with('-')
@@ -6450,6 +6660,13 @@ impl Executor {
             }
         }
 
+        // Display prompt if -p was specified
+        if let Some(ref prompt_text) = prompt {
+            let expanded = self.expand_word(prompt_text);
+            eprint!("{}", expanded);
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+
         if let Some(name) = array_name {
             if char_limit == Some(0) {
                 self.env_vars.insert(name.clone(), read_array_storage(&[]));
@@ -6496,6 +6713,10 @@ impl Executor {
             {
                 self.assign_read_scalar_names(&scalar_names, &line, raw);
                 0
+            } else if self.env_vars.contains_key(FUNCTION_STDIN) {
+                // FUNCTION_STDIN is exhausted - EOF on heredoc/redirect
+                self.assign_read_scalar_names(&scalar_names, "", raw);
+                1
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => {
@@ -6566,6 +6787,12 @@ impl Executor {
                 char_limit,
                 exact_char_limit,
             ));
+        }
+
+        // If FUNCTION_STDIN is set (from heredoc or redirect), only read from it.
+        // Do NOT fall through to process stdin - that would block on the terminal.
+        if self.env_vars.contains_key(FUNCTION_STDIN) {
+            return self.read_function_stdin(delimiter, char_limit, exact_char_limit);
         }
 
         self.read_function_stdin(delimiter, char_limit, exact_char_limit)
@@ -10231,7 +10458,7 @@ impl Executor {
     fn is_brace_expand_enabled(&self) -> bool {
         crate::builtins::set::shell_option_enabled(&self.env_vars, "braceexpand")
     }
-        fn expand_word_mut(&mut self, word: &str) -> String {
+    fn expand_word_mut(&mut self, word: &str) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
 
         if let Some(word) = word.strip_prefix('\x1b') {
@@ -10329,7 +10556,49 @@ impl Executor {
             }
         }
 
+        // For words with embedded $(...) that may call shell functions,
+        // use the mutable expansion path which handles functions.
+        if (word.contains("$(") || word.contains('`')) && self.has_function_in_word(word) {
+            return self.expand_embedded_parameters_mut(word);
+        }
+
         self.expand_word(word)
+    }
+
+    /// Check if a word contains a command substitution that calls a shell function.
+    fn has_function_in_word(&self, word: &str) -> bool {
+        // Check for $(...) command substitutions
+        let mut chars = word.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '$' && chars.peek() == Some(&'(') {
+                chars.next(); // skip (
+                if chars.peek() == Some(&'(') {
+                    // Arithmetic, skip
+                    continue;
+                }
+                // Collect until matching )
+                let mut depth = 1;
+                let mut source = String::new();
+                for ch in chars.by_ref() {
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    source.push(ch);
+                }
+                let first_word = source.split_whitespace().next().unwrap_or("");
+                if !first_word.is_empty() && self.functions.contains_key(first_word) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn expand_parameter_named_value(&self, name: &str) -> String {
@@ -12456,16 +12725,15 @@ impl Executor {
             _ => {
                 // Generic external command first stage
                 let cmd_name = self.expand_word(&words[0]);
-                let expanded_args: Vec<String> = words[1..]
-                    .iter()
-                    .map(|w| self.expand_word(w))
-                    .collect();
+                let expanded_args: Vec<String> =
+                    words[1..].iter().map(|w| self.expand_word(w)).collect();
                 use std::process::{Command, Stdio};
                 let output = Command::new(&cmd_name)
                     .args(&expanded_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
-                    .output().ok()?;
+                    .output()
+                    .ok()?;
                 Some(String::from_utf8_lossy(&output.stdout).into_owned())
             }
         }
@@ -12497,23 +12765,24 @@ impl Executor {
             _ => {
                 // Generic external command filter - run command with stdin
                 let cmd_name = self.expand_word(&words[0]);
-                let expanded_args: Vec<String> = words[1..]
-                    .iter()
-                    .map(|w| self.expand_word(w))
-                    .collect();
-                use std::process::{Command, Stdio};
+                let expanded_args: Vec<String> =
+                    words[1..].iter().map(|w| self.expand_word(w)).collect();
                 use std::io::Write;
+                use std::process::{Command, Stdio};
                 let child = Command::new(&cmd_name)
                     .args(&expanded_args)
                     .stdin(Stdio::piped())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
-                    .spawn().ok()?;
+                    .spawn()
+                    .ok()?;
                 child.stdin.as_ref()?.write_all(input.as_bytes()).ok()?;
                 let output = child.wait_with_output().ok()?;
-                Some(String::from_utf8_lossy(&output.stdout)
-                    .trim_end_matches('\n')
-                    .to_string())
+                Some(
+                    String::from_utf8_lossy(&output.stdout)
+                        .trim_end_matches('\n')
+                        .to_string(),
+                )
             }
         }
     }
@@ -16026,6 +16295,15 @@ fn remove_parameter_pattern(value: &str, pattern: &str, operation: PatternRemova
             remove_matching_suffix(value, pattern, MatchLength::Longest)
         }
     }
+}
+
+fn strip_surrounding_quotes(s: &str) -> String {
+    if s.len() >= 2 {
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 fn decode_parameter_pattern_quotes(pattern: &str) -> String {
