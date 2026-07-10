@@ -1,0 +1,217 @@
+use std::str::from_utf8;
+
+use super::scanner::Lexer;
+
+impl<'a> Lexer<'a> {
+    pub(super) fn skip_cmd_subst(&mut self) {
+        let mut depth = 1;
+        while let Some(c) = self.advance() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                '\'' => self.skip_single(),
+                '"' => self.skip_double(),
+                '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {
+                    self.advance();
+                    self.advance();
+                }
+                '<' if self.peek() == Some('<') => self.skip_heredoc_in_command_substitution(),
+                _ => {}
+            }
+        }
+    }
+
+    pub(super) fn skip_heredoc_in_command_substitution(&mut self) {
+        self.advance();
+        let strip_tabs = if self.peek() == Some('-') {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        while self.peek().is_some_and(|ch| matches!(ch, ' ' | '\t')) {
+            self.advance();
+        }
+        let delimiter_start = self.position;
+        while self
+            .peek()
+            .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
+        {
+            self.advance();
+        }
+        let mut delimiter = from_utf8(&self.input[delimiter_start..self.position])
+            .unwrap_or("")
+            .replace(['\'', '"', '\\'], "");
+        if strip_tabs {
+            delimiter = delimiter.trim_start_matches('\t').to_string();
+        }
+        if delimiter.is_empty() {
+            return;
+        }
+        while self.peek().is_some_and(|ch| ch != '\n') {
+            self.advance();
+        }
+        if self.peek() == Some('\n') {
+            self.advance();
+        }
+
+        while !self.at_end() {
+            let line_start = self.position;
+            while self.peek().is_some_and(|ch| ch != '\n') {
+                self.advance();
+            }
+            let line = from_utf8(&self.input[line_start..self.position]).unwrap_or("");
+            let comparable = if strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if comparable
+                .strip_suffix(')')
+                .is_some_and(|value| value == delimiter)
+            {
+                let leading_tabs = if strip_tabs {
+                    line.chars().take_while(|ch| *ch == '\t').count()
+                } else {
+                    0
+                };
+                self.position = line_start + leading_tabs + delimiter.len();
+                break;
+            }
+            if comparable == delimiter {
+                if self.peek() == Some('\n') {
+                    self.advance();
+                }
+                break;
+            }
+            if self.peek() == Some('\n') {
+                self.advance();
+            }
+        }
+    }
+
+    pub(super) fn skip_backtick(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '`' {
+                break;
+            } else if c == '\\' {
+                self.advance();
+            }
+        }
+    }
+    pub(super) fn skip_single(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '\'' {
+                break;
+            }
+        }
+    }
+    pub(super) fn skip_ansi_c_single(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '\\' {
+                self.advance();
+            } else if c == '\'' {
+                break;
+            }
+        }
+    }
+    pub(super) fn skip_double(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '"' {
+                break;
+            } else if c == '$' {
+                match self.peek() {
+                    Some('{') => {
+                        self.advance();
+                        self.skip_braced();
+                    }
+                    Some('(') => {
+                        self.advance();
+                        self.skip_cmd_subst();
+                    }
+                    _ => {}
+                }
+            } else if c == '\\' {
+                self.advance();
+            }
+        }
+    }
+    pub(super) fn skip_braced(&mut self) {
+        while let Some(c) = self.advance() {
+            if c == '}' {
+                break;
+            }
+        }
+    }
+    pub(super) fn skip_brace(&mut self) {
+        let mut depth = 1usize;
+        let mut comment_start = true;
+        while let Some(c) = self.advance() {
+            if c == '\n' {
+                comment_start = true;
+                continue;
+            }
+            if c.is_whitespace() {
+                comment_start = true;
+                continue;
+            }
+            if c == '#' && comment_start {
+                while self.peek().is_some_and(|ch| ch != '\n') {
+                    self.advance();
+                }
+                continue;
+            }
+            match c {
+                '{' => {
+                    comment_start = false;
+                    depth += 1;
+                }
+                '}' => {
+                    comment_start = false;
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                '$' => {
+                    comment_start = false;
+                    match self.peek() {
+                        Some('{') => {
+                            self.advance();
+                            self.skip_braced();
+                        }
+                        Some('(') => {
+                            self.advance();
+                            self.skip_cmd_subst();
+                        }
+                        _ => {}
+                    }
+                }
+                '`' => {
+                    comment_start = false;
+                    self.skip_backtick();
+                }
+                '\'' => {
+                    comment_start = false;
+                    self.skip_single();
+                }
+                '"' => {
+                    comment_start = false;
+                    self.skip_double();
+                }
+                '\\' => {
+                    comment_start = false;
+                    self.advance();
+                }
+                _ => {
+                    comment_start = false;
+                }
+            }
+        }
+    }
+}
