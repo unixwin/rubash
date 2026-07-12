@@ -26,6 +26,42 @@ fn test_for_command_redirects_body_stdout() {
 }
 
 #[test]
+fn test_for_command_expands_brace_range_words() {
+    let output_path = "target/rubash-for-brace-range-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("for item in {{1..3}}; do echo $item >> {output_path}; done");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].for_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n2\n3\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_for_command_expands_brace_list_words() {
+    let output_path = "target/rubash-for-brace-list-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("for item in pre{{a,b}}; do echo $item >> {output_path}; done");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].for_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "prea\npreb\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_for_command_accepts_brace_group_body() {
     let output_path = "target/rubash-for-brace-body-output.txt";
     let _ = fs::remove_file(output_path);

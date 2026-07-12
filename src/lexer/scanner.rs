@@ -277,6 +277,9 @@ impl<'a> Lexer<'a> {
             }
             '{' => {
                 self.skip_brace();
+                if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
+                    return Some(self.finish_word_token(start, false));
+                }
                 let v = self.slice(start);
                 let kind = if is_brace_expansion(v) {
                     TokenKind::BraceExpand

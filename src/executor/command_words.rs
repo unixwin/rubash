@@ -43,6 +43,20 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_for_word_values(&self, word: &str) -> Vec<String> {
+        if self.is_brace_expand_enabled() && !word.contains("${") {
+            let braced = crate::expand::braces::expand_braces(word);
+            if braced.len() > 1 {
+                return braced
+                    .into_iter()
+                    .flat_map(|word| self.expand_for_brace_word_values(&word))
+                    .collect();
+            }
+        }
+
+        self.expand_for_brace_word_values(word)
+    }
+
+    fn expand_for_brace_word_values(&self, word: &str) -> Vec<String> {
         let expanded = self.expand_word(word);
         if for_word_has_unquoted_expansion(word) {
             return expanded.split_whitespace().map(str::to_string).collect();

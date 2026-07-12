@@ -71,6 +71,12 @@ impl<'a> Lexer<'a> {
                     extglob_operator = false;
                     continue;
                 }
+                if c == '{' {
+                    self.advance();
+                    self.skip_brace();
+                    extglob_operator = false;
+                    continue;
+                }
                 break;
             }
             match c {

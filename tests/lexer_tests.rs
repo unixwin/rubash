@@ -273,6 +273,24 @@ mod brace_expansion {
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].kind, TokenKind::BraceExpand);
     }
+
+    #[test]
+    fn test_brace_list_with_literal_prefix_stays_one_word() {
+        let input = "pre{foo,bar}";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(tokens[0].value, "pre{foo,bar}");
+    }
+
+    #[test]
+    fn test_brace_list_with_literal_suffix_stays_one_word() {
+        let input = "{foo,bar}post";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(tokens[0].value, "{foo,bar}post");
+    }
 }
 
 // ============================================================================

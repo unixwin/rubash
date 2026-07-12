@@ -41,7 +41,11 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             }
             if matches!(
                 tokens[i].kind,
-                TokenKind::Word | TokenKind::Variable | TokenKind::Assignment
+                TokenKind::Word
+                    | TokenKind::Variable
+                    | TokenKind::Assignment
+                    | TokenKind::CommandSubst
+                    | TokenKind::BraceExpand
             ) {
                 words.push(tokens[i].value.clone());
             }
