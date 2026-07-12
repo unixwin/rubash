@@ -85,6 +85,7 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
 
     let while_command = loops[0];
     assert!(!while_command.until);
+    assert_eq!(while_command.kind, LoopKind::While);
     assert_eq!(while_command.condition[0].words, ["((", "n < 3", "))"]);
     assert_eq!(
         while_command.condition[0]
@@ -106,6 +107,7 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
 
     let until_command = loops[1];
     assert!(until_command.until);
+    assert_eq!(until_command.kind, LoopKind::Until);
     assert_eq!(until_command.condition[0].words, ["((", "n == 5", "))"]);
     assert_eq!(
         until_command.condition[0]

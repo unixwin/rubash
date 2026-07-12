@@ -2,10 +2,10 @@ use super::*;
 use crate::lexer::Token;
 
 pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
-    let until = if is_keyword(tokens, start, "while") {
-        false
+    let (kind, until) = if is_keyword(tokens, start, "while") {
+        (LoopKind::While, false)
     } else if is_keyword(tokens, start, "until") {
-        true
+        (LoopKind::Until, true)
     } else {
         return None;
     };
@@ -19,6 +19,7 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
     command.loop_command = Some(LoopCommand {
         condition,
         body,
+        kind,
         until,
     });
 

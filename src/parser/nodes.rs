@@ -102,7 +102,14 @@ pub struct ElifBranch {
 pub struct LoopCommand {
     pub condition: Vec<CommandNode>,
     pub body: Vec<CommandNode>,
+    pub kind: LoopKind,
     pub until: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopKind {
+    While,
+    Until,
 }
 
 /// Represents a `[[ expression ]]` conditional command.

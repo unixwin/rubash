@@ -4,7 +4,8 @@
 
 use rubash::lexer::tokenize;
 use rubash::parser::{
-    parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, FunctionBodyKind, QuoteKind,
+    parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, FunctionBodyKind, LoopKind,
+    QuoteKind,
 };
 
 #[path = "parser_coproc_tests.rs"]
@@ -444,6 +445,7 @@ mod function_tests {
         let loop_command = function.body[0].loop_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
         assert!(!loop_command.until);
+        assert_eq!(loop_command.kind, LoopKind::While);
         assert_eq!(loop_command.condition[0].words, ["false"]);
         assert_eq!(loop_command.body[0].words, ["echo", "bad"]);
     }
