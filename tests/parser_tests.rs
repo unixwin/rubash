@@ -849,6 +849,69 @@ mod brace_expansion_tests {
     }
 }
 
+mod extglob_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn test_extglob_pattern_records_structured_ast_for_words() {
+        let input = "echo @(alpha|beta) file!(.tmp) nested@(a|+(b|c))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].words,
+            ["echo", "@(alpha|beta)", "file!(.tmp)", "nested@(a|+(b|c))"]
+        );
+
+        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        assert_eq!(patterns.len(), 3);
+        assert_eq!(patterns[0].text, "@(alpha|beta)");
+        assert_eq!(patterns[0].operator, '@');
+        assert_eq!(patterns[0].pattern, "alpha|beta");
+        assert_eq!(patterns[0].alternatives, ["alpha", "beta"]);
+        assert_eq!(patterns[0].word_index, Some(1));
+        assert_eq!(patterns[1].text, "!(.tmp)");
+        assert_eq!(patterns[1].operator, '!');
+        assert_eq!(patterns[1].alternatives, [".tmp"]);
+        assert_eq!(patterns[1].word_index, Some(2));
+        assert_eq!(patterns[2].text, "@(a|+(b|c))");
+        assert_eq!(patterns[2].pattern, "a|+(b|c)");
+        assert_eq!(patterns[2].alternatives, ["a", "+(b|c)"]);
+        assert_eq!(patterns[2].word_index, Some(3));
+    }
+
+    #[test]
+    fn test_extglob_pattern_skips_command_substitution_source() {
+        let input = "echo $(echo @(hidden|source)) ?(visible)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "?(visible)");
+        assert_eq!(patterns[0].operator, '?');
+        assert_eq!(patterns[0].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_assignment_word_extglob_pattern_records_word_index() {
+        let input = "echo pattern=*(src|tests)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "pattern=*(src|tests)"]);
+
+        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "*(src|tests)");
+        assert_eq!(patterns[0].operator, '*');
+        assert_eq!(patterns[0].pattern, "src|tests");
+        assert_eq!(patterns[0].assignment_name.as_deref(), Some("pattern"));
+        assert_eq!(patterns[0].word_index, Some(1));
+    }
+}
+
 mod background_tests {
     use super::*;
 

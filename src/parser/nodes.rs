@@ -173,6 +173,17 @@ pub struct BraceExpansion {
     pub assignment_name: Option<String>,
 }
 
+/// Represents a parsed extglob pattern such as `@(a|b)` or `!(tmp)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtglobPattern {
+    pub text: String,
+    pub operator: char,
+    pub pattern: String,
+    pub alternatives: Vec<String>,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -243,6 +254,8 @@ pub struct CommandNode {
     pub parameter_expansions: Vec<ParameterExpansion>,
     /// Structured brace expansions parsed from `{a,b}` and `{1..3}` words.
     pub brace_expansions: Vec<BraceExpansion>,
+    /// Structured extglob patterns parsed from `@(a|b)`, `!(x)`, etc.
+    pub extglob_patterns: Vec<ExtglobPattern>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -320,6 +333,7 @@ impl CommandNode {
             arithmetic_expansions: Vec::new(),
             parameter_expansions: Vec::new(),
             brace_expansions: Vec::new(),
+            extglob_patterns: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

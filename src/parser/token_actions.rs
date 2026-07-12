@@ -70,6 +70,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         None,
                     );
+                    record_extglob_patterns_for_assignment(
+                        &mut state.current_cmd,
+                        assignment_name,
+                        &var_value,
+                        None,
+                    );
                     state.current_cmd.assignments.insert(var_name, var_value);
                 } else {
                     let mut word = token.value.clone();
@@ -113,6 +119,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             Some(word_index),
                         );
                         record_brace_expansions_for_assignment(
+                            &mut state.current_cmd,
+                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
+                            value,
+                            Some(word_index),
+                        );
+                        record_extglob_patterns_for_assignment(
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
