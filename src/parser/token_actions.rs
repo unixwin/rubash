@@ -273,12 +273,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             if *i + 1 < tokens.len() {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
-                let delimiter = tokens[*i + 1].value.clone();
-                state.current_cmd.heredoc_redirects.push(HereDocRedirect {
+                let delimiter_token = &tokens[*i + 1];
+                let delimiter = delimiter_token.value.clone();
+                state.current_cmd.heredoc_redirects.push(heredoc_redirect(
+                    &token.value,
+                    delimiter_token,
                     fd,
-                    delimiter: delimiter.clone(),
-                    body: None,
-                });
+                ));
                 if fd.is_none() {
                     state.current_cmd.heredoc_delimiter = Some(delimiter);
                 }

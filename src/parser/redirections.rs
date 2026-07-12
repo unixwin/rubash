@@ -106,11 +106,9 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::HereDoc => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                command.heredoc_redirects.push(HereDocRedirect {
-                    fd,
-                    delimiter: target.value.clone(),
-                    body: None,
-                });
+                command
+                    .heredoc_redirects
+                    .push(heredoc_redirect(&token.value, target, fd));
                 if fd.is_none() {
                     command.heredoc_delimiter = Some(target.value.clone());
                 }
@@ -133,7 +131,11 @@ pub(super) fn assign_here_string_redirect(command: &mut CommandNode, operator: &
     if let Some(fd) = fd {
         command.heredoc_redirects.push(HereDocRedirect {
             fd: Some(fd),
+            operator: operator.to_string(),
             delimiter: "<<<".to_string(),
+            strip_tabs: false,
+            quoted_delimiter: false,
+            here_string: true,
             body: Some(format!("\x1d{target}")),
         });
     } else {
@@ -222,4 +224,23 @@ pub(super) fn fill_pending_heredoc_body(cmd: &mut CommandNode, body: &str) -> bo
         cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
     }
     true
+}
+
+pub(super) fn heredoc_redirect(
+    operator: &str,
+    delimiter: &Token,
+    fd: Option<u32>,
+) -> HereDocRedirect {
+    HereDocRedirect {
+        fd,
+        operator: operator.to_string(),
+        delimiter: delimiter.value.clone(),
+        strip_tabs: operator.ends_with("<<-"),
+        quoted_delimiter: delimiter
+            .raw
+            .chars()
+            .any(|ch| matches!(ch, '\'' | '"' | '\\')),
+        here_string: false,
+        body: None,
+    }
 }

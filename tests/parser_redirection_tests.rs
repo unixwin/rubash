@@ -203,6 +203,57 @@ fn test_here_string_redirect() {
 }
 
 #[test]
+fn test_heredoc_redirect_records_operator_metadata() {
+    let input = "cat <<EOF\nalpha\nEOF";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    let redirect = &command.heredoc_redirects[0];
+    assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.operator, "<<");
+    assert_eq!(redirect.delimiter, "EOF");
+    assert!(!redirect.strip_tabs);
+    assert!(!redirect.quoted_delimiter);
+    assert!(!redirect.here_string);
+    assert_eq!(redirect.body.as_deref(), Some("alpha\n"));
+}
+
+#[test]
+fn test_heredoc_redirect_records_quoted_strip_tabs_metadata() {
+    let input = "cat <<-'EOF'\n\talpha\n\tEOF";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    let redirect = &command.heredoc_redirects[0];
+    assert_eq!(redirect.operator, "<<-");
+    assert_eq!(redirect.delimiter, "EOF");
+    assert!(redirect.strip_tabs);
+    assert!(redirect.quoted_delimiter);
+    assert_eq!(redirect.body.as_deref(), Some("\x1ealpha\n"));
+}
+
+#[test]
+fn test_fd_heredoc_redirect_records_operator_metadata() {
+    let input = "read -u 3 value 3<<EOF\nalpha\nEOF";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    let redirect = &command.heredoc_redirects[0];
+    assert_eq!(redirect.fd, Some(3));
+    assert_eq!(redirect.operator, "3<<");
+    assert_eq!(redirect.delimiter, "EOF");
+    assert!(!redirect.strip_tabs);
+    assert!(!redirect.quoted_delimiter);
+    assert!(!redirect.here_string);
+}
+
+#[test]
 fn test_here_string_fd_prefix_maps_to_fd_input() {
     let input = "read -u 3 value 3<<<alpha";
     let tokens = tokenize(input);
@@ -212,6 +263,11 @@ fn test_here_string_fd_prefix_maps_to_fd_input() {
     assert!(command.here_string.is_none());
     assert_eq!(command.heredoc_redirects.len(), 1);
     assert_eq!(command.heredoc_redirects[0].fd, Some(3));
+    assert_eq!(command.heredoc_redirects[0].operator, "3<<<");
+    assert_eq!(command.heredoc_redirects[0].delimiter, "<<<");
+    assert!(!command.heredoc_redirects[0].strip_tabs);
+    assert!(!command.heredoc_redirects[0].quoted_delimiter);
+    assert!(command.heredoc_redirects[0].here_string);
     assert_eq!(
         command.heredoc_redirects[0].body.as_deref(),
         Some("\x1dalpha")

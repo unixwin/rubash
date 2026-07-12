@@ -13,7 +13,11 @@ pub struct Redirect {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocRedirect {
     pub fd: Option<u32>,
+    pub operator: String,
     pub delimiter: String,
+    pub strip_tabs: bool,
+    pub quoted_delimiter: bool,
+    pub here_string: bool,
     pub body: Option<String>,
 }
 
