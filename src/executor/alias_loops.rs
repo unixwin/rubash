@@ -212,11 +212,15 @@ impl Executor {
         };
         if let Some(brace_group) = do_command.brace_group.clone() {
             let for_command = ForCommand {
+                keyword: "for".to_string(),
                 variable: words[1].clone(),
+                in_keyword: Some("in".to_string()),
                 words: words[3..].to_vec(),
                 default_positional: false,
                 arithmetic: None,
                 body_kind: CommandBodyKind::BraceGroup,
+                do_keyword: None,
+                end_keyword: None,
                 body: brace_group.body,
             };
             self.execute_for_command_with_redirects(&for_command, do_command)?;
@@ -242,11 +246,15 @@ impl Executor {
         body.extend(ast.commands[do_index + 1..done_index].iter().cloned());
 
         let for_command = ForCommand {
+            keyword: "for".to_string(),
             variable: words[1].clone(),
+            in_keyword: Some("in".to_string()),
             words: words[3..].to_vec(),
             default_positional: false,
             arithmetic: None,
             body_kind: CommandBodyKind::DoDone,
+            do_keyword: Some("do".to_string()),
+            end_keyword: Some("done".to_string()),
             body,
         };
         self.execute_for_command(&for_command)?;

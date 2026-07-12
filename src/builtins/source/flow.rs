@@ -66,7 +66,9 @@ fn inline_arithmetic_for_command(
     for_node.words.clear();
     for_node.word_kinds.clear();
     for_node.for_command = Some(ForCommand {
+        keyword: "for".to_string(),
         variable: String::new(),
+        in_keyword: None,
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(ArithmeticForCommand {
@@ -75,6 +77,8 @@ fn inline_arithmetic_for_command(
             update: command.words[3].clone(),
         }),
         body_kind: CommandBodyKind::DoDone,
+        do_keyword: Some("do".to_string()),
+        end_keyword: Some("done".to_string()),
         body: normalize_inline_compound_commands(body),
     });
     Some((for_node, done_index + 1))

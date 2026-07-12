@@ -20,7 +20,9 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
 
     let mut i = start + 2;
     let mut words = Vec::new();
+    let mut in_keyword = None;
     let default_positional = if is_keyword(tokens, i, "in") {
+        in_keyword = Some(tokens[i].value.clone());
         i += 1;
         while i < tokens.len() && !is_keyword(tokens, i, "do") {
             if tokens[i].kind == TokenKind::Semicolon {
@@ -62,51 +64,59 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         true
     };
 
-    let (body, body_end, body_kind) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i)
-    {
-        (body, next_i, CommandBodyKind::BraceGroup)
-    } else {
-        if !is_keyword(tokens, i, "do") {
-            return None;
-        }
-        i += 1;
-
-        let body_start = i;
-        let mut depth = 0usize;
-        while i < tokens.len() {
-            if is_keyword(tokens, i, "for")
-                || is_keyword(tokens, i, "while")
-                || is_keyword(tokens, i, "until")
-                || is_keyword(tokens, i, "select")
-            {
-                depth += 1;
-            } else if is_keyword(tokens, i, "done") {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
+    let (body, body_end, body_kind, do_keyword, end_keyword) =
+        if let Some((body, next_i)) = parse_for_brace_body(tokens, i) {
+            (body, next_i, CommandBodyKind::BraceGroup, None, None)
+        } else {
+            if !is_keyword(tokens, i, "do") {
+                return None;
             }
+            let do_keyword = Some(tokens[i].value.clone());
             i += 1;
-        }
 
-        if !is_keyword(tokens, i, "done") {
-            return None;
-        }
+            let body_start = i;
+            let mut depth = 0usize;
+            while i < tokens.len() {
+                if is_keyword(tokens, i, "for")
+                    || is_keyword(tokens, i, "while")
+                    || is_keyword(tokens, i, "until")
+                    || is_keyword(tokens, i, "select")
+                {
+                    depth += 1;
+                } else if is_keyword(tokens, i, "done") {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                i += 1;
+            }
 
-        (
-            parse_for_body_commands(&tokens[body_start..i]),
-            i + 1,
-            CommandBodyKind::DoDone,
-        )
-    };
+            if !is_keyword(tokens, i, "done") {
+                return None;
+            }
+            let end_keyword = Some(tokens[i].value.clone());
+
+            (
+                parse_for_body_commands(&tokens[body_start..i]),
+                i + 1,
+                CommandBodyKind::DoDone,
+                do_keyword,
+                end_keyword,
+            )
+        };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
+        keyword: tokens[start].value.clone(),
         variable,
+        in_keyword,
         words,
         default_positional,
         arithmetic: None,
         body_kind,
+        do_keyword,
+        end_keyword,
         body,
     });
     let mut next_i = body_end;

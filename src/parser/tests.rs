@@ -189,6 +189,10 @@ fn test_parse_arithmetic_for_command() {
     let for_command = ast.commands[0].for_command.as_ref().unwrap();
     let arithmetic = for_command.arithmetic.as_ref().unwrap();
 
+    assert_eq!(for_command.keyword, "for");
+    assert_eq!(for_command.in_keyword, None);
+    assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+    assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
     assert_eq!(arithmetic.init, "i = 0");
     assert_eq!(arithmetic.test, "i < 3");
     assert_eq!(arithmetic.update, "i++");

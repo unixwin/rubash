@@ -104,11 +104,15 @@ fn alias_arithmetic_for_command(
     body: Vec<CommandNode>,
 ) -> ForCommand {
     ForCommand {
+        keyword: "for".to_string(),
         variable: String::new(),
+        in_keyword: None,
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(arithmetic),
         body_kind: CommandBodyKind::DoDone,
+        do_keyword: Some("do".to_string()),
+        end_keyword: Some("done".to_string()),
         body,
     }
 }

@@ -112,6 +112,10 @@ mod pipeline_tests {
         assert!(time_command.posix_format);
         assert!(!time_command.inverted);
         let for_command = time_command.command.for_command.as_ref().unwrap();
+        assert_eq!(for_command.keyword, "for");
+        assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
         assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
@@ -239,6 +243,10 @@ mod command_body_kind_tests {
         let ast = parse(&tokens);
         let for_command = ast.commands[0].for_command.as_ref().unwrap();
 
+        assert_eq!(for_command.keyword, "for");
+        assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(for_command.do_keyword, None);
+        assert_eq!(for_command.end_keyword, None);
         assert_eq!(for_command.body_kind, CommandBodyKind::BraceGroup);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
     }
@@ -420,6 +428,10 @@ mod function_tests {
         assert_eq!(function.name, "foo");
         let for_command = function.body[0].for_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(for_command.keyword, "for");
+        assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
         assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);

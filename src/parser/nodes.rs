@@ -42,11 +42,15 @@ pub struct HereDocRedirect {
 /// Represents a narrow `for` compound command.
 #[derive(Debug, Clone)]
 pub struct ForCommand {
+    pub keyword: String,
     pub variable: String,
+    pub in_keyword: Option<String>,
     pub words: Vec<String>,
     pub default_positional: bool,
     pub arithmetic: Option<ArithmeticForCommand>,
     pub body_kind: CommandBodyKind,
+    pub do_keyword: Option<String>,
+    pub end_keyword: Option<String>,
     pub body: Vec<CommandNode>,
 }
 

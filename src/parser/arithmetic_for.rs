@@ -71,13 +71,14 @@ pub(super) fn parse_arithmetic_for_command(
         i += 1;
     }
 
-    let (body, body_end, body_kind) =
+    let (body, body_end, body_kind, do_keyword, end_keyword) =
         if let Some((body, next_i)) = parse_arithmetic_for_brace_body(tokens, i) {
-            (body, next_i, CommandBodyKind::BraceGroup)
+            (body, next_i, CommandBodyKind::BraceGroup, None, None)
         } else {
             if !is_keyword(tokens, i, "do") {
                 return None;
             }
+            let do_keyword = Some(tokens[i].value.clone());
             i += 1;
 
             let body_start = i;
@@ -101,17 +102,22 @@ pub(super) fn parse_arithmetic_for_command(
             if !is_keyword(tokens, i, "done") {
                 return None;
             }
+            let end_keyword = Some(tokens[i].value.clone());
 
             (
                 parse_arithmetic_for_body_commands(&tokens[body_start..i]),
                 i + 1,
                 CommandBodyKind::DoDone,
+                do_keyword,
+                end_keyword,
             )
         };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
+        keyword: tokens[start].value.clone(),
         variable: String::new(),
+        in_keyword: None,
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(ArithmeticForCommand {
@@ -120,6 +126,8 @@ pub(super) fn parse_arithmetic_for_command(
             update: parts[2].join(" "),
         }),
         body_kind,
+        do_keyword,
+        end_keyword,
         body,
     });
     let mut next_i = body_end;
