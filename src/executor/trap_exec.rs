@@ -75,6 +75,8 @@ impl Executor {
             }
             let append_redirect = Redirect {
                 fd: redirect.fd,
+                operator: ">>".to_string(),
+                kind: crate::parser::RedirectKind::Append,
                 target,
                 append: true,
                 clobber: false,
@@ -84,6 +86,8 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             let append_redirect = Redirect {
                 fd: redirect.fd,
+                operator: redirect.operator.clone(),
+                kind: redirect.kind.clone(),
                 target,
                 append: true,
                 clobber: false,
@@ -101,6 +105,8 @@ impl Executor {
             }
             let append_redirect = Redirect {
                 fd: redirect.fd,
+                operator: "2>>".to_string(),
+                kind: crate::parser::RedirectKind::Append,
                 target,
                 append: true,
                 clobber: false,
@@ -110,6 +116,8 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             let append_redirect = Redirect {
                 fd: redirect.fd,
+                operator: redirect.operator.clone(),
+                kind: redirect.kind.clone(),
                 target,
                 append: true,
                 clobber: false,

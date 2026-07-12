@@ -25,12 +25,7 @@ pub(super) fn collect_trailing_redirections(
                 process_substitution.redirect_fd = fd;
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                command.redirect_in = Some(Redirect {
-                    fd,
-                    target,
-                    append: false,
-                    clobber: false,
-                });
+                command.redirect_in = Some(redirect_node(&token.value, fd, &target, false, false));
                 *index = next_i + 1;
                 continue;
             }
@@ -45,12 +40,7 @@ pub(super) fn collect_trailing_redirections(
                 process_substitution.redirect_fd = fd;
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                command.redirect_out = Some(Redirect {
-                    fd,
-                    target,
-                    append: false,
-                    clobber: false,
-                });
+                command.redirect_out = Some(redirect_node(&token.value, fd, &target, false, false));
                 *index = next_i + 1;
                 continue;
             }
@@ -72,21 +62,23 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::RedirectIn => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                command.redirect_in = Some(Redirect {
+                command.redirect_in = Some(redirect_node(
+                    &token.value,
                     fd,
-                    target: input_redirect_target(&token.value, &target.value),
-                    append: false,
-                    clobber: false,
-                });
+                    &input_redirect_target(&token.value, &target.value),
+                    false,
+                    false,
+                ));
             }
             TokenKind::RedirectOut => {
                 if token.value == "<>" {
-                    command.redirect_in = Some(Redirect {
-                        fd: None,
-                        target: target.value.clone(),
-                        append: true,
-                        clobber: false,
-                    });
+                    command.redirect_in = Some(redirect_node(
+                        &token.value,
+                        None,
+                        &target.value,
+                        true,
+                        false,
+                    ));
                 } else {
                     assign_output_redirect(command, &token.value, &target.value, None);
                 }
@@ -167,6 +159,62 @@ pub(super) fn redirect_operator_fd(operator: &str) -> Option<u32> {
         return None;
     }
     digits.parse().ok()
+}
+
+pub(super) fn redirect_node(
+    operator: &str,
+    fd: Option<u32>,
+    target: &str,
+    append: bool,
+    clobber: bool,
+) -> Redirect {
+    Redirect {
+        fd,
+        operator: operator.to_string(),
+        kind: redirect_kind(operator, target),
+        target: target.to_string(),
+        append,
+        clobber,
+    }
+}
+
+pub(super) fn redirect_kind(operator: &str, target: &str) -> RedirectKind {
+    if operator.ends_with("<&") {
+        return if target == "&-" {
+            RedirectKind::CloseInput
+        } else {
+            RedirectKind::DuplicateInput
+        };
+    }
+    if operator.ends_with(">&") {
+        return if target == "&-" {
+            RedirectKind::CloseOutput
+        } else {
+            RedirectKind::DuplicateOutput
+        };
+    }
+    if operator == "<>" {
+        return RedirectKind::ReadWrite;
+    }
+    if operator == "&>" {
+        return RedirectKind::CombinedOutput;
+    }
+    if operator == "&>>" {
+        return RedirectKind::CombinedAppend;
+    }
+    if operator.ends_with(">>") {
+        return RedirectKind::Append;
+    }
+    if operator.ends_with(">|") {
+        return RedirectKind::ClobberOutput;
+    }
+    if operator.ends_with('>') {
+        return RedirectKind::Output;
+    }
+    if operator.ends_with('<') {
+        return RedirectKind::Input;
+    }
+    RedirectKind::Unknown
 }
 
 pub(super) fn redirect_target(operator: &str, target: &str) -> String {

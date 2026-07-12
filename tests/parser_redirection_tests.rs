@@ -1,5 +1,5 @@
 use rubash::lexer::tokenize;
-use rubash::parser::parse;
+use rubash::parser::{parse, RedirectKind};
 
 #[test]
 fn test_output_redirect() {
@@ -8,7 +8,10 @@ fn test_output_redirect() {
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
     assert!(ast.commands[0].redirect_out.is_some());
-    assert!(!ast.commands[0].redirect_out.as_ref().unwrap().clobber);
+    let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
+    assert_eq!(redirect.operator, ">");
+    assert_eq!(redirect.kind, RedirectKind::Output);
+    assert!(!redirect.clobber);
 }
 
 #[test]
@@ -30,7 +33,10 @@ fn test_clobber_output_redirect() {
     let tokens = tokenize(input);
     let ast = parse(&tokens);
     assert_eq!(ast.commands.len(), 1);
-    assert!(ast.commands[0].redirect_out.as_ref().unwrap().clobber);
+    let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
+    assert_eq!(redirect.operator, ">|");
+    assert_eq!(redirect.kind, RedirectKind::ClobberOutput);
+    assert!(redirect.clobber);
 }
 
 #[test]
@@ -149,6 +155,11 @@ fn test_input_fd_copy_redirect_maps_target_fd() {
 
     assert_eq!(command.redirect_in.as_ref().unwrap().fd, None);
     assert_eq!(command.redirect_in.as_ref().unwrap().target, "&3");
+    assert_eq!(command.redirect_in.as_ref().unwrap().operator, "<&");
+    assert_eq!(
+        command.redirect_in.as_ref().unwrap().kind,
+        RedirectKind::DuplicateInput
+    );
     assert_eq!(command.words, ["read", "value"]);
 }
 
@@ -160,6 +171,11 @@ fn test_input_fd_close_redirect_with_prefix() {
 
     assert_eq!(command.redirect_in.as_ref().unwrap().fd, Some(0));
     assert_eq!(command.redirect_in.as_ref().unwrap().target, "&-");
+    assert_eq!(command.redirect_in.as_ref().unwrap().operator, "0<&");
+    assert_eq!(
+        command.redirect_in.as_ref().unwrap().kind,
+        RedirectKind::CloseInput
+    );
     assert_eq!(command.words, ["read", "value"]);
 }
 
@@ -171,6 +187,11 @@ fn test_read_write_redirect_maps_to_stdin() {
     let command = &ast.commands[0];
 
     assert_eq!(command.redirect_in.as_ref().unwrap().target, "input.txt");
+    assert_eq!(command.redirect_in.as_ref().unwrap().operator, "<>");
+    assert_eq!(
+        command.redirect_in.as_ref().unwrap().kind,
+        RedirectKind::ReadWrite
+    );
     assert!(command.redirect_in.as_ref().unwrap().append);
     assert!(command.redirect_out.is_none());
 }
@@ -282,8 +303,16 @@ fn test_combined_stdout_stderr_redirect() {
 
     assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
     assert_eq!(
+        command.redirect_out.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
+    );
+    assert_eq!(
         command.redirect_err_append.as_ref().unwrap().target,
         "out.txt"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
     );
 }
 
@@ -295,8 +324,16 @@ fn test_combined_stdout_stderr_append_redirect() {
 
     assert_eq!(command.append.as_ref().unwrap().target, "out.txt");
     assert_eq!(
+        command.append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
+    );
+    assert_eq!(
         command.redirect_err_append.as_ref().unwrap().target,
         "out.txt"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
     );
 }
 
@@ -331,6 +368,10 @@ fn test_stderr_fd_close_redirect() {
     let command = &ast.commands[0];
 
     assert_eq!(command.redirect_err.as_ref().unwrap().target, "&-");
+    assert_eq!(
+        command.redirect_err.as_ref().unwrap().kind,
+        RedirectKind::CloseOutput
+    );
     assert_eq!(command.words, ["echo", "error"]);
 }
 
@@ -342,5 +383,9 @@ fn test_stdout_fd_close_redirect_with_prefix() {
 
     assert_eq!(command.redirect_out.as_ref().unwrap().target, "&-");
     assert_eq!(command.redirect_out.as_ref().unwrap().fd, Some(1));
+    assert_eq!(
+        command.redirect_out.as_ref().unwrap().kind,
+        RedirectKind::CloseOutput
+    );
     assert_eq!(command.words, ["echo", "hidden"]);
 }

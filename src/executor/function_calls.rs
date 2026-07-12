@@ -170,6 +170,8 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             self.create_redirect_output(&target, redirect.clobber)?;
             let append_redirect = Redirect {
+                operator: ">>".to_string(),
+                kind: crate::parser::RedirectKind::Append,
                 append: true,
                 ..redirect.clone()
             };
@@ -192,6 +194,8 @@ impl Executor {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
             let append_redirect = Redirect {
+                operator: "2>>".to_string(),
+                kind: crate::parser::RedirectKind::Append,
                 append: true,
                 ..redirect.clone()
             };

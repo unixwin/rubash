@@ -205,12 +205,8 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         .current_cmd
                         .process_substitutions
                         .push(process_substitution);
-                    state.current_cmd.redirect_in = Some(Redirect {
-                        fd,
-                        target,
-                        append: false,
-                        clobber: false,
-                    });
+                    state.current_cmd.redirect_in =
+                        Some(redirect_node(&token.value, fd, &target, false, false));
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
@@ -227,12 +223,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 } else if *i + 1 < tokens.len()
                     && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
                 {
-                    state.current_cmd.redirect_in = Some(Redirect {
+                    state.current_cmd.redirect_in = Some(redirect_node(
+                        &token.value,
                         fd,
-                        target: input_redirect_target(&token.value, &tokens[*i + 1].value),
-                        append: false,
-                        clobber: false,
-                    });
+                        &input_redirect_target(&token.value, &tokens[*i + 1].value),
+                        false,
+                        false,
+                    ));
                     *i += 1;
                 }
             }

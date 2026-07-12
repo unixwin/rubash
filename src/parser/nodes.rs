@@ -4,9 +4,27 @@ use crate::lexer::TokenKind;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
     pub fd: Option<u32>,
+    pub operator: String,
+    pub kind: RedirectKind,
     pub target: String,
     pub append: bool,
     pub clobber: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedirectKind {
+    Input,
+    Output,
+    Append,
+    ReadWrite,
+    DuplicateInput,
+    DuplicateOutput,
+    CloseInput,
+    CloseOutput,
+    ClobberOutput,
+    CombinedOutput,
+    CombinedAppend,
+    Unknown,
 }
 
 /// Represents a here-document redirection.

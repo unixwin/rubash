@@ -14,12 +14,13 @@ pub(super) fn assign_redirect_out_target(
         process_substitution.redirect_fd = fd;
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
-        command.redirect_out = Some(Redirect {
+        command.redirect_out = Some(redirect_node(
+            &tokens[index].value,
             fd,
-            target,
-            append: false,
-            clobber: false,
-        });
+            &target,
+            false,
+            false,
+        ));
         return Some(next_i);
     }
 
@@ -38,12 +39,13 @@ pub(super) fn assign_redirect_out_target(
     let fd = redirect_operator_fd(&tokens[index].value)
         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
     if tokens[index].value == "<>" {
-        command.redirect_in = Some(Redirect {
+        command.redirect_in = Some(redirect_node(
+            &tokens[index].value,
             fd,
-            target: target.value.clone(),
-            append: true,
-            clobber: false,
-        });
+            &target.value,
+            true,
+            false,
+        ));
         return Some(index + 1);
     }
     assign_output_redirect(command, &tokens[index].value, &target.value, fd);
@@ -75,22 +77,24 @@ pub(super) fn assign_redirect_err_target(
             .clone()
             .or_else(|| command.redirect_out.clone())
         {
-            command.redirect_err_append = Some(Redirect {
-                fd: Some(2),
-                target: redirect.target,
-                append: true,
-                clobber: false,
-            });
+            command.redirect_err_append = Some(redirect_node(
+                &tokens[index].value,
+                Some(2),
+                &redirect.target,
+                true,
+                false,
+            ));
             return Some(index + 1);
         }
     }
 
-    command.redirect_err = Some(Redirect {
-        fd: Some(2),
-        target: target_value,
-        append: false,
-        clobber: tokens[index].value == "2>|",
-    });
+    command.redirect_err = Some(redirect_node(
+        &tokens[index].value,
+        Some(2),
+        &target_value,
+        false,
+        tokens[index].value == "2>|",
+    ));
     Some(index + 1)
 }
 
@@ -100,12 +104,13 @@ pub(super) fn assign_redirect_err_append_target(
     command: &mut CommandNode,
 ) -> Option<usize> {
     let target = redirect_target_token(tokens, index)?;
-    command.redirect_err_append = Some(Redirect {
-        fd: Some(2),
-        target: target.value.clone(),
-        append: true,
-        clobber: false,
-    });
+    command.redirect_err_append = Some(redirect_node(
+        &tokens[index].value,
+        Some(2),
+        &target.value,
+        true,
+        false,
+    ));
     Some(index + 1)
 }
 
@@ -127,19 +132,15 @@ pub(super) fn assign_output_redirect(
     target: &str,
     fd: Option<u32>,
 ) {
-    command.redirect_out = Some(Redirect {
+    command.redirect_out = Some(redirect_node(
+        operator,
         fd,
-        target: redirect_target(operator, target),
-        append: false,
-        clobber: operator == ">|",
-    });
+        &redirect_target(operator, target),
+        false,
+        operator == ">|",
+    ));
     if operator == "&>" {
-        command.redirect_err_append = Some(Redirect {
-            fd: Some(2),
-            target: target.to_string(),
-            append: true,
-            clobber: false,
-        });
+        command.redirect_err_append = Some(redirect_node(operator, Some(2), target, true, false));
     }
 }
 
@@ -149,18 +150,8 @@ pub(super) fn assign_append_redirect(
     target: &str,
     fd: Option<u32>,
 ) {
-    command.append = Some(Redirect {
-        fd,
-        target: target.to_string(),
-        append: true,
-        clobber: false,
-    });
+    command.append = Some(redirect_node(operator, fd, target, true, false));
     if operator == "&>>" {
-        command.redirect_err_append = Some(Redirect {
-            fd: Some(2),
-            target: target.to_string(),
-            append: true,
-            clobber: false,
-        });
+        command.redirect_err_append = Some(redirect_node(operator, Some(2), target, true, false));
     }
 }
