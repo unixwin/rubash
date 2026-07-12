@@ -50,12 +50,17 @@ impl Executor {
         let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
         };
+        let in_keyword = (!default_positional).then(|| "in".to_string());
         if let Some(brace_group) = do_command.brace_group.clone() {
             let select_command = SelectCommand {
+                keyword: "select".to_string(),
                 variable,
+                in_keyword: in_keyword.clone(),
                 words: select_words,
                 default_positional,
                 body_kind: CommandBodyKind::BraceGroup,
+                do_keyword: None,
+                end_keyword: None,
                 body: brace_group.body,
             };
             self.execute_select_command(do_command, &select_command)?;
@@ -81,10 +86,14 @@ impl Executor {
         body.extend(ast.commands[do_index + 1..done_index].iter().cloned());
 
         let select_command = SelectCommand {
+            keyword: "select".to_string(),
             variable,
+            in_keyword,
             words: select_words,
             default_positional,
             body_kind: CommandBodyKind::DoDone,
+            do_keyword: Some("do".to_string()),
+            end_keyword: Some("done".to_string()),
             body,
         };
         self.execute_select_command(done_command, &select_command)?;

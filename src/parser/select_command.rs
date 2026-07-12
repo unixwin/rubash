@@ -13,9 +13,11 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
 
     let mut i = start + 2;
     let mut words = Vec::new();
+    let mut in_keyword = None;
 
     // Optional `in words...`
     let default_positional = if is_keyword(tokens, i, "in") {
+        in_keyword = Some(tokens[i].value.clone());
         i += 1;
         while i < tokens.len() && !is_keyword(tokens, i, "do") {
             if tokens[i].kind == TokenKind::Semicolon {
@@ -58,13 +60,14 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         true
     };
 
-    let (body, body_end, body_kind) =
+    let (body, body_end, body_kind, do_keyword, end_keyword) =
         if let Some((body, next_i)) = parse_select_brace_body(tokens, i) {
-            (body, next_i, CommandBodyKind::BraceGroup)
+            (body, next_i, CommandBodyKind::BraceGroup, None, None)
         } else {
             if !is_keyword(tokens, i, "do") {
                 return None;
             }
+            let do_keyword = Some(tokens[i].value.clone());
             i += 1;
 
             // Find matching `done`
@@ -89,22 +92,29 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             if !is_keyword(tokens, i, "done") {
                 return None;
             }
+            let end_keyword = Some(tokens[i].value.clone());
 
             (
                 parse_select_body_commands(&tokens[body_start..i]),
                 i + 1,
                 CommandBodyKind::DoDone,
+                do_keyword,
+                end_keyword,
             )
         };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.select_command = Some(SelectCommand {
+    command.select_command = Some(Box::new(SelectCommand {
+        keyword: tokens[start].value.clone(),
         variable,
+        in_keyword,
         words,
         default_positional,
         body_kind,
+        do_keyword,
+        end_keyword,
         body,
-    });
+    }));
     let mut next_i = body_end;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     Some((command, next_i))

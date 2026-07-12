@@ -410,10 +410,14 @@ pub enum CaseTerminator {
 /// Represents a `select name [in words ...]; do ...; done` compound command.
 #[derive(Debug, Clone)]
 pub struct SelectCommand {
+    pub keyword: String,
     pub variable: String,
+    pub in_keyword: Option<String>,
     pub words: Vec<String>,
     pub default_positional: bool,
     pub body_kind: CommandBodyKind,
+    pub do_keyword: Option<String>,
+    pub end_keyword: Option<String>,
     pub body: Vec<CommandNode>,
 }
 
@@ -545,7 +549,7 @@ pub struct CommandNode {
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `select name [in words ...]; do ...; done`
-    pub select_command: Option<SelectCommand>,
+    pub select_command: Option<Box<SelectCommand>>,
     /// `name() { compound_list; }`
     pub function_command: Option<FunctionCommand>,
     /// `{ compound_list; }`

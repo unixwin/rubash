@@ -261,8 +261,16 @@ mod command_body_kind_tests {
         let second = brace_ast.commands[0].select_command.as_ref().unwrap();
 
         assert_eq!(first.body_kind, CommandBodyKind::DoDone);
+        assert_eq!(first.keyword, "select");
+        assert_eq!(first.in_keyword.as_deref(), Some("in"));
+        assert_eq!(first.do_keyword.as_deref(), Some("do"));
+        assert_eq!(first.end_keyword.as_deref(), Some("done"));
         assert_eq!(first.body[0].words, ["echo", "$x"]);
         assert_eq!(second.body_kind, CommandBodyKind::BraceGroup);
+        assert_eq!(second.keyword, "select");
+        assert_eq!(second.in_keyword.as_deref(), Some("in"));
+        assert_eq!(second.do_keyword, None);
+        assert_eq!(second.end_keyword, None);
         assert_eq!(second.body[0].words, ["echo", "$y"]);
     }
 }
