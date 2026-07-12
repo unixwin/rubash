@@ -76,6 +76,12 @@ pub struct SubshellCommand {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents a `{ compound_list; }` brace group command.
+#[derive(Debug, Clone)]
+pub struct BraceGroupCommand {
+    pub body: Vec<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -183,7 +189,7 @@ pub struct CommandNode {
     /// `name() { compound_list; }`
     pub function_command: Option<FunctionCommand>,
     /// `{ compound_list; }`
-    pub brace_group: Option<Vec<CommandNode>>,
+    pub brace_group: Option<BraceGroupCommand>,
     pub coproc_command: Option<CoprocCommand>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,

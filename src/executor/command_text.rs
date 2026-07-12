@@ -49,6 +49,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.subshell_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
+        && cmd.brace_group.is_none()
 }
 
 pub(in crate::executor) fn normalize_leading_assignment_words(cmd: &mut CommandNode) {
@@ -84,6 +85,7 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
         || command.loop_command.is_some()
         || command.conditional_command.is_some()
         || command.subshell_command.is_some()
+        || command.brace_group.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -116,6 +118,19 @@ fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
                     .iter()
                     .any(command_or_compound_has_heredoc)
         })
+        || command
+            .subshell_command
+            .as_ref()
+            .is_some_and(|subshell_command| {
+                subshell_command
+                    .body
+                    .iter()
+                    .any(command_or_compound_has_heredoc)
+            })
+        || command
+            .brace_group
+            .as_ref()
+            .is_some_and(|brace_group| brace_group.body.iter().any(command_or_compound_has_heredoc))
 }
 
 pub(in crate::executor) fn function_definition_command_omits_terminator(
@@ -255,8 +270,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         case_command_source_text(case_command)
     } else if let Some(coproc_command) = &cmd.coproc_command {
         coproc_command_source_text(coproc_command)
-    } else if let Some(body) = &cmd.brace_group {
-        format!("{{ {}; }}", bash_command_sequence_text(body))
+    } else if let Some(brace_group) = &cmd.brace_group {
+        format!("{{ {}; }}", bash_command_sequence_text(&brace_group.body))
     } else {
         bash_command_text(cmd)
     };

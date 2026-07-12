@@ -5,8 +5,8 @@ impl Executor {
         &mut self,
         command: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if let Some(body) = &command.brace_group {
-            let mut body = body.clone();
+        if let Some(brace_group) = &command.brace_group {
+            let mut body = brace_group.body.clone();
             self.apply_brace_group_redirects(command, &mut body)?;
             let ast = Ast { commands: body };
             self.with_command_input_redirects(command, |executor| executor.execute_ast(&ast))?;

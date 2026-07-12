@@ -217,7 +217,7 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
             }
         }
         if let Some(brace_group) = &mut command.brace_group {
-            apply_stdout_append_redirect(brace_group, redirect);
+            apply_stdout_append_redirect(&mut brace_group.body, redirect);
         }
     }
 }
@@ -257,7 +257,7 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
             }
         }
         if let Some(brace_group) = &mut command.brace_group {
-            apply_stderr_append_redirect(brace_group, redirect);
+            apply_stderr_append_redirect(&mut brace_group.body, redirect);
         }
     }
 }

@@ -50,12 +50,12 @@ impl Executor {
         let Some(do_command) = ast.commands.get(do_index) else {
             return Ok(None);
         };
-        if let Some(body) = do_command.brace_group.clone() {
+        if let Some(brace_group) = do_command.brace_group.clone() {
             let select_command = SelectCommand {
                 variable,
                 words: select_words,
                 default_positional,
-                body,
+                body: brace_group.body,
             };
             self.execute_select_command(do_command, &select_command)?;
             return Ok(Some(do_index + 1));

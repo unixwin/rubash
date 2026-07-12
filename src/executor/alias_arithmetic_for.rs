@@ -16,8 +16,8 @@ impl Executor {
             return Ok(None);
         };
 
-        if let Some(body) = body_command.brace_group.clone() {
-            let for_command = alias_arithmetic_for_command(arithmetic, body);
+        if let Some(brace_group) = body_command.brace_group.clone() {
+            let for_command = alias_arithmetic_for_command(arithmetic, brace_group.body);
             self.execute_for_command_with_redirects(&for_command, body_command)?;
             return Ok(Some(body_index + 1));
         }

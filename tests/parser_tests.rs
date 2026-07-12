@@ -102,9 +102,22 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         assert_eq!(ast.commands[0].words, ["time", "-p"]);
-        let body = ast.commands[0].brace_group.as_ref().unwrap();
+        let body = &ast.commands[0].brace_group.as_ref().unwrap().body;
         assert_eq!(body[0].words, ["echo", "one"]);
         assert_eq!(body[1].words, ["echo", "two"]);
+    }
+
+    #[test]
+    fn test_brace_group_command_consumes_redirect_and_connector() {
+        let input = "{ echo hi; } > out && echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let body = &ast.commands[0].brace_group.as_ref().unwrap().body;
+        assert_eq!(body[0].words, ["echo", "hi"]);
+        assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
+        assert_eq!(ast.commands[0].and_or, Some(true));
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
 
     #[test]

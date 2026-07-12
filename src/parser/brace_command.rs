@@ -19,7 +19,9 @@ pub(super) fn parse_brace_group_command(
         let body_tokens = crate::lexer::tokenize(inner);
         let mut command = CommandNode::new();
         command.line = Some(token.position);
-        command.brace_group = Some(parse(&body_tokens).commands);
+        command.brace_group = Some(BraceGroupCommand {
+            body: parse(&body_tokens).commands,
+        });
         return Some(finish_compound_command(command, tokens, start + 1));
     }
 
@@ -46,6 +48,8 @@ pub(super) fn parse_brace_group_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.brace_group = Some(parse(&tokens[start + 1..i]).commands);
+    command.brace_group = Some(BraceGroupCommand {
+        body: parse(&tokens[start + 1..i]).commands,
+    });
     Some(finish_compound_command(command, tokens, i + 1))
 }
