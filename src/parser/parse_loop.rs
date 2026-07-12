@@ -176,6 +176,12 @@ fn parse_time_prefixed_compound_command(
         })
     {
         parse_brace_group_command(tokens, i)?
+    } else if is_keyword(tokens, i, "(") && !is_keyword(tokens, i + 1, "(") {
+        let (body, body_end) = parse_parenthesized_function_body(tokens, i)?;
+        let mut command = CommandNode::new();
+        command.line = tokens.get(i).map(|token| token.position);
+        command.brace_group = Some(body);
+        finish_compound_command(command, tokens, body_end + 1)
     } else if tokens
         .get(i)
         .is_some_and(|token| token.value.starts_with("(("))
