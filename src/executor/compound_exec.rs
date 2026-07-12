@@ -1,6 +1,19 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_background_ast_command(
+        &mut self,
+        background_command: &BackgroundCommand,
+    ) -> Result<(), ExecuteError> {
+        let ast = Ast {
+            commands: vec![(*background_command.command).clone()],
+        };
+        self.execute_ast(&ast)?;
+        self.last_background_pid = Some(std::process::id());
+        self.exit_code = 0;
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_time_ast_command(
         &mut self,
         time_command: &TimeCommand,

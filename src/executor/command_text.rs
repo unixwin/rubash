@@ -42,11 +42,13 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.pipeline_command.is_none()
         && cmd.and_or_list.is_none()
         && cmd.time_command.is_none()
+        && cmd.background_command.is_none()
         && !cmd.subshell
         && !cmd.subshell_end
         && cmd.pipeline_command.is_none()
         && cmd.and_or_list.is_none()
         && cmd.time_command.is_none()
+        && cmd.background_command.is_none()
         && cmd.for_command.is_none()
         && cmd.arithmetic_command.is_none()
         && cmd.if_command.is_none()
@@ -89,6 +91,7 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
         || command.pipeline_command.is_some()
         || command.and_or_list.is_some()
         || command.time_command.is_some()
+        || command.background_command.is_some()
         || command.arithmetic_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()
@@ -150,6 +153,10 @@ fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
             .time_command
             .as_ref()
             .is_some_and(|time_command| command_or_compound_has_heredoc(&time_command.command))
+        || command
+            .background_command
+            .as_ref()
+            .is_some_and(|background| command_or_compound_has_heredoc(&background.command))
 }
 
 pub(in crate::executor) fn function_definition_command_omits_terminator(
@@ -279,6 +286,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         and_or_list_source_text(and_or_list)
     } else if let Some(time_command) = &cmd.time_command {
         time_command_source_text(time_command)
+    } else if let Some(background_command) = &cmd.background_command {
+        background_command_source_text(background_command)
     } else if let Some(arithmetic_command) = &cmd.arithmetic_command {
         arithmetic_command_source_text(arithmetic_command)
     } else if let Some(if_command) = &cmd.if_command {
@@ -360,6 +369,13 @@ fn time_command_source_text(time_command: &TimeCommand) -> String {
     }
     parts.push(bash_command_source_text(&time_command.command));
     parts.join(" ")
+}
+
+fn background_command_source_text(background_command: &BackgroundCommand) -> String {
+    format!(
+        "{} &",
+        bash_command_source_text(&background_command.command)
+    )
 }
 
 fn arithmetic_command_source_text(arithmetic_command: &ArithmeticCommand) -> String {

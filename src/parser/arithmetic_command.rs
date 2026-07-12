@@ -96,6 +96,10 @@ pub(super) fn finish_arithmetic_command(
             command.and_or = Some(false);
             (command, index + 1)
         }
+        Some(TokenKind::Background) => {
+            command.background = true;
+            (command, index + 1)
+        }
         Some(TokenKind::Semicolon) => (command, index + 1),
         _ => (command, index),
     }
@@ -114,6 +118,10 @@ pub(super) fn finish_compound_command(
         }
         Some(TokenKind::Or) => {
             command.and_or = Some(false);
+            (command, index + 1)
+        }
+        Some(TokenKind::Background) => {
+            command.background = true;
             (command, index + 1)
         }
         Some(TokenKind::Semicolon) => (command, index + 1),

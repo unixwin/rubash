@@ -532,6 +532,33 @@ mod assignment_tests {
     }
 }
 
+mod background_tests {
+    use super::*;
+
+    #[test]
+    fn test_background_command_wraps_simple_command() {
+        let input = "false & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        assert_eq!(background.command.words, ["false"]);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
+
+    #[test]
+    fn test_background_command_wraps_pipeline() {
+        let input = "printf hi | cat & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        let pipeline = background.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
+}
+
 mod variable_tests {
     use super::*;
 

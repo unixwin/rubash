@@ -38,7 +38,28 @@ pub fn parse(tokens: &[Token]) -> Ast {
 
     state.ast.commands = fold_pipeline_commands(state.ast.commands);
     state.ast.commands = fold_and_or_list_commands(state.ast.commands);
+    state.ast.commands = fold_background_commands(state.ast.commands);
     state.ast
+}
+
+fn fold_background_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    commands
+        .into_iter()
+        .map(|mut command| {
+            if !command.background {
+                return command;
+            }
+
+            command.background = false;
+            let line = command.line;
+            let mut background = CommandNode::new();
+            background.line = line;
+            background.background_command = Some(BackgroundCommand {
+                command: Box::new(command),
+            });
+            background
+        })
+        .collect()
 }
 
 fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
