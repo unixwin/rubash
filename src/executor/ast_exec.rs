@@ -44,6 +44,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_time_prefixed_command_sequence(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
             {
                 index = next_index;

@@ -20,6 +20,47 @@ impl Executor {
         result
     }
 
+    pub(in crate::executor) fn execute_time_prefixed_command_sequence(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let Some(compound_index) = time_prefixed_sequence_index(&command.words) else {
+            return Ok(None);
+        };
+        if !matches!(
+            command.words.get(compound_index).map(String::as_str),
+            Some("if" | "while" | "until")
+        ) {
+            return Ok(None);
+        }
+
+        let mut timed_ast = Ast {
+            commands: ast.commands[index..].to_vec(),
+        };
+        if let Some(first) = timed_ast.commands.first_mut() {
+            first.words = command.words[compound_index..].to_vec();
+            if command.word_kinds.len() == command.words.len() {
+                first.word_kinds = command.word_kinds[compound_index..].to_vec();
+            }
+        }
+
+        let next_index = match timed_ast.commands[0].words.first().map(String::as_str) {
+            Some("if") => crate::builtins::source::execute_simple_if(self, &timed_ast, 0)?,
+            Some("while" | "until") => self.execute_simple_loop(&timed_ast, 0)?,
+            _ => None,
+        };
+        let Some(next_index) = next_index else {
+            return Ok(None);
+        };
+
+        print_posix_time();
+        Ok(Some(index + next_index))
+    }
+
     pub(in crate::executor) fn execute_arithmetic_for_command(
         &mut self,
         arithmetic: &ArithmeticForCommand,
@@ -296,6 +337,21 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
             || cmd.select_command.is_some()
             || cmd.case_command.is_some()
             || cmd.coproc_command.is_some())
+}
+
+fn time_prefixed_sequence_index(words: &[String]) -> Option<usize> {
+    if words.first().map(String::as_str) != Some("time") {
+        return None;
+    }
+
+    let mut index = 1;
+    while let Some(word) = words.get(index).map(String::as_str) {
+        match word {
+            "-p" | "--" => index += 1,
+            _ => break,
+        }
+    }
+    (index < words.len()).then_some(index)
 }
 
 fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {

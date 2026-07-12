@@ -73,6 +73,17 @@ mod pipeline_tests {
         assert_eq!(for_command.words, ["a", "b"]);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
     }
+
+    #[test]
+    fn test_time_prefix_parses_if_command_sequence() {
+        let input = "time -p if true; then echo yes; fi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 3);
+        assert_eq!(ast.commands[0].words, ["time", "-p", "if", "true"]);
+        assert_eq!(ast.commands[1].words, ["then", "echo", "yes"]);
+        assert_eq!(ast.commands[2].words, ["fi"]);
+    }
 }
 
 mod semicolon_tests {
