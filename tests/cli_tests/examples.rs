@@ -3,6 +3,13 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::{fs, path::Path};
 
+fn bash_example_dir(kind: &str) -> std::path::PathBuf {
+    Path::new("third_party")
+        .join("bash")
+        .join("examples")
+        .join(kind)
+}
+
 #[test]
 fn gnu_zprintf_usage_guard_exits_before_body() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -34,7 +41,7 @@ fn gnu_dirstack_function_definitions_parse_comments() {
 fn script_aliasconv_example_converts_aliases() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("aliasconv.bash")
-        .current_dir(Path::new("bash").join("examples").join("misc"))
+        .current_dir(bash_example_dir("misc"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -58,7 +65,7 @@ fn script_aliasconv_example_converts_aliases() {
 fn script_arrayops_example_manipulates_arrays() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")
-        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .current_dir(bash_example_dir("functions"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -92,7 +99,7 @@ fn script_arrayops_example_manipulates_arrays() {
 fn script_array_stuff_example_runs_array_workflows() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("array-stuff")
-        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .current_dir(bash_example_dir("functions"))
         .output()
         .expect("run rubash");
 
@@ -115,7 +122,7 @@ fn script_array_stuff_example_runs_array_workflows() {
 fn script_array_to_string_example_joins_arrays() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-s")
-        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .current_dir(bash_example_dir("functions"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -151,7 +158,7 @@ fn script_center_example_reads_file_in_nested_loop() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("center")
         .arg(&script_input)
-        .current_dir(Path::new("bash").join("examples").join("scripts"))
+        .current_dir(bash_example_dir("scripts"))
         .output()
         .expect("run rubash");
 
@@ -167,7 +174,7 @@ fn script_center_example_reads_file_in_nested_loop() {
 fn script_sort_pos_params_example_handles_quoted_positional_args() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("sort-pos-params")
-        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .current_dir(bash_example_dir("functions"))
         .output()
         .expect("run rubash");
 
@@ -183,7 +190,7 @@ fn script_sort_pos_params_example_handles_quoted_positional_args() {
 fn script_kshenv_example_parses_multiline_awk_quote() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("kshenv")
-        .current_dir(Path::new("bash").join("examples").join("functions"))
+        .current_dir(bash_example_dir("functions"))
         .output()
         .expect("run rubash");
 
@@ -196,7 +203,7 @@ fn script_kshenv_example_parses_multiline_awk_quote() {
 fn script_xterm_title_example_reports_script_name_without_display() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("xterm_title")
-        .current_dir(Path::new("bash").join("examples").join("scripts"))
+        .current_dir(bash_example_dir("scripts"))
         .output()
         .expect("run rubash");
 
