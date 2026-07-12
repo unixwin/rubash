@@ -224,6 +224,12 @@ pub struct CommandSubstitutionNode {
 pub struct ArithmeticExpansion {
     pub text: String,
     pub expression: String,
+    pub operators: Vec<ArithmeticOperator>,
+    pub variables: Vec<String>,
+    pub has_assignment: bool,
+    pub has_comparison: bool,
+    pub has_logical: bool,
+    pub has_update: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
 }

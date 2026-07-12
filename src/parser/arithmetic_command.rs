@@ -103,7 +103,7 @@ fn arithmetic_command(expression: String) -> ArithmeticCommand {
     }
 }
 
-fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
+pub(super) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
     const OPERATORS: &[&str] = &[
         "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&", "||", "==",
         "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/", "*", "+", "-",
@@ -130,7 +130,7 @@ fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
     operators
 }
 
-fn arithmetic_variables(expression: &str) -> Vec<String> {
+pub(super) fn arithmetic_variables(expression: &str) -> Vec<String> {
     let chars = expression.char_indices().collect::<Vec<_>>();
     let mut variables = Vec::new();
     let mut i = 0;
@@ -167,14 +167,14 @@ fn is_arithmetic_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-fn is_arithmetic_assignment_operator(operator: &str) -> bool {
+pub(super) fn is_arithmetic_assignment_operator(operator: &str) -> bool {
     matches!(
         operator,
         "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
     )
 }
 
-fn is_arithmetic_comparison_operator(operator: &str) -> bool {
+pub(super) fn is_arithmetic_comparison_operator(operator: &str) -> bool {
     matches!(operator, "==" | "!=" | "<" | ">" | "<=" | ">=")
 }
 

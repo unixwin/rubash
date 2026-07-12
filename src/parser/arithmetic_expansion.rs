@@ -1,4 +1,7 @@
-use super::{ArithmeticExpansion, CommandNode};
+use super::{
+    arithmetic_operators, arithmetic_variables, is_arithmetic_assignment_operator,
+    is_arithmetic_comparison_operator, ArithmeticExpansion, CommandNode,
+};
 
 pub(super) fn record_arithmetic_expansions_for_word(
     command: &mut CommandNode,
@@ -74,13 +77,9 @@ fn arithmetic_expansion(chars: &[char], start: usize) -> Option<(ArithmeticExpan
             '(' if !single && !double => depth += 1,
             ')' if !single && !double && depth > 0 => depth -= 1,
             ')' if !single && !double && chars.get(index + 1) == Some(&')') => {
+                let expression = chars[start + 3..index].iter().collect::<String>();
                 return Some((
-                    ArithmeticExpansion {
-                        text: chars[start..=index + 1].iter().collect(),
-                        expression: chars[start + 3..index].iter().collect(),
-                        word_index: None,
-                        assignment_name: None,
-                    },
+                    arithmetic_expansion_node(chars, start, index, expression),
                     index + 2,
                 ));
             }
@@ -89,4 +88,33 @@ fn arithmetic_expansion(chars: &[char], start: usize) -> Option<(ArithmeticExpan
         index += 1;
     }
     None
+}
+
+fn arithmetic_expansion_node(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    expression: String,
+) -> ArithmeticExpansion {
+    let operators = arithmetic_operators(&expression);
+    ArithmeticExpansion {
+        text: chars[start..=end + 1].iter().collect(),
+        variables: arithmetic_variables(&expression),
+        has_assignment: operators
+            .iter()
+            .any(|operator| is_arithmetic_assignment_operator(&operator.text)),
+        has_comparison: operators
+            .iter()
+            .any(|operator| is_arithmetic_comparison_operator(&operator.text)),
+        has_logical: operators
+            .iter()
+            .any(|operator| matches!(operator.text.as_str(), "&&" | "||" | "!")),
+        has_update: operators
+            .iter()
+            .any(|operator| matches!(operator.text.as_str(), "++" | "--")),
+        operators,
+        expression,
+        word_index: None,
+        assignment_name: None,
+    }
 }

@@ -887,10 +887,20 @@ mod arithmetic_expansion_tests {
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "$((n + 1))");
         assert_eq!(expansions[0].expression, "n + 1");
+        assert_eq!(expansions[0].variables, ["n"]);
+        assert_eq!(expansions[0].operators[0].text, "+");
+        assert!(!expansions[0].has_assignment);
+        assert!(!expansions[0].has_comparison);
         assert_eq!(expansions[0].word_index, Some(1));
         assert_eq!(expansions[0].assignment_name, None);
         assert_eq!(expansions[1].text, "$((1+(2*3)))");
         assert_eq!(expansions[1].expression, "1+(2*3)");
+        let operators = expansions[1]
+            .operators
+            .iter()
+            .map(|operator| operator.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(operators, ["+", "*"]);
         assert_eq!(expansions[1].word_index, Some(2));
     }
 
@@ -909,8 +919,31 @@ mod arithmetic_expansion_tests {
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "$((2 + 3))");
         assert_eq!(expansions[0].expression, "2 + 3");
+        assert_eq!(expansions[0].operators[0].text, "+");
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(expansions[0].word_index, None);
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_records_operator_metadata() {
+        let input = "echo value=$((count += 1)) ok=$((count > 0 && ! done))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let expansions = ast.commands[0].arithmetic_expansions.as_slice();
+
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(expansions[0].variables, ["count"]);
+        assert!(expansions[0].has_assignment);
+        assert!(expansions[0]
+            .operators
+            .iter()
+            .any(|operator| operator.text == "+="));
+        assert_eq!(expansions[1].assignment_name.as_deref(), Some("ok"));
+        assert_eq!(expansions[1].variables, ["count", "done"]);
+        assert!(expansions[1].has_comparison);
+        assert!(expansions[1].has_logical);
+        assert!(!expansions[1].has_update);
     }
 
     #[test]
