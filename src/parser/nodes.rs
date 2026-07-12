@@ -183,12 +183,14 @@ pub struct TimeCommand {
 /// Represents `command &`.
 #[derive(Debug, Clone)]
 pub struct BackgroundCommand {
+    pub operator: String,
     pub command: Box<CommandNode>,
 }
 
 /// Represents `! command`.
 #[derive(Debug, Clone)]
 pub struct InvertedCommand {
+    pub operator: String,
     pub command: Box<CommandNode>,
 }
 

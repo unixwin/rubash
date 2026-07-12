@@ -61,6 +61,7 @@ fn fold_inverted_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             inverted.and_or = and_or;
             inverted.background = background_flag;
             inverted.inverted_command = Some(InvertedCommand {
+                operator: "!".to_string(),
                 command: Box::new(command),
             });
             inverted
@@ -81,6 +82,7 @@ fn fold_background_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             let mut background = CommandNode::new();
             background.line = line;
             background.background_command = Some(BackgroundCommand {
+                operator: "&".to_string(),
                 command: Box::new(command),
             });
             background

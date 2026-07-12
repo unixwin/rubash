@@ -1488,6 +1488,7 @@ mod background_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
         let background = ast.commands[0].background_command.as_ref().unwrap();
+        assert_eq!(background.operator, "&");
         assert_eq!(background.command.words, ["false"]);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
@@ -1499,6 +1500,7 @@ mod background_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
         let background = ast.commands[0].background_command.as_ref().unwrap();
+        assert_eq!(background.operator, "&");
         let pipeline = background.command.pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 2);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
@@ -1515,6 +1517,7 @@ mod inverted_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        assert_eq!(inverted.operator, "!");
         assert_eq!(inverted.command.words, ["false"]);
     }
 
@@ -1525,6 +1528,7 @@ mod inverted_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        assert_eq!(inverted.operator, "!");
         let pipeline = inverted.command.pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 2);
         assert_eq!(pipeline.stages[0].words, ["false"]);
