@@ -1,4 +1,5 @@
-use super::*;
+use rubash::lexer::tokenize;
+use rubash::parser::parse;
 
 #[test]
 fn test_named_coproc_parses_split_brace_group_body() {
