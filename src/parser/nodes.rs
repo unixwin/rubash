@@ -97,6 +97,7 @@ pub enum CommandBodyKind {
 pub struct IfCommand {
     pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub condition_terminator: Option<String>,
     pub then_keyword: String,
     pub then_body: Vec<CommandNode>,
     pub elif_branches: Vec<ElifBranch>,
@@ -109,6 +110,7 @@ pub struct IfCommand {
 pub struct ElifBranch {
     pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub condition_terminator: Option<String>,
     pub then_keyword: String,
     pub body: Vec<CommandNode>,
 }

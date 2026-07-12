@@ -9,6 +9,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let then_index = find_if_then(tokens, start + 1)?;
     let then_keyword = tokens[then_index].value.clone();
     let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
+    let condition_terminator = condition_terminator_before(tokens, then_index);
     let mut index = then_index + 1;
 
     let (then_body, boundary) = parse_if_section(tokens, index)?;
@@ -20,10 +21,12 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         let elif_then = find_if_then(tokens, index + 1)?;
         let elif_then_keyword = tokens[elif_then].value.clone();
         let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
+        let condition_terminator = condition_terminator_before(tokens, elif_then);
         let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
         elif_branches.push(ElifBranch {
             keyword: elif_keyword,
             condition,
+            condition_terminator,
             then_keyword: elif_then_keyword,
             body,
         });
@@ -48,6 +51,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     command.if_command = Some(IfCommand {
         keyword: tokens[start].value.clone(),
         condition,
+        condition_terminator,
         then_keyword,
         then_body,
         elif_branches,
@@ -59,6 +63,13 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let mut next_i = index + 1;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     Some((command, next_i))
+}
+
+fn condition_terminator_before(tokens: &[Token], then_index: usize) -> Option<String> {
+    tokens
+        .get(then_index.saturating_sub(1))
+        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+        .map(|token| token.value.clone())
 }
 
 fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
