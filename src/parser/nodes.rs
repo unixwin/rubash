@@ -158,6 +158,9 @@ pub struct ArithmeticExpansion {
 pub struct ParameterExpansion {
     pub text: String,
     pub parameter: String,
+    pub name: String,
+    pub operator: Option<String>,
+    pub word: Option<String>,
     pub braced: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,

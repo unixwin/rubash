@@ -104,10 +104,15 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
             '}' if !single && !double => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
+                    let parameter = chars[start + 2..index].iter().collect::<String>();
+                    let (name, operator, word) = parameter_parts(&parameter);
                     return Some((
                         ParameterExpansion {
                             text: chars[start..=index].iter().collect(),
-                            parameter: chars[start + 2..index].iter().collect(),
+                            parameter,
+                            name,
+                            operator,
+                            word,
                             braced: true,
                             word_index: None,
                             assignment_name: None,
@@ -145,13 +150,95 @@ fn simple_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
 }
 
 fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpansion {
+    let parameter = chars[start + 1..end].iter().collect::<String>();
     ParameterExpansion {
         text: chars[start..end].iter().collect(),
-        parameter: chars[start + 1..end].iter().collect(),
+        name: parameter.clone(),
+        parameter,
+        operator: None,
+        word: None,
         braced: false,
         word_index: None,
         assignment_name: None,
     }
+}
+
+fn parameter_parts(parameter: &str) -> (String, Option<String>, Option<String>) {
+    if let Some(name) = parameter.strip_prefix('#') {
+        return (name.to_string(), Some("#".to_string()), None);
+    }
+
+    if let Some(name) = parameter.strip_prefix('!') {
+        return (name.to_string(), Some("!".to_string()), None);
+    }
+
+    for operator in [
+        ":-", ":=", ":?", ":+", "##", "%%", "//", "-", "=", "?", "+", "#", "%", "/",
+    ] {
+        if let Some(index) = top_level_operator(parameter, operator) {
+            return (
+                parameter[..index].to_string(),
+                Some(operator.to_string()),
+                Some(parameter[index + operator.len()..].to_string()),
+            );
+        }
+    }
+
+    (parameter.to_string(), None, None)
+}
+
+fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
+    let chars = parameter.chars().collect::<Vec<_>>();
+    let operator_chars = operator.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        if chars[index] == '\\' && !single {
+            index += 2;
+            continue;
+        }
+
+        match chars[index] {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '$' if !single && chars.get(index + 1) == Some(&'{') => {
+                brace_depth += 1;
+                index += 2;
+                continue;
+            }
+            '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
+            '(' if !single && !double => paren_depth += 1,
+            ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
+            _ => {}
+        }
+
+        if !single
+            && !double
+            && brace_depth == 0
+            && paren_depth == 0
+            && chars[index..].starts_with(&operator_chars)
+            && operator_can_start(parameter, index, operator)
+        {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn operator_can_start(_parameter: &str, index: usize, operator: &str) -> bool {
+    if index == 0 {
+        return false;
+    }
+
+    if operator == "/" || operator == "//" {
+        return index > 0;
+    }
+
+    true
 }
 
 fn skip_command_substitution(chars: &[char], start: usize) -> Option<usize> {
