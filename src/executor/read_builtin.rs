@@ -87,7 +87,26 @@ impl Executor {
                     index += 2;
                 }
                 "-u" => {
-                    read_fd = cmd.words.get(index + 1).and_then(|word| word.parse().ok());
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -u: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    read_fd = match parse_read_fd(word) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
                     index += 2;
                 }
                 "-i" | "-t" => {
@@ -197,8 +216,18 @@ impl Executor {
                     && matches!(word.as_bytes().get(1).copied(), Some(b'i' | b't' | b'u'))
                     && word.len() > 2 =>
                 {
-                    if let Some(fd) = word.strip_prefix("-u").and_then(|word| word.parse().ok()) {
-                        read_fd = Some(fd);
+                    if let Some(value) = word.strip_prefix("-u") {
+                        read_fd = match parse_read_fd(value) {
+                            Ok(fd) => Some(fd),
+                            Err(()) => {
+                                let _ = writeln!(
+                                    &mut stderr,
+                                    "{}read: {value}: invalid file descriptor specification",
+                                    self.diagnostic_prefix()
+                                );
+                                return self.finish_read_error(cmd, &stderr, 1);
+                            }
+                        };
                     }
                     index += 1;
                 }
@@ -230,6 +259,17 @@ impl Executor {
             let expanded = self.expand_word(prompt_text);
             eprint!("{}", expanded);
             let _ = std::io::Write::flush(&mut std::io::stderr());
+        }
+
+        if let Some(fd) = read_fd {
+            if !self.read_fd_is_available(cmd, fd) {
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}read: {fd}: invalid file descriptor: Bad file descriptor",
+                    self.diagnostic_prefix()
+                );
+                return self.finish_read_error(cmd, &stderr, 1);
+            }
         }
 
         if let Some(name) = array_name {
@@ -307,6 +347,27 @@ impl Executor {
         );
         self.finish_read_error(cmd, &stderr, 127)
     }
+
+    fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
+        if self.env_vars.contains_key(&fd_stdin_key(fd)) {
+            return true;
+        }
+        if cmd
+            .heredoc_redirects
+            .iter()
+            .any(|redirect| redirect.fd == Some(fd) && redirect.body.is_some())
+        {
+            return true;
+        }
+        cmd.redirect_in
+            .as_ref()
+            .is_some_and(|redirect| redirect.fd == Some(fd) && !is_closed_redirect_target(&self.expand_word(&redirect.target)))
+    }
+}
+
+fn parse_read_fd(value: &str) -> Result<u32, ()> {
+    let fd = value.parse::<i32>().map_err(|_| ())?;
+    u32::try_from(fd).map_err(|_| ())
 }
 
 fn first_invalid_read_option(word: &str) -> Option<char> {

@@ -202,6 +202,110 @@ fn test_read_u_uses_numbered_input_redirect_fd() {
 }
 
 #[test]
+fn test_read_u_rejects_invalid_fd_specifications() {
+    let output_path = "target/rubash-read-u-invalid-fd-status.txt";
+    let error_path = "target/rubash-read-u-invalid-fd-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read -u x value <<< abc 2> {error_path}; echo word:$? > {output_path}; \
+         read -u-1 value <<< abc 2>> {error_path}; echo compact_negative:$? >> {output_path}; \
+         read -u2147483648 value <<< abc 2>> {error_path}; echo too_large:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "word:1\ncompact_negative:1\ntoo_large:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: x: invalid file descriptor specification"));
+    assert!(error.contains("read: -1: invalid file descriptor specification"));
+    assert!(error.contains("read: 2147483648: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_u_missing_argument_reports_usage() {
+    let output_path = "target/rubash-read-u-missing-status.txt";
+    let error_path = "target/rubash-read-u-missing-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!("read -u 2> {error_path}; echo $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: -u: option requires an argument"));
+    assert!(error.contains("read: usage:"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_u_reports_bad_fd_for_unopened_or_closed_fd() {
+    let output_path = "target/rubash-read-u-bad-fd-status.txt";
+    let error_path = "target/rubash-read-u-bad-fd-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read -u3 value 2> {error_path}; echo unopened:$? > {output_path}; \
+         read -u 3 value 3<&- 2>> {error_path}; echo closed:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "unopened:1\nclosed:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert_eq!(
+        error
+            .matches("read: 3: invalid file descriptor: Bad file descriptor")
+            .count(),
+        2
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_u_allows_open_fd_at_eof() {
+    let output_path = "target/rubash-read-u-open-empty-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -u3 value 3<<< ''; printf '%s:<%s>' \"$?\" \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0:<>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_input_fd_copy_reads_virtual_fd() {
     let output_path = "target/rubash-input-fd-copy-output.txt";
     let _ = fs::remove_file(output_path);
