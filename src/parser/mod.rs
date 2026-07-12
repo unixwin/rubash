@@ -3,6 +3,7 @@
 //! Transforms tokens into an AST.
 
 mod arithmetic_command;
+mod arithmetic_expansion;
 mod arithmetic_for;
 mod assignment;
 mod brace_command;
@@ -31,6 +32,7 @@ pub use nodes::*;
 pub use parse_loop::parse;
 
 use arithmetic_command::*;
+use arithmetic_expansion::*;
 use arithmetic_for::*;
 use assignment::*;
 use brace_command::*;

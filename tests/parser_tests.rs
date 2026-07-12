@@ -637,6 +637,67 @@ mod command_substitution_tests {
     }
 }
 
+mod arithmetic_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn test_arithmetic_expansion_records_structured_ast_for_words() {
+        let input = "echo $((n + 1)) pre$((1+(2*3)))post";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].words,
+            ["echo", "$((n + 1))", "pre$((1+(2*3)))post"]
+        );
+
+        let expansions = ast.commands[0].arithmetic_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].text, "$((n + 1))");
+        assert_eq!(expansions[0].expression, "n + 1");
+        assert_eq!(expansions[0].word_index, Some(1));
+        assert_eq!(expansions[0].assignment_name, None);
+        assert_eq!(expansions[1].text, "$((1+(2*3)))");
+        assert_eq!(expansions[1].expression, "1+(2*3)");
+        assert_eq!(expansions[1].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_assignment_arithmetic_expansion_records_structured_ast() {
+        let input = "value=$((2 + 3)) echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].assignments.get("value").unwrap(),
+            "$((2 + 3))"
+        );
+
+        let expansions = ast.commands[0].arithmetic_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "$((2 + 3))");
+        assert_eq!(expansions[0].expression, "2 + 3");
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(expansions[0].word_index, None);
+    }
+
+    #[test]
+    fn test_assignment_word_arithmetic_expansion_records_word_index() {
+        let input = "echo value=$((4 * 5))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "value=$((4 * 5))"]);
+
+        let expansions = ast.commands[0].arithmetic_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "$((4 * 5))");
+        assert_eq!(expansions[0].expression, "4 * 5");
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(expansions[0].word_index, Some(1));
+    }
+}
+
 mod background_tests {
     use super::*;
 
