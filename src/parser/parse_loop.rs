@@ -154,7 +154,7 @@ fn parse_time_prefixed_compound_command(
     let mut i = start + 1;
     while tokens
         .get(i)
-        .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--"))
+        .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
     {
         words.push(tokens[i].value.clone());
         i += 1;

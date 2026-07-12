@@ -306,6 +306,27 @@ fn test_time_prefix_executes_for_command() {
 }
 
 #[test]
+fn test_time_inversion_prefix_executes_for_command() {
+    let output_path = "target/rubash-time-inverted-for-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "time -p ! for x in a; do echo $x >> {output_path}; done; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
+    assert!(ast.commands[0].for_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nstatus:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_prefix_executes_if_command_sequence() {
     let output_path = "target/rubash-time-if-output.txt";
     let _ = fs::remove_file(output_path);
@@ -322,6 +343,26 @@ fn test_time_prefix_executes_if_command_sequence() {
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\nstatus:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_time_inversion_prefix_executes_if_command_sequence() {
+    let output_path = "target/rubash-time-inverted-if-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "time -p ! if true; then echo yes > {output_path}; else echo no > {output_path}; fi; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "-p", "!", "if", "true"]);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\nstatus:1\n");
     let _ = fs::remove_file(output_path);
 }
 

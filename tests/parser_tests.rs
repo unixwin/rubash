@@ -75,6 +75,16 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_inversion_prefix_parses_for_command() {
+        let input = "time -p ! for x in a; do echo $x; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
+        assert!(ast.commands[0].for_command.is_some());
+    }
+
+    #[test]
     fn test_time_prefix_parses_if_command_sequence() {
         let input = "time -p if true; then echo yes; fi";
         let tokens = tokenize(input);

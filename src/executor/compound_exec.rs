@@ -5,6 +5,9 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        let inverted = time_prefix_parts(&cmd.words)
+            .map(|parts| parts.inverted)
+            .unwrap_or(false);
         let result = if let Some(for_command) = &cmd.for_command {
             self.execute_for_command_with_redirects(for_command, cmd)
         } else if let Some(select_command) = &cmd.select_command {
@@ -19,7 +22,11 @@ impl Executor {
             Ok(())
         };
         print_posix_time();
-        result
+        result?;
+        if inverted {
+            self.exit_code = invert_exit_status(self.exit_code);
+        }
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_time_prefixed_command_sequence(
@@ -30,11 +37,11 @@ impl Executor {
         let Some(command) = ast.commands.get(index) else {
             return Ok(None);
         };
-        let Some(compound_index) = time_prefixed_sequence_index(&command.words) else {
+        let Some(prefix) = time_prefix_parts(&command.words) else {
             return Ok(None);
         };
         if !matches!(
-            command.words.get(compound_index).map(String::as_str),
+            command.words.get(prefix.command_index).map(String::as_str),
             Some("if" | "while" | "until")
         ) {
             return Ok(None);
@@ -44,9 +51,9 @@ impl Executor {
             commands: ast.commands[index..].to_vec(),
         };
         if let Some(first) = timed_ast.commands.first_mut() {
-            first.words = command.words[compound_index..].to_vec();
+            first.words = command.words[prefix.command_index..].to_vec();
             if command.word_kinds.len() == command.words.len() {
-                first.word_kinds = command.word_kinds[compound_index..].to_vec();
+                first.word_kinds = command.word_kinds[prefix.command_index..].to_vec();
             }
         }
 
@@ -60,6 +67,9 @@ impl Executor {
         };
 
         print_posix_time();
+        if prefix.inverted {
+            self.exit_code = invert_exit_status(self.exit_code);
+        }
         Ok(Some(index + next_index))
     }
 
@@ -342,19 +352,32 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
             || cmd.brace_group.is_some())
 }
 
-fn time_prefixed_sequence_index(words: &[String]) -> Option<usize> {
+struct TimePrefixParts {
+    command_index: usize,
+    inverted: bool,
+}
+
+fn time_prefix_parts(words: &[String]) -> Option<TimePrefixParts> {
     if words.first().map(String::as_str) != Some("time") {
         return None;
     }
 
     let mut index = 1;
+    let mut inverted = false;
     while let Some(word) = words.get(index).map(String::as_str) {
         match word {
             "-p" | "--" => index += 1,
+            "!" => {
+                inverted = !inverted;
+                index += 1;
+            }
             _ => break,
         }
     }
-    (index < words.len()).then_some(index)
+    Some(TimePrefixParts {
+        command_index: index,
+        inverted,
+    })
 }
 
 fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
