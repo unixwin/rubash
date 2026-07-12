@@ -40,6 +40,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 name,
                 Vec::new(),
                 CoprocBodyKind::BraceGroup,
+                Some(("{".to_string(), "}".to_string())),
                 Some(body),
             ));
             let mut next_i = i + 1;
@@ -61,6 +62,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 name,
                 Vec::new(),
                 CoprocBodyKind::BraceGroup,
+                Some((tokens[i].value.clone(), tokens[close_i].value.clone())),
                 Some(body),
             ));
             let mut next_i = close_i + 1;
@@ -98,6 +100,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                     name,
                     Vec::new(),
                     CoprocBodyKind::Subshell,
+                    Some(("(".to_string(), tokens[i].value.clone())),
                     Some(body),
                 ));
                 let mut next_i = i + 1;
@@ -119,6 +122,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 name,
                 Vec::new(),
                 CoprocBodyKind::CommandSequence,
+                None,
                 Some(body),
             ));
             let mut next_i = body_end;
@@ -139,6 +143,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 name,
                 Vec::new(),
                 CoprocBodyKind::CompoundCommand,
+                None,
                 Some(vec![body_command]),
             ));
             let mut next_i = body_end;
@@ -179,6 +184,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         words,
         CoprocBodyKind::SimpleCommand,
         None,
+        None,
     ));
     let mut next_i = i;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
@@ -195,13 +201,19 @@ fn coproc_command(
     name: Option<String>,
     words: Vec<String>,
     body_kind: CoprocBodyKind,
+    body_delimiters: Option<(String, String)>,
     body: Option<Vec<CommandNode>>,
 ) -> Box<CoprocCommand> {
+    let (body_open_delimiter, body_close_delimiter) = body_delimiters
+        .map(|(open, close)| (Some(open), Some(close)))
+        .unwrap_or((None, None));
     Box::new(CoprocCommand {
         keyword: "coproc".to_string(),
         name,
         words,
         body_kind,
+        body_open_delimiter,
+        body_close_delimiter,
         body,
     })
 }

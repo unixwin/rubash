@@ -491,6 +491,8 @@ pub struct CoprocCommand {
     /// The command words (for simple commands)
     pub words: Vec<String>,
     pub body_kind: CoprocBodyKind,
+    pub body_open_delimiter: Option<String>,
+    pub body_close_delimiter: Option<String>,
     /// Brace group body (for compound commands)
     pub body: Option<Vec<CommandNode>>,
 }
