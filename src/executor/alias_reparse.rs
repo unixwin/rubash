@@ -112,7 +112,17 @@ impl Executor {
             pattern_index = boundary.next_word_index;
         };
 
-        Some((CaseCommand { word, clauses }, redirect_command, next_index))
+        Some((
+            CaseCommand {
+                keyword: "case".to_string(),
+                word,
+                in_keyword: "in".to_string(),
+                clauses,
+                end_keyword: "esac".to_string(),
+            },
+            redirect_command,
+            next_index,
+        ))
     }
 
     fn alias_case_source<'a>(

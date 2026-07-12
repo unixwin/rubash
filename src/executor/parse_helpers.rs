@@ -114,7 +114,13 @@ pub(in crate::executor) fn case_command_from_words(words: &[String]) -> Option<C
         }
     }
 
-    Some(CaseCommand { word, clauses })
+    Some(CaseCommand {
+        keyword: "case".to_string(),
+        word,
+        in_keyword: "in".to_string(),
+        clauses,
+        end_keyword: "esac".to_string(),
+    })
 }
 
 pub(in crate::executor) fn needs_parser_level_alias_expansion(value: &str) -> bool {

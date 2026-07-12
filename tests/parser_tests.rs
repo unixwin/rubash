@@ -613,7 +613,10 @@ mod case_tests {
         let ast = parse(&tokens);
         let case_command = ast.commands[0].case_command.as_ref().unwrap();
 
+        assert_eq!(case_command.keyword, "case");
         assert_eq!(case_command.word, "$word");
+        assert_eq!(case_command.in_keyword, "in");
+        assert_eq!(case_command.end_keyword, "esac");
         assert_eq!(case_command.clauses.len(), 2);
         assert_eq!(
             case_command.clauses[0].terminator,

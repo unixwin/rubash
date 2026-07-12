@@ -13,6 +13,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     if !is_keyword(tokens, i, "in") {
         return None;
     }
+    let in_keyword = tokens[i].value.clone();
     i += 1;
 
     let mut clauses = Vec::new();
@@ -120,7 +121,13 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.case_command = Some(CaseCommand { word, clauses });
+    command.case_command = Some(Box::new(CaseCommand {
+        keyword: tokens[start].value.clone(),
+        word,
+        in_keyword,
+        clauses,
+        end_keyword: tokens[i].value.clone(),
+    }));
     let mut next_i = i + 1;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     Some((command, next_i))

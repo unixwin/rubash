@@ -350,8 +350,11 @@ pub struct WordQuote {
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
+    pub keyword: String,
     pub word: String,
+    pub in_keyword: String,
     pub clauses: Vec<CaseClause>,
+    pub end_keyword: String,
 }
 
 #[derive(Debug, Clone)]
@@ -547,7 +550,7 @@ pub struct CommandNode {
     /// `( compound_list )`
     pub subshell_command: Option<SubshellCommand>,
     /// `case word in pattern) ... ;; esac`
-    pub case_command: Option<CaseCommand>,
+    pub case_command: Option<Box<CaseCommand>>,
     /// `select name [in words ...]; do ...; done`
     pub select_command: Option<Box<SelectCommand>>,
     /// `name() { compound_list; }`
