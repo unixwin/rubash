@@ -134,14 +134,15 @@ fn command_substitution_node(
 ) -> CommandSubstitutionNode {
     let tokens = crate::lexer::tokenize(&source);
     let commands = parse(&tokens).commands;
-    let (open_delimiter, close_delimiter) = if backtick {
-        ("`".to_string(), "`".to_string())
+    let (open_delimiter, operator, close_delimiter) = if backtick {
+        ("`".to_string(), "`".to_string(), "`".to_string())
     } else {
-        ("$(".to_string(), ")".to_string())
+        ("$(".to_string(), "$".to_string(), ")".to_string())
     };
     CommandSubstitutionNode {
         text,
         open_delimiter,
+        operator,
         source,
         close_delimiter,
         commands,

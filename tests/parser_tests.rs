@@ -975,6 +975,7 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 3);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].open_delimiter, "$(");
+        assert_eq!(substitutions[0].operator, "$");
         assert_eq!(substitutions[0].close_delimiter, ")");
         assert_eq!(substitutions[0].source, "printf hi");
         assert_eq!(substitutions[0].commands.len(), 1);
@@ -984,12 +985,14 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].assignment_name, None);
         assert_eq!(substitutions[1].text, "$(date)");
         assert_eq!(substitutions[1].open_delimiter, "$(");
+        assert_eq!(substitutions[1].operator, "$");
         assert_eq!(substitutions[1].close_delimiter, ")");
         assert_eq!(substitutions[1].source, "date");
         assert_eq!(substitutions[1].commands[0].words, ["date"]);
         assert_eq!(substitutions[1].word_index, Some(2));
         assert_eq!(substitutions[2].text, "`whoami`");
         assert_eq!(substitutions[2].open_delimiter, "`");
+        assert_eq!(substitutions[2].operator, "`");
         assert_eq!(substitutions[2].close_delimiter, "`");
         assert_eq!(substitutions[2].source, "whoami");
         assert_eq!(substitutions[2].commands[0].words, ["whoami"]);
@@ -1012,6 +1015,7 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].open_delimiter, "$(");
+        assert_eq!(substitutions[0].operator, "$");
         assert_eq!(substitutions[0].close_delimiter, ")");
         assert_eq!(substitutions[0].source, "printf hi");
         assert_eq!(substitutions[0].commands[0].words, ["printf", "hi"]);
@@ -1049,6 +1053,7 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "`printf hi`");
         assert_eq!(substitutions[0].open_delimiter, "`");
+        assert_eq!(substitutions[0].operator, "`");
         assert_eq!(substitutions[0].close_delimiter, "`");
         assert_eq!(substitutions[0].source, "printf hi");
         assert!(substitutions[0].backtick);

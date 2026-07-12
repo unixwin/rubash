@@ -271,6 +271,7 @@ pub struct ProcessSubstitution {
 pub struct CommandSubstitutionNode {
     pub text: String,
     pub open_delimiter: String,
+    pub operator: String,
     pub source: String,
     pub close_delimiter: String,
     pub commands: Vec<CommandNode>,
