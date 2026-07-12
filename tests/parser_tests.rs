@@ -147,7 +147,10 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert!(time_command.posix_format);
-        let body = &time_command.command.brace_group.as_ref().unwrap().body;
+        let brace_group = time_command.command.brace_group.as_ref().unwrap();
+        assert_eq!(brace_group.open_delimiter, "{");
+        assert_eq!(brace_group.close_delimiter, "}");
+        let body = &brace_group.body;
         assert_eq!(body[0].words, ["echo", "one"]);
         assert_eq!(body[1].words, ["echo", "two"]);
     }
@@ -159,7 +162,10 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
-        let body = &list.commands[0].brace_group.as_ref().unwrap().body;
+        let brace_group = list.commands[0].brace_group.as_ref().unwrap();
+        assert_eq!(brace_group.open_delimiter, "{");
+        assert_eq!(brace_group.close_delimiter, "}");
+        let body = &brace_group.body;
         assert_eq!(body[0].words, ["echo", "hi"]);
         assert_eq!(
             list.commands[0].redirect_out.as_ref().unwrap().target,
@@ -177,7 +183,10 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert!(time_command.posix_format);
-        let body = &time_command.command.subshell_command.as_ref().unwrap().body;
+        let subshell = time_command.command.subshell_command.as_ref().unwrap();
+        assert_eq!(subshell.open_delimiter, "(");
+        assert_eq!(subshell.close_delimiter, ")");
+        let body = &subshell.body;
         assert_eq!(body[0].words, ["echo", "one"]);
         assert_eq!(body[1].words, ["echo", "two"]);
     }
@@ -189,7 +198,10 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
-        let body = &list.commands[0].subshell_command.as_ref().unwrap().body;
+        let subshell = list.commands[0].subshell_command.as_ref().unwrap();
+        assert_eq!(subshell.open_delimiter, "(");
+        assert_eq!(subshell.close_delimiter, ")");
+        let body = &subshell.body;
         assert_eq!(body[0].words, ["echo", "hi"]);
         assert_eq!(
             list.commands[0].redirect_out.as_ref().unwrap().target,

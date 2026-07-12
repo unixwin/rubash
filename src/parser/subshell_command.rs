@@ -14,7 +14,11 @@ pub(super) fn parse_subshell_command(
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.subshell_command = Some(SubshellCommand { body });
+    command.subshell_command = Some(SubshellCommand {
+        open_delimiter: "(".to_string(),
+        close_delimiter: ")".to_string(),
+        body,
+    });
     Some(finish_compound_command(command, tokens, close + 1))
 }
 

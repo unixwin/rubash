@@ -143,12 +143,16 @@ pub enum ConditionalExpressionKind {
 /// Represents a `( compound_list )` subshell command.
 #[derive(Debug, Clone)]
 pub struct SubshellCommand {
+    pub open_delimiter: String,
+    pub close_delimiter: String,
     pub body: Vec<CommandNode>,
 }
 
 /// Represents a `{ compound_list; }` brace group command.
 #[derive(Debug, Clone)]
 pub struct BraceGroupCommand {
+    pub open_delimiter: String,
+    pub close_delimiter: String,
     pub body: Vec<CommandNode>,
 }
 
