@@ -239,6 +239,45 @@ fn test_readarray_compact_d_keeps_delimiter_without_t() {
 }
 
 #[test]
+fn test_mapfile_u_reads_numbered_fd_here_string() {
+    let output_path = "target/rubash-mapfile-u-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "mapfile -u 3 -t arr 3<<<$'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_readarray_compact_u_reads_numbered_fd_file() {
+    let input_path = "target/rubash-readarray-u-fd-input.txt";
+    fs::write(input_path, "alpha\nbeta\n").unwrap();
+    let input = format!("readarray -u3 -t arr 3<{input_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        executor.get_env("arr"),
+        Some("\x1d([0]=\"alpha\" [1]=\"beta\")")
+    );
+    let _ = fs::remove_file(input_path);
+}
+
+#[test]
 fn test_array_at_indices_expand() {
     let output_path = "target/rubash-array-at-indices-output.txt";
     let _ = fs::remove_file(output_path);

@@ -12,6 +12,7 @@ impl Executor {
         let mut skip = 0;
         let mut callback = None;
         let mut callback_quantum = 5000usize;
+        let mut read_fd = None;
         let mut array_name = None;
         let mut index = 1;
         let mut stderr = Vec::new();
@@ -105,6 +106,26 @@ impl Executor {
                     callback = Some(word.clone());
                     index += 2;
                 }
+                "-u" => {
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "u",
+                            &mut stderr,
+                        );
+                    };
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        word,
+                        "invalid file descriptor",
+                        &mut stderr,
+                    ) {
+                        Ok(value) => read_fd = Some(value as u32),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 2;
+                }
                 "-c" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         return self.mapfile_missing_option_argument(
@@ -164,6 +185,18 @@ impl Executor {
                     callback = Some(word[2..].to_string());
                     index += 1;
                 }
+                word if word.starts_with("-u") && word.len() > 2 => {
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        &word[2..],
+                        "invalid file descriptor",
+                        &mut stderr,
+                    ) {
+                        Ok(value) => read_fd = Some(value as u32),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 1;
+                }
                 word if word.starts_with("-c") && word.len() > 2 => {
                     match self.parse_mapfile_callback_quantum(command_name, &word[2..], &mut stderr)
                     {
@@ -187,7 +220,7 @@ impl Executor {
         }
 
         let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
-        if let Some(input) = self.stdin_string_for_command(cmd) {
+        if let Some(input) = self.mapfile_input_for_command(cmd, read_fd) {
             let mut values = split_mapfile_input(&input, delimiter, trim_newline)
                 .into_iter()
                 .skip(skip)

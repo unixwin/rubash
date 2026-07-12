@@ -95,6 +95,85 @@ impl Executor {
         status
     }
 
+    pub(in crate::executor) fn mapfile_input_for_command(
+        &mut self,
+        cmd: &CommandNode,
+        read_fd: Option<u32>,
+    ) -> Option<String> {
+        let Some(fd) = read_fd else {
+            return self.stdin_string_for_command(cmd);
+        };
+
+        if let Some(input) = self.mapfile_redirected_fd_input(cmd, fd) {
+            return Some(input);
+        }
+        self.mapfile_virtual_fd_input(fd)
+            .or_else(|| self.mapfile_heredoc_fd_input(cmd, fd))
+    }
+
+    fn mapfile_redirected_fd_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {
+        let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd != Some(fd) {
+            return None;
+        }
+
+        if let Some(source) = redirect
+            .target
+            .strip_prefix("<(")
+            .and_then(|target| target.strip_suffix(')'))
+        {
+            return self.process_substitution_output(source);
+        }
+
+        let target = self.expand_word(&redirect.target);
+        if is_closed_redirect_target(&target) {
+            return None;
+        }
+        let path = shell_path_to_windows(&target, &self.env_vars);
+        if redirect.append {
+            let _ = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&path);
+        }
+        fs::read_to_string(path).ok()
+    }
+
+    fn mapfile_virtual_fd_input(&mut self, fd: u32) -> Option<String> {
+        let input_key = fd_stdin_key(fd);
+        let offset_key = fd_stdin_offset_key(fd);
+        let input = self.env_vars.get(&input_key)?.clone();
+        let offset = self
+            .env_vars
+            .get(&offset_key)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        if offset >= input.len() {
+            return None;
+        }
+        self.env_vars
+            .insert(offset_key, input.len().to_string());
+        Some(input[offset..].to_string())
+    }
+
+    fn mapfile_heredoc_fd_input(&self, cmd: &CommandNode, fd: u32) -> Option<String> {
+        let body = cmd
+            .heredoc_redirects
+            .iter()
+            .rev()
+            .find(|redirect| redirect.fd == Some(fd))?
+            .body
+            .as_deref()?;
+        if let Some(word) = body.strip_prefix('\x1d') {
+            let mut input =
+                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
+            input.push('\n');
+            return Some(input);
+        }
+        Some(strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string())
+    }
+
     pub(in crate::executor) fn execute_mapfile_callback(
         &mut self,
         callback: &str,
