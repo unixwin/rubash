@@ -49,8 +49,12 @@ mod pipeline_tests {
         let input = "ls | grep foo";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
-        assert!(ast.commands[0].pipe.is_some());
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.stages[0].words, ["ls"]);
+        assert!(pipeline.stages[0].pipe.is_some());
+        assert_eq!(pipeline.stages[1].words, ["grep", "foo"]);
     }
 
     #[test]
@@ -58,7 +62,21 @@ mod pipeline_tests {
         let input = "ls | grep foo | sort";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 3);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 3);
+        assert_eq!(pipeline.stages[2].words, ["sort"]);
+    }
+
+    #[test]
+    fn test_pipeline_command_preserves_connector() {
+        let input = "printf a | grep a && echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].pipeline_command.is_some());
+        assert_eq!(ast.commands[0].and_or, Some(true));
+        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
     }
 
     #[test]

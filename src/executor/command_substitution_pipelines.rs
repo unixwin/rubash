@@ -90,6 +90,14 @@ impl Executor {
         let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
         let first = ast.commands.first()?;
+        let (first, piped_next) = if let Some(pipeline_command) = &first.pipeline_command {
+            (
+                pipeline_command.stages.first()?,
+                pipeline_command.stages.get(1),
+            )
+        } else {
+            (first, ast.commands.get(1))
+        };
         if first.words.first().map(String::as_str) != Some("cat") {
             return None;
         }
@@ -100,7 +108,7 @@ impl Executor {
 
         let mut output = self.stdin_string_for_command(first)?;
         if first.pipe.is_some() {
-            let next = ast.commands.get(1)?;
+            let next = piped_next?;
             match next.words.as_slice() {
                 [cmd, option] if cmd == "sort" && option == "-u" => {
                     let mut lines = output.lines().map(str::to_string).collect::<Vec<_>>();

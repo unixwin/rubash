@@ -13,7 +13,11 @@ fn test_parse_simple() {
 fn test_parse_pipeline() {
     let tokens = tokenize("ls | grep foo");
     let ast = parse(&tokens);
-    assert_eq!(ast.commands.len(), 2);
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.stages.len(), 2);
+    assert_eq!(pipeline.stages[0].words, ["ls"]);
+    assert_eq!(pipeline.stages[1].words, ["grep", "foo"]);
 }
 
 #[test]
@@ -58,11 +62,12 @@ fn test_parse_piped_heredoc_body_belongs_to_left_command() {
     let tokens = tokenize("cat <<EOF | sort -u\nbody\nEOF");
     let ast = parse(&tokens);
 
-    assert_eq!(ast.commands.len(), 2);
-    assert_eq!(ast.commands[0].words, vec!["cat"]);
-    assert_eq!(ast.commands[0].heredoc.as_deref(), Some("body\n"));
-    assert_eq!(ast.commands[1].words, vec!["sort", "-u"]);
-    assert!(ast.commands[1].heredoc.is_none());
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.stages[0].words, vec!["cat"]);
+    assert_eq!(pipeline.stages[0].heredoc.as_deref(), Some("body\n"));
+    assert_eq!(pipeline.stages[1].words, vec!["sort", "-u"]);
+    assert!(pipeline.stages[1].heredoc.is_none());
 }
 
 #[test]

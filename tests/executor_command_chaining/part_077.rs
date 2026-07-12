@@ -216,8 +216,9 @@ fn test_time_pipeline_modifier_executes_full_pipeline() {
     let input = format!("time -p echo alpha | wc -l > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words[0], "time");
-    assert!(ast.commands[0].pipe.is_some());
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.stages[0].words[0], "time");
+    assert!(pipeline.stages[0].pipe.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -235,7 +236,8 @@ fn test_time_pipeline_modifier_preserves_pipeline_status() {
     let input = format!("time echo alpha | grep beta > {output_path}; echo $? >> {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert!(ast.commands[0].pipe.is_some());
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].pipe.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

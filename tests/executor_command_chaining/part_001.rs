@@ -128,10 +128,11 @@ fn test_pipeline_redirects_filtered_output() {
     let input = format!("echo hello | grep hello > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands.len(), 2);
-    assert!(ast.commands[0].pipe.is_some());
-    assert_eq!(ast.commands[1].words, ["grep", "hello"]);
-    assert!(ast.commands[1].redirect_out.is_some());
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].pipe.is_some());
+    assert_eq!(pipeline.stages[1].words, ["grep", "hello"]);
+    assert!(pipeline.stages[1].redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -149,10 +150,11 @@ fn test_pipeline_counts_bytes_with_wc() {
     let input = format!("echo hello | wc -c > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands.len(), 2);
-    assert!(ast.commands[0].pipe.is_some());
-    assert_eq!(ast.commands[1].words, ["wc", "-c"]);
-    assert!(ast.commands[1].redirect_out.is_some());
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].pipe.is_some());
+    assert_eq!(pipeline.stages[1].words, ["wc", "-c"]);
+    assert!(pipeline.stages[1].redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -170,11 +172,12 @@ fn test_pipeline_filters_printf_output() {
     let input = format!("printf 'a\\nb\\n' | grep b > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands.len(), 2);
-    assert!(ast.commands[0].pipe.is_some());
-    assert_eq!(ast.commands[0].words, ["printf", "a\\nb\\n"]);
-    assert_eq!(ast.commands[1].words, ["grep", "b"]);
-    assert!(ast.commands[1].redirect_out.is_some());
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].pipe.is_some());
+    assert_eq!(pipeline.stages[0].words, ["printf", "a\\nb\\n"]);
+    assert_eq!(pipeline.stages[1].words, ["grep", "b"]);
+    assert!(pipeline.stages[1].redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

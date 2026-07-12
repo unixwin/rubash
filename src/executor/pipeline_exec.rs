@@ -1,6 +1,19 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_pipeline_command(
+        &mut self,
+        pipeline_command: &PipelineCommand,
+    ) -> Result<(), ExecuteError> {
+        let ast = Ast {
+            commands: pipeline_command.stages.clone(),
+        };
+        self.execute_simple_pipeline(&ast, 0)?.ok_or_else(|| {
+            ExecuteError::UnknownBuiltin("pipeline command could not execute".to_string())
+        })?;
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_brace_group_pipeline(
         &mut self,
         command: &CommandNode,

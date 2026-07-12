@@ -82,6 +82,12 @@ pub struct BraceGroupCommand {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents a `command | command` pipeline.
+#[derive(Debug, Clone)]
+pub struct PipelineCommand {
+    pub stages: Vec<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -166,6 +172,8 @@ pub struct CommandNode {
     pub and_or: Option<bool>,
     /// Return status is inverted by the reserved word `!`.
     pub inverted: bool,
+    /// Pipeline of commands connected by `|`.
+    pub pipeline_command: Option<PipelineCommand>,
     /// Command is executed inside a subshell grouping `( ... )`.
     pub subshell: bool,
     /// This command closes the current subshell grouping.
@@ -214,6 +222,7 @@ impl CommandNode {
             background: false,
             and_or: None,
             inverted: false,
+            pipeline_command: None,
             subshell: false,
             subshell_end: false,
             for_command: None,

@@ -35,10 +35,11 @@ fn test_pipeline_feeds_external_stage_stdin() {
     let input = format!("printf 'a\\nb\\n' | {shell_script_path} > {shell_output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands.len(), 2);
-    assert!(ast.commands[0].pipe.is_some());
-    assert_eq!(ast.commands[1].words, [shell_script_path.as_str()]);
-    assert!(ast.commands[1].redirect_out.is_some());
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].pipe.is_some());
+    assert_eq!(pipeline.stages[1].words, [shell_script_path.as_str()]);
+    assert!(pipeline.stages[1].redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

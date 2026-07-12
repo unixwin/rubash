@@ -107,6 +107,29 @@ impl Executor {
                 continue;
             }
 
+            if let Some(pipeline_command) = &command.pipeline_command {
+                let execution_result = if command.inverted || command.and_or().is_some() {
+                    self.with_errexit_suppressed(|executor| {
+                        executor.execute_pipeline_command(pipeline_command)
+                    })
+                } else {
+                    self.execute_pipeline_command(pipeline_command)
+                };
+                match execution_result {
+                    Ok(()) => {}
+                    Err(error) => return Err(error),
+                }
+                if command.inverted {
+                    self.exit_code = invert_exit_status(self.exit_code);
+                }
+                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
             if self.execute_brace_group_pipeline(command)? {
                 if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
                     index = next_index;

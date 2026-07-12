@@ -36,7 +36,63 @@ pub fn parse(tokens: &[Token]) -> Ast {
         state.ast.commands.push(state.current_cmd);
     }
 
+    state.ast.commands = fold_pipeline_commands(state.ast.commands);
     state.ast
+}
+
+fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    let mut folded = Vec::new();
+    let mut index = 0;
+    while index < commands.len() {
+        let command = commands[index].clone();
+        if command.pipe.is_none() {
+            folded.push(command);
+            index += 1;
+            continue;
+        }
+
+        let mut stages = vec![command];
+        index += 1;
+        while let Some(command) = commands.get(index) {
+            stages.push(command.clone());
+            index += 1;
+            if command.pipe.is_none() {
+                break;
+            }
+        }
+
+        if stages.len() == 1
+            || stages.last().is_some_and(|command| command.pipe.is_some())
+            || looks_like_case_pattern_alternate(&stages)
+        {
+            folded.extend(stages);
+            continue;
+        }
+
+        let first = stages.first().expect("pipeline has a first stage");
+        let last = stages.last().expect("pipeline has a last stage");
+        let mut pipeline = CommandNode::new();
+        pipeline.line = first.line;
+        pipeline.inverted = first.inverted;
+        pipeline.background = last.background;
+        pipeline.and_or = last.and_or;
+        if let Some(first_stage) = stages.first_mut() {
+            first_stage.inverted = false;
+        }
+        pipeline.pipeline_command = Some(PipelineCommand { stages });
+        folded.push(pipeline);
+    }
+    folded
+}
+
+fn looks_like_case_pattern_alternate(stages: &[CommandNode]) -> bool {
+    let Some(first) = stages.first() else {
+        return false;
+    };
+    if first.words.get(2).map(String::as_str) != Some("in") {
+        return false;
+    }
+    first.words.len() >= 4 && stages.len() >= 2
 }
 
 fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) -> Option<usize> {
