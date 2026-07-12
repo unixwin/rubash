@@ -183,9 +183,7 @@ impl Executor {
                 }
                 word if word.starts_with('-')
                     && word.len() > 2
-                    && word[1..]
-                        .chars()
-                        .all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
+                    && word[1..].chars().all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
                 {
                     raw |= word[1..].contains('r');
                     index += 1;
@@ -454,9 +452,10 @@ impl Executor {
         {
             return true;
         }
-        cmd.redirect_in
-            .as_ref()
-            .is_some_and(|redirect| redirect.fd == Some(fd) && !is_closed_redirect_target(&self.expand_word(&redirect.target)))
+        cmd.redirect_in.as_ref().is_some_and(|redirect| {
+            redirect.fd == Some(fd)
+                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+        })
     }
 }
 
@@ -466,13 +465,21 @@ fn parse_read_fd(value: &str) -> Result<u32, ()> {
 }
 
 fn report_read_invalid_identifier(stderr: &mut Vec<u8>, diagnostic_prefix: &str, name: &str) {
-    let _ = writeln!(stderr, "{diagnostic_prefix}read: `{name}': not a valid identifier");
+    let _ = writeln!(
+        stderr,
+        "{diagnostic_prefix}read: `{name}': not a valid identifier"
+    );
 }
 
 fn first_invalid_read_option(word: &str) -> Option<char> {
     let mut chars = word.chars();
     chars.next()?;
-    chars.find(|ch| !matches!(ch, 'a' | 'd' | 'e' | 'i' | 'n' | 'N' | 'p' | 'r' | 's' | 't' | 'u'))
+    chars.find(|ch| {
+        !matches!(
+            ch,
+            'a' | 'd' | 'e' | 'i' | 'n' | 'N' | 'p' | 'r' | 's' | 't' | 'u'
+        )
+    })
 }
 
 fn command_closes_stdin(cmd: &CommandNode) -> bool {

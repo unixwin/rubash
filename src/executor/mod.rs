@@ -2,10 +2,10 @@
 //!
 //! Executes parsed AST commands.
 
-pub(crate) mod path;
-mod glob;
-mod upstream_scripts;
 mod arithmetic;
+mod glob;
+pub(crate) mod path;
+mod upstream_scripts;
 use arithmetic::{
     arithmetic_division_by_zero_token, eval_arith_value, eval_conditional_arith_value,
 };
@@ -41,6 +41,7 @@ mod command_substitution_values;
 mod command_words;
 mod compound_exec;
 use compound_exec::*;
+mod declare_local;
 mod dynamic_arrays;
 mod embedded_mutations;
 mod embedded_parameters;
@@ -50,16 +51,20 @@ mod expand_braced_patterns;
 mod expand_braced_replacement;
 mod expand_braced_special;
 mod expand_word;
+mod export_builtin;
 mod external_file_builtins;
 mod external_finish;
 mod external_inner;
 mod external_redirects;
 mod external_setup;
+mod function_calls;
+mod function_locals;
 mod getopts_enable;
 mod init;
 mod job_builtins;
 mod limit_builtins;
 mod lookup_paths;
+mod loop_select;
 mod mapfile_builtin;
 mod mapfile_helpers;
 mod option_builtins;
@@ -75,23 +80,18 @@ mod pwd_loop_builtins;
 mod read_builtin;
 mod read_io;
 mod read_redirected_fd;
+mod readonly_functions;
 mod shell_options;
 mod shift_echo_builtins;
 mod source_type_state;
 mod temporary_assignments;
-mod variable_state;
+mod trap_exec;
 mod trap_stack_builtins;
 mod type_builtin;
 mod type_describe;
 mod type_functions;
-mod declare_local;
-mod export_builtin;
-mod function_calls;
-mod function_locals;
-mod loop_select;
-mod readonly_functions;
-mod trap_exec;
 mod unset_arrays;
+mod variable_state;
 
 mod assignment_helpers;
 mod ast_exec;

@@ -92,10 +92,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             return None;
         }
 
-        (
-            parse_for_body_commands(&tokens[body_start..i]),
-            i + 1,
-        )
+        (parse_for_body_commands(&tokens[body_start..i]), i + 1)
     };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);

@@ -199,8 +199,15 @@ where
         valid_assign_names.push(name);
     }
     let assign_names = valid_assign_names;
-    if assign_declare_names(&assign_names, variables, array, assoc, integer, !print, stderr)?
-        != EXECUTION_SUCCESS
+    if assign_declare_names(
+        &assign_names,
+        variables,
+        array,
+        assoc,
+        integer,
+        !print,
+        stderr,
+    )? != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
     }

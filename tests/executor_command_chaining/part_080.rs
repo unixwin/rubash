@@ -292,7 +292,8 @@ fn test_read_u_reports_bad_fd_for_unopened_or_closed_fd() {
 fn test_read_u_allows_open_fd_at_eof() {
     let output_path = "target/rubash-read-u-open-empty-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("read -u3 value 3<<< ''; printf '%s:<%s>' \"$?\" \"$value\" > {output_path}");
+    let input =
+        format!("read -u3 value 3<<< ''; printf '%s:<%s>' \"$?\" \"$value\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();

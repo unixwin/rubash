@@ -8,8 +8,8 @@ use super::storage::{
     append_array_value, append_assoc_value, eval_arith_value, is_noassign_bash_array,
 };
 use super::{
-    ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, EXECUTION_FAILURE, EXECUTION_SUCCESS,
-    DECLARED_UNSET_VARS, READONLY_VARS,
+    ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS, EXECUTION_FAILURE,
+    EXECUTION_SUCCESS, READONLY_VARS,
 };
 
 pub(super) fn assign_declare_names<W>(

@@ -176,8 +176,9 @@ fn test_for_command_input_redirect_feeds_body_reads() {
 fn test_for_command_here_string_feeds_body_read() {
     let output_path = "target/rubash-for-command-herestring-output.txt";
     let _ = fs::remove_file(output_path);
-    let input =
-        format!("for item in one; do read value; echo $item:$value; done <<< alpha > {output_path}");
+    let input = format!(
+        "for item in one; do read value; echo $item:$value; done <<< alpha > {output_path}"
+    );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     assert!(ast.commands[0].for_command.is_some());

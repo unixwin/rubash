@@ -156,8 +156,11 @@ impl Executor {
         let output = self.timed_command_substitution_inner(&words[index..])?;
         print_posix_time();
         let status = self.last_command_substitution_status.get().unwrap_or(0);
-        self.last_command_substitution_status
-            .set(Some(if inverted { invert_exit_status(status) } else { status }));
+        self.last_command_substitution_status.set(Some(if inverted {
+            invert_exit_status(status)
+        } else {
+            status
+        }));
         Some(output)
     }
 

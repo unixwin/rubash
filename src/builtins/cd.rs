@@ -280,4 +280,3 @@ fn logical_posix_test_dir(target: &Target) -> Option<&str> {
     let display = target.display.as_ref()?.to_str()?;
     matches!(display, "/" | "/bin" | "/etc" | "/tmp" | "/usr").then_some(display)
 }
-

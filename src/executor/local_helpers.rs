@@ -10,8 +10,8 @@ pub(in crate::executor) fn validate_local_options(args: &[String]) -> Result<(),
         }
         for option in arg[1..].chars() {
             match option {
-                'a' | 'A' | 'f' | 'F' | 'g' | 'I' | 'i' | 'l' | 'n' | 'p' | 'r' | 't'
-                | 'u' | 'x' => {}
+                'a' | 'A' | 'f' | 'F' | 'g' | 'I' | 'i' | 'l' | 'n' | 'p' | 'r' | 't' | 'u'
+                | 'x' => {}
                 other => return Err(other),
             }
         }

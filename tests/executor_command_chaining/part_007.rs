@@ -49,8 +49,7 @@ fn test_brace_group_here_string_feeds_body_read() {
     let output_path = target_test_path("rubash-brace-group-herestring-output.txt");
     let shell_output_path = shell_test_path(&output_path);
     let _ = fs::remove_file(&output_path);
-    let input =
-        format!("{{ read value; echo got:$value; }} <<< alpha > {shell_output_path}");
+    let input = format!("{{ read value; echo got:$value; }} <<< alpha > {shell_output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();

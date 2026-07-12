@@ -172,11 +172,10 @@ impl Executor {
         {
             return true;
         }
-        cmd.redirect_in
-            .as_ref()
-            .is_some_and(|redirect| {
-                redirect.fd == Some(fd) && !is_closed_redirect_target(&self.expand_word(&redirect.target))
-            })
+        cmd.redirect_in.as_ref().is_some_and(|redirect| {
+            redirect.fd == Some(fd)
+                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+        })
     }
 
     fn mapfile_redirected_fd_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {
@@ -220,8 +219,7 @@ impl Executor {
         if offset >= input.len() {
             return None;
         }
-        self.env_vars
-            .insert(offset_key, input.len().to_string());
+        self.env_vars.insert(offset_key, input.len().to_string());
         Some(input[offset..].to_string())
     }
 

@@ -39,7 +39,9 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
         if bytes[i] == b'\'' {
             i += 1;
             while i < bytes.len() && bytes[i] != b'\'' {
-                if bytes[i] == b'\\' { i += 1; }
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
                 i += 1;
             }
             i += 1;
@@ -49,7 +51,9 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
         if bytes[i] == b'"' {
             i += 1;
             while i < bytes.len() && bytes[i] != b'"' {
-                if bytes[i] == b'\\' { i += 1; }
+                if bytes[i] == b'\\' {
+                    i += 1;
+                }
                 i += 1;
             }
             i += 1;
@@ -77,13 +81,17 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
                 b'{' => depth += 1,
                 b'}' => {
                     depth -= 1;
-                    if depth == 0 { break; }
+                    if depth == 0 {
+                        break;
+                    }
                 }
                 b',' if depth == 1 => has_comma = true,
                 b'.' if depth == 1 && j + 1 < bytes.len() && bytes[j + 1] == b'.' => {
                     has_double_dot = true;
                 }
-                b'\\' => { j += 1; }
+                b'\\' => {
+                    j += 1;
+                }
                 _ => {}
             }
             j += 1;
@@ -154,7 +162,9 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
         let mut current = start;
         loop {
             result.push(current.to_string());
-            if current == end { break; }
+            if current == end {
+                break;
+            }
             current += step;
         }
         return Some(result);
@@ -162,13 +172,19 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
     // Alpha range
     let start = left.as_bytes()[0];
     let end = right.as_bytes()[0];
-    if left.len() == 1 && right.len() == 1 && start.is_ascii_alphabetic() && end.is_ascii_alphabetic() {
+    if left.len() == 1
+        && right.len() == 1
+        && start.is_ascii_alphabetic()
+        && end.is_ascii_alphabetic()
+    {
         let step: i16 = if start <= end { 1 } else { -1 };
         let mut result = Vec::new();
         let mut current = start as i16;
         loop {
             result.push((current as u8 as char).to_string());
-            if current == end as i16 { break; }
+            if current == end as i16 {
+                break;
+            }
             current += step;
         }
         return Some(result);

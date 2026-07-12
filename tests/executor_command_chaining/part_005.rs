@@ -156,7 +156,8 @@ fn test_printf_command_substitution_strips_trailing_newlines() {
 fn test_time_command_substitution_captures_timed_stdout() {
     let output_path = "target/rubash-time-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("v=$(time -p echo hi); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
+    let input =
+        format!("v=$(time -p echo hi); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -165,7 +166,10 @@ fn test_time_command_substitution_captures_timed_stdout() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<hi> status:0\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "v=<hi> status:0\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 
@@ -173,7 +177,8 @@ fn test_time_command_substitution_captures_timed_stdout() {
 fn test_time_command_substitution_inverts_status() {
     let output_path = "target/rubash-time-command-substitution-invert-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("v=$(time ! false); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
+    let input =
+        format!("v=$(time ! false); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
