@@ -25,6 +25,7 @@ fn pathname_patterns_in_word(word: &str) -> Vec<PathnamePattern> {
     let mut has_question = false;
     let mut has_bracket = false;
     let mut globstar = false;
+    let mut operators = Vec::new();
 
     while index < chars.len() {
         if chars[index] == '`' {
@@ -53,13 +54,20 @@ fn pathname_patterns_in_word(word: &str) -> Vec<PathnamePattern> {
                 has_star = true;
                 if chars.get(index + 1) == Some(&'*') {
                     globstar = true;
+                    operators.push("**".to_string());
                     index += 1;
+                } else {
+                    operators.push("*".to_string());
                 }
             }
-            '?' => has_question = true,
+            '?' => {
+                has_question = true;
+                operators.push("?".to_string());
+            }
             '[' => {
                 if let Some(next_index) = skip_bracket_class(&chars, index) {
                     has_bracket = true;
+                    operators.push(chars[index..next_index].iter().collect());
                     index = next_index;
                     continue;
                 }
@@ -73,6 +81,7 @@ fn pathname_patterns_in_word(word: &str) -> Vec<PathnamePattern> {
     if has_star || has_question || has_bracket {
         vec![PathnamePattern {
             text: word.to_string(),
+            operators,
             has_star,
             has_question,
             has_bracket,

@@ -340,6 +340,7 @@ pub struct TildeExpansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathnamePattern {
     pub text: String,
+    pub operators: Vec<String>,
     pub has_star: bool,
     pub has_question: bool,
     pub has_bracket: bool,
