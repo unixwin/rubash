@@ -72,6 +72,28 @@ pub struct LoopCommand {
 #[derive(Debug, Clone)]
 pub struct ConditionalCommand {
     pub args: Vec<String>,
+    pub expression: ConditionalExpression,
+}
+
+/// Represents the parsed expression inside `[[ ... ]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalExpression {
+    pub kind: ConditionalExpressionKind,
+    pub operator: Option<String>,
+    pub operands: Vec<String>,
+    pub children: Vec<ConditionalExpression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionalExpressionKind {
+    Empty,
+    Word,
+    Unary,
+    Binary,
+    Logical,
+    Negation,
+    Group,
+    Unknown,
 }
 
 /// Represents a `( compound_list )` subshell command.

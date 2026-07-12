@@ -3,7 +3,7 @@
 //! Run with: cargo test --test parser_tests
 
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, QuoteKind};
+use rubash::parser::{parse, ConditionalExpressionKind, QuoteKind};
 
 #[path = "parser_coproc_tests.rs"]
 mod coproc_tests;
@@ -415,6 +415,55 @@ mod conditional_tests {
             ast.commands[0].words,
             ["[[", "$value", "==", "a*", "&&", "-n", "$other", "]]"]
         );
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Logical
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("&&"));
+        assert_eq!(conditional.expression.children.len(), 2);
+        assert_eq!(
+            conditional.expression.children[0].kind,
+            ConditionalExpressionKind::Binary
+        );
+        assert_eq!(
+            conditional.expression.children[0].operator.as_deref(),
+            Some("==")
+        );
+        assert_eq!(
+            conditional.expression.children[0].operands,
+            ["$value", "a*"]
+        );
+        assert_eq!(
+            conditional.expression.children[1].kind,
+            ConditionalExpressionKind::Unary
+        );
+        assert_eq!(
+            conditional.expression.children[1].operator.as_deref(),
+            Some("-n")
+        );
+        assert_eq!(conditional.expression.children[1].operands, ["$other"]);
+    }
+
+    #[test]
+    fn test_conditional_command_records_group_and_negation_expression() {
+        let input = "[[ ! ( -z $empty || $value =~ ^a ) ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Negation
+        );
+        let group = &conditional.expression.children[0];
+        assert_eq!(group.kind, ConditionalExpressionKind::Group);
+        let logical = &group.children[0];
+        assert_eq!(logical.kind, ConditionalExpressionKind::Logical);
+        assert_eq!(logical.operator.as_deref(), Some("||"));
+        assert_eq!(logical.children[0].kind, ConditionalExpressionKind::Unary);
+        assert_eq!(logical.children[0].operator.as_deref(), Some("-z"));
+        assert_eq!(logical.children[1].kind, ConditionalExpressionKind::Binary);
+        assert_eq!(logical.children[1].operator.as_deref(), Some("=~"));
     }
 
     #[test]
