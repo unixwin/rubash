@@ -1189,6 +1189,7 @@ mod parameter_expansion_tests {
         assert_eq!(expansions[0].parameter, "HOME");
         assert_eq!(expansions[0].name, "HOME");
         assert_eq!(expansions[0].operator, None);
+        assert!(!expansions[0].operator_prefix);
         assert_eq!(expansions[0].word, None);
         assert!(!expansions[0].braced);
         assert_eq!(expansions[0].word_index, Some(1));
@@ -1198,6 +1199,7 @@ mod parameter_expansion_tests {
         assert_eq!(expansions[1].parameter, "USER:-guest");
         assert_eq!(expansions[1].name, "USER");
         assert_eq!(expansions[1].operator.as_deref(), Some(":-"));
+        assert!(!expansions[1].operator_prefix);
         assert_eq!(expansions[1].word.as_deref(), Some("guest"));
         assert!(expansions[1].braced);
         assert_eq!(expansions[1].word_index, Some(2));
@@ -1207,6 +1209,7 @@ mod parameter_expansion_tests {
         assert_eq!(expansions[2].parameter, "name");
         assert_eq!(expansions[2].name, "name");
         assert_eq!(expansions[2].operator, None);
+        assert!(!expansions[2].operator_prefix);
         assert_eq!(expansions[2].word_index, Some(3));
         assert_eq!(expansions[3].text, "$?");
         assert_eq!(expansions[3].parameter, "?");
@@ -1281,19 +1284,43 @@ mod parameter_expansion_tests {
         assert_eq!(expansions.len(), 5);
         assert_eq!(expansions[0].name, "file");
         assert_eq!(expansions[0].operator.as_deref(), Some("##"));
+        assert!(!expansions[0].operator_prefix);
         assert_eq!(expansions[0].word.as_deref(), Some("*/"));
         assert_eq!(expansions[1].name, "file");
         assert_eq!(expansions[1].operator.as_deref(), Some("%"));
+        assert!(!expansions[1].operator_prefix);
         assert_eq!(expansions[1].word.as_deref(), Some(".rs"));
         assert_eq!(expansions[2].name, "text");
         assert_eq!(expansions[2].operator.as_deref(), Some("//"));
+        assert!(!expansions[2].operator_prefix);
         assert_eq!(expansions[2].word.as_deref(), Some("old/new"));
         assert_eq!(expansions[3].name, "array[@]");
         assert_eq!(expansions[3].operator.as_deref(), Some("#"));
+        assert!(expansions[3].operator_prefix);
         assert_eq!(expansions[3].word, None);
         assert_eq!(expansions[4].name, "value");
         assert_eq!(expansions[4].operator.as_deref(), Some(":="));
+        assert!(!expansions[4].operator_prefix);
         assert_eq!(expansions[4].word.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn test_parameter_expansion_records_prefix_operator_shape() {
+        let input = "echo ${!name} ${array#prefix}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].name, "name");
+        assert_eq!(expansions[0].operator.as_deref(), Some("!"));
+        assert!(expansions[0].operator_prefix);
+        assert_eq!(expansions[0].word, None);
+        assert_eq!(expansions[1].name, "array");
+        assert_eq!(expansions[1].operator.as_deref(), Some("#"));
+        assert!(!expansions[1].operator_prefix);
+        assert_eq!(expansions[1].word.as_deref(), Some("prefix"));
     }
 }
 

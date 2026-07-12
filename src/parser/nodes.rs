@@ -306,6 +306,7 @@ pub struct ParameterExpansion {
     pub close_delimiter: String,
     pub name: String,
     pub operator: Option<String>,
+    pub operator_prefix: bool,
     pub word: Option<String>,
     pub braced: bool,
     pub word_index: Option<usize>,

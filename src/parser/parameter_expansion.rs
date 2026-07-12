@@ -105,7 +105,7 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let parameter = chars[start + 2..index].iter().collect::<String>();
-                    let (name, operator, word) = parameter_parts(&parameter);
+                    let (name, operator, operator_prefix, word) = parameter_parts(&parameter);
                     return Some((
                         ParameterExpansion {
                             text: chars[start..=index].iter().collect(),
@@ -114,6 +114,7 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
                             close_delimiter: "}".to_string(),
                             name,
                             operator,
+                            operator_prefix,
                             word,
                             braced: true,
                             word_index: None,
@@ -160,6 +161,7 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
         parameter,
         close_delimiter: String::new(),
         operator: None,
+        operator_prefix: false,
         word: None,
         braced: false,
         word_index: None,
@@ -167,13 +169,13 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
     }
 }
 
-fn parameter_parts(parameter: &str) -> (String, Option<String>, Option<String>) {
+fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<String>) {
     if let Some(name) = parameter.strip_prefix('#') {
-        return (name.to_string(), Some("#".to_string()), None);
+        return (name.to_string(), Some("#".to_string()), true, None);
     }
 
     if let Some(name) = parameter.strip_prefix('!') {
-        return (name.to_string(), Some("!".to_string()), None);
+        return (name.to_string(), Some("!".to_string()), true, None);
     }
 
     for operator in [
@@ -183,12 +185,13 @@ fn parameter_parts(parameter: &str) -> (String, Option<String>, Option<String>) 
             return (
                 parameter[..index].to_string(),
                 Some(operator.to_string()),
+                false,
                 Some(parameter[index + operator.len()..].to_string()),
             );
         }
     }
 
-    (parameter.to_string(), None, None)
+    (parameter.to_string(), None, false, None)
 }
 
 fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
