@@ -1,4 +1,4 @@
-use super::ProcessSubstitution;
+use super::{parse, ProcessSubstitution};
 use crate::lexer::{Token, TokenKind};
 
 pub(super) fn process_substitution_redirect_target(
@@ -118,10 +118,12 @@ fn collect_process_substitution_target_with_prefix(
         .collect::<Vec<_>>()
         .join(" ");
     let prefix = if output { ">(" } else { "<(" };
+    let commands = parse(&crate::lexer::tokenize(&source)).commands;
     Some((
         ProcessSubstitution {
             target: format!("{prefix}{source})"),
             source,
+            commands,
             output,
             word_index: None,
             redirect_fd: None,

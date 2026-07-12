@@ -54,6 +54,12 @@ fn test_output_process_substitution_redirect() {
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, ">(cat > out.txt)");
     assert_eq!(process[0].source, "cat > out.txt");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].words, ["cat"]);
+    assert_eq!(
+        process[0].commands[0].redirect_out.as_ref().unwrap().target,
+        "out.txt"
+    );
     assert!(process[0].output);
     assert_eq!(process[0].word_index, None);
     assert_eq!(process[0].redirect_fd, None);
@@ -71,6 +77,12 @@ fn test_output_process_substitution_word() {
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, ">(cat > out.txt)");
     assert_eq!(process[0].source, "cat > out.txt");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].words, ["cat"]);
+    assert_eq!(
+        process[0].commands[0].redirect_out.as_ref().unwrap().target,
+        "out.txt"
+    );
     assert!(process[0].output);
     assert_eq!(process[0].word_index, Some(1));
     assert_eq!(process[0].redirect_fd, None);
@@ -91,6 +103,8 @@ fn test_input_process_substitution_redirect_records_structured_ast() {
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, "<(printf data)");
     assert_eq!(process[0].source, "printf data");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].words, ["printf", "data"]);
     assert!(!process[0].output);
     assert_eq!(process[0].word_index, None);
     assert_eq!(process[0].redirect_fd, None);
@@ -108,9 +122,29 @@ fn test_input_process_substitution_word_records_structured_ast() {
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, "<(printf a)");
     assert_eq!(process[0].source, "printf a");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].words, ["printf", "a"]);
     assert!(!process[0].output);
     assert_eq!(process[0].word_index, Some(1));
     assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
+fn test_process_substitution_records_nested_body_ast() {
+    let input = "cat < <(echo $(date); printf done)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].source, "echo $(date) ; printf done");
+    assert_eq!(process[0].commands.len(), 2);
+    assert_eq!(process[0].commands[0].words, ["echo", "$(date)"]);
+    assert_eq!(process[0].commands[1].words, ["printf", "done"]);
+    assert_eq!(
+        process[0].commands[0].command_substitutions[0].source,
+        "date"
+    );
 }
 
 #[test]

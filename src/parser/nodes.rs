@@ -200,10 +200,11 @@ pub struct ArrayElementAssignment {
 }
 
 /// Represents a parsed `<(...)` or `>(...)` process substitution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ProcessSubstitution {
     pub target: String,
     pub source: String,
+    pub commands: Vec<CommandNode>,
     pub output: bool,
     pub word_index: Option<usize>,
     pub redirect_fd: Option<u32>,
