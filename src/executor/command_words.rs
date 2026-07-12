@@ -43,6 +43,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_for_word_values(&self, word: &str) -> Vec<String> {
+        if let Some(values) = self.array_at_word_values(word) {
+            return values;
+        }
         if self.is_brace_expand_enabled() && !word.contains("${") {
             let braced = crate::expand::braces::expand_braces(word);
             if braced.len() > 1 {

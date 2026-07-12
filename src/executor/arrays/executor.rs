@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::assoc_keys;
 
 impl Executor {
     pub(in crate::executor) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
@@ -67,11 +68,31 @@ impl Executor {
     }
 
     pub(in crate::executor) fn array_at_word_values(&self, word: &str) -> Option<Vec<String>> {
+        let quoted_array_word =
+            (word.starts_with('"') && word.ends_with('"')) || word.starts_with('\x1d');
         let word = word
             .strip_prefix('"')
             .and_then(|word| word.strip_suffix('"'))
             .unwrap_or(word);
         let word = word.strip_prefix('\x1d').unwrap_or(word);
+        if quoted_array_word {
+            if let Some(name) = word
+                .strip_prefix("${!")
+                .and_then(|word| word.strip_suffix("[@]}"))
+            {
+                if is_noassign_bash_array(name)
+                    || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
+                {
+                    return None;
+                }
+                let storage_name = self.resolved_variable_name(name)?;
+                let storage = self.parameter_array_storage(name)?;
+                if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
+                    return Some(assoc_keys(&storage));
+                }
+                return Some(array_indices(&storage));
+            }
+        }
         let name = word.strip_prefix("${")?.strip_suffix("[@]}")?;
         if is_noassign_bash_array(name)
             || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")

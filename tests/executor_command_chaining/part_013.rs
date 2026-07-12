@@ -21,6 +21,50 @@ fn test_array_star_indices_expand() {
 }
 
 #[test]
+fn test_quoted_array_at_indices_expand_as_loop_words() {
+    let output_path = "target/rubash-quoted-array-indices-loop-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(apple banana cherry); for i in \"${{!arr[@]}}\"; do echo \"[$i]=${{arr[$i]}}\" >> {output_path}; done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "[0]=apple\n[1]=banana\n[2]=cherry\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_quoted_assoc_at_indices_expand_as_loop_words() {
+    let output_path = "target/rubash-quoted-assoc-indices-loop-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "declare -A loop_assoc_indices=([red]=apple [blue]=berry); for key in \"${{!loop_assoc_indices[@]}}\"; do echo \"$key=${{loop_assoc_indices[$key]}}\" >> {output_path}; done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "red=apple\nblue=berry\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_array_numeric_subscript_expands_element() {
     let output_path = "target/rubash-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
