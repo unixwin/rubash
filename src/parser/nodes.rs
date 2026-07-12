@@ -520,6 +520,8 @@ pub struct FunctionCommand {
     pub open_paren: Option<String>,
     pub close_paren: Option<String>,
     pub body_kind: FunctionBodyKind,
+    pub body_open_delimiter: Option<String>,
+    pub body_close_delimiter: Option<String>,
     pub body_start: Option<usize>,
     pub body_end: Option<usize>,
 }

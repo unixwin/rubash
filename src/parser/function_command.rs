@@ -211,6 +211,12 @@ fn function_command(
     body_start: Option<usize>,
     body_end: Option<usize>,
 ) -> Box<FunctionCommand> {
+    let (body_open_delimiter, body_close_delimiter) = match body_kind {
+        FunctionBodyKind::BraceGroup => (Some("{".to_string()), Some("}".to_string())),
+        FunctionBodyKind::Subshell => (Some("(".to_string()), Some(")".to_string())),
+        FunctionBodyKind::CommandSequence | FunctionBodyKind::CompoundCommand => (None, None),
+    };
+
     Box::new(FunctionCommand {
         name,
         body,
@@ -220,6 +226,8 @@ fn function_command(
         open_paren: has_parentheses.then(|| "(".to_string()),
         close_paren: has_parentheses.then(|| ")".to_string()),
         body_kind,
+        body_open_delimiter,
+        body_close_delimiter,
         body_start,
         body_end,
     })

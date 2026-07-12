@@ -353,6 +353,8 @@ mod function_tests {
         assert_eq!(function.open_paren, None);
         assert_eq!(function.close_paren, None);
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
         assert!(function.body_start.is_some());
         assert!(function.body_end.is_some());
         assert_eq!(function.body.len(), 1);
@@ -373,6 +375,8 @@ mod function_tests {
         assert_eq!(function.open_paren.as_deref(), Some("("));
         assert_eq!(function.close_paren.as_deref(), Some(")"));
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
@@ -390,6 +394,8 @@ mod function_tests {
         assert_eq!(function.open_paren.as_deref(), Some("("));
         assert_eq!(function.close_paren.as_deref(), Some(")"));
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
@@ -412,6 +418,8 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 2);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
         assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
@@ -427,6 +435,8 @@ mod function_tests {
         assert!(!function.keyword);
         assert!(function.has_parentheses);
         assert_eq!(function.body_kind, FunctionBodyKind::Subshell);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("("));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some(")"));
         assert!(function.body_start.is_some());
         assert!(function.body_end.is_some());
         assert_eq!(function.body[0].words, ["echo", "hi"]);
@@ -455,6 +465,8 @@ mod function_tests {
         assert_eq!(function.name, "foo");
         let for_command = function.body[0].for_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(function.body_open_delimiter, None);
+        assert_eq!(function.body_close_delimiter, None);
         assert_eq!(for_command.keyword, "for");
         assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
         assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
@@ -509,6 +521,8 @@ mod function_tests {
         assert_eq!(function.name, "foo");
         let loop_command = function.body[0].loop_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(function.body_open_delimiter, None);
+        assert_eq!(function.body_close_delimiter, None);
         assert!(!loop_command.until);
         assert_eq!(loop_command.kind, LoopKind::While);
         assert_eq!(loop_command.keyword, "while");
