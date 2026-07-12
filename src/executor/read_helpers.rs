@@ -233,7 +233,17 @@ impl Executor {
         line: &str,
         raw: bool,
     ) {
-        if names.len() == 1 {
+        self.assign_read_scalar_names_with_field_count(names, line, raw, names.len());
+    }
+
+    pub(in crate::executor) fn assign_read_scalar_names_with_field_count(
+        &mut self,
+        names: &[String],
+        line: &str,
+        raw: bool,
+        field_count: usize,
+    ) {
+        if names.len() == 1 && field_count == 1 {
             let value = if raw {
                 line.to_string()
             } else {
@@ -249,9 +259,9 @@ impl Executor {
             .map(String::as_str)
             .unwrap_or(" \t\n");
         let fields = if raw {
-            read_scalar_fields(line, names.len(), ifs)
+            read_scalar_fields(line, field_count, ifs)
         } else {
-            read_scalar_fields_with_backslashes(line, names.len(), ifs)
+            read_scalar_fields_with_backslashes(line, field_count, ifs)
         };
         for (index, name) in names.iter().enumerate() {
             let value = fields.get(index).cloned().unwrap_or_default();

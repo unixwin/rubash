@@ -134,6 +134,79 @@ fn test_read_double_dash_allows_name_arguments() {
 }
 
 #[test]
+fn test_read_invalid_scalar_name_reports_identifier_error() {
+    let output_path = "target/rubash-read-invalid-scalar-status.txt";
+    let error_path = "target/rubash-read-invalid-scalar-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read ok 1bad later <<< 'a b c' 2> {error_path}; \
+         printf '%s:%s:%s' \"$?\" \"$ok\" \"$later\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1:a:");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: `1bad': not a valid identifier"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_invalid_array_name_falls_back_to_scalar_names() {
+    let output_path = "target/rubash-read-invalid-array-status.txt";
+    let error_path = "target/rubash-read-invalid-array-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read -a 1bad ok <<< 'a b' 2> {error_path}; \
+         printf '%s:%s' \"$?\" \"$ok\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1:a");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: `1bad': not a valid identifier"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_a_missing_argument_reports_usage() {
+    let output_path = "target/rubash-read-a-missing-status.txt";
+    let error_path = "target/rubash-read-a-missing-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!("read -a 2> {error_path} <<< 'a b'; echo $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: -a: option requires an argument"));
+    assert!(error.contains("read: usage:"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_read_combined_rn_reads_raw_limited_characters() {
     let output_path = "target/rubash-read-rn-output.txt";
     let _ = fs::remove_file(output_path);

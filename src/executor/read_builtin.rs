@@ -12,6 +12,9 @@ impl Executor {
         let mut exact_char_limit = false;
         let mut raw = false;
         let mut scalar_names = Vec::new();
+        let mut scalar_field_count = 0usize;
+        let mut invalid_name = false;
+        let mut stop_scalar_names = false;
         let mut prompt: Option<String> = None;
         let mut read_fd: Option<u32> = None;
         let mut index = 1;
@@ -20,24 +23,71 @@ impl Executor {
                 "--" => {
                     index += 1;
                     while index < cmd.words.len() {
+                        if stop_scalar_names {
+                            index += 1;
+                            continue;
+                        }
                         if is_shell_name(&cmd.words[index]) {
                             scalar_names.push(cmd.words[index].clone());
+                            scalar_field_count += 1;
+                        } else {
+                            report_read_invalid_identifier(
+                                &mut stderr,
+                                &self.diagnostic_prefix(),
+                                &cmd.words[index],
+                            );
+                            invalid_name = true;
+                            scalar_field_count += 1;
+                            stop_scalar_names = true;
                         }
                         index += 1;
                     }
                 }
                 "-a" => {
-                    if let Some(name) = cmd.words.get(index + 1).filter(|name| is_shell_name(name))
-                    {
+                    let Some(name) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -a: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    if is_shell_name(name) {
                         array_name = Some(name.clone());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        scalar_field_count += 1;
                     }
                     index += 2;
                 }
                 "-ar" | "-ra" => {
                     raw = true;
-                    if let Some(name) = cmd.words.get(index + 1).filter(|name| is_shell_name(name))
-                    {
+                    let Some(name) = cmd.words.get(index + 1) else {
+                        let option = &cmd.words[index][1..];
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -{option}: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    if is_shell_name(name) {
                         array_name = Some(name.clone());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        scalar_field_count += 1;
                     }
                     index += 2;
                 }
@@ -45,6 +95,14 @@ impl Executor {
                     let name = &word[2..];
                     if is_shell_name(name) {
                         array_name = Some(name.to_string());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        stop_scalar_names = true;
                     }
                     index += 1;
                 }
@@ -244,8 +302,20 @@ impl Executor {
                     let _ = writeln!(&mut stderr, "{READ_USAGE}");
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
-                word if is_shell_name(word) => {
-                    scalar_names.push(word.to_string());
+                word if !stop_scalar_names => {
+                    if is_shell_name(word) {
+                        scalar_names.push(word.to_string());
+                        scalar_field_count += 1;
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            word,
+                        );
+                        invalid_name = true;
+                        scalar_field_count += 1;
+                        stop_scalar_names = true;
+                    }
                     index += 1;
                 }
                 _ => {
@@ -299,24 +369,42 @@ impl Executor {
             };
             self.env_vars.insert(name.clone(), value);
             mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
-            return 0;
+            return if invalid_name {
+                self.finish_read_error(cmd, &stderr, 1)
+            } else {
+                0
+            };
         }
 
         let scalar_names = if scalar_names.is_empty() {
-            vec!["REPLY".to_string()]
+            if invalid_name {
+                Vec::new()
+            } else {
+                scalar_field_count = 1;
+                vec!["REPLY".to_string()]
+            }
         } else {
             scalar_names
         };
         if !scalar_names.is_empty() {
             if char_limit == Some(0) {
                 self.assign_read_scalar_names(&scalar_names, "", raw);
-                return 0;
+                return if invalid_name {
+                    self.finish_read_error(cmd, &stderr, 1)
+                } else {
+                    0
+                };
             }
 
             let status = if let Some(line) =
                 self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit)
             {
-                self.assign_read_scalar_names(&scalar_names, &line, raw);
+                self.assign_read_scalar_names_with_field_count(
+                    &scalar_names,
+                    &line,
+                    raw,
+                    scalar_field_count,
+                );
                 0
             } else if read_fd.is_some() || command_closes_stdin(cmd) {
                 self.assign_read_scalar_names(&scalar_names, "", raw);
@@ -338,7 +426,14 @@ impl Executor {
                     Err(_) => 1,
                 }
             };
-            return status;
+            return if invalid_name {
+                self.finish_read_error(cmd, &stderr, 1)
+            } else {
+                status
+            };
+        }
+        if invalid_name {
+            return self.finish_read_error(cmd, &stderr, 1);
         }
         let _ = writeln!(
             &mut stderr,
@@ -368,6 +463,10 @@ impl Executor {
 fn parse_read_fd(value: &str) -> Result<u32, ()> {
     let fd = value.parse::<i32>().map_err(|_| ())?;
     u32::try_from(fd).map_err(|_| ())
+}
+
+fn report_read_invalid_identifier(stderr: &mut Vec<u8>, diagnostic_prefix: &str, name: &str) {
+    let _ = writeln!(stderr, "{diagnostic_prefix}read: `{name}': not a valid identifier");
 }
 
 fn first_invalid_read_option(word: &str) -> Option<char> {
