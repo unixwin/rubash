@@ -7,6 +7,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     }
 
     let then_index = find_if_then(tokens, start + 1)?;
+    let then_keyword = tokens[then_index].value.clone();
     let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
     let mut index = then_index + 1;
 
@@ -15,19 +16,27 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
 
     let mut elif_branches = Vec::new();
     while is_keyword(tokens, index, "elif") {
+        let elif_keyword = tokens[index].value.clone();
         let elif_then = find_if_then(tokens, index + 1)?;
+        let elif_then_keyword = tokens[elif_then].value.clone();
         let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
         let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
-        elif_branches.push(ElifBranch { condition, body });
+        elif_branches.push(ElifBranch {
+            keyword: elif_keyword,
+            condition,
+            then_keyword: elif_then_keyword,
+            body,
+        });
         index = next_boundary;
     }
 
-    let else_body = if is_keyword(tokens, index, "else") {
+    let (else_keyword, else_body) = if is_keyword(tokens, index, "else") {
+        let else_keyword = tokens[index].value.clone();
         let (body, next_boundary) = parse_if_section(tokens, index + 1)?;
         index = next_boundary;
-        Some(body)
+        (Some(else_keyword), Some(body))
     } else {
-        None
+        (None, None)
     };
 
     if !is_keyword(tokens, index, "fi") {
@@ -37,10 +46,14 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.if_command = Some(IfCommand {
+        keyword: tokens[start].value.clone(),
         condition,
+        then_keyword,
         then_body,
         elif_branches,
+        else_keyword,
         else_body,
+        end_keyword: tokens[index].value.clone(),
     });
 
     let mut next_i = index + 1;

@@ -85,15 +85,21 @@ pub enum CommandBodyKind {
 /// Represents an `if condition; then ... [elif ...] [else ...] fi` command.
 #[derive(Debug, Clone)]
 pub struct IfCommand {
+    pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub then_keyword: String,
     pub then_body: Vec<CommandNode>,
     pub elif_branches: Vec<ElifBranch>,
+    pub else_keyword: Option<String>,
     pub else_body: Option<Vec<CommandNode>>,
+    pub end_keyword: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ElifBranch {
+    pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub then_keyword: String,
     pub body: Vec<CommandNode>,
 }
 
