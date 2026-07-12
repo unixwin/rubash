@@ -184,6 +184,17 @@ pub struct ExtglobPattern {
     pub assignment_name: Option<String>,
 }
 
+/// Represents a parsed tilde prefix such as `~`, `~/x`, `~+`, or `~user`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TildeExpansion {
+    pub text: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub after_colon: bool,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -256,6 +267,8 @@ pub struct CommandNode {
     pub brace_expansions: Vec<BraceExpansion>,
     /// Structured extglob patterns parsed from `@(a|b)`, `!(x)`, etc.
     pub extglob_patterns: Vec<ExtglobPattern>,
+    /// Structured tilde prefixes parsed from words and assignment values.
+    pub tilde_expansions: Vec<TildeExpansion>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -334,6 +347,7 @@ impl CommandNode {
             parameter_expansions: Vec::new(),
             brace_expansions: Vec::new(),
             extglob_patterns: Vec::new(),
+            tilde_expansions: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

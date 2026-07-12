@@ -26,6 +26,7 @@ mod redirections;
 mod select_command;
 mod subshell_command;
 mod support;
+mod tilde_expansion;
 mod token_actions;
 
 #[cfg(test)]
@@ -56,4 +57,5 @@ use redirections::*;
 use select_command::*;
 use subshell_command::*;
 use support::*;
+use tilde_expansion::*;
 use token_actions::*;
