@@ -39,6 +39,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(CoprocCommand {
                 name,
                 words: Vec::new(),
+                body_kind: CoprocBodyKind::BraceGroup,
                 body: Some(body),
             });
             let mut next_i = i + 1;
@@ -59,6 +60,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(CoprocCommand {
                 name,
                 words: Vec::new(),
+                body_kind: CoprocBodyKind::BraceGroup,
                 body: Some(body),
             });
             let mut next_i = close_i + 1;
@@ -95,6 +97,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 command.coproc_command = Some(CoprocCommand {
                     name,
                     words: Vec::new(),
+                    body_kind: CoprocBodyKind::Subshell,
                     body: Some(body),
                 });
                 let mut next_i = i + 1;
@@ -115,6 +118,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(CoprocCommand {
                 name,
                 words: Vec::new(),
+                body_kind: CoprocBodyKind::CommandSequence,
                 body: Some(body),
             });
             let mut next_i = body_end;
@@ -134,6 +138,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(CoprocCommand {
                 name,
                 words: Vec::new(),
+                body_kind: CoprocBodyKind::CompoundCommand,
                 body: Some(vec![body_command]),
             });
             let mut next_i = body_end;
@@ -172,6 +177,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     command.coproc_command = Some(CoprocCommand {
         name,
         words,
+        body_kind: CoprocBodyKind::SimpleCommand,
         body: None,
     });
     let mut next_i = i;

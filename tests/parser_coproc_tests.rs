@@ -1,5 +1,5 @@
 use rubash::lexer::tokenize;
-use rubash::parser::parse;
+use rubash::parser::{parse, CoprocBodyKind};
 
 #[test]
 fn test_named_coproc_parses_split_brace_group_body() {
@@ -11,6 +11,7 @@ fn test_named_coproc_parses_split_brace_group_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     let body = coproc.body.as_ref().unwrap();
     assert_eq!(body.len(), 1);
     assert_eq!(body[0].words, ["echo", "hi"]);
@@ -26,6 +27,7 @@ fn test_unnamed_coproc_parses_split_brace_group_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name, None);
     assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(coproc.body.as_ref().unwrap()[0].words, ["echo", "hi"]);
 }
 
@@ -39,6 +41,7 @@ fn test_coproc_simple_command_does_not_treat_first_word_as_name() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name, None);
     assert_eq!(coproc.words, ["MYC", "cat"]);
+    assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
     assert!(coproc.body.is_none());
 }
 
@@ -51,6 +54,7 @@ fn test_named_coproc_parses_subshell_body() {
     assert_eq!(ast.commands.len(), 1);
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::Subshell);
     assert_eq!(coproc.body.as_ref().unwrap()[0].words, ["echo", "hi"]);
 }
 
@@ -64,6 +68,7 @@ fn test_named_coproc_parses_for_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
     let for_command = coproc.body.as_ref().unwrap()[0]
         .for_command
         .as_ref()
@@ -83,6 +88,7 @@ fn test_named_coproc_parses_conditional_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CommandSequence);
     assert_eq!(
         coproc.body.as_ref().unwrap()[0].words,
         ["[[", "$value", "==", "ok", "]]"]

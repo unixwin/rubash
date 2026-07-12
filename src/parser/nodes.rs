@@ -421,8 +421,18 @@ pub struct CoprocCommand {
     pub name: Option<String>,
     /// The command words (for simple commands)
     pub words: Vec<String>,
+    pub body_kind: CoprocBodyKind,
     /// Brace group body (for compound commands)
     pub body: Option<Vec<CommandNode>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoprocBodyKind {
+    SimpleCommand,
+    BraceGroup,
+    Subshell,
+    CommandSequence,
+    CompoundCommand,
 }
 
 /// Represents a parsed command
