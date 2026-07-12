@@ -255,9 +255,9 @@ impl Executor {
                         || stripped.contains("?(")
                         || stripped.contains("!(")
                     {
-                        crate::executor::conditional::extglob_case_pattern_matches(&pattern, &word)
+                        crate::executor::conditional::extglob_case_pattern_matches(&stripped, &word)
                     } else {
-                        case_pattern_matches(&pattern, &word)
+                        case_pattern_matches(&stripped, &word)
                     }
                 });
             if matched {
