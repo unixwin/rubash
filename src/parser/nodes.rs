@@ -195,6 +195,18 @@ pub struct TildeExpansion {
     pub assignment_name: Option<String>,
 }
 
+/// Represents a parsed pathname expansion pattern such as `*.rs` or `src/[ab]?`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathnamePattern {
+    pub text: String,
+    pub has_star: bool,
+    pub has_question: bool,
+    pub has_bracket: bool,
+    pub globstar: bool,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -269,6 +281,8 @@ pub struct CommandNode {
     pub extglob_patterns: Vec<ExtglobPattern>,
     /// Structured tilde prefixes parsed from words and assignment values.
     pub tilde_expansions: Vec<TildeExpansion>,
+    /// Structured pathname expansion patterns parsed from glob words.
+    pub pathname_patterns: Vec<PathnamePattern>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -348,6 +362,7 @@ impl CommandNode {
             brace_expansions: Vec::new(),
             extglob_patterns: Vec::new(),
             tilde_expansions: Vec::new(),
+            pathname_patterns: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

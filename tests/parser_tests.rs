@@ -981,6 +981,65 @@ mod tilde_expansion_tests {
     }
 }
 
+mod pathname_pattern_tests {
+    use super::*;
+
+    #[test]
+    fn test_pathname_patterns_record_structured_ast_for_words() {
+        let input = "echo *.rs src/[mp]*.rs docs/??.md src/**/mod.rs literal";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].pathname_patterns.as_slice();
+        assert_eq!(patterns.len(), 4);
+        assert_eq!(patterns[0].text, "*.rs");
+        assert!(patterns[0].has_star);
+        assert!(!patterns[0].has_question);
+        assert!(!patterns[0].has_bracket);
+        assert!(!patterns[0].globstar);
+        assert_eq!(patterns[0].word_index, Some(1));
+        assert_eq!(patterns[1].text, "src/[mp]*.rs");
+        assert!(patterns[1].has_star);
+        assert!(patterns[1].has_bracket);
+        assert_eq!(patterns[1].word_index, Some(2));
+        assert_eq!(patterns[2].text, "docs/??.md");
+        assert!(patterns[2].has_question);
+        assert_eq!(patterns[2].word_index, Some(3));
+        assert_eq!(patterns[3].text, "src/**/mod.rs");
+        assert!(patterns[3].has_star);
+        assert!(patterns[3].globstar);
+        assert_eq!(patterns[3].word_index, Some(4));
+    }
+
+    #[test]
+    fn test_pathname_pattern_skips_command_substitution_source() {
+        let input = "echo $(echo *.rs) visible?.rs";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].pathname_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "visible?.rs");
+        assert!(patterns[0].has_question);
+        assert_eq!(patterns[0].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_assignment_like_word_does_not_record_pathname_pattern() {
+        let input = "echo target=*.rs plain*.rs";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].pathname_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "plain*.rs");
+        assert_eq!(patterns[0].word_index, Some(2));
+    }
+}
+
 mod background_tests {
     use super::*;
 
