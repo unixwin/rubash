@@ -124,6 +124,16 @@ pub struct CompoundAssignment {
     pub word_index: Option<usize>,
 }
 
+/// Represents a parsed `<(...)` or `>(...)` process substitution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessSubstitution {
+    pub target: String,
+    pub source: String,
+    pub output: bool,
+    pub word_index: Option<usize>,
+    pub redirect_fd: Option<u32>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -184,6 +194,8 @@ pub struct CommandNode {
     pub assignments: std::collections::HashMap<String, String>,
     /// Structured compound array assignment words parsed from `name=(...)`.
     pub compound_assignments: Vec<CompoundAssignment>,
+    /// Structured process substitutions parsed from `<(...)` and `>(...)`.
+    pub process_substitutions: Vec<ProcessSubstitution>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -256,6 +268,7 @@ impl CommandNode {
             word_kinds: Vec::new(),
             assignments: std::collections::HashMap::new(),
             compound_assignments: Vec::new(),
+            process_substitutions: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

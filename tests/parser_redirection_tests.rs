@@ -44,6 +44,13 @@ fn test_output_process_substitution_redirect() {
         ast.commands[0].redirect_out.as_ref().unwrap().target,
         ">(cat > out.txt)"
     );
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, None);
 }
 
 #[test]
@@ -54,6 +61,50 @@ fn test_output_process_substitution_word() {
     assert_eq!(ast.commands.len(), 1);
     assert_eq!(ast.commands[0].words, ["tee", ">(cat > out.txt)"]);
     assert!(ast.commands[0].redirect_out.is_none());
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, Some(1));
+    assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
+fn test_input_process_substitution_redirect_records_structured_ast() {
+    let input = "cat < <(printf data)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["cat"]);
+    assert_eq!(
+        ast.commands[0].redirect_in.as_ref().unwrap().target,
+        "<(printf data)"
+    );
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, "<(printf data)");
+    assert_eq!(process[0].source, "printf data");
+    assert!(!process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
+fn test_input_process_substitution_word_records_structured_ast() {
+    let input = "diff <(printf a) expected";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["diff", "<(printf a)", "expected"]);
+    assert!(ast.commands[0].redirect_in.is_none());
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, "<(printf a)");
+    assert_eq!(process[0].source, "printf a");
+    assert!(!process[0].output);
+    assert_eq!(process[0].word_index, Some(1));
+    assert_eq!(process[0].redirect_fd, None);
 }
 
 #[test]

@@ -1,9 +1,10 @@
+use super::ProcessSubstitution;
 use crate::lexer::{Token, TokenKind};
 
 pub(super) fn process_substitution_redirect_target(
     tokens: &[Token],
     redirect_index: usize,
-) -> Option<(String, usize)> {
+) -> Option<(ProcessSubstitution, usize)> {
     if tokens.get(redirect_index)?.kind != TokenKind::RedirectIn {
         return None;
     }
@@ -26,7 +27,7 @@ pub(super) fn process_substitution_redirect_target(
 pub(super) fn process_substitution_word_target(
     tokens: &[Token],
     redirect_index: usize,
-) -> Option<(String, usize)> {
+) -> Option<(ProcessSubstitution, usize)> {
     if tokens.get(redirect_index)?.kind != TokenKind::RedirectIn
         || !tokens
             .get(redirect_index + 1)
@@ -41,7 +42,7 @@ pub(super) fn process_substitution_word_target(
 pub(super) fn output_process_substitution_redirect_target(
     tokens: &[Token],
     redirect_index: usize,
-) -> Option<(String, usize)> {
+) -> Option<(ProcessSubstitution, usize)> {
     if tokens.get(redirect_index)?.kind != TokenKind::RedirectOut
         || tokens.get(redirect_index)?.value != ">"
         || !tokens
@@ -60,7 +61,7 @@ pub(super) fn output_process_substitution_redirect_target(
 pub(super) fn output_process_substitution_word_target(
     tokens: &[Token],
     redirect_index: usize,
-) -> Option<(String, usize)> {
+) -> Option<(ProcessSubstitution, usize)> {
     let redirect = tokens.get(redirect_index)?;
     let open = tokens.get(redirect_index + 1)?;
     if redirect.kind != TokenKind::RedirectOut
@@ -77,22 +78,22 @@ pub(super) fn output_process_substitution_word_target(
 pub(super) fn collect_process_substitution_target(
     tokens: &[Token],
     source_start: usize,
-) -> Option<(String, usize)> {
-    collect_process_substitution_target_with_prefix(tokens, source_start, "<(")
+) -> Option<(ProcessSubstitution, usize)> {
+    collect_process_substitution_target_with_prefix(tokens, source_start, false)
 }
 
 fn collect_output_process_substitution_target(
     tokens: &[Token],
     source_start: usize,
-) -> Option<(String, usize)> {
-    collect_process_substitution_target_with_prefix(tokens, source_start, ">(")
+) -> Option<(ProcessSubstitution, usize)> {
+    collect_process_substitution_target_with_prefix(tokens, source_start, true)
 }
 
 fn collect_process_substitution_target_with_prefix(
     tokens: &[Token],
     source_start: usize,
-    prefix: &str,
-) -> Option<(String, usize)> {
+    output: bool,
+) -> Option<(ProcessSubstitution, usize)> {
     let mut index = source_start;
     let source_start = index;
     let mut depth = 1usize;
@@ -116,5 +117,15 @@ fn collect_process_substitution_target_with_prefix(
         .map(|token| token.value.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    Some((format!("{prefix}{source})"), index))
+    let prefix = if output { ">(" } else { "<(" };
+    Some((
+        ProcessSubstitution {
+            target: format!("{prefix}{source})"),
+            source,
+            output,
+            word_index: None,
+            redirect_fd: None,
+        },
+        index,
+    ))
 }

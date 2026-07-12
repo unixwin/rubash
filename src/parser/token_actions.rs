@@ -101,7 +101,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let fd = redirect_operator_fd(&token.value).or_else(|| {
                     take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
                 });
-                if let Some((target, next_i)) = process_substitution_redirect_target(tokens, *i) {
+                if let Some((mut process_substitution, next_i)) =
+                    process_substitution_redirect_target(tokens, *i)
+                {
+                    process_substitution.redirect_fd = fd;
+                    let target = process_substitution.target.clone();
+                    state
+                        .current_cmd
+                        .process_substitutions
+                        .push(process_substitution);
                     state.current_cmd.redirect_in = Some(Redirect {
                         fd,
                         target,
@@ -109,8 +117,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         clobber: false,
                     });
                     *i = next_i;
-                } else if let Some((target, next_i)) = process_substitution_word_target(tokens, *i)
+                } else if let Some((mut process_substitution, next_i)) =
+                    process_substitution_word_target(tokens, *i)
                 {
+                    process_substitution.word_index = Some(state.current_cmd.words.len());
+                    let target = process_substitution.target.clone();
+                    state
+                        .current_cmd
+                        .process_substitutions
+                        .push(process_substitution);
                     state.current_cmd.words.push(target);
                     state.current_cmd.word_kinds.push(TokenKind::Word);
                     *i = next_i;
