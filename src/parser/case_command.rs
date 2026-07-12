@@ -25,11 +25,16 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
             break;
         }
 
-        if is_keyword(tokens, i, "(") {
+        let pattern_open_delimiter = if is_keyword(tokens, i, "(") {
+            let delimiter = Some(tokens[i].value.clone());
             i += 1;
-        }
+            delimiter
+        } else {
+            None
+        };
 
         let mut patterns = Vec::new();
+        let mut pattern_separators = Vec::new();
         let mut current_pattern = String::new();
         let mut in_extglob = 0i32;
         while i < tokens.len() {
@@ -81,6 +86,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                     // Pipe separates case patterns (not inside extglob)
                     if in_extglob == 0 {
                         patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
+                        pattern_separators.push(tokens[i].value.clone());
                         current_pattern.clear();
                     } else {
                         current_pattern.push('|');
@@ -93,6 +99,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         if !is_keyword(tokens, i, ")") {
             return None;
         }
+        let pattern_close_delimiter = tokens[i].value.clone();
         i += 1;
 
         let body_start = i;
@@ -103,7 +110,10 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         let clause_index = clauses.len();
         let pattern_nodes = case_pattern_nodes(&patterns, clause_index);
         clauses.push(CaseClause {
+            pattern_open_delimiter,
             patterns,
+            pattern_separators,
+            pattern_close_delimiter,
             pattern_nodes,
             body,
             terminator,

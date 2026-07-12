@@ -386,7 +386,10 @@ pub struct CaseCommand {
 
 #[derive(Debug, Clone)]
 pub struct CaseClause {
+    pub pattern_open_delimiter: Option<String>,
     pub patterns: Vec<String>,
+    pub pattern_separators: Vec<String>,
+    pub pattern_close_delimiter: String,
     pub pattern_nodes: Vec<CasePattern>,
     pub body: Vec<CommandNode>,
     pub terminator: CaseTerminator,

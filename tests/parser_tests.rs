@@ -640,9 +640,15 @@ mod case_tests {
             Some(";&")
         );
         assert_eq!(
+            case_command.clauses[0].pattern_open_delimiter.as_deref(),
+            Some("(")
+        );
+        assert_eq!(
             case_command.clauses[0].patterns,
             ["x", "@(foo|bar)", "!(tmp)"]
         );
+        assert_eq!(case_command.clauses[0].pattern_separators, ["|", "|"]);
+        assert_eq!(case_command.clauses[0].pattern_close_delimiter, ")");
 
         let patterns = &case_command.clauses[0].pattern_nodes;
         assert_eq!(patterns.len(), 3);
@@ -663,6 +669,9 @@ mod case_tests {
         assert_eq!(fallback.clause_index, 1);
         assert_eq!(fallback.pattern_index, 0);
         assert!(fallback.has_glob);
+        assert_eq!(case_command.clauses[1].pattern_open_delimiter, None);
+        assert!(case_command.clauses[1].pattern_separators.is_empty());
+        assert_eq!(case_command.clauses[1].pattern_close_delimiter, ")");
         assert_eq!(
             case_command.clauses[1].terminator_text.as_deref(),
             Some(";;")

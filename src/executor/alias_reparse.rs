@@ -94,6 +94,12 @@ impl Executor {
                 })
                 .collect();
             clauses.push(CaseClause {
+                pattern_open_delimiter: None,
+                pattern_separators: vec![
+                    "|".to_string();
+                    patterns.patterns.len().saturating_sub(1)
+                ],
+                pattern_close_delimiter: ")".to_string(),
                 patterns: patterns.patterns,
                 pattern_nodes,
                 body,
