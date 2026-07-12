@@ -199,6 +199,9 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
         if let Some(pipeline_command) = &mut command.pipeline_command {
             apply_stdout_append_redirect(&mut pipeline_command.stages, redirect);
         }
+        if let Some(and_or_list) = &mut command.and_or_list {
+            apply_stdout_append_redirect(&mut and_or_list.commands, redirect);
+        }
         if let Some(if_command) = &mut command.if_command {
             apply_stdout_append_redirect(&mut if_command.condition, redirect);
             apply_stdout_append_redirect(&mut if_command.then_body, redirect);
@@ -241,6 +244,9 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         }
         if let Some(pipeline_command) = &mut command.pipeline_command {
             apply_stderr_append_redirect(&mut pipeline_command.stages, redirect);
+        }
+        if let Some(and_or_list) = &mut command.and_or_list {
+            apply_stderr_append_redirect(&mut and_or_list.commands, redirect);
         }
         if let Some(if_command) = &mut command.if_command {
             apply_stderr_append_redirect(&mut if_command.condition, redirect);

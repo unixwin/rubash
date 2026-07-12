@@ -40,9 +40,11 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && !cmd.background
         && !cmd.inverted
         && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
         && !cmd.subshell
         && !cmd.subshell_end
         && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
         && cmd.for_command.is_none()
         && cmd.arithmetic_command.is_none()
         && cmd.if_command.is_none()
@@ -83,6 +85,7 @@ pub(in crate::executor) fn function_body_needs_command_terminators(body: &[Comma
 pub(in crate::executor) fn function_definition_command_is_printable(command: &CommandNode) -> bool {
     !command.words.is_empty()
         || command.pipeline_command.is_some()
+        || command.and_or_list.is_some()
         || command.arithmetic_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()
@@ -134,6 +137,12 @@ fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
             .brace_group
             .as_ref()
             .is_some_and(|brace_group| brace_group.body.iter().any(command_or_compound_has_heredoc))
+        || command.and_or_list.as_ref().is_some_and(|and_or_list| {
+            and_or_list
+                .commands
+                .iter()
+                .any(command_or_compound_has_heredoc)
+        })
 }
 
 pub(in crate::executor) fn function_definition_command_omits_terminator(
@@ -259,6 +268,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         for_command_source_text(for_command)
     } else if let Some(pipeline_command) = &cmd.pipeline_command {
         pipeline_command_source_text(pipeline_command)
+    } else if let Some(and_or_list) = &cmd.and_or_list {
+        and_or_list_source_text(and_or_list)
     } else if let Some(arithmetic_command) = &cmd.arithmetic_command {
         arithmetic_command_source_text(arithmetic_command)
     } else if let Some(if_command) = &cmd.if_command {
@@ -312,6 +323,22 @@ fn pipeline_command_source_text(pipeline_command: &PipelineCommand) -> String {
         .map(bash_command_source_text)
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn and_or_list_source_text(and_or_list: &AndOrListCommand) -> String {
+    let mut text = String::new();
+    for (index, command) in and_or_list.commands.iter().enumerate() {
+        if index > 0 {
+            let connector = and_or_list
+                .connectors
+                .get(index - 1)
+                .copied()
+                .unwrap_or(true);
+            text.push_str(if connector { " && " } else { " || " });
+        }
+        text.push_str(&bash_command_source_text(command));
+    }
+    text
 }
 
 fn arithmetic_command_source_text(arithmetic_command: &ArithmeticCommand) -> String {

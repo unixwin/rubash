@@ -73,10 +73,24 @@ mod pipeline_tests {
         let input = "printf a | grep a && echo ok";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
-        assert!(ast.commands[0].pipeline_command.is_some());
-        assert_eq!(ast.commands[0].and_or, Some(true));
-        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        assert_eq!(list.connectors, [true]);
+        assert!(list.commands[0].pipeline_command.is_some());
+        assert_eq!(list.commands[1].words, ["echo", "ok"]);
+    }
+
+    #[test]
+    fn test_and_or_list_command_preserves_mixed_connectors() {
+        let input = "false || echo fallback && echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        assert_eq!(list.connectors, [false, true]);
+        assert_eq!(list.commands[0].words, ["false"]);
+        assert_eq!(list.commands[1].words, ["echo", "fallback"]);
+        assert_eq!(list.commands[2].words, ["echo", "done"]);
     }
 
     #[test]
@@ -130,12 +144,16 @@ mod pipeline_tests {
         let input = "{ echo hi; } > out && echo done";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
-        let body = &ast.commands[0].brace_group.as_ref().unwrap().body;
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        let body = &list.commands[0].brace_group.as_ref().unwrap().body;
         assert_eq!(body[0].words, ["echo", "hi"]);
-        assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
-        assert_eq!(ast.commands[0].and_or, Some(true));
-        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+        assert_eq!(
+            list.commands[0].redirect_out.as_ref().unwrap().target,
+            "out"
+        );
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands[1].words, ["echo", "done"]);
     }
 
     #[test]
@@ -155,12 +173,16 @@ mod pipeline_tests {
         let input = "( echo hi ) > out && echo done";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
-        let body = &ast.commands[0].subshell_command.as_ref().unwrap().body;
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        let body = &list.commands[0].subshell_command.as_ref().unwrap().body;
         assert_eq!(body[0].words, ["echo", "hi"]);
-        assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
-        assert_eq!(ast.commands[0].and_or, Some(true));
-        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+        assert_eq!(
+            list.commands[0].redirect_out.as_ref().unwrap().target,
+            "out"
+        );
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands[1].words, ["echo", "done"]);
     }
 }
 
@@ -392,11 +414,12 @@ mod conditional_tests {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
-        assert!(ast.commands[0].conditional_command.is_some());
-        assert!(ast.commands[0].redirect_out.is_some());
-        assert_eq!(ast.commands[0].and_or, Some(true));
-        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        assert!(list.commands[0].conditional_command.is_some());
+        assert!(list.commands[0].redirect_out.is_some());
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands[1].words, ["echo", "ok"]);
     }
 }
 
@@ -419,17 +442,48 @@ mod arithmetic_command_tests {
         let input = "(( n++ )) && echo ok";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 2);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
         assert_eq!(
-            ast.commands[0]
+            list.commands[0]
                 .arithmetic_command
                 .as_ref()
                 .unwrap()
                 .expression,
             "n++"
         );
-        assert_eq!(ast.commands[0].and_or, Some(true));
-        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands[1].words, ["echo", "ok"]);
+    }
+
+    #[test]
+    fn test_arithmetic_and_or_list_skips_connector_newline() {
+        let input =
+            "if (( integerPart2 == 0 )) &&\n  (( fractionalPart2 == 0 ))\nthen echo bad; fi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let if_command = ast.commands[0].if_command.as_ref().unwrap();
+        assert_eq!(if_command.condition.len(), 1);
+        let list = if_command.condition[0].and_or_list.as_ref().unwrap();
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands.len(), 2);
+        assert_eq!(
+            list.commands[0]
+                .arithmetic_command
+                .as_ref()
+                .unwrap()
+                .expression,
+            "integerPart2 == 0"
+        );
+        assert_eq!(
+            list.commands[1]
+                .arithmetic_command
+                .as_ref()
+                .unwrap()
+                .expression,
+            "fractionalPart2 == 0"
+        );
     }
 }
 

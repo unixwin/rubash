@@ -37,7 +37,57 @@ pub fn parse(tokens: &[Token]) -> Ast {
     }
 
     state.ast.commands = fold_pipeline_commands(state.ast.commands);
+    state.ast.commands = fold_and_or_list_commands(state.ast.commands);
     state.ast
+}
+
+fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    let mut folded = Vec::new();
+    let mut index = 0;
+    while index < commands.len() {
+        let command = commands[index].clone();
+        if command.and_or.is_none() {
+            folded.push(command);
+            index += 1;
+            continue;
+        }
+
+        let mut list_commands = vec![command];
+        let mut connectors = Vec::new();
+        index += 1;
+        while let Some(connector) = list_commands.last().and_then(|command| command.and_or) {
+            connectors.push(connector);
+            while commands.get(index).is_some_and(command_is_empty) {
+                index += 1;
+            }
+            let Some(next) = commands.get(index).cloned() else {
+                break;
+            };
+            list_commands.push(next);
+            index += 1;
+        }
+
+        if connectors.is_empty() || list_commands.len() != connectors.len() + 1 {
+            folded.extend(list_commands);
+            continue;
+        }
+
+        let first = list_commands
+            .first()
+            .expect("and-or list has a first command");
+        let last = list_commands
+            .last()
+            .expect("and-or list has a last command");
+        let mut list = CommandNode::new();
+        list.line = first.line;
+        list.background = last.background;
+        list.and_or_list = Some(AndOrListCommand {
+            commands: list_commands,
+            connectors,
+        });
+        folded.push(list);
+    }
+    folded
 }
 
 fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {

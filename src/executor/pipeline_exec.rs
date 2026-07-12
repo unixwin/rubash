@@ -1,6 +1,16 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_and_or_list_command(
+        &mut self,
+        and_or_list: &AndOrListCommand,
+    ) -> Result<(), ExecuteError> {
+        let ast = Ast {
+            commands: and_or_list.commands.clone(),
+        };
+        self.execute_ast(&ast)
+    }
+
     pub(in crate::executor) fn execute_pipeline_command(
         &mut self,
         pipeline_command: &PipelineCommand,

@@ -130,6 +130,12 @@ impl Executor {
                 continue;
             }
 
+            if let Some(and_or_list) = &command.and_or_list {
+                self.execute_and_or_list_command(and_or_list)?;
+                index += 1;
+                continue;
+            }
+
             if self.execute_brace_group_pipeline(command)? {
                 if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
                     index = next_index;

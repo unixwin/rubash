@@ -44,6 +44,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.and_or.is_none()
         && !cmd.inverted
         && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
         && cmd.for_command.is_none()
         && cmd.arithmetic_command.is_none()
         && cmd.if_command.is_none()

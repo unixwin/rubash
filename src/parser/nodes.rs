@@ -88,6 +88,13 @@ pub struct PipelineCommand {
     pub stages: Vec<CommandNode>,
 }
 
+/// Represents commands connected by `&&` and `||`.
+#[derive(Debug, Clone)]
+pub struct AndOrListCommand {
+    pub commands: Vec<CommandNode>,
+    pub connectors: Vec<bool>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -174,6 +181,8 @@ pub struct CommandNode {
     pub inverted: bool,
     /// Pipeline of commands connected by `|`.
     pub pipeline_command: Option<PipelineCommand>,
+    /// Commands connected by `&&` and `||`.
+    pub and_or_list: Option<AndOrListCommand>,
     /// Command is executed inside a subshell grouping `( ... )`.
     pub subshell: bool,
     /// This command closes the current subshell grouping.
@@ -223,6 +232,7 @@ impl CommandNode {
             and_or: None,
             inverted: false,
             pipeline_command: None,
+            and_or_list: None,
             subshell: false,
             subshell_end: false,
             for_command: None,
