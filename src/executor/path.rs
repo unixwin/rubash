@@ -57,6 +57,7 @@ pub fn find_shell(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     ["sh", "bash"]
         .into_iter()
         .find_map(|name| find_user_command(name, env_vars))
+        .or_else(find_standard_unix_shell)
 }
 
 pub fn should_run_with_shell(path: &Path) -> bool {
@@ -139,6 +140,17 @@ fn find_native_shell_on_path(env_vars: &HashMap<String, String>) -> Option<PathB
         .into_iter()
         .filter_map(|name| find_user_command(name, env_vars))
         .find(|path| is_native_windows_shell(path))
+}
+
+fn find_standard_unix_shell() -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+
+    ["/bin/sh", "/usr/bin/sh", "/bin/bash", "/usr/bin/bash"]
+        .into_iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
 }
 
 fn is_native_windows_shell(path: &Path) -> bool {
@@ -253,10 +265,18 @@ fn git_bash_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(windows)]
     use super::*;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_shell_lookup_falls_back_to_standard_paths() {
+        let mut env_vars = HashMap::new();
+        env_vars.insert("PATH".to_string(), "target/rubash-isolated-bin".to_string());
+
+        assert!(find_shell(&env_vars).is_some());
+    }
 
     #[cfg(windows)]
     #[test]

@@ -10,6 +10,8 @@
 
 - Linux/Unix 上执行无 shebang 外部脚本时，遇到 exec format error 会通过 shell
   回退执行，行为更接近 Bash。
+- Unix shell 回退不再完全依赖被脚本或测试改写过的 `PATH`，会兜底查找标准
+  `/bin/sh`、`/usr/bin/sh`、`/bin/bash` 和 `/usr/bin/bash`。
 
 ### 测试
 
