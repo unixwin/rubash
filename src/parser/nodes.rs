@@ -65,7 +65,9 @@ pub struct ArithmeticForCommand {
 /// Represents a `(( expression ))` arithmetic command.
 #[derive(Debug, Clone)]
 pub struct ArithmeticCommand {
+    pub open_delimiter: String,
     pub expression: String,
+    pub close_delimiter: String,
     pub operators: Vec<ArithmeticOperator>,
     pub variables: Vec<String>,
     pub has_assignment: bool,

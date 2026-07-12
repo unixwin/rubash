@@ -85,6 +85,8 @@ fn set_arithmetic_command_words(command: &mut CommandNode, expression: String) {
 fn arithmetic_command(expression: String) -> ArithmeticCommand {
     let operators = arithmetic_operators(&expression);
     ArithmeticCommand {
+        open_delimiter: "((".to_string(),
+        close_delimiter: "))".to_string(),
         variables: arithmetic_variables(&expression),
         has_assignment: operators
             .iter()
