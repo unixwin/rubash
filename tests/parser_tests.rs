@@ -563,6 +563,8 @@ mod conditional_tests {
             conditional.expression.kind,
             ConditionalExpressionKind::Logical
         );
+        assert_eq!(conditional.expression.open_delimiter, None);
+        assert_eq!(conditional.expression.close_delimiter, None);
         assert_eq!(conditional.expression.operator.as_deref(), Some("&&"));
         assert_eq!(conditional.expression.children.len(), 2);
         assert_eq!(
@@ -603,6 +605,8 @@ mod conditional_tests {
         );
         let group = &conditional.expression.children[0];
         assert_eq!(group.kind, ConditionalExpressionKind::Group);
+        assert_eq!(group.open_delimiter.as_deref(), Some("("));
+        assert_eq!(group.close_delimiter.as_deref(), Some(")"));
         let logical = &group.children[0];
         assert_eq!(logical.kind, ConditionalExpressionKind::Logical);
         assert_eq!(logical.operator.as_deref(), Some("||"));

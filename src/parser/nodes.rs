@@ -147,9 +147,11 @@ pub struct ConditionalCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConditionalExpression {
     pub kind: ConditionalExpressionKind,
+    pub open_delimiter: Option<String>,
     pub operator: Option<String>,
     pub operands: Vec<String>,
     pub children: Vec<ConditionalExpression>,
+    pub close_delimiter: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

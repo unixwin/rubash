@@ -45,9 +45,11 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
     if let Some(inner) = conditional_outer_group(args) {
         return ConditionalExpression {
             kind: ConditionalExpressionKind::Group,
+            open_delimiter: Some("(".to_string()),
             operator: None,
             operands: Vec::new(),
             children: vec![conditional_expression(inner)],
+            close_delimiter: Some(")".to_string()),
         };
     }
 
@@ -61,9 +63,11 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
     if args[0] == "!" {
         return ConditionalExpression {
             kind: ConditionalExpressionKind::Negation,
+            open_delimiter: None,
             operator: Some("!".to_string()),
             operands: Vec::new(),
             children: vec![conditional_expression(&args[1..])],
+            close_delimiter: None,
         };
     }
 
@@ -90,12 +94,14 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
 fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalExpression {
     ConditionalExpression {
         kind: ConditionalExpressionKind::Logical,
+        open_delimiter: None,
         operator: Some(args[index].clone()),
         operands: Vec::new(),
         children: vec![
             conditional_expression(&args[..index]),
             conditional_expression(&args[index + 1..]),
         ],
+        close_delimiter: None,
     }
 }
 
@@ -106,9 +112,11 @@ fn conditional_leaf(
 ) -> ConditionalExpression {
     ConditionalExpression {
         kind,
+        open_delimiter: None,
         operator,
         operands: operands.to_vec(),
         children: Vec::new(),
+        close_delimiter: None,
     }
 }
 
