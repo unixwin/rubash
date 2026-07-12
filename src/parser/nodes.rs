@@ -327,7 +327,9 @@ pub struct ExtglobPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TildeExpansion {
     pub text: String,
+    pub open_delimiter: String,
     pub prefix: String,
+    pub close_delimiter: String,
     pub suffix: String,
     pub after_colon: bool,
     pub word_index: Option<usize>,

@@ -70,7 +70,9 @@ fn tilde_expansion_at(segment: &str, after_colon: bool) -> Option<TildeExpansion
     if prefix == "~+" || prefix == "~-" || prefix == "~" || valid_tilde_login(prefix) {
         return Some(TildeExpansion {
             text: segment.to_string(),
+            open_delimiter: "~".to_string(),
             prefix: prefix.to_string(),
+            close_delimiter: String::new(),
             suffix: segment[prefix_len..].to_string(),
             after_colon,
             word_index: None,
