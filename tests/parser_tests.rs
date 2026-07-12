@@ -1534,15 +1534,23 @@ mod word_quote_tests {
         let quotes = ast.commands[0].word_quotes.as_slice();
         assert_eq!(quotes.len(), 4);
         assert_eq!(quotes[0].text, "'one two'");
+        assert_eq!(quotes[0].open_delimiter, "'");
+        assert_eq!(quotes[0].close_delimiter, "'");
         assert_eq!(quotes[0].kind, QuoteKind::Single);
         assert_eq!(quotes[0].word_index, Some(1));
         assert_eq!(quotes[1].text, "\"three $HOME\"");
+        assert_eq!(quotes[1].open_delimiter, "\"");
+        assert_eq!(quotes[1].close_delimiter, "\"");
         assert_eq!(quotes[1].kind, QuoteKind::Double);
         assert_eq!(quotes[1].word_index, Some(2));
         assert_eq!(quotes[2].text, "$'line\\n'");
+        assert_eq!(quotes[2].open_delimiter, "$'");
+        assert_eq!(quotes[2].close_delimiter, "'");
         assert_eq!(quotes[2].kind, QuoteKind::AnsiC);
         assert_eq!(quotes[2].word_index, Some(3));
         assert_eq!(quotes[3].text, "$\"locale\"");
+        assert_eq!(quotes[3].open_delimiter, "$\"");
+        assert_eq!(quotes[3].close_delimiter, "\"");
         assert_eq!(quotes[3].kind, QuoteKind::Locale);
         assert_eq!(quotes[3].word_index, Some(4));
     }
@@ -1557,10 +1565,14 @@ mod word_quote_tests {
         let quotes = ast.commands[0].word_quotes.as_slice();
         assert_eq!(quotes.len(), 2);
         assert_eq!(quotes[0].text, "'value one'");
+        assert_eq!(quotes[0].open_delimiter, "'");
+        assert_eq!(quotes[0].close_delimiter, "'");
         assert_eq!(quotes[0].kind, QuoteKind::Single);
         assert_eq!(quotes[0].assignment_name.as_deref(), Some("name"));
         assert_eq!(quotes[0].word_index, None);
         assert_eq!(quotes[1].text, "\"two words\"");
+        assert_eq!(quotes[1].open_delimiter, "\"");
+        assert_eq!(quotes[1].close_delimiter, "\"");
         assert_eq!(quotes[1].kind, QuoteKind::Double);
         assert_eq!(quotes[1].assignment_name.as_deref(), Some("target"));
         assert_eq!(quotes[1].word_index, Some(1));

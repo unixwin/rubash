@@ -358,7 +358,9 @@ pub enum QuoteKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WordQuote {
     pub text: String,
+    pub open_delimiter: String,
     pub kind: QuoteKind,
+    pub close_delimiter: String,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
 }
