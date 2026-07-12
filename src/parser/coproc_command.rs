@@ -36,12 +36,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             let body = parse_inline_brace_body(token);
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
-            command.coproc_command = Some(CoprocCommand {
+            command.coproc_command = Some(coproc_command(
                 name,
-                words: Vec::new(),
-                body_kind: CoprocBodyKind::BraceGroup,
-                body: Some(body),
-            });
+                Vec::new(),
+                CoprocBodyKind::BraceGroup,
+                Some(body),
+            ));
             let mut next_i = i + 1;
             collect_trailing_redirections(tokens, &mut next_i, &mut command);
             while tokens
@@ -57,12 +57,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             let (body, close_i) = parse_split_brace_body(tokens, i)?;
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
-            command.coproc_command = Some(CoprocCommand {
+            command.coproc_command = Some(coproc_command(
                 name,
-                words: Vec::new(),
-                body_kind: CoprocBodyKind::BraceGroup,
-                body: Some(body),
-            });
+                Vec::new(),
+                CoprocBodyKind::BraceGroup,
+                Some(body),
+            ));
             let mut next_i = close_i + 1;
             collect_trailing_redirections(tokens, &mut next_i, &mut command);
             while tokens
@@ -94,12 +94,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 let body = parse(&tokens[body_start..i]).commands;
                 let mut command = CommandNode::new();
                 command.line = tokens.get(start).map(|t| t.position);
-                command.coproc_command = Some(CoprocCommand {
+                command.coproc_command = Some(coproc_command(
                     name,
-                    words: Vec::new(),
-                    body_kind: CoprocBodyKind::Subshell,
-                    body: Some(body),
-                });
+                    Vec::new(),
+                    CoprocBodyKind::Subshell,
+                    Some(body),
+                ));
                 let mut next_i = i + 1;
                 collect_trailing_redirections(tokens, &mut next_i, &mut command);
                 while tokens
@@ -115,12 +115,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
-            command.coproc_command = Some(CoprocCommand {
+            command.coproc_command = Some(coproc_command(
                 name,
-                words: Vec::new(),
-                body_kind: CoprocBodyKind::CommandSequence,
-                body: Some(body),
-            });
+                Vec::new(),
+                CoprocBodyKind::CommandSequence,
+                Some(body),
+            ));
             let mut next_i = body_end;
             collect_trailing_redirections(tokens, &mut next_i, &mut command);
             while tokens
@@ -135,12 +135,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
-            command.coproc_command = Some(CoprocCommand {
+            command.coproc_command = Some(coproc_command(
                 name,
-                words: Vec::new(),
-                body_kind: CoprocBodyKind::CompoundCommand,
-                body: Some(vec![body_command]),
-            });
+                Vec::new(),
+                CoprocBodyKind::CompoundCommand,
+                Some(vec![body_command]),
+            ));
             let mut next_i = body_end;
             collect_trailing_redirections(tokens, &mut next_i, &mut command);
             while tokens
@@ -174,12 +174,12 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|t| t.position);
-    command.coproc_command = Some(CoprocCommand {
+    command.coproc_command = Some(coproc_command(
         name,
         words,
-        body_kind: CoprocBodyKind::SimpleCommand,
-        body: None,
-    });
+        CoprocBodyKind::SimpleCommand,
+        None,
+    ));
     let mut next_i = i;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     while tokens
@@ -189,6 +189,21 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn coproc_command(
+    name: Option<String>,
+    words: Vec<String>,
+    body_kind: CoprocBodyKind,
+    body: Option<Vec<CommandNode>>,
+) -> Box<CoprocCommand> {
+    Box::new(CoprocCommand {
+        keyword: "coproc".to_string(),
+        name,
+        words,
+        body_kind,
+        body,
+    })
 }
 
 fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {

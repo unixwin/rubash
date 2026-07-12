@@ -450,6 +450,7 @@ pub enum FunctionBodyKind {
 /// Represents `coproc [NAME] command [args...]` or `coproc [NAME] { body; }`
 #[derive(Debug, Clone)]
 pub struct CoprocCommand {
+    pub keyword: String,
     /// Optional name (defaults to COPROC)
     pub name: Option<String>,
     /// The command words (for simple commands)
@@ -560,7 +561,7 @@ pub struct CommandNode {
     pub function_command: Option<Box<FunctionCommand>>,
     /// `{ compound_list; }`
     pub brace_group: Option<BraceGroupCommand>,
-    pub coproc_command: Option<CoprocCommand>,
+    pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
 }
