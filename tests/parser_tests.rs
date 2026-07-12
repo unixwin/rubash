@@ -539,6 +539,8 @@ mod conditional_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+        assert_eq!(conditional.open_delimiter, "[[");
+        assert_eq!(conditional.close_delimiter, "]]");
         assert_eq!(
             conditional.args,
             ["$value", "==", "a*", "&&", "-n", "$other", "]]"]
@@ -583,6 +585,8 @@ mod conditional_tests {
         let ast = parse(&tokens);
         let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
 
+        assert_eq!(conditional.open_delimiter, "[[");
+        assert_eq!(conditional.close_delimiter, "]]");
         assert_eq!(
             conditional.expression.kind,
             ConditionalExpressionKind::Negation

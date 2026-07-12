@@ -128,7 +128,9 @@ pub enum LoopKind {
 /// Represents a `[[ expression ]]` conditional command.
 #[derive(Debug, Clone)]
 pub struct ConditionalCommand {
+    pub open_delimiter: String,
     pub args: Vec<String>,
+    pub close_delimiter: String,
     pub expression: ConditionalExpression,
 }
 
@@ -550,7 +552,7 @@ pub struct CommandNode {
     /// `while/until condition; do body; done`
     pub loop_command: Option<LoopCommand>,
     /// `[[ expression ]]`
-    pub conditional_command: Option<ConditionalCommand>,
+    pub conditional_command: Option<Box<ConditionalCommand>>,
     /// `( compound_list )`
     pub subshell_command: Option<SubshellCommand>,
     /// `case word in pattern) ... ;; esac`

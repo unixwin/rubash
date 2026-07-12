@@ -23,7 +23,12 @@ pub(super) fn parse_conditional_command(
     command.line = tokens.get(start).map(|token| token.position);
     command.words.push("[[".to_string());
     command.words.extend(args.clone());
-    command.conditional_command = Some(ConditionalCommand { args, expression });
+    command.conditional_command = Some(Box::new(ConditionalCommand {
+        open_delimiter: tokens[start].value.clone(),
+        args,
+        close_delimiter: tokens[end].value.clone(),
+        expression,
+    }));
 
     Some(finish_compound_command(command, tokens, end + 1))
 }
