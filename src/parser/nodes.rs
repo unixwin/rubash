@@ -376,6 +376,7 @@ pub enum QuoteKind {
 pub struct WordQuote {
     pub text: String,
     pub open_delimiter: String,
+    pub body: String,
     pub kind: QuoteKind,
     pub close_delimiter: String,
     pub word_index: Option<usize>,

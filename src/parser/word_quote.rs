@@ -93,6 +93,7 @@ fn quoted_segment(
                 WordQuote {
                     text: chars[start..=index].iter().collect(),
                     open_delimiter: chars[start..start + opener_len].iter().collect(),
+                    body: chars[start + opener_len..index].iter().collect(),
                     kind,
                     close_delimiter: terminator.to_string(),
                     word_index: None,
