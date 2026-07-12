@@ -143,6 +143,33 @@ mod function_tests {
         assert_eq!(function.name, "foo=bar");
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
+
+    #[test]
+    fn test_function_body_can_be_for_command() {
+        let input = "foo() for x in a b; do echo $x; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        let for_command = function.body[0].for_command.as_ref().unwrap();
+        assert_eq!(for_command.variable, "x");
+        assert_eq!(for_command.words, ["a", "b"]);
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+    }
+
+    #[test]
+    fn test_function_body_can_be_case_command() {
+        let input = "foo() case $1 in a) echo alpha ;; *) echo other ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        let case_command = function.body[0].case_command.as_ref().unwrap();
+        assert_eq!(case_command.word, "$1");
+        assert_eq!(case_command.clauses.len(), 2);
+    }
 }
 
 mod assignment_tests {

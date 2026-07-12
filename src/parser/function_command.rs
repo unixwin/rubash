@@ -82,6 +82,27 @@ pub(super) fn parse_function_command(
         return Some((command, next_i));
     }
 
+    if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            body_command.line = Some(line);
+        }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand {
+            name,
+            body: vec![body_command],
+        });
+        let mut next_i = body_end;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+        return Some((command, next_i));
+    }
+
     if tokens.get(i)?.value != "{" {
         return None;
     }
@@ -123,6 +144,17 @@ pub(super) fn parse_function_command(
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    match tokens.get(start)?.value.as_str() {
+        "for" => parse_for_command(tokens, start),
+        "case" => parse_case_command(tokens, start),
+        "select" => parse_select_command(tokens, start),
+        "coproc" => parse_coproc_command(tokens, start),
+        _ if tokens[start].value.starts_with("((") => parse_arithmetic_command(tokens, start),
+        _ => None,
+    }
 }
 
 pub(super) fn parse_parenthesized_function_body(

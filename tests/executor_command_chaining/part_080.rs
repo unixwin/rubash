@@ -249,3 +249,39 @@ fn test_read_u_reads_fd_here_string() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_function_body_can_be_for_command() {
+    let output_path = "target/rubash-function-for-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("f() for x in a b; do echo $x >> {output_path}; done; f");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nb\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_function_body_can_be_case_command() {
+    let output_path = "target/rubash-function-case-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "f() case $1 in a) echo alpha > {output_path} ;; *) echo other > {output_path} ;; esac; f a"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
