@@ -109,7 +109,9 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
                     return Some((
                         ParameterExpansion {
                             text: chars[start..=index].iter().collect(),
+                            open_delimiter: "${".to_string(),
                             parameter,
+                            close_delimiter: "}".to_string(),
                             name,
                             operator,
                             word,
@@ -153,8 +155,10 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
     let parameter = chars[start + 1..end].iter().collect::<String>();
     ParameterExpansion {
         text: chars[start..end].iter().collect(),
+        open_delimiter: "$".to_string(),
         name: parameter.clone(),
         parameter,
+        close_delimiter: String::new(),
         operator: None,
         word: None,
         braced: false,

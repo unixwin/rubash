@@ -287,7 +287,9 @@ pub struct ArithmeticExpansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterExpansion {
     pub text: String,
+    pub open_delimiter: String,
     pub parameter: String,
+    pub close_delimiter: String,
     pub name: String,
     pub operator: Option<String>,
     pub word: Option<String>,

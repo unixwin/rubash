@@ -1147,6 +1147,8 @@ mod parameter_expansion_tests {
         let expansions = ast.commands[0].parameter_expansions.as_slice();
         assert_eq!(expansions.len(), 5);
         assert_eq!(expansions[0].text, "$HOME");
+        assert_eq!(expansions[0].open_delimiter, "$");
+        assert_eq!(expansions[0].close_delimiter, "");
         assert_eq!(expansions[0].parameter, "HOME");
         assert_eq!(expansions[0].name, "HOME");
         assert_eq!(expansions[0].operator, None);
@@ -1154,6 +1156,8 @@ mod parameter_expansion_tests {
         assert!(!expansions[0].braced);
         assert_eq!(expansions[0].word_index, Some(1));
         assert_eq!(expansions[1].text, "${USER:-guest}");
+        assert_eq!(expansions[1].open_delimiter, "${");
+        assert_eq!(expansions[1].close_delimiter, "}");
         assert_eq!(expansions[1].parameter, "USER:-guest");
         assert_eq!(expansions[1].name, "USER");
         assert_eq!(expansions[1].operator.as_deref(), Some(":-"));
@@ -1161,6 +1165,8 @@ mod parameter_expansion_tests {
         assert!(expansions[1].braced);
         assert_eq!(expansions[1].word_index, Some(2));
         assert_eq!(expansions[2].text, "${name}");
+        assert_eq!(expansions[2].open_delimiter, "${");
+        assert_eq!(expansions[2].close_delimiter, "}");
         assert_eq!(expansions[2].parameter, "name");
         assert_eq!(expansions[2].name, "name");
         assert_eq!(expansions[2].operator, None);
@@ -1187,6 +1193,8 @@ mod parameter_expansion_tests {
         let expansions = ast.commands[0].parameter_expansions.as_slice();
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "${HOME}");
+        assert_eq!(expansions[0].open_delimiter, "${");
+        assert_eq!(expansions[0].close_delimiter, "}");
         assert_eq!(expansions[0].parameter, "HOME");
         assert!(expansions[0].braced);
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("path"));
@@ -1218,6 +1226,8 @@ mod parameter_expansion_tests {
         let expansions = ast.commands[0].parameter_expansions.as_slice();
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "$USER");
+        assert_eq!(expansions[0].open_delimiter, "$");
+        assert_eq!(expansions[0].close_delimiter, "");
         assert_eq!(expansions[0].parameter, "USER");
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(expansions[0].word_index, Some(1));
