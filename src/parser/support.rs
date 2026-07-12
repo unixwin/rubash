@@ -15,6 +15,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     record_extglob_patterns_for_word(cmd, cmd.words.len(), &token.value);
     record_tilde_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_pathname_patterns_for_word(cmd, cmd.words.len(), &token.value);
+    record_word_quotes_for_word(cmd, cmd.words.len(), &token.raw);
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }
@@ -46,6 +47,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.extglob_patterns.is_empty()
         && cmd.tilde_expansions.is_empty()
         && cmd.pathname_patterns.is_empty()
+        && cmd.word_quotes.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

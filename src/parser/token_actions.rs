@@ -82,9 +82,18 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         None,
                     );
+                    if let Some((_, raw_value)) = token.raw.split_once('=') {
+                        record_word_quotes_for_assignment(
+                            &mut state.current_cmd,
+                            assignment_name,
+                            raw_value,
+                            None,
+                        );
+                    }
                     state.current_cmd.assignments.insert(var_name, var_value);
                 } else {
                     let mut word = token.value.clone();
+                    let raw_word = token.raw.clone();
                     if word.ends_with('=') {
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
@@ -142,6 +151,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             Some(word_index),
                         );
+                        if let Some((raw_assignment_name, raw_value)) = raw_word.split_once('=') {
+                            record_word_quotes_for_assignment(
+                                &mut state.current_cmd,
+                                raw_assignment_name
+                                    .strip_suffix('+')
+                                    .unwrap_or(raw_assignment_name),
+                                raw_value,
+                                Some(word_index),
+                            );
+                        }
                     }
                     state.current_cmd.words.push(word);
                     state.current_cmd.word_kinds.push(TokenKind::Word);

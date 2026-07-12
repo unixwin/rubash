@@ -207,6 +207,23 @@ pub struct PathnamePattern {
     pub assignment_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuoteKind {
+    Single,
+    Double,
+    AnsiC,
+    Locale,
+}
+
+/// Represents a quoted segment in a shell word before quote removal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordQuote {
+    pub text: String,
+    pub kind: QuoteKind,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -283,6 +300,8 @@ pub struct CommandNode {
     pub tilde_expansions: Vec<TildeExpansion>,
     /// Structured pathname expansion patterns parsed from glob words.
     pub pathname_patterns: Vec<PathnamePattern>,
+    /// Structured quoted segments parsed from raw shell words.
+    pub word_quotes: Vec<WordQuote>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -363,6 +382,7 @@ impl CommandNode {
             extglob_patterns: Vec::new(),
             tilde_expansions: Vec::new(),
             pathname_patterns: Vec::new(),
+            word_quotes: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

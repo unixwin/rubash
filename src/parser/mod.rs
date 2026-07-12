@@ -29,6 +29,7 @@ mod subshell_command;
 mod support;
 mod tilde_expansion;
 mod token_actions;
+mod word_quote;
 
 #[cfg(test)]
 mod tests;
@@ -61,3 +62,4 @@ use subshell_command::*;
 use support::*;
 use tilde_expansion::*;
 use token_actions::*;
+use word_quote::*;

@@ -14,6 +14,7 @@ fn test_double_quotes() {
     let tokens = tokenize(input);
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[1].value, "hello world");
+    assert_eq!(tokens[1].raw, "\"hello world\"");
 }
 
 #[test]
@@ -47,6 +48,7 @@ fn test_assignment_word_with_quoted_value() {
     assert_eq!(tokens.len(), 2);
     assert_eq!(tokens[1].kind, TokenKind::Assignment);
     assert_eq!(tokens[1].value, "foo=\x1cecho ");
+    assert_eq!(tokens[1].raw, "foo='echo '");
 }
 
 #[test]

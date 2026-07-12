@@ -3,7 +3,7 @@
 //! Run with: cargo test --test parser_tests
 
 use rubash::lexer::tokenize;
-use rubash::parser::parse;
+use rubash::parser::{parse, QuoteKind};
 
 #[path = "parser_coproc_tests.rs"]
 mod coproc_tests;
@@ -1037,6 +1037,52 @@ mod pathname_pattern_tests {
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].text, "plain*.rs");
         assert_eq!(patterns[0].word_index, Some(2));
+    }
+}
+
+mod word_quote_tests {
+    use super::*;
+
+    #[test]
+    fn test_word_quotes_record_structured_ast_for_words() {
+        let input = "printf 'one two' \"three $HOME\" $'line\\n' $\"locale\"";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let quotes = ast.commands[0].word_quotes.as_slice();
+        assert_eq!(quotes.len(), 4);
+        assert_eq!(quotes[0].text, "'one two'");
+        assert_eq!(quotes[0].kind, QuoteKind::Single);
+        assert_eq!(quotes[0].word_index, Some(1));
+        assert_eq!(quotes[1].text, "\"three $HOME\"");
+        assert_eq!(quotes[1].kind, QuoteKind::Double);
+        assert_eq!(quotes[1].word_index, Some(2));
+        assert_eq!(quotes[2].text, "$'line\\n'");
+        assert_eq!(quotes[2].kind, QuoteKind::AnsiC);
+        assert_eq!(quotes[2].word_index, Some(3));
+        assert_eq!(quotes[3].text, "$\"locale\"");
+        assert_eq!(quotes[3].kind, QuoteKind::Locale);
+        assert_eq!(quotes[3].word_index, Some(4));
+    }
+
+    #[test]
+    fn test_assignment_word_quotes_record_assignment_metadata() {
+        let input = "name='value one' echo target=\"two words\"";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let quotes = ast.commands[0].word_quotes.as_slice();
+        assert_eq!(quotes.len(), 2);
+        assert_eq!(quotes[0].text, "'value one'");
+        assert_eq!(quotes[0].kind, QuoteKind::Single);
+        assert_eq!(quotes[0].assignment_name.as_deref(), Some("name"));
+        assert_eq!(quotes[0].word_index, None);
+        assert_eq!(quotes[1].text, "\"two words\"");
+        assert_eq!(quotes[1].kind, QuoteKind::Double);
+        assert_eq!(quotes[1].assignment_name.as_deref(), Some("target"));
+        assert_eq!(quotes[1].word_index, Some(1));
     }
 }
 

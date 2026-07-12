@@ -59,7 +59,7 @@ impl<'a> Lexer<'a> {
         } else {
             value
         };
-        Token::new(kind, &value, start)
+        Token::new_with_raw(kind, &value, raw, start)
     }
 
     pub(super) fn skip_word(&mut self) {

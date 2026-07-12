@@ -28,6 +28,7 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub value: String,
+    pub raw: String,
     pub position: usize,
 }
 
@@ -36,6 +37,16 @@ impl Token {
         Self {
             kind,
             value: value.to_string(),
+            raw: value.to_string(),
+            position,
+        }
+    }
+
+    pub fn new_with_raw(kind: TokenKind, value: &str, raw: &str, position: usize) -> Self {
+        Self {
+            kind,
+            value: value.to_string(),
+            raw: raw.to_string(),
             position,
         }
     }
