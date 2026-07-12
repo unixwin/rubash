@@ -193,9 +193,12 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(for_command.in_keyword, None);
     assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
     assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
+    assert_eq!(arithmetic.open_delimiter, "((");
     assert_eq!(arithmetic.init, "i = 0");
+    assert_eq!(arithmetic.separators, [";", ";"]);
     assert_eq!(arithmetic.test, "i < 3");
     assert_eq!(arithmetic.update, "i++");
+    assert_eq!(arithmetic.close_delimiter, "))");
     assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
     assert_eq!(for_command.body[0].words, ["echo", "$i"]);
 }

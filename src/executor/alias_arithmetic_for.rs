@@ -90,9 +90,12 @@ impl Executor {
 
         Some((
             ArithmeticForCommand {
+                open_delimiter: "((".to_string(),
                 init: parts[0].clone(),
+                separators: vec![";".to_string(), ";".to_string()],
                 test: parts[1].clone(),
                 update: parts[2].clone(),
+                close_delimiter: "))".to_string(),
             },
             index,
         ))

@@ -121,9 +121,12 @@ pub(super) fn parse_arithmetic_for_command(
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(ArithmeticForCommand {
+            open_delimiter: "((".to_string(),
             init: parts[0].join(" "),
+            separators: vec![";".to_string(), ";".to_string()],
             test: parts[1].join(" "),
             update: parts[2].join(" "),
+            close_delimiter: "))".to_string(),
         }),
         body_kind,
         do_keyword,

@@ -72,9 +72,12 @@ fn inline_arithmetic_for_command(
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(ArithmeticForCommand {
+            open_delimiter: "((".to_string(),
             init: command.words[1].clone(),
+            separators: vec![";".to_string(), ";".to_string()],
             test: String::new(),
             update: command.words[3].clone(),
+            close_delimiter: "))".to_string(),
         }),
         body_kind: CommandBodyKind::DoDone,
         do_keyword: Some("do".to_string()),

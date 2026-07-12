@@ -57,9 +57,12 @@ pub struct ForCommand {
 /// Represents a narrow `for (( init; test; update ))` compound command.
 #[derive(Debug, Clone)]
 pub struct ArithmeticForCommand {
+    pub open_delimiter: String,
     pub init: String,
+    pub separators: Vec<String>,
     pub test: String,
     pub update: String,
+    pub close_delimiter: String,
 }
 
 /// Represents a `(( expression ))` arithmetic command.
