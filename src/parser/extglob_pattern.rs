@@ -74,7 +74,7 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
     let open = start + 1;
     let close = matching_group_end(chars, open)?;
     let pattern = chars[open + 1..close].iter().collect::<String>();
-    let alternatives = split_alternatives(&pattern);
+    let (alternatives, operators) = split_alternatives(&pattern);
     Some((
         ExtglobPattern {
             text: chars[start..=close].iter().collect(),
@@ -82,6 +82,7 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
             operator,
             pattern,
             close_delimiter: ")".to_string(),
+            operators,
             alternatives,
             word_index: None,
             assignment_name: None,
@@ -119,9 +120,10 @@ fn matching_group_end(chars: &[char], open: usize) -> Option<usize> {
     None
 }
 
-fn split_alternatives(pattern: &str) -> Vec<String> {
+fn split_alternatives(pattern: &str) -> (Vec<String>, Vec<String>) {
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut alternatives = Vec::new();
+    let mut operators = Vec::new();
     let mut start = 0usize;
     let mut depth = 0usize;
     let mut index = 0usize;
@@ -131,7 +133,17 @@ fn split_alternatives(pattern: &str) -> Vec<String> {
             ')' => depth = depth.saturating_sub(1),
             '|' if depth == 0 => {
                 alternatives.push(chars[start..index].iter().collect());
+                operators.push("|".to_string());
                 start = index + 1;
+            }
+            '[' => {
+                index += 1;
+                while index < chars.len() && chars[index] != ']' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
             }
             '\\' => index += 1,
             _ => {}
@@ -139,7 +151,7 @@ fn split_alternatives(pattern: &str) -> Vec<String> {
         index += 1;
     }
     alternatives.push(chars[start..].iter().collect());
-    alternatives
+    (alternatives, operators)
 }
 
 fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {

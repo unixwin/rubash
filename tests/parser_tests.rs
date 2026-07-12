@@ -1394,18 +1394,38 @@ mod extglob_pattern_tests {
         assert_eq!(patterns[0].close_delimiter, ")");
         assert_eq!(patterns[0].operator, '@');
         assert_eq!(patterns[0].pattern, "alpha|beta");
+        assert_eq!(patterns[0].operators, ["|"]);
         assert_eq!(patterns[0].alternatives, ["alpha", "beta"]);
         assert_eq!(patterns[0].word_index, Some(1));
         assert_eq!(patterns[1].text, "!(.tmp)");
         assert_eq!(patterns[1].open_delimiter, "!(");
         assert_eq!(patterns[1].close_delimiter, ")");
         assert_eq!(patterns[1].operator, '!');
+        assert!(patterns[1].operators.is_empty());
         assert_eq!(patterns[1].alternatives, [".tmp"]);
         assert_eq!(patterns[1].word_index, Some(2));
         assert_eq!(patterns[2].text, "@(a|+(b|c))");
         assert_eq!(patterns[2].pattern, "a|+(b|c)");
+        assert_eq!(patterns[2].operators, ["|"]);
         assert_eq!(patterns[2].alternatives, ["a", "+(b|c)"]);
         assert_eq!(patterns[2].word_index, Some(3));
+    }
+
+    #[test]
+    fn test_extglob_pattern_records_repeated_alternative_operators() {
+        let input = "echo @(a|b|c) @(a[|]b|c)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        assert_eq!(patterns.len(), 2);
+        assert_eq!(patterns[0].text, "@(a|b|c)");
+        assert_eq!(patterns[0].operators, ["|", "|"]);
+        assert_eq!(patterns[0].alternatives, ["a", "b", "c"]);
+        assert_eq!(patterns[1].text, "@(a[|]b|c)");
+        assert_eq!(patterns[1].operators, ["|"]);
+        assert_eq!(patterns[1].alternatives, ["a[|]b", "c"]);
     }
 
     #[test]
@@ -1437,6 +1457,7 @@ mod extglob_pattern_tests {
         assert_eq!(patterns[0].close_delimiter, ")");
         assert_eq!(patterns[0].operator, '*');
         assert_eq!(patterns[0].pattern, "src|tests");
+        assert_eq!(patterns[0].operators, ["|"]);
         assert_eq!(patterns[0].assignment_name.as_deref(), Some("pattern"));
         assert_eq!(patterns[0].word_index, Some(1));
     }

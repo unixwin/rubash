@@ -331,6 +331,7 @@ pub struct ExtglobPattern {
     pub operator: char,
     pub pattern: String,
     pub close_delimiter: String,
+    pub operators: Vec<String>,
     pub alternatives: Vec<String>,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
