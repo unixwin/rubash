@@ -413,6 +413,51 @@ fn test_time_prefix_executes_until_command_sequence() {
 }
 
 #[test]
+fn test_time_prefix_executes_case_command() {
+    let output_path = "target/rubash-time-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "time -p case beta in alpha) echo alpha > {output_path} ;; beta) echo beta > {output_path} ;; esac; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "-p"]);
+    assert!(ast.commands[0].case_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\nstatus:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_time_prefix_executes_select_command() {
+    let output_path = "target/rubash-time-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "time -p select item in alpha beta; do echo chosen:$item > {output_path}; break; done <<< '2'; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "-p"]);
+    assert!(ast.commands[0].select_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "chosen:beta\nstatus:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_prefix_executes_brace_group() {
     let output_path = "target/rubash-time-brace-group-output.txt";
     let _ = fs::remove_file(output_path);
