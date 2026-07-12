@@ -13,6 +13,8 @@ impl Executor {
             self.execute_case_command_with_redirects(cmd, case_command)
         } else if let Some(coproc_cmd) = &cmd.coproc_command {
             self.execute_coproc_command(cmd, coproc_cmd)
+        } else if cmd.brace_group.is_some() {
+            self.execute_brace_group_pipeline(cmd).map(|_| ())
         } else {
             Ok(())
         };
@@ -336,7 +338,8 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
         && (cmd.for_command.is_some()
             || cmd.select_command.is_some()
             || cmd.case_command.is_some()
-            || cmd.coproc_command.is_some())
+            || cmd.coproc_command.is_some()
+            || cmd.brace_group.is_some())
 }
 
 fn time_prefixed_sequence_index(words: &[String]) -> Option<usize> {

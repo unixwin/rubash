@@ -168,7 +168,18 @@ fn parse_time_prefixed_compound_command(
         parse_select_command(tokens, i)?
     } else if is_keyword(tokens, i, "coproc") {
         parse_coproc_command(tokens, i)?
-    } else if tokens.get(i).is_some_and(|token| token.value.starts_with("((")) {
+    } else if is_keyword(tokens, i, "{")
+        || tokens.get(i).is_some_and(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.ends_with('}')
+        })
+    {
+        parse_brace_group_command(tokens, i)?
+    } else if tokens
+        .get(i)
+        .is_some_and(|token| token.value.starts_with("(("))
+    {
         parse_arithmetic_command(tokens, i)?
     } else {
         return None;

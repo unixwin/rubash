@@ -84,6 +84,18 @@ mod pipeline_tests {
         assert_eq!(ast.commands[1].words, ["then", "echo", "yes"]);
         assert_eq!(ast.commands[2].words, ["fi"]);
     }
+
+    #[test]
+    fn test_time_prefix_parses_brace_group() {
+        let input = "time -p { echo one; echo two; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["time", "-p"]);
+        let body = ast.commands[0].brace_group.as_ref().unwrap();
+        assert_eq!(body[0].words, ["echo", "one"]);
+        assert_eq!(body[1].words, ["echo", "two"]);
+    }
 }
 
 mod semicolon_tests {

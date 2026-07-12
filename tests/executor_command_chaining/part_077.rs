@@ -370,3 +370,27 @@ fn test_time_prefix_executes_until_command_sequence() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\nstatus:0\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_time_prefix_executes_brace_group() {
+    let output_path = "target/rubash-time-brace-group-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "time -p {{ echo one > {output_path}; echo two >> {output_path}; }}; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands[0].words, ["time", "-p"]);
+    assert!(ast.commands[0].brace_group.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "one\ntwo\nstatus:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
