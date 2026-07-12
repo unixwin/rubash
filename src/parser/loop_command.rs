@@ -17,8 +17,11 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.loop_command = Some(LoopCommand {
+        keyword: tokens[start].value.clone(),
         condition,
+        do_keyword: tokens[do_index].value.clone(),
         body,
+        end_keyword: tokens[done_index].value.clone(),
         kind,
         until,
     });

@@ -106,8 +106,11 @@ pub struct ElifBranch {
 /// Represents `while condition; do body; done` or `until condition; do body; done`.
 #[derive(Debug, Clone)]
 pub struct LoopCommand {
+    pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub do_keyword: String,
     pub body: Vec<CommandNode>,
+    pub end_keyword: String,
     pub kind: LoopKind,
     pub until: bool,
 }

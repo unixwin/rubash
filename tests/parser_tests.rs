@@ -472,6 +472,9 @@ mod function_tests {
         assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
         assert!(!loop_command.until);
         assert_eq!(loop_command.kind, LoopKind::While);
+        assert_eq!(loop_command.keyword, "while");
+        assert_eq!(loop_command.do_keyword, "do");
+        assert_eq!(loop_command.end_keyword, "done");
         assert_eq!(loop_command.condition[0].words, ["false"]);
         assert_eq!(loop_command.body[0].words, ["echo", "bad"]);
     }
