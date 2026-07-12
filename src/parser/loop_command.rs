@@ -12,6 +12,10 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
 
     let do_index = find_loop_do(tokens, start + 1)?;
     let condition = parse_loop_body_commands(&tokens[start + 1..do_index]);
+    let condition_terminator = tokens
+        .get(do_index.saturating_sub(1))
+        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+        .map(|token| token.value.clone());
     let (body, done_index) = parse_loop_body(tokens, do_index + 1)?;
 
     let mut command = CommandNode::new();
@@ -19,6 +23,7 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
     command.loop_command = Some(LoopCommand {
         keyword: tokens[start].value.clone(),
         condition,
+        condition_terminator,
         do_keyword: tokens[do_index].value.clone(),
         body,
         end_keyword: tokens[done_index].value.clone(),

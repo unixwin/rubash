@@ -89,6 +89,7 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
     assert_eq!(while_command.keyword, "while");
     assert_eq!(while_command.do_keyword, "do");
     assert_eq!(while_command.end_keyword, "done");
+    assert_eq!(while_command.condition_terminator.as_deref(), Some(";"));
     assert_eq!(while_command.condition[0].words, ["((", "n < 3", "))"]);
     assert_eq!(
         while_command.condition[0]
@@ -114,6 +115,7 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
     assert_eq!(until_command.keyword, "until");
     assert_eq!(until_command.do_keyword, "do");
     assert_eq!(until_command.end_keyword, "done");
+    assert_eq!(until_command.condition_terminator.as_deref(), Some(";"));
     assert_eq!(until_command.condition[0].words, ["((", "n == 5", "))"]);
     assert_eq!(
         until_command.condition[0]

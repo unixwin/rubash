@@ -118,6 +118,7 @@ pub struct ElifBranch {
 pub struct LoopCommand {
     pub keyword: String,
     pub condition: Vec<CommandNode>,
+    pub condition_terminator: Option<String>,
     pub do_keyword: String,
     pub body: Vec<CommandNode>,
     pub end_keyword: String,
