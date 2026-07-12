@@ -153,6 +153,16 @@ pub struct ArithmeticExpansion {
     pub assignment_name: Option<String>,
 }
 
+/// Represents a parsed `$name`, `$?`, or `${...}` parameter expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterExpansion {
+    pub text: String,
+    pub parameter: String,
+    pub braced: bool,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -219,6 +229,8 @@ pub struct CommandNode {
     pub command_substitutions: Vec<CommandSubstitutionNode>,
     /// Structured arithmetic expansions parsed from `$((...))`.
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
+    /// Structured parameter expansions parsed from `$name`, `$?`, and `${...}`.
+    pub parameter_expansions: Vec<ParameterExpansion>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -294,6 +306,7 @@ impl CommandNode {
             process_substitutions: Vec::new(),
             command_substitutions: Vec::new(),
             arithmetic_expansions: Vec::new(),
+            parameter_expansions: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

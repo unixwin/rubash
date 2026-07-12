@@ -698,6 +698,99 @@ mod arithmetic_expansion_tests {
     }
 }
 
+mod parameter_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn test_parameter_expansion_records_structured_ast_for_words() {
+        let input = "echo $HOME ${USER:-guest} pre${name}post $? $10";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].words,
+            [
+                "echo",
+                "$HOME",
+                "${USER:-guest}",
+                "pre${name}post",
+                "$?",
+                "$10"
+            ]
+        );
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 5);
+        assert_eq!(expansions[0].text, "$HOME");
+        assert_eq!(expansions[0].parameter, "HOME");
+        assert!(!expansions[0].braced);
+        assert_eq!(expansions[0].word_index, Some(1));
+        assert_eq!(expansions[1].text, "${USER:-guest}");
+        assert_eq!(expansions[1].parameter, "USER:-guest");
+        assert!(expansions[1].braced);
+        assert_eq!(expansions[1].word_index, Some(2));
+        assert_eq!(expansions[2].text, "${name}");
+        assert_eq!(expansions[2].parameter, "name");
+        assert_eq!(expansions[2].word_index, Some(3));
+        assert_eq!(expansions[3].text, "$?");
+        assert_eq!(expansions[3].parameter, "?");
+        assert_eq!(expansions[3].word_index, Some(4));
+        assert_eq!(expansions[4].text, "$1");
+        assert_eq!(expansions[4].parameter, "1");
+        assert_eq!(expansions[4].word_index, Some(5));
+    }
+
+    #[test]
+    fn test_assignment_parameter_expansion_records_structured_ast() {
+        let input = "path=${HOME}/bin echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].assignments.get("path").unwrap(),
+            "${HOME}/bin"
+        );
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "${HOME}");
+        assert_eq!(expansions[0].parameter, "HOME");
+        assert!(expansions[0].braced);
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("path"));
+        assert_eq!(expansions[0].word_index, None);
+    }
+
+    #[test]
+    fn test_parameter_expansion_skips_command_and_arithmetic_sources() {
+        let input = "echo $(echo $HOME) $((n + $delta)) $USER";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "$USER");
+        assert_eq!(expansions[0].parameter, "USER");
+        assert_eq!(expansions[0].word_index, Some(3));
+    }
+
+    #[test]
+    fn test_assignment_word_parameter_expansion_records_word_index() {
+        let input = "echo value=$USER";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "value=$USER"]);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "$USER");
+        assert_eq!(expansions[0].parameter, "USER");
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(expansions[0].word_index, Some(1));
+    }
+}
+
 mod background_tests {
     use super::*;
 
