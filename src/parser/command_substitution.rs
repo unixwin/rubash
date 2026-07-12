@@ -1,4 +1,4 @@
-use super::{CommandNode, CommandSubstitutionNode};
+use super::{parse, CommandNode, CommandSubstitutionNode};
 
 pub(super) fn record_command_substitutions_for_word(
     command: &mut CommandNode,
@@ -87,16 +87,9 @@ fn dollar_command_substitution(
             ')' if !single && !double => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
-                    return Some((
-                        CommandSubstitutionNode {
-                            text: chars[start..=index].iter().collect(),
-                            source: chars[start + 2..index].iter().collect(),
-                            backtick: false,
-                            word_index: None,
-                            assignment_name: None,
-                        },
-                        index + 1,
-                    ));
+                    let text = chars[start..=index].iter().collect();
+                    let source = chars[start + 2..index].iter().collect();
+                    return Some((command_substitution_node(text, source, false), index + 1));
                 }
             }
             _ => {}
@@ -125,18 +118,28 @@ fn backtick_command_substitution(
             continue;
         }
         if ch == '`' {
-            return Some((
-                CommandSubstitutionNode {
-                    text: chars[start..=index].iter().collect(),
-                    source: chars[start + 1..index].iter().collect(),
-                    backtick: true,
-                    word_index: None,
-                    assignment_name: None,
-                },
-                index + 1,
-            ));
+            let text = chars[start..=index].iter().collect();
+            let source = chars[start + 1..index].iter().collect();
+            return Some((command_substitution_node(text, source, true), index + 1));
         }
         index += 1;
     }
     None
+}
+
+fn command_substitution_node(
+    text: String,
+    source: String,
+    backtick: bool,
+) -> CommandSubstitutionNode {
+    let tokens = crate::lexer::tokenize(&source);
+    let commands = parse(&tokens).commands;
+    CommandSubstitutionNode {
+        text,
+        source,
+        commands,
+        backtick,
+        word_index: None,
+        assignment_name: None,
+    }
 }

@@ -210,10 +210,11 @@ pub struct ProcessSubstitution {
 }
 
 /// Represents a parsed `$()` or backtick command substitution inside a word.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CommandSubstitutionNode {
     pub text: String,
     pub source: String,
+    pub commands: Vec<CommandNode>,
     pub backtick: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,

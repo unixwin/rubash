@@ -820,14 +820,18 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 3);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].source, "printf hi");
+        assert_eq!(substitutions[0].commands.len(), 1);
+        assert_eq!(substitutions[0].commands[0].words, ["printf", "hi"]);
         assert!(!substitutions[0].backtick);
         assert_eq!(substitutions[0].word_index, Some(1));
         assert_eq!(substitutions[0].assignment_name, None);
         assert_eq!(substitutions[1].text, "$(date)");
         assert_eq!(substitutions[1].source, "date");
+        assert_eq!(substitutions[1].commands[0].words, ["date"]);
         assert_eq!(substitutions[1].word_index, Some(2));
         assert_eq!(substitutions[2].text, "`whoami`");
         assert_eq!(substitutions[2].source, "whoami");
+        assert_eq!(substitutions[2].commands[0].words, ["whoami"]);
         assert!(substitutions[2].backtick);
         assert_eq!(substitutions[2].word_index, Some(3));
     }
@@ -847,8 +851,27 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 1);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].source, "printf hi");
+        assert_eq!(substitutions[0].commands[0].words, ["printf", "hi"]);
         assert_eq!(substitutions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(substitutions[0].word_index, None);
+    }
+
+    #[test]
+    fn test_command_substitution_records_nested_body_ast() {
+        let input = "echo $(echo $(date); printf done)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].source, "echo $(date); printf done");
+        assert_eq!(substitutions[0].commands.len(), 2);
+        assert_eq!(substitutions[0].commands[0].words, ["echo", "$(date)"]);
+        assert_eq!(substitutions[0].commands[1].words, ["printf", "done"]);
+        assert_eq!(
+            substitutions[0].commands[0].command_substitutions[0].source,
+            "date"
+        );
     }
 
     #[test]
