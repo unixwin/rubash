@@ -358,6 +358,39 @@ mod conditional_tests {
     }
 }
 
+mod arithmetic_command_tests {
+    use super::*;
+
+    #[test]
+    fn test_arithmetic_command_parses_expression() {
+        let input = "(( n += 2 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
+        assert_eq!(arithmetic.expression, "n += 2");
+        assert_eq!(ast.commands[0].words, ["((", "n += 2", "))"]);
+    }
+
+    #[test]
+    fn test_arithmetic_command_preserves_and_or_connector() {
+        let input = "(( n++ )) && echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert_eq!(
+            ast.commands[0]
+                .arithmetic_command
+                .as_ref()
+                .unwrap()
+                .expression,
+            "n++"
+        );
+        assert_eq!(ast.commands[0].and_or, Some(true));
+        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
+    }
+}
+
 mod assignment_tests {
     use super::*;
 

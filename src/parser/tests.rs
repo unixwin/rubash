@@ -80,11 +80,35 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
     let while_command = loops[0];
     assert!(!while_command.until);
     assert_eq!(while_command.condition[0].words, ["((", "n < 3", "))"]);
+    assert_eq!(
+        while_command.condition[0]
+            .arithmetic_command
+            .as_ref()
+            .unwrap()
+            .expression,
+        "n < 3"
+    );
     assert_eq!(while_command.body[0].words, ["((", "n++", "))"]);
+    assert_eq!(
+        while_command.body[0]
+            .arithmetic_command
+            .as_ref()
+            .unwrap()
+            .expression,
+        "n++"
+    );
 
     let until_command = loops[1];
     assert!(until_command.until);
     assert_eq!(until_command.condition[0].words, ["((", "n == 5", "))"]);
+    assert_eq!(
+        until_command.condition[0]
+            .arithmetic_command
+            .as_ref()
+            .unwrap()
+            .expression,
+        "n == 5"
+    );
     assert_eq!(until_command.body[0].words, ["((", "n++", "))"]);
 }
 
@@ -108,6 +132,13 @@ fn test_parse_arithmetic_bitwise_assignment_operators() {
             vec!["((", "n >>= 1", "))"],
         ]
     );
+    let expressions = ast
+        .commands
+        .iter()
+        .filter_map(|command| command.arithmetic_command.as_ref())
+        .map(|command| command.expression.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(expressions, ["n &= 10", "n |= 1", "n <<= 2", "n >>= 1"]);
 }
 
 #[test]
@@ -128,6 +159,13 @@ fn test_parse_grouped_arithmetic_command_expression() {
             vec!["((", "( ( m = 0 ) )", "))"],
         ]
     );
+    let expressions = ast
+        .commands
+        .iter()
+        .filter_map(|command| command.arithmetic_command.as_ref())
+        .map(|command| command.expression.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(expressions, ["( n = 3 )", "( ( m = 0 ) )"]);
 }
 
 #[test]

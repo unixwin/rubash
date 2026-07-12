@@ -42,6 +42,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && !cmd.subshell
         && !cmd.subshell_end
         && cmd.for_command.is_none()
+        && cmd.arithmetic_command.is_none()
         && cmd.if_command.is_none()
         && cmd.loop_command.is_none()
         && cmd.conditional_command.is_none()
@@ -77,6 +78,7 @@ pub(in crate::executor) fn function_body_needs_command_terminators(body: &[Comma
 
 pub(in crate::executor) fn function_definition_command_is_printable(command: &CommandNode) -> bool {
     !command.words.is_empty()
+        || command.arithmetic_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()
         || command.conditional_command.is_some()
@@ -235,6 +237,8 @@ pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) 
 pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String {
     let mut text = if let Some(for_command) = &cmd.for_command {
         for_command_source_text(for_command)
+    } else if let Some(arithmetic_command) = &cmd.arithmetic_command {
+        arithmetic_command_source_text(arithmetic_command)
     } else if let Some(if_command) = &cmd.if_command {
         if_command_source_text(if_command)
     } else if let Some(loop_command) = &cmd.loop_command {
@@ -275,6 +279,10 @@ fn for_command_source_text(for_command: &ForCommand) -> String {
             body
         )
     }
+}
+
+fn arithmetic_command_source_text(arithmetic_command: &ArithmeticCommand) -> String {
+    format!("(( {} ))", arithmetic_command.expression)
 }
 
 fn if_command_source_text(if_command: &IfCommand) -> String {

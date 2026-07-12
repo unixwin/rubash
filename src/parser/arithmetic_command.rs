@@ -13,9 +13,7 @@ pub(super) fn parse_arithmetic_command(
     {
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.words.push("((".to_string());
-        command.words.push(inner.to_string());
-        command.words.push("))".to_string());
+        set_arithmetic_command_words(&mut command, inner.to_string());
         return Some(finish_arithmetic_command(command, tokens, start + 1));
     }
 
@@ -34,18 +32,14 @@ pub(super) fn parse_arithmetic_command(
         if paren_depth == 0 && tokens[i].value == "))" {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
-            command.words.push("((".to_string());
-            command.words.push(parts.join(" "));
-            command.words.push("))".to_string());
+            set_arithmetic_command_words(&mut command, parts.join(" "));
             return Some(finish_arithmetic_command(command, tokens, i + 1));
         }
 
         if paren_depth == 0 && is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
-            command.words.push("((".to_string());
-            command.words.push(parts.join(" "));
-            command.words.push("))".to_string());
+            set_arithmetic_command_words(&mut command, parts.join(" "));
             return Some(finish_arithmetic_command(command, tokens, i + 2));
         }
 
@@ -79,6 +73,13 @@ pub(super) fn parse_arithmetic_command(
     }
 
     None
+}
+
+fn set_arithmetic_command_words(command: &mut CommandNode, expression: String) {
+    command.words.push("((".to_string());
+    command.words.push(expression.clone());
+    command.words.push("))".to_string());
+    command.arithmetic_command = Some(ArithmeticCommand { expression });
 }
 
 pub(super) fn finish_arithmetic_command(

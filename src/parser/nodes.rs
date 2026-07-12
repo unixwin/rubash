@@ -35,6 +35,12 @@ pub struct ArithmeticForCommand {
     pub update: String,
 }
 
+/// Represents a `(( expression ))` arithmetic command.
+#[derive(Debug, Clone)]
+pub struct ArithmeticCommand {
+    pub expression: String,
+}
+
 /// Represents an `if condition; then ... [elif ...] [else ...] fi` command.
 #[derive(Debug, Clone)]
 pub struct IfCommand {
@@ -154,6 +160,8 @@ pub struct CommandNode {
     pub subshell_end: bool,
     /// `for name in words; do ...; done`
     pub for_command: Option<ForCommand>,
+    /// `(( expression ))`
+    pub arithmetic_command: Option<ArithmeticCommand>,
     /// `if condition; then body; fi`
     pub if_command: Option<IfCommand>,
     /// `while/until condition; do body; done`
@@ -195,6 +203,7 @@ impl CommandNode {
             subshell: false,
             subshell_end: false,
             for_command: None,
+            arithmetic_command: None,
             if_command: None,
             loop_command: None,
             conditional_command: None,
