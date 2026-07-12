@@ -46,6 +46,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.if_command.is_none()
         && cmd.loop_command.is_none()
         && cmd.conditional_command.is_none()
+        && cmd.subshell_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
 }
@@ -82,6 +83,7 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
         || command.if_command.is_some()
         || command.loop_command.is_some()
         || command.conditional_command.is_some()
+        || command.subshell_command.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -245,6 +247,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         loop_command_source_text(loop_command)
     } else if let Some(conditional_command) = &cmd.conditional_command {
         conditional_command_source_text(conditional_command)
+    } else if let Some(subshell_command) = &cmd.subshell_command {
+        subshell_command_source_text(subshell_command)
     } else if let Some(select_command) = &cmd.select_command {
         select_command_source_text(select_command)
     } else if let Some(case_command) = &cmd.case_command {
@@ -316,6 +320,10 @@ fn loop_command_source_text(loop_command: &LoopCommand) -> String {
 
 fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> String {
     format!("[[ {}", conditional_command.args.join(" "))
+}
+
+fn subshell_command_source_text(subshell_command: &SubshellCommand) -> String {
+    format!("( {} )", bash_command_sequence_text(&subshell_command.body))
 }
 
 fn select_command_source_text(select_command: &SelectCommand) -> String {

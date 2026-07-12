@@ -19,6 +19,7 @@ mod process_substitution;
 mod redirect_assign;
 mod redirections;
 mod select_command;
+mod subshell_command;
 mod support;
 mod token_actions;
 
@@ -43,5 +44,6 @@ use process_substitution::*;
 use redirect_assign::*;
 use redirections::*;
 use select_command::*;
+use subshell_command::*;
 use support::*;
 use token_actions::*;

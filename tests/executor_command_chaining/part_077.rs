@@ -510,9 +510,9 @@ fn test_time_prefix_executes_subshell_group() {
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     assert_eq!(ast.commands[1].words, ["time", "-p"]);
-    let body = ast.commands[1].brace_group.as_ref().unwrap();
-    assert!(body[0].subshell);
-    assert!(body[1].subshell_end);
+    let body = &ast.commands[1].subshell_command.as_ref().unwrap().body;
+    assert_eq!(body[0].assignments.get("value"), Some(&"inner".to_string()));
+    assert_eq!(body[1].words, ["echo", "$value"]);
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -534,7 +534,7 @@ fn test_time_inversion_prefix_executes_subshell_group() {
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
-    assert!(ast.commands[0].brace_group.is_some());
+    assert!(ast.commands[0].subshell_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

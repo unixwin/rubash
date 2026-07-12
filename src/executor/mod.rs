@@ -146,7 +146,7 @@ use crate::lexer::TokenKind;
 use crate::parser::{
     ArithmeticCommand, ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator,
     CommandNode, ConditionalCommand, ForCommand, FunctionCommand, IfCommand, LoopCommand, Redirect,
-    SelectCommand,
+    SelectCommand, SubshellCommand,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};

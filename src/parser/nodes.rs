@@ -70,6 +70,12 @@ pub struct ConditionalCommand {
     pub args: Vec<String>,
 }
 
+/// Represents a `( compound_list )` subshell command.
+#[derive(Debug, Clone)]
+pub struct SubshellCommand {
+    pub body: Vec<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -168,6 +174,8 @@ pub struct CommandNode {
     pub loop_command: Option<LoopCommand>,
     /// `[[ expression ]]`
     pub conditional_command: Option<ConditionalCommand>,
+    /// `( compound_list )`
+    pub subshell_command: Option<SubshellCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `select name [in words ...]; do ...; done`
@@ -207,6 +215,7 @@ impl CommandNode {
             if_command: None,
             loop_command: None,
             conditional_command: None,
+            subshell_command: None,
             case_command: None,
             select_command: None,
             function_command: None,

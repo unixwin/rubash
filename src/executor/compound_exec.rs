@@ -20,6 +20,8 @@ impl Executor {
             self.execute_case_command_with_redirects(cmd, case_command)
         } else if let Some(coproc_cmd) = &cmd.coproc_command {
             self.execute_coproc_command(cmd, coproc_cmd)
+        } else if let Some(subshell_command) = &cmd.subshell_command {
+            self.execute_subshell_command_with_redirects(cmd, subshell_command)
         } else if cmd.brace_group.is_some() {
             self.execute_brace_group_pipeline(cmd).map(|_| ())
         } else {
@@ -171,6 +173,31 @@ impl Executor {
                 executor.execute_loop_command(&loop_command)
             })
         })
+    }
+
+    pub(in crate::executor) fn execute_subshell_command_with_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        subshell_command: &SubshellCommand,
+    ) -> Result<(), ExecuteError> {
+        let saved_env = self.env_vars.clone();
+        let saved_depth = self.subshell_depth.get();
+        self.subshell_depth.set(saved_depth + 1);
+
+        let mut body = Ast {
+            commands: subshell_command.body.clone(),
+        };
+        let result = self
+            .apply_command_output_redirects(cmd, &mut body)
+            .and_then(|()| {
+                self.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body))
+            });
+        let status = self.exit_code;
+
+        self.restore_shell_env(saved_env);
+        self.subshell_depth.set(saved_depth);
+        self.exit_code = status;
+        result
     }
 
     fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {
@@ -534,6 +561,7 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
             || cmd.select_command.is_some()
             || cmd.case_command.is_some()
             || cmd.coproc_command.is_some()
+            || cmd.subshell_command.is_some()
             || cmd.brace_group.is_some())
 }
 
