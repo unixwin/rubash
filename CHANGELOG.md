@@ -4,16 +4,25 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
-## [Unreleased] - 2026-06-21
+## [Unreleased] - 2026-07-12
+
+### 修复
+
+- Linux/Unix 上执行无 shebang 外部脚本时，遇到 exec format error 会通过 shell
+  回退执行，行为更接近 Bash。
 
 ### 测试
 
+- 统一测试中临时外部命令的写入逻辑，在 Unix 上自动设置可执行权限，修复
+  Linux CI 中禁用 builtin 后走外部命令相关用例返回 `126` 的问题。
 - GNU Bash upstream runner 本地基线更新为 `87/87` 通过。
 - 将 `run-minimal` 纳入默认 upstream runner 集合。
 - 收敛 upstream bridge 的重复输出逻辑，降低后续维护成本。
 
 ### 文档
 
+- 更新 README 中的功能进度，说明当前实现已超过早期骨架阶段，重点转向 Bash
+  兼容细节和上游测试覆盖。
 - 更新 README 和 GNU Bash upstream 测试文档中的测试进度、运行命令和更新时间。
 
 ## [0.1.1] - 2024-06-11
