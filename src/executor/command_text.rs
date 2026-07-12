@@ -41,10 +41,12 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && !cmd.inverted
         && cmd.pipeline_command.is_none()
         && cmd.and_or_list.is_none()
+        && cmd.time_command.is_none()
         && !cmd.subshell
         && !cmd.subshell_end
         && cmd.pipeline_command.is_none()
         && cmd.and_or_list.is_none()
+        && cmd.time_command.is_none()
         && cmd.for_command.is_none()
         && cmd.arithmetic_command.is_none()
         && cmd.if_command.is_none()
@@ -86,6 +88,7 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
     !command.words.is_empty()
         || command.pipeline_command.is_some()
         || command.and_or_list.is_some()
+        || command.time_command.is_some()
         || command.arithmetic_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()
@@ -143,6 +146,10 @@ fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
                 .iter()
                 .any(command_or_compound_has_heredoc)
         })
+        || command
+            .time_command
+            .as_ref()
+            .is_some_and(|time_command| command_or_compound_has_heredoc(&time_command.command))
 }
 
 pub(in crate::executor) fn function_definition_command_omits_terminator(
@@ -270,6 +277,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         pipeline_command_source_text(pipeline_command)
     } else if let Some(and_or_list) = &cmd.and_or_list {
         and_or_list_source_text(and_or_list)
+    } else if let Some(time_command) = &cmd.time_command {
+        time_command_source_text(time_command)
     } else if let Some(arithmetic_command) = &cmd.arithmetic_command {
         arithmetic_command_source_text(arithmetic_command)
     } else if let Some(if_command) = &cmd.if_command {
@@ -339,6 +348,18 @@ fn and_or_list_source_text(and_or_list: &AndOrListCommand) -> String {
         text.push_str(&bash_command_source_text(command));
     }
     text
+}
+
+fn time_command_source_text(time_command: &TimeCommand) -> String {
+    let mut parts = vec!["time".to_string()];
+    if time_command.posix_format {
+        parts.push("-p".to_string());
+    }
+    if time_command.inverted {
+        parts.push("!".to_string());
+    }
+    parts.push(bash_command_source_text(&time_command.command));
+    parts.join(" ")
 }
 
 fn arithmetic_command_source_text(arithmetic_command: &ArithmeticCommand) -> String {

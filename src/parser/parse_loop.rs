@@ -297,18 +297,31 @@ fn parse_time_prefixed_compound_command(
     tokens: &[Token],
     start: usize,
 ) -> Option<(CommandNode, usize)> {
-    let mut words = vec![tokens.get(start)?.value.clone()];
+    tokens.get(start)?;
+    let mut posix_format = false;
+    let mut inverted = false;
     let mut i = start + 1;
     while tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
     {
-        words.push(tokens[i].value.clone());
+        match tokens[i].value.as_str() {
+            "-p" => posix_format = true,
+            "!" => inverted = !inverted,
+            _ => {}
+        }
         i += 1;
     }
 
     let (mut command, next_i) = if is_keyword(tokens, i, "for") {
         parse_for_command(tokens, i)?
+    } else if is_keyword(tokens, i, "if") {
+        parse_if_command(tokens, i)?
+    } else if tokens
+        .get(i)
+        .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
+    {
+        parse_loop_command(tokens, i)?
     } else if is_keyword(tokens, i, "case") {
         parse_case_command(tokens, i)?
     } else if is_keyword(tokens, i, "select") {
@@ -334,6 +347,14 @@ fn parse_time_prefixed_compound_command(
         return None;
     };
 
-    command.words = words;
-    Some((command, next_i))
+    let and_or = command.and_or.take();
+    let mut timed = CommandNode::new();
+    timed.line = tokens.get(start).map(|token| token.position);
+    timed.and_or = and_or;
+    timed.time_command = Some(TimeCommand {
+        command: Box::new(command),
+        posix_format,
+        inverted,
+    });
+    Some((timed, next_i))
 }

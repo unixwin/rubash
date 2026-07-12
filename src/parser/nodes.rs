@@ -95,6 +95,14 @@ pub struct AndOrListCommand {
     pub connectors: Vec<bool>,
 }
 
+/// Represents `time [-p] [!] command`.
+#[derive(Debug, Clone)]
+pub struct TimeCommand {
+    pub command: Box<CommandNode>,
+    pub posix_format: bool,
+    pub inverted: bool,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -183,6 +191,8 @@ pub struct CommandNode {
     pub pipeline_command: Option<PipelineCommand>,
     /// Commands connected by `&&` and `||`.
     pub and_or_list: Option<AndOrListCommand>,
+    /// `time [-p] [!] command`.
+    pub time_command: Option<TimeCommand>,
     /// Command is executed inside a subshell grouping `( ... )`.
     pub subshell: bool,
     /// This command closes the current subshell grouping.
@@ -233,6 +243,7 @@ impl CommandNode {
             inverted: false,
             pipeline_command: None,
             and_or_list: None,
+            time_command: None,
             subshell: false,
             subshell_end: false,
             for_command: None,

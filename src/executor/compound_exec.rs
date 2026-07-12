@@ -1,6 +1,22 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_time_ast_command(
+        &mut self,
+        time_command: &TimeCommand,
+    ) -> Result<(), ExecuteError> {
+        if time_command.command.brace_group.is_some() {
+            self.execute_brace_group_pipeline(&time_command.command)?;
+        } else {
+            self.execute_command(&time_command.command)?;
+        }
+        print_posix_time();
+        if time_command.inverted {
+            self.exit_code = invert_exit_status(self.exit_code);
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_time_prefixed_compound_command(
         &mut self,
         cmd: &CommandNode,

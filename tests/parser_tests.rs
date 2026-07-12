@@ -99,8 +99,10 @@ mod pipeline_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-        assert_eq!(ast.commands[0].words, ["time", "-p"]);
-        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        assert!(!time_command.inverted);
+        let for_command = time_command.command.for_command.as_ref().unwrap();
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
@@ -112,8 +114,10 @@ mod pipeline_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-        assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
-        assert!(ast.commands[0].for_command.is_some());
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        assert!(time_command.inverted);
+        assert!(time_command.command.for_command.is_some());
     }
 
     #[test]
@@ -121,10 +125,12 @@ mod pipeline_tests {
         let input = "time -p if true; then echo yes; fi";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
-        assert_eq!(ast.commands.len(), 3);
-        assert_eq!(ast.commands[0].words, ["time", "-p", "if", "true"]);
-        assert_eq!(ast.commands[1].words, ["then", "echo", "yes"]);
-        assert_eq!(ast.commands[2].words, ["fi"]);
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        let if_command = time_command.command.if_command.as_ref().unwrap();
+        assert_eq!(if_command.condition[0].words, ["true"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
     }
 
     #[test]
@@ -133,8 +139,9 @@ mod pipeline_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-        assert_eq!(ast.commands[0].words, ["time", "-p"]);
-        let body = &ast.commands[0].brace_group.as_ref().unwrap().body;
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        let body = &time_command.command.brace_group.as_ref().unwrap().body;
         assert_eq!(body[0].words, ["echo", "one"]);
         assert_eq!(body[1].words, ["echo", "two"]);
     }
@@ -162,8 +169,9 @@ mod pipeline_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
-        assert_eq!(ast.commands[0].words, ["time", "-p"]);
-        let body = &ast.commands[0].subshell_command.as_ref().unwrap().body;
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        let body = &time_command.command.subshell_command.as_ref().unwrap().body;
         assert_eq!(body[0].words, ["echo", "one"]);
         assert_eq!(body[1].words, ["echo", "two"]);
     }

@@ -295,8 +295,9 @@ fn test_time_prefix_executes_for_command() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p"]);
-    assert!(ast.commands[0].for_command.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.posix_format);
+    assert!(time_command.command.for_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -316,8 +317,10 @@ fn test_time_inversion_prefix_executes_for_command() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
-    assert!(ast.commands[0].for_command.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.posix_format);
+    assert!(time_command.inverted);
+    assert!(time_command.command.for_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -337,7 +340,8 @@ fn test_time_prefix_executes_if_command_sequence() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p", "if", "true"]);
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.command.if_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -357,7 +361,9 @@ fn test_time_inversion_prefix_executes_if_command_sequence() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p", "!", "if", "true"]);
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.inverted);
+    assert!(time_command.command.if_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -377,10 +383,8 @@ fn test_time_prefix_executes_while_command_sequence() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(
-        ast.commands[1].words,
-        ["time", "-p", "while", "[[", "$n", "-lt", "2", "]]"]
-    );
+    let time_command = ast.commands[1].time_command.as_ref().unwrap();
+    assert!(time_command.command.loop_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -400,10 +404,8 @@ fn test_time_prefix_executes_until_command_sequence() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(
-        ast.commands[1].words,
-        ["time", "-p", "until", "[[", "$n", "-ge", "2", "]]"]
-    );
+    let time_command = ast.commands[1].time_command.as_ref().unwrap();
+    assert!(time_command.command.loop_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -423,8 +425,8 @@ fn test_time_prefix_executes_case_command() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p"]);
-    assert!(ast.commands[0].case_command.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.command.case_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -444,8 +446,8 @@ fn test_time_prefix_executes_select_command() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p"]);
-    assert!(ast.commands[0].select_command.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.command.select_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -468,8 +470,8 @@ fn test_time_prefix_executes_brace_group() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p"]);
-    assert!(ast.commands[0].brace_group.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.command.brace_group.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -490,8 +492,9 @@ fn test_time_inversion_prefix_executes_brace_group() {
     let input = format!("time -p ! {{ true; }}; echo status:$? > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
-    assert!(ast.commands[0].brace_group.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.inverted);
+    assert!(time_command.command.brace_group.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -511,8 +514,8 @@ fn test_time_prefix_executes_subshell_group() {
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[1].words, ["time", "-p"]);
-    let body = &ast.commands[1].subshell_command.as_ref().unwrap().body;
+    let time_command = ast.commands[1].time_command.as_ref().unwrap();
+    let body = &time_command.command.subshell_command.as_ref().unwrap().body;
     assert_eq!(body[0].assignments.get("value"), Some(&"inner".to_string()));
     assert_eq!(body[1].words, ["echo", "$value"]);
     let mut executor = Executor::new();
@@ -535,8 +538,9 @@ fn test_time_inversion_prefix_executes_subshell_group() {
     let input = format!("time -p ! ( true ); echo status:$? > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "-p", "!"]);
-    assert!(ast.commands[0].subshell_command.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.inverted);
+    assert!(time_command.command.subshell_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
