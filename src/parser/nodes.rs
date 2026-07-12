@@ -317,6 +317,7 @@ pub struct BraceExpansion {
     pub open_delimiter: String,
     pub body: String,
     pub close_delimiter: String,
+    pub operators: Vec<String>,
     pub range: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,

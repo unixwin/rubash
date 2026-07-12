@@ -74,6 +74,7 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
     let mut depth = 1usize;
     let mut has_comma = false;
     let mut has_double_dot = false;
+    let mut operators = Vec::new();
     while index < chars.len() {
         match chars[index] {
             '{' => depth += 1,
@@ -89,6 +90,7 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
                             open_delimiter: "{".to_string(),
                             body: chars[start + 1..index].iter().collect(),
                             close_delimiter: "}".to_string(),
+                            operators,
                             range: has_double_dot && !has_comma,
                             word_index: None,
                             assignment_name: None,
@@ -97,8 +99,15 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
                     ));
                 }
             }
-            ',' if depth == 1 => has_comma = true,
-            '.' if depth == 1 && chars.get(index + 1) == Some(&'.') => has_double_dot = true,
+            ',' if depth == 1 => {
+                has_comma = true;
+                operators.push(",".to_string());
+            }
+            '.' if depth == 1 && chars.get(index + 1) == Some(&'.') => {
+                has_double_dot = true;
+                operators.push("..".to_string());
+                index += 1;
+            }
             '\\' => index += 1,
             ch if ch.is_ascii_whitespace() => return None,
             _ => {}

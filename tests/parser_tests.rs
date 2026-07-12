@@ -1312,6 +1312,7 @@ mod brace_expansion_tests {
         assert_eq!(expansions[0].open_delimiter, "{");
         assert_eq!(expansions[0].close_delimiter, "}");
         assert_eq!(expansions[0].body, "a,b");
+        assert_eq!(expansions[0].operators, [","]);
         assert!(!expansions[0].range);
         assert_eq!(expansions[0].word_index, Some(1));
         assert_eq!(expansions[0].assignment_name, None);
@@ -1319,8 +1320,23 @@ mod brace_expansion_tests {
         assert_eq!(expansions[1].open_delimiter, "{");
         assert_eq!(expansions[1].close_delimiter, "}");
         assert_eq!(expansions[1].body, "1..3");
+        assert_eq!(expansions[1].operators, [".."]);
         assert!(expansions[1].range);
         assert_eq!(expansions[1].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_brace_expansion_records_repeated_list_operators() {
+        let input = "echo {a,b,c}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "{a,b,c}");
+        assert_eq!(expansions[0].operators, [",", ","]);
+        assert!(!expansions[0].range);
     }
 
     #[test]
@@ -1351,6 +1367,7 @@ mod brace_expansion_tests {
         assert_eq!(expansions[0].open_delimiter, "{");
         assert_eq!(expansions[0].close_delimiter, "}");
         assert_eq!(expansions[0].body, "left,right");
+        assert_eq!(expansions[0].operators, [","]);
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(expansions[0].word_index, Some(1));
     }
