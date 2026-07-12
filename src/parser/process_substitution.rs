@@ -117,12 +117,14 @@ fn collect_process_substitution_target_with_prefix(
         .map(|token| token.value.as_str())
         .collect::<Vec<_>>()
         .join(" ");
-    let prefix = if output { ">(" } else { "<(" };
+    let operator = if output { ">" } else { "<" };
+    let prefix = format!("{operator}(");
     let commands = parse(&crate::lexer::tokenize(&source)).commands;
     Some((
         ProcessSubstitution {
             target: format!("{prefix}{source})"),
-            open_delimiter: prefix.to_string(),
+            open_delimiter: prefix,
+            operator: operator.to_string(),
             source,
             close_delimiter: ")".to_string(),
             commands,

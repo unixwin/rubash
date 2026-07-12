@@ -257,6 +257,7 @@ pub struct ArrayElementAssignment {
 pub struct ProcessSubstitution {
     pub target: String,
     pub open_delimiter: String,
+    pub operator: String,
     pub source: String,
     pub close_delimiter: String,
     pub commands: Vec<CommandNode>,
