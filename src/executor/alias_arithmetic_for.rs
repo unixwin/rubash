@@ -108,6 +108,7 @@ fn alias_arithmetic_for_command(
         words: Vec::new(),
         default_positional: false,
         arithmetic: Some(arithmetic),
+        body_kind: CommandBodyKind::DoDone,
         body,
     }
 }

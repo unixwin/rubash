@@ -62,8 +62,9 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         true
     };
 
-    let (body, body_end) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i) {
-        (body, next_i)
+    let (body, body_end, body_kind) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i)
+    {
+        (body, next_i, CommandBodyKind::BraceGroup)
     } else {
         if !is_keyword(tokens, i, "do") {
             return None;
@@ -92,7 +93,11 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             return None;
         }
 
-        (parse_for_body_commands(&tokens[body_start..i]), i + 1)
+        (
+            parse_for_body_commands(&tokens[body_start..i]),
+            i + 1,
+            CommandBodyKind::DoDone,
+        )
     };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
@@ -101,6 +106,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         words,
         default_positional,
         arithmetic: None,
+        body_kind,
         body,
     });
     let mut next_i = body_end;

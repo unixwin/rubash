@@ -4,7 +4,7 @@
 
 use rubash::lexer::tokenize;
 use rubash::parser::{
-    parse, CaseTerminator, ConditionalExpressionKind, FunctionBodyKind, QuoteKind,
+    parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, FunctionBodyKind, QuoteKind,
 };
 
 #[path = "parser_coproc_tests.rs"]
@@ -109,6 +109,7 @@ mod pipeline_tests {
         let for_command = time_command.command.for_command.as_ref().unwrap();
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
+        assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
     }
 
@@ -207,6 +208,35 @@ mod semicolon_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
+    }
+}
+
+mod command_body_kind_tests {
+    use super::*;
+
+    #[test]
+    fn test_for_brace_body_records_body_kind() {
+        let tokens = tokenize("for x in a; { echo $x; }");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+
+        assert_eq!(for_command.body_kind, CommandBodyKind::BraceGroup);
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+    }
+
+    #[test]
+    fn test_select_body_kind_records_do_done_and_brace_group() {
+        let do_done_tokens = tokenize("select x in a; do echo $x; done");
+        let do_done_ast = parse(&do_done_tokens);
+        let brace_tokens = tokenize("select y in b; { echo $y; }");
+        let brace_ast = parse(&brace_tokens);
+        let first = do_done_ast.commands[0].select_command.as_ref().unwrap();
+        let second = brace_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(first.body_kind, CommandBodyKind::DoDone);
+        assert_eq!(first.body[0].words, ["echo", "$x"]);
+        assert_eq!(second.body_kind, CommandBodyKind::BraceGroup);
+        assert_eq!(second.body[0].words, ["echo", "$y"]);
     }
 }
 
@@ -365,6 +395,7 @@ mod function_tests {
         assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
+        assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
     }
 

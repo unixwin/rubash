@@ -58,45 +58,51 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         true
     };
 
-    let (body, body_end) = if let Some((body, next_i)) = parse_select_brace_body(tokens, i) {
-        (body, next_i)
-    } else {
-        if !is_keyword(tokens, i, "do") {
-            return None;
-        }
-        i += 1;
-
-        // Find matching `done`
-        let body_start = i;
-        let mut depth = 0usize;
-        while i < tokens.len() {
-            if is_keyword(tokens, i, "for")
-                || is_keyword(tokens, i, "while")
-                || is_keyword(tokens, i, "until")
-                || is_keyword(tokens, i, "select")
-            {
-                depth += 1;
-            } else if is_keyword(tokens, i, "done") {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
+    let (body, body_end, body_kind) =
+        if let Some((body, next_i)) = parse_select_brace_body(tokens, i) {
+            (body, next_i, CommandBodyKind::BraceGroup)
+        } else {
+            if !is_keyword(tokens, i, "do") {
+                return None;
             }
             i += 1;
-        }
 
-        if !is_keyword(tokens, i, "done") {
-            return None;
-        }
+            // Find matching `done`
+            let body_start = i;
+            let mut depth = 0usize;
+            while i < tokens.len() {
+                if is_keyword(tokens, i, "for")
+                    || is_keyword(tokens, i, "while")
+                    || is_keyword(tokens, i, "until")
+                    || is_keyword(tokens, i, "select")
+                {
+                    depth += 1;
+                } else if is_keyword(tokens, i, "done") {
+                    if depth == 0 {
+                        break;
+                    }
+                    depth -= 1;
+                }
+                i += 1;
+            }
 
-        (parse_select_body_commands(&tokens[body_start..i]), i + 1)
-    };
+            if !is_keyword(tokens, i, "done") {
+                return None;
+            }
+
+            (
+                parse_select_body_commands(&tokens[body_start..i]),
+                i + 1,
+                CommandBodyKind::DoDone,
+            )
+        };
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.select_command = Some(SelectCommand {
         variable,
         words,
         default_positional,
+        body_kind,
         body,
     });
     let mut next_i = body_end;

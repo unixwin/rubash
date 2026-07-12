@@ -216,6 +216,7 @@ impl Executor {
                 words: words[3..].to_vec(),
                 default_positional: false,
                 arithmetic: None,
+                body_kind: CommandBodyKind::BraceGroup,
                 body: brace_group.body,
             };
             self.execute_for_command_with_redirects(&for_command, do_command)?;
@@ -245,6 +246,7 @@ impl Executor {
             words: words[3..].to_vec(),
             default_positional: false,
             arithmetic: None,
+            body_kind: CommandBodyKind::DoDone,
             body,
         };
         self.execute_for_command(&for_command)?;

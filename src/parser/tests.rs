@@ -184,5 +184,6 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(arithmetic.init, "i = 0");
     assert_eq!(arithmetic.test, "i < 3");
     assert_eq!(arithmetic.update, "i++");
+    assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
     assert_eq!(for_command.body[0].words, ["echo", "$i"]);
 }

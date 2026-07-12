@@ -1,4 +1,4 @@
-use crate::parser::{ArithmeticForCommand, CommandNode, ForCommand};
+use crate::parser::{ArithmeticForCommand, CommandBodyKind, CommandNode, ForCommand};
 
 pub(super) fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
     let command = command?;
@@ -74,6 +74,7 @@ fn inline_arithmetic_for_command(
             test: String::new(),
             update: command.words[3].clone(),
         }),
+        body_kind: CommandBodyKind::DoDone,
         body: normalize_inline_compound_commands(body),
     });
     Some((for_node, done_index + 1))

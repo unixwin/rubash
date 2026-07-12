@@ -46,6 +46,7 @@ pub struct ForCommand {
     pub words: Vec<String>,
     pub default_positional: bool,
     pub arithmetic: Option<ArithmeticForCommand>,
+    pub body_kind: CommandBodyKind,
     pub body: Vec<CommandNode>,
 }
 
@@ -73,6 +74,12 @@ pub struct ArithmeticCommand {
 pub struct ArithmeticOperator {
     pub text: String,
     pub index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandBodyKind {
+    DoDone,
+    BraceGroup,
 }
 
 /// Represents an `if condition; then ... [elif ...] [else ...] fi` command.
@@ -376,6 +383,7 @@ pub struct SelectCommand {
     pub variable: String,
     pub words: Vec<String>,
     pub default_positional: bool,
+    pub body_kind: CommandBodyKind,
     pub body: Vec<CommandNode>,
 }
 

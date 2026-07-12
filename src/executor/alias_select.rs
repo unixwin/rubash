@@ -55,6 +55,7 @@ impl Executor {
                 variable,
                 words: select_words,
                 default_positional,
+                body_kind: CommandBodyKind::BraceGroup,
                 body: brace_group.body,
             };
             self.execute_select_command(do_command, &select_command)?;
@@ -83,6 +84,7 @@ impl Executor {
             variable,
             words: select_words,
             default_positional,
+            body_kind: CommandBodyKind::DoDone,
             body,
         };
         self.execute_select_command(done_command, &select_command)?;
