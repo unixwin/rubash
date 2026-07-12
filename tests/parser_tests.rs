@@ -105,6 +105,8 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p"]);
         assert!(time_command.posix_format);
         assert!(!time_command.inverted);
         let for_command = time_command.command.for_command.as_ref().unwrap();
@@ -121,6 +123,8 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p", "!"]);
         assert!(time_command.posix_format);
         assert!(time_command.inverted);
         assert!(time_command.command.for_command.is_some());

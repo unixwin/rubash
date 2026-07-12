@@ -351,11 +351,13 @@ fn parse_time_prefixed_compound_command(
     tokens.get(start)?;
     let mut posix_format = false;
     let mut inverted = false;
+    let mut prefix_words = Vec::new();
     let mut i = start + 1;
     while tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
     {
+        prefix_words.push(tokens[i].value.clone());
         match tokens[i].value.as_str() {
             "-p" => posix_format = true,
             "!" => inverted = !inverted,
@@ -403,6 +405,8 @@ fn parse_time_prefixed_compound_command(
     timed.line = tokens.get(start).map(|token| token.position);
     timed.and_or = and_or;
     timed.time_command = Some(TimeCommand {
+        keyword: tokens[start].value.clone(),
+        prefix_words,
         command: Box::new(command),
         posix_format,
         inverted,

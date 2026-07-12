@@ -173,6 +173,8 @@ pub struct AndOrListCommand {
 /// Represents `time [-p] [!] command`.
 #[derive(Debug, Clone)]
 pub struct TimeCommand {
+    pub keyword: String,
+    pub prefix_words: Vec<String>,
     pub command: Box<CommandNode>,
     pub posix_format: bool,
     pub inverted: bool,
