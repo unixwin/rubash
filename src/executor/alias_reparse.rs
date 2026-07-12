@@ -84,8 +84,18 @@ impl Executor {
                 patterns.body_start,
                 &mut body,
             )?;
+            let clause_index = clauses.len();
+            let pattern_nodes = patterns
+                .patterns
+                .iter()
+                .enumerate()
+                .map(|(pattern_index, pattern)| {
+                    crate::parser::CasePattern::new(pattern.clone(), clause_index, pattern_index)
+                })
+                .collect();
             clauses.push(CaseClause {
                 patterns: patterns.patterns,
+                pattern_nodes,
                 body,
                 terminator: boundary.terminator,
             });

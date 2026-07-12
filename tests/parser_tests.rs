@@ -3,7 +3,7 @@
 //! Run with: cargo test --test parser_tests
 
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, ConditionalExpressionKind, QuoteKind};
+use rubash::parser::{parse, CaseTerminator, ConditionalExpressionKind, QuoteKind};
 
 #[path = "parser_coproc_tests.rs"]
 mod coproc_tests;
@@ -344,6 +344,10 @@ mod function_tests {
         let case_command = function.body[0].case_command.as_ref().unwrap();
         assert_eq!(case_command.word, "$1");
         assert_eq!(case_command.clauses.len(), 2);
+        assert_eq!(case_command.clauses[0].pattern_nodes[0].text, "a");
+        assert!(!case_command.clauses[0].pattern_nodes[0].has_glob);
+        assert_eq!(case_command.clauses[1].pattern_nodes[0].text, "*");
+        assert!(case_command.clauses[1].pattern_nodes[0].has_glob);
     }
 
     #[test]
@@ -477,6 +481,49 @@ mod conditional_tests {
         assert!(list.commands[0].redirect_out.is_some());
         assert_eq!(list.connectors, [true]);
         assert_eq!(list.commands[1].words, ["echo", "ok"]);
+    }
+}
+
+mod case_tests {
+    use super::*;
+
+    #[test]
+    fn test_case_patterns_record_structured_metadata() {
+        let input = "case $word in (x|@(foo|bar)|!(tmp)) echo hit ;& *) echo rest ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.word, "$word");
+        assert_eq!(case_command.clauses.len(), 2);
+        assert_eq!(
+            case_command.clauses[0].terminator,
+            CaseTerminator::FallThrough
+        );
+        assert_eq!(
+            case_command.clauses[0].patterns,
+            ["x", "@(foo|bar)", "!(tmp)"]
+        );
+
+        let patterns = &case_command.clauses[0].pattern_nodes;
+        assert_eq!(patterns.len(), 3);
+        assert_eq!(patterns[0].text, "x");
+        assert_eq!(patterns[0].clause_index, 0);
+        assert_eq!(patterns[0].pattern_index, 0);
+        assert!(!patterns[0].has_glob);
+        assert!(!patterns[0].has_extglob);
+        assert_eq!(patterns[1].text, "@(foo|bar)");
+        assert!(patterns[1].has_extglob);
+        assert!(!patterns[1].negated_extglob);
+        assert_eq!(patterns[2].text, "!(tmp)");
+        assert!(patterns[2].has_extglob);
+        assert!(patterns[2].negated_extglob);
+
+        let fallback = &case_command.clauses[1].pattern_nodes[0];
+        assert_eq!(fallback.text, "*");
+        assert_eq!(fallback.clause_index, 1);
+        assert_eq!(fallback.pattern_index, 0);
+        assert!(fallback.has_glob);
     }
 }
 

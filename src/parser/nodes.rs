@@ -300,8 +300,46 @@ pub struct CaseCommand {
 #[derive(Debug, Clone)]
 pub struct CaseClause {
     pub patterns: Vec<String>,
+    pub pattern_nodes: Vec<CasePattern>,
     pub body: Vec<CommandNode>,
     pub terminator: CaseTerminator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasePattern {
+    pub text: String,
+    pub clause_index: usize,
+    pub pattern_index: usize,
+    pub has_glob: bool,
+    pub has_extglob: bool,
+    pub negated_extglob: bool,
+}
+
+impl CasePattern {
+    pub fn new(text: String, clause_index: usize, pattern_index: usize) -> Self {
+        Self {
+            has_glob: case_pattern_has_glob(&text),
+            has_extglob: case_pattern_has_extglob(&text),
+            negated_extglob: text.contains("!("),
+            text,
+            clause_index,
+            pattern_index,
+        }
+    }
+}
+
+fn case_pattern_has_glob(pattern: &str) -> bool {
+    pattern
+        .chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn case_pattern_has_extglob(pattern: &str) -> bool {
+    pattern.contains("@(")
+        || pattern.contains("*(")
+        || pattern.contains("+(")
+        || pattern.contains("?(")
+        || pattern.contains("!(")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -98,8 +98,11 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         i = case_body_end(tokens, i);
         let body = parse(&tokens[body_start..i]).commands;
         let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
+        let clause_index = clauses.len();
+        let pattern_nodes = case_pattern_nodes(&patterns, clause_index);
         clauses.push(CaseClause {
             patterns,
+            pattern_nodes,
             body,
             terminator,
         });
@@ -123,6 +126,16 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
 pub(super) fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {
     pattern.replace('\\', "\x18")
+}
+
+fn case_pattern_nodes(patterns: &[String], clause_index: usize) -> Vec<CasePattern> {
+    patterns
+        .iter()
+        .enumerate()
+        .map(|(pattern_index, pattern)| {
+            CasePattern::new(pattern.clone(), clause_index, pattern_index)
+        })
+        .collect()
 }
 
 /// Check if a pattern string ends with an extglob operator character before (

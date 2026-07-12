@@ -94,8 +94,15 @@ pub(in crate::executor) fn case_command_from_words(words: &[String]) -> Option<C
             let tokens = crate::lexer::tokenize(&body_source);
             crate::parser::parse(&tokens).commands
         };
+        let clause_index = clauses.len();
+        let pattern_nodes = vec![crate::parser::CasePattern::new(
+            pattern.clone(),
+            clause_index,
+            0,
+        )];
         clauses.push(CaseClause {
             patterns: vec![pattern],
+            pattern_nodes,
             body,
             terminator: CaseTerminator::Break,
         });
