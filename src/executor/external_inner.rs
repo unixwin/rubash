@@ -45,10 +45,11 @@ impl Executor {
             return Ok(());
         };
 
+        let used_shell = should_run_with_shell(&program);
         let mut process = self.external_process_for(cmd, &program);
         self.apply_external_environment(cmd, &mut process);
         self.apply_external_redirects(cmd, &mut process)?;
-        self.spawn_external_process(cmd, &program, process)
+        self.spawn_external_process(cmd, &program, process, used_shell)
     }
 
     fn handle_external_shortcuts(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
@@ -184,6 +185,7 @@ impl Executor {
         cmd: &CommandNode,
         program: &PathBuf,
         mut process: Command,
+        used_shell: bool,
     ) -> Result<(), ExecuteError> {
         match process.spawn() {
             Ok(mut child) => {
@@ -201,7 +203,7 @@ impl Executor {
                                 &output.stdout,
                                 &output.stderr,
                             )?;
-                            if should_run_with_shell(program) {
+                            if used_shell {
                                 self.filter_external_shell_stderr_noise(cmd)?;
                             }
                             self.exit_code = output.status.code().unwrap_or(1);
@@ -211,7 +213,7 @@ impl Executor {
                 } else {
                     match child.wait() {
                         Ok(status) => {
-                            if should_run_with_shell(program) {
+                            if used_shell {
                                 self.filter_external_shell_stderr_noise(cmd)?;
                             }
                             self.exit_code = status.code().unwrap_or(1);
@@ -220,7 +222,19 @@ impl Executor {
                     }
                 }
             }
-            Err(error) => self.report_external_spawn_error(cmd, error)?,
+            Err(error) => {
+                if !used_shell && is_exec_format_error(&error) {
+                    if let Some(shell) = find_shell(&self.env_vars) {
+                        let mut shell_process = Command::new(shell);
+                        shell_process.arg(program);
+                        shell_process.args(&cmd.words[1..]);
+                        self.apply_external_environment(cmd, &mut shell_process);
+                        self.apply_external_redirects(cmd, &mut shell_process)?;
+                        return self.spawn_external_process(cmd, program, shell_process, true);
+                    }
+                }
+                self.report_external_spawn_error(cmd, error)?;
+            }
         }
 
         Ok(())
@@ -234,5 +248,18 @@ impl Executor {
         let mut stderr = Vec::new();
         writeln!(&mut stderr, "rubash: {}: {}", cmd.words[0], error)?;
         self.finish_external_error(cmd, &stderr, 126)
+    }
+}
+
+fn is_exec_format_error(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(8)
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }

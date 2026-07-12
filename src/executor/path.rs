@@ -253,7 +253,9 @@ fn git_bash_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
     use super::*;
+    #[cfg(windows)]
     use std::fs;
 
     #[cfg(windows)]
