@@ -40,6 +40,7 @@ mod command_substitution_pipelines;
 mod command_substitution_values;
 mod command_words;
 mod compound_exec;
+use compound_exec::*;
 mod dynamic_arrays;
 mod embedded_mutations;
 mod embedded_parameters;

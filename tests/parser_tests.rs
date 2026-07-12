@@ -60,6 +60,19 @@ mod pipeline_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 3);
     }
+
+    #[test]
+    fn test_time_prefix_parses_for_command() {
+        let input = "time -p for x in a b; do echo $x; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["time", "-p"]);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+        assert_eq!(for_command.variable, "x");
+        assert_eq!(for_command.words, ["a", "b"]);
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+    }
 }
 
 mod semicolon_tests {

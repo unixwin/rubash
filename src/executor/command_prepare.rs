@@ -21,6 +21,9 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Option<Result<(), ExecuteError>> {
+        if command_is_time_prefixed_compound(cmd) {
+            return Some(self.execute_time_prefixed_compound_command(cmd));
+        }
         if let Some(for_command) = &cmd.for_command {
             return Some(self.execute_for_command_with_redirects(for_command, cmd));
         }

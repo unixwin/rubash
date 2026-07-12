@@ -1,6 +1,25 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_time_prefixed_compound_command(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        let result = if let Some(for_command) = &cmd.for_command {
+            self.execute_for_command_with_redirects(for_command, cmd)
+        } else if let Some(select_command) = &cmd.select_command {
+            self.execute_select_command(cmd, select_command)
+        } else if let Some(case_command) = &cmd.case_command {
+            self.execute_case_command_with_redirects(cmd, case_command)
+        } else if let Some(coproc_cmd) = &cmd.coproc_command {
+            self.execute_coproc_command(cmd, coproc_cmd)
+        } else {
+            Ok(())
+        };
+        print_posix_time();
+        result
+    }
+
     pub(in crate::executor) fn execute_arithmetic_for_command(
         &mut self,
         arithmetic: &ArithmeticForCommand,
@@ -269,6 +288,14 @@ impl Executor {
 
         Ok(())
     }
+}
+
+pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) -> bool {
+    cmd.words.first().map(String::as_str) == Some("time")
+        && (cmd.for_command.is_some()
+            || cmd.select_command.is_some()
+            || cmd.case_command.is_some()
+            || cmd.coproc_command.is_some())
 }
 
 fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {

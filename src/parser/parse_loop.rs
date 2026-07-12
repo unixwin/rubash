@@ -43,6 +43,17 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     let token = &tokens[i];
 
     if token.kind == TokenKind::Keyword
+        && token.value == "time"
+        && command_is_empty(&state.current_cmd)
+    {
+        if let Some((time_cmd, next_i)) = parse_time_prefixed_compound_command(tokens, i) {
+            state.ast.commands.push(time_cmd);
+            state.current_cmd = CommandNode::new();
+            return Some(next_i);
+        }
+    }
+
+    if token.kind == TokenKind::Keyword
         && token.value == "for"
         && command_is_empty(&state.current_cmd)
     {
@@ -133,4 +144,36 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     None
+}
+
+fn parse_time_prefixed_compound_command(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(CommandNode, usize)> {
+    let mut words = vec![tokens.get(start)?.value.clone()];
+    let mut i = start + 1;
+    while tokens
+        .get(i)
+        .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--"))
+    {
+        words.push(tokens[i].value.clone());
+        i += 1;
+    }
+
+    let (mut command, next_i) = if is_keyword(tokens, i, "for") {
+        parse_for_command(tokens, i)?
+    } else if is_keyword(tokens, i, "case") {
+        parse_case_command(tokens, i)?
+    } else if is_keyword(tokens, i, "select") {
+        parse_select_command(tokens, i)?
+    } else if is_keyword(tokens, i, "coproc") {
+        parse_coproc_command(tokens, i)?
+    } else if tokens.get(i).is_some_and(|token| token.value.starts_with("((")) {
+        parse_arithmetic_command(tokens, i)?
+    } else {
+        return None;
+    };
+
+    command.words = words;
+    Some((command, next_i))
 }
