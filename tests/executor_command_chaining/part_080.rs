@@ -1,5 +1,7 @@
 use super::super::*;
 use std::fs;
+use std::thread;
+use std::time::Duration;
 
 #[test]
 fn test_combined_stdout_stderr_redirect_captures_brace_group() {
@@ -290,7 +292,8 @@ fn test_function_body_can_be_case_command() {
 fn test_function_body_can_be_if_command_sequence() {
     let output_path = "target/rubash-function-if-body-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("f() if true; then echo yes > {output_path}; else echo no > {output_path}; fi; f");
+    let input =
+        format!("f() if true; then echo yes > {output_path}; else echo no > {output_path}; fi; f");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -338,4 +341,38 @@ fn test_function_body_can_be_conditional_command() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(output_path).unwrap(), "yes:0\nno:1\n");
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_named_coproc_executes_for_body() {
+    let output_path = "target/rubash-coproc-for-body-output.txt";
+    let status_path = "target/rubash-coproc-for-body-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC for x in a b; do echo $x >> {output_path}; done; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "a\nb\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "a\nb\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
 }

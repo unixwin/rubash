@@ -53,3 +53,38 @@ fn test_named_coproc_parses_subshell_body() {
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert_eq!(coproc.body.as_ref().unwrap()[0].words, ["echo", "hi"]);
 }
+
+#[test]
+fn test_named_coproc_parses_for_body() {
+    let input = "coproc MYC for x in a b; do echo $x; done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert!(coproc.words.is_empty());
+    let for_command = coproc.body.as_ref().unwrap()[0]
+        .for_command
+        .as_ref()
+        .unwrap();
+    assert_eq!(for_command.variable, "x");
+    assert_eq!(for_command.words, ["a", "b"]);
+    assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+}
+
+#[test]
+fn test_named_coproc_parses_conditional_body() {
+    let input = "coproc MYC [[ $value == ok ]]";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert!(coproc.words.is_empty());
+    assert_eq!(
+        coproc.body.as_ref().unwrap()[0].words,
+        ["[[", "$value", "==", "ok", "]]"]
+    );
+}

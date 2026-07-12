@@ -77,15 +77,15 @@ impl Executor {
             .clone()
             .unwrap_or_else(|| "COPROC".to_string());
         use std::process::{Command, Stdio};
-        let exe = std::env::current_exe().unwrap_or_else(|_| "rubash".into());
+        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
+            .map(std::path::PathBuf::from)
+            .or_else(test_rubash_binary_from_current_exe)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| "rubash".into());
 
         let mut child = if let Some(body) = &coproc_cmd.body {
             // Compound command body: coproc [NAME] { body; } or ( body )
-            let body_text = body
-                .iter()
-                .map(|c| c.words.join(" "))
-                .collect::<Vec<_>>()
-                .join("; ");
+            let body_text = bash_command_sequence_text(body);
             let mut child = Command::new(&exe);
             child.arg("--").arg("-c").arg(&body_text);
             child
@@ -269,4 +269,20 @@ impl Executor {
 
         Ok(())
     }
+}
+
+fn test_rubash_binary_from_current_exe() -> Option<std::path::PathBuf> {
+    let current = std::env::current_exe().ok()?;
+    let deps = current.parent()?;
+    if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
+        return None;
+    }
+    let debug_dir = deps.parent()?;
+    let binary_name = if cfg!(windows) {
+        "rubash.exe"
+    } else {
+        "rubash"
+    };
+    let candidate = debug_dir.join(binary_name);
+    candidate.is_file().then_some(candidate)
 }

@@ -181,6 +181,123 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     parts.join(" ")
 }
 
+pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) -> String {
+    commands
+        .iter()
+        .map(bash_command_source_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String {
+    let mut text = if let Some(for_command) = &cmd.for_command {
+        for_command_source_text(for_command)
+    } else if let Some(select_command) = &cmd.select_command {
+        select_command_source_text(select_command)
+    } else if let Some(case_command) = &cmd.case_command {
+        case_command_source_text(case_command)
+    } else if let Some(coproc_command) = &cmd.coproc_command {
+        coproc_command_source_text(coproc_command)
+    } else if let Some(body) = &cmd.brace_group {
+        format!("{{ {}; }}", bash_command_sequence_text(body))
+    } else {
+        bash_command_text(cmd)
+    };
+    append_source_redirects(&mut text, cmd);
+    text
+}
+
+fn for_command_source_text(for_command: &ForCommand) -> String {
+    let body = bash_command_sequence_text(&for_command.body);
+    if let Some(arithmetic) = &for_command.arithmetic {
+        return format!(
+            "for (( {}; {}; {} )); do {}; done",
+            arithmetic.init, arithmetic.test, arithmetic.update, body
+        );
+    }
+
+    if for_command.default_positional {
+        format!("for {}; do {}; done", for_command.variable, body)
+    } else {
+        format!(
+            "for {} in {}; do {}; done",
+            for_command.variable,
+            for_command.words.join(" "),
+            body
+        )
+    }
+}
+
+fn select_command_source_text(select_command: &SelectCommand) -> String {
+    let body = bash_command_sequence_text(&select_command.body);
+    if select_command.default_positional {
+        format!("select {}; do {}; done", select_command.variable, body)
+    } else {
+        format!(
+            "select {} in {}; do {}; done",
+            select_command.variable,
+            select_command.words.join(" "),
+            body
+        )
+    }
+}
+
+fn case_command_source_text(case_command: &CaseCommand) -> String {
+    let mut text = format!("case {} in", case_command.word);
+    for clause in &case_command.clauses {
+        text.push(' ');
+        text.push_str(&clause.patterns.join("|"));
+        text.push_str(") ");
+        text.push_str(&bash_command_sequence_text(&clause.body));
+        text.push(' ');
+        text.push_str(match clause.terminator {
+            CaseTerminator::Break => ";;",
+            CaseTerminator::FallThrough => ";&",
+            CaseTerminator::TestNext => ";;&",
+        });
+    }
+    text.push_str(" esac");
+    text
+}
+
+fn coproc_command_source_text(coproc_command: &crate::parser::CoprocCommand) -> String {
+    let mut text = String::from("coproc");
+    if let Some(name) = &coproc_command.name {
+        text.push(' ');
+        text.push_str(name);
+    }
+    text.push(' ');
+    if let Some(body) = &coproc_command.body {
+        text.push_str("{ ");
+        text.push_str(&bash_command_sequence_text(body));
+        text.push_str("; }");
+    } else {
+        text.push_str(&coproc_command.words.join(" "));
+    }
+    text
+}
+
+fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
+    append_function_redirect(text, cmd.redirect_in.as_ref(), "<");
+    append_function_redirect(
+        text,
+        cmd.redirect_out.as_ref(),
+        cmd.redirect_out
+            .as_ref()
+            .filter(|redirect| redirect.clobber)
+            .map(|_| ">|")
+            .unwrap_or(">"),
+    );
+    append_function_redirect(text, cmd.append.as_ref(), ">>");
+    append_function_redirect(text, cmd.redirect_err.as_ref(), "2>");
+    append_function_redirect(text, cmd.redirect_err_append.as_ref(), "2>>");
+    if let Some(here_string) = &cmd.here_string {
+        text.push_str(" <<< ");
+        text.push_str(here_string);
+    }
+}
+
 pub(in crate::executor) fn function_here_string_text(
     value: &str,
     multi_command_body: bool,

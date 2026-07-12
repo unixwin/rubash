@@ -12,14 +12,15 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     if let Some(lookahead) = lookahead {
         let is_brace = is_brace_group_token(lookahead) || is_keyword(tokens, i, "{");
         let is_subshell = is_keyword(tokens, i, "(");
+        let is_compound = is_brace || is_subshell || is_coproc_shell_command_start(tokens, i);
 
-        if !is_brace && !is_subshell {
+        if !is_compound {
             // This might be a name. Check if the token *after* it is a brace group or subshell.
             let next_after = tokens.get(i + 1);
-            let next_is_compound = next_after.is_some_and(|t| {
-                is_brace_group_token(t)
-                    || (t.kind == TokenKind::Keyword && (t.value == "{" || t.value == "("))
-            });
+            let next_is_compound = next_after.is_some_and(|t| is_brace_group_token(t))
+                || is_keyword(tokens, i + 1, "{")
+                || is_keyword(tokens, i + 1, "(")
+                || is_coproc_shell_command_start(tokens, i + 1);
             if next_is_compound {
                 name = Some(lookahead.value.clone());
                 i += 1; // consume the name
@@ -107,6 +108,44 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 return Some((command, next_i));
             }
         }
+
+        if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.coproc_command = Some(CoprocCommand {
+                name,
+                words: Vec::new(),
+                body: Some(body),
+            });
+            let mut next_i = body_end;
+            collect_trailing_redirections(tokens, &mut next_i, &mut command);
+            while tokens
+                .get(next_i)
+                .is_some_and(|t| t.kind == TokenKind::Semicolon)
+            {
+                next_i += 1;
+            }
+            return Some((command, next_i));
+        }
+
+        if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.coproc_command = Some(CoprocCommand {
+                name,
+                words: Vec::new(),
+                body: Some(vec![body_command]),
+            });
+            let mut next_i = body_end;
+            collect_trailing_redirections(tokens, &mut next_i, &mut command);
+            while tokens
+                .get(next_i)
+                .is_some_and(|t| t.kind == TokenKind::Semicolon)
+            {
+                next_i += 1;
+            }
+            return Some((command, next_i));
+        }
     }
 
     // Simple command: collect remaining tokens as words
@@ -144,6 +183,77 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
+    tokens.get(index).is_some_and(|token| {
+        matches!(
+            token.value.as_str(),
+            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
+        ) || token.value.starts_with("((")
+    })
+}
+
+fn parse_coproc_command_sequence_body(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
+    let end = match tokens.get(start)?.value.as_str() {
+        "[[" => matching_coproc_conditional_end(tokens, start)?,
+        "if" => matching_coproc_if_end(tokens, start)?,
+        "while" | "until" => matching_coproc_loop_end(tokens, start)?,
+        _ => return None,
+    };
+    Some((parse(&tokens[start..=end]).commands, end + 1))
+}
+
+fn matching_coproc_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
+    (start..tokens.len()).find(|&index| tokens[index].value == "]]")
+}
+
+fn matching_coproc_if_end(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..tokens.len() {
+        if is_keyword(tokens, index, "if") {
+            depth += 1;
+        } else if is_keyword(tokens, index, "fi") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn matching_coproc_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..tokens.len() {
+        if is_keyword(tokens, index, "for")
+            || is_keyword(tokens, index, "while")
+            || is_keyword(tokens, index, "until")
+            || is_keyword(tokens, index, "select")
+        {
+            depth += 1;
+        } else if is_keyword(tokens, index, "done") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    match tokens.get(start)?.value.as_str() {
+        "for" => parse_for_command(tokens, start),
+        "case" => parse_case_command(tokens, start),
+        "select" => parse_select_command(tokens, start),
+        "coproc" => parse_coproc_command(tokens, start),
+        _ if tokens[start].value.starts_with("((") => parse_arithmetic_command(tokens, start),
+        _ => None,
+    }
 }
 
 fn is_brace_group_token(token: &Token) -> bool {
