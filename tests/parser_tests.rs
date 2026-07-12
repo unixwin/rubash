@@ -3,7 +3,9 @@
 //! Run with: cargo test --test parser_tests
 
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, CaseTerminator, ConditionalExpressionKind, QuoteKind};
+use rubash::parser::{
+    parse, CaseTerminator, ConditionalExpressionKind, FunctionBodyKind, QuoteKind,
+};
 
 #[path = "parser_coproc_tests.rs"]
 mod coproc_tests;
@@ -260,6 +262,11 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "greet");
+        assert!(function.keyword);
+        assert!(!function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert!(function.body_start.is_some());
+        assert!(function.body_end.is_some());
         assert_eq!(function.body.len(), 1);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
@@ -272,6 +279,9 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "greet");
+        assert!(function.keyword);
+        assert!(function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
@@ -283,6 +293,9 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo-a");
+        assert!(!function.keyword);
+        assert!(function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
@@ -303,9 +316,26 @@ mod function_tests {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
-        assert!(ast.commands[0].function_command.is_some());
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
+
+    #[test]
+    fn test_parenthesized_function_body_records_subshell_metadata() {
+        let input = "foo() (echo hi)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(function.name, "foo");
+        assert!(!function.keyword);
+        assert!(function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::Subshell);
+        assert!(function.body_start.is_some());
+        assert!(function.body_end.is_some());
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
     #[test]
@@ -316,6 +346,8 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo=bar");
+        assert!(function.keyword);
+        assert!(!function.has_parentheses);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
 
@@ -328,6 +360,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
         let for_command = function.body[0].for_command.as_ref().unwrap();
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.words, ["a", "b"]);
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
@@ -376,6 +409,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
         let loop_command = function.body[0].loop_command.as_ref().unwrap();
+        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
         assert!(!loop_command.until);
         assert_eq!(loop_command.condition[0].words, ["false"]);
         assert_eq!(loop_command.body[0].words, ["echo", "bad"]);
@@ -390,6 +424,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
         let conditional = function.body[0].conditional_command.as_ref().unwrap();
+        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
         assert_eq!(
             conditional.args,
             ["$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]

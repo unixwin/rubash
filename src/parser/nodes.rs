@@ -363,6 +363,19 @@ pub struct SelectCommand {
 pub struct FunctionCommand {
     pub name: String,
     pub body: Vec<CommandNode>,
+    pub keyword: bool,
+    pub has_parentheses: bool,
+    pub body_kind: FunctionBodyKind,
+    pub body_start: Option<usize>,
+    pub body_end: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionBodyKind {
+    BraceGroup,
+    Subshell,
+    CommandSequence,
+    CompoundCommand,
 }
 
 /// Represents `coproc [NAME] command [args...]` or `coproc [NAME] { body; }`

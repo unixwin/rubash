@@ -21,7 +21,8 @@ pub(super) fn parse_function_command(
         return None;
     }
 
-    if tokens.get(i).is_some_and(|token| token.value == "(") {
+    let has_parentheses = tokens.get(i).is_some_and(|token| token.value == "(");
+    if has_parentheses {
         if tokens.get(i + 1)?.value != ")" {
             return None;
         }
@@ -52,7 +53,15 @@ pub(super) fn parse_function_command(
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(FunctionCommand { name, body });
+        command.function_command = Some(function_command(
+            name,
+            body,
+            keyword_form,
+            has_parentheses,
+            FunctionBodyKind::BraceGroup,
+            Some(i),
+            Some(i),
+        ));
         let mut next_i = i + 1;
         collect_trailing_redirections(tokens, &mut next_i, &mut command);
         while tokens
@@ -70,7 +79,15 @@ pub(super) fn parse_function_command(
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(FunctionCommand { name, body });
+        command.function_command = Some(function_command(
+            name,
+            body,
+            keyword_form,
+            has_parentheses,
+            FunctionBodyKind::Subshell,
+            Some(i),
+            Some(close_i),
+        ));
         let mut next_i = close_i + 1;
         collect_trailing_redirections(tokens, &mut next_i, &mut command);
         while tokens
@@ -88,7 +105,15 @@ pub(super) fn parse_function_command(
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(FunctionCommand { name, body });
+        command.function_command = Some(function_command(
+            name,
+            body,
+            keyword_form,
+            has_parentheses,
+            FunctionBodyKind::CommandSequence,
+            Some(i),
+            body_end.checked_sub(1),
+        ));
         let mut next_i = body_end;
         collect_trailing_redirections(tokens, &mut next_i, &mut command);
         while tokens
@@ -106,10 +131,15 @@ pub(super) fn parse_function_command(
         }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        command.function_command = Some(FunctionCommand {
+        command.function_command = Some(function_command(
             name,
-            body: vec![body_command],
-        });
+            vec![body_command],
+            keyword_form,
+            has_parentheses,
+            FunctionBodyKind::CompoundCommand,
+            Some(i),
+            body_end.checked_sub(1),
+        ));
         let mut next_i = body_end;
         collect_trailing_redirections(tokens, &mut next_i, &mut command);
         while tokens
@@ -152,7 +182,15 @@ pub(super) fn parse_function_command(
     let body = parse(&tokens[body_start..i]).commands;
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.function_command = Some(FunctionCommand { name, body });
+    command.function_command = Some(function_command(
+        name,
+        body,
+        keyword_form,
+        has_parentheses,
+        FunctionBodyKind::BraceGroup,
+        Some(body_start),
+        i.checked_sub(1),
+    ));
     let mut next_i = i + 1;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     while tokens
@@ -162,6 +200,26 @@ pub(super) fn parse_function_command(
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn function_command(
+    name: String,
+    body: Vec<CommandNode>,
+    keyword: bool,
+    has_parentheses: bool,
+    body_kind: FunctionBodyKind,
+    body_start: Option<usize>,
+    body_end: Option<usize>,
+) -> FunctionCommand {
+    FunctionCommand {
+        name,
+        body,
+        keyword,
+        has_parentheses,
+        body_kind,
+        body_start,
+        body_end,
+    }
 }
 
 fn parse_function_command_sequence_body(
