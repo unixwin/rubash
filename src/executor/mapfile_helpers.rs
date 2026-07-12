@@ -72,6 +72,21 @@ impl Executor {
         self.finish_mapfile_error(cmd, stderr, 1)
     }
 
+    pub(in crate::executor) fn mapfile_invalid_identifier(
+        &mut self,
+        cmd: &CommandNode,
+        command_name: &str,
+        name: &str,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let _ = writeln!(
+            stderr,
+            "{}{command_name}: `{name}': not a valid identifier",
+            self.diagnostic_prefix()
+        );
+        self.finish_mapfile_error(cmd, stderr, 1)
+    }
+
     pub(in crate::executor) fn mapfile_missing_option_argument(
         &mut self,
         cmd: &CommandNode,

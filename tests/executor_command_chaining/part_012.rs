@@ -355,3 +355,55 @@ fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(error_path);
 }
+
+#[test]
+fn test_mapfile_rejects_invalid_array_name() {
+    let output_path = "target/rubash-mapfile-invalid-array-status.txt";
+    let error_path = "target/rubash-mapfile-invalid-array-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "mapfile 1bad <<< abc 2> {error_path}; echo mapfile:$? > {output_path}; \
+         readarray 2bad <<< abc 2>> {error_path}; echo readarray:$? >> {output_path}; \
+         mapfile -O 0 3bad <<< abc 2>> {error_path}; echo option:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "mapfile:1\nreadarray:1\noption:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("mapfile: `1bad': not a valid identifier"));
+    assert!(error.contains("readarray: `2bad': not a valid identifier"));
+    assert!(error.contains("mapfile: `3bad': not a valid identifier"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_mapfile_ignores_extra_array_names_and_accepts_double_dash() {
+    let output_path = "target/rubash-mapfile-extra-array-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "mapfile ok extra <<< abc; \
+         mapfile -- dashed <<< def; \
+         printf '%s:%s:%s:%s' \"${{#ok[@]}}\" \"${{#extra[@]}}\" \"${{#dashed[@]}}\" \"${{dashed[0]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1:0:1:def\n");
+    let _ = fs::remove_file(output_path);
+}

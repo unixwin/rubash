@@ -16,8 +16,30 @@ impl Executor {
         let mut array_name = None;
         let mut index = 1;
         let mut stderr = Vec::new();
+        let mut end_options = false;
         while index < cmd.words.len() {
+            if end_options {
+                if array_name.is_none() {
+                    if is_shell_name(&cmd.words[index]) {
+                        array_name = Some(cmd.words[index].clone());
+                    } else {
+                        return self.mapfile_invalid_identifier(
+                            cmd,
+                            command_name,
+                            &cmd.words[index],
+                            &mut stderr,
+                        );
+                    }
+                }
+                index += 1;
+                continue;
+            }
+
             match cmd.words[index].as_str() {
+                "--" => {
+                    end_options = true;
+                    index += 1;
+                }
                 "-t" => {
                     trim_newline = true;
                     index += 1;
@@ -200,10 +222,20 @@ impl Executor {
                     return self.mapfile_invalid_option(cmd, command_name, option, &mut stderr);
                 }
                 word if is_shell_name(word) => {
-                    array_name = Some(word.to_string());
+                    if array_name.is_none() {
+                        array_name = Some(word.to_string());
+                    }
                     index += 1;
                 }
-                _ => {
+                word => {
+                    if array_name.is_none() {
+                        return self.mapfile_invalid_identifier(
+                            cmd,
+                            command_name,
+                            word,
+                            &mut stderr,
+                        );
+                    }
                     index += 1;
                 }
             }
