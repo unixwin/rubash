@@ -255,7 +255,9 @@ pub struct ProcessSubstitution {
 #[derive(Debug, Clone)]
 pub struct CommandSubstitutionNode {
     pub text: String,
+    pub open_delimiter: String,
     pub source: String,
+    pub close_delimiter: String,
     pub commands: Vec<CommandNode>,
     pub backtick: bool,
     pub word_index: Option<usize>,
