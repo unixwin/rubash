@@ -12,11 +12,13 @@ pub(super) fn compound_assignment_from_word(
     }
 
     let append = name.ends_with('+');
+    let operator = if append { "+=" } else { "=" }.to_string();
     let name = name.strip_suffix('+').unwrap_or(name).to_string();
     Some(CompoundAssignment {
         name,
         elements: compound_assignment_elements(&value),
         value,
+        operator,
         append,
         word_index,
     })
@@ -41,6 +43,7 @@ fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
         return CompoundAssignmentElement {
             subscript: Some(subscript.to_string()),
             value: value.to_string(),
+            operator: Some("+=".to_string()),
             append: true,
         };
     }
@@ -49,6 +52,7 @@ fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
         return CompoundAssignmentElement {
             subscript: Some(subscript.to_string()),
             value: value.to_string(),
+            operator: Some("=".to_string()),
             append: false,
         };
     }
@@ -56,6 +60,7 @@ fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
     CompoundAssignmentElement {
         subscript: None,
         value: word.to_string(),
+        operator: None,
         append: false,
     }
 }

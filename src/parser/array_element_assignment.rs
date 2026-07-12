@@ -20,10 +20,10 @@ fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignme
 
     let close = matching_subscript_end(word, open)?;
     let operator_start = close + 1;
-    let (append, value_start) = if word[operator_start..].starts_with("+=") {
-        (true, operator_start + 2)
+    let (operator, append, value_start) = if word[operator_start..].starts_with("+=") {
+        ("+=", true, operator_start + 2)
     } else if word[operator_start..].starts_with('=') {
-        (false, operator_start + 1)
+        ("=", false, operator_start + 1)
     } else {
         return None;
     };
@@ -32,6 +32,7 @@ fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignme
         name: name.to_string(),
         subscript: word[open + 1..close].to_string(),
         value: word[value_start..].to_string(),
+        operator: operator.to_string(),
         append,
         word_index: None,
     })

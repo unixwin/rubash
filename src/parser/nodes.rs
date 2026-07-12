@@ -217,6 +217,7 @@ pub struct InvertedCommand {
 pub struct CompoundAssignment {
     pub name: String,
     pub value: String,
+    pub operator: String,
     pub append: bool,
     pub word_index: Option<usize>,
     pub elements: Vec<CompoundAssignmentElement>,
@@ -227,6 +228,7 @@ pub struct CompoundAssignment {
 pub struct CompoundAssignmentElement {
     pub subscript: Option<String>,
     pub value: String,
+    pub operator: Option<String>,
     pub append: bool,
 }
 
@@ -236,6 +238,7 @@ pub struct ArrayElementAssignment {
     pub name: String,
     pub subscript: String,
     pub value: String,
+    pub operator: String,
     pub append: bool,
     pub word_index: Option<usize>,
 }

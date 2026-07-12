@@ -823,13 +823,16 @@ mod assignment_tests {
         assert_eq!(compound.len(), 1);
         assert_eq!(compound[0].name, "arr");
         assert_eq!(compound[0].value, "(one \"two words\")");
+        assert_eq!(compound[0].operator, "=");
         assert!(!compound[0].append);
         assert_eq!(compound[0].word_index, None);
         assert_eq!(compound[0].elements.len(), 2);
         assert_eq!(compound[0].elements[0].subscript, None);
         assert_eq!(compound[0].elements[0].value, "one");
+        assert_eq!(compound[0].elements[0].operator, None);
         assert_eq!(compound[0].elements[1].subscript, None);
         assert_eq!(compound[0].elements[1].value, "\"two words\"");
+        assert_eq!(compound[0].elements[1].operator, None);
     }
 
     #[test]
@@ -847,6 +850,7 @@ mod assignment_tests {
         assert_eq!(compound.len(), 1);
         assert_eq!(compound[0].name, "arr");
         assert_eq!(compound[0].value, "(three four)");
+        assert_eq!(compound[0].operator, "+=");
         assert!(compound[0].append);
         assert_eq!(compound[0].word_index, None);
         assert_eq!(compound[0].elements.len(), 2);
@@ -867,12 +871,15 @@ mod assignment_tests {
         assert_eq!(compound[0].elements.len(), 3);
         assert_eq!(compound[0].elements[0].subscript.as_deref(), Some("2"));
         assert_eq!(compound[0].elements[0].value, "two");
+        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
         assert!(!compound[0].elements[0].append);
         assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("name"));
         assert_eq!(compound[0].elements[1].value, "more");
+        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
         assert!(compound[0].elements[1].append);
         assert_eq!(compound[0].elements[2].subscript, None);
         assert_eq!(compound[0].elements[2].value, "plain");
+        assert_eq!(compound[0].elements[2].operator, None);
     }
 
     #[test]
@@ -888,11 +895,13 @@ mod assignment_tests {
         assert_eq!(elements[0].name, "arr");
         assert_eq!(elements[0].subscript, "0");
         assert_eq!(elements[0].value, "zero");
+        assert_eq!(elements[0].operator, "=");
         assert!(!elements[0].append);
         assert_eq!(elements[0].word_index, Some(0));
         assert_eq!(elements[1].name, "arr");
         assert_eq!(elements[1].subscript, "i+1");
         assert_eq!(elements[1].value, "more");
+        assert_eq!(elements[1].operator, "+=");
         assert!(elements[1].append);
         assert_eq!(elements[1].word_index, Some(1));
     }
