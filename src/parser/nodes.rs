@@ -35,6 +35,21 @@ pub struct ArithmeticForCommand {
     pub update: String,
 }
 
+/// Represents an `if condition; then ... [elif ...] [else ...] fi` command.
+#[derive(Debug, Clone)]
+pub struct IfCommand {
+    pub condition: Vec<CommandNode>,
+    pub then_body: Vec<CommandNode>,
+    pub elif_branches: Vec<ElifBranch>,
+    pub else_body: Option<Vec<CommandNode>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ElifBranch {
+    pub condition: Vec<CommandNode>,
+    pub body: Vec<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -125,6 +140,8 @@ pub struct CommandNode {
     pub subshell_end: bool,
     /// `for name in words; do ...; done`
     pub for_command: Option<ForCommand>,
+    /// `if condition; then body; fi`
+    pub if_command: Option<IfCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `select name [in words ...]; do ...; done`
@@ -160,6 +177,7 @@ impl CommandNode {
             subshell: false,
             subshell_end: false,
             for_command: None,
+            if_command: None,
             case_command: None,
             select_command: None,
             function_command: None,

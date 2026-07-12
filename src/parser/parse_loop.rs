@@ -54,6 +54,17 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     if token.kind == TokenKind::Keyword
+        && token.value == "if"
+        && command_is_empty(&state.current_cmd)
+    {
+        if let Some((if_cmd, next_i)) = parse_if_command(tokens, i) {
+            state.ast.commands.push(if_cmd);
+            state.current_cmd = CommandNode::new();
+            return Some(next_i);
+        }
+    }
+
+    if token.kind == TokenKind::Keyword
         && token.value == "for"
         && command_is_empty(&state.current_cmd)
     {

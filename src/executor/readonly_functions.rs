@@ -170,12 +170,13 @@ impl Executor {
         writeln!(stdout, "{{ ")?;
         let printable_commands = body
             .iter()
-            .filter(|command| !command.words.is_empty())
+            .filter(|command| function_definition_command_is_printable(command))
             .collect::<Vec<_>>();
         let last_index = printable_commands.len().saturating_sub(1);
         let mut indent_level = 1usize;
         for (index, command) in printable_commands.iter().enumerate() {
-            if command.words.is_empty() {
+            if let Some(if_command) = &command.if_command {
+                self.write_if_function_definition(if_command, stdout, indent_level)?;
                 continue;
             }
             if function_definition_command_closes_block(command) {
@@ -212,6 +213,101 @@ impl Executor {
             }
         }
         writeln!(stdout, "}}")
+    }
+
+    fn write_if_function_definition<W>(
+        &self,
+        if_command: &IfCommand,
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        self.write_if_condition_definition("if", &if_command.condition, stdout, indent_level)?;
+        self.write_function_definition_commands(&if_command.then_body, stdout, indent_level + 1)?;
+        for branch in &if_command.elif_branches {
+            self.write_if_condition_definition("elif", &branch.condition, stdout, indent_level)?;
+            self.write_function_definition_commands(&branch.body, stdout, indent_level + 1)?;
+        }
+        if let Some(body) = &if_command.else_body {
+            writeln!(stdout, "{}else", "    ".repeat(indent_level))?;
+            self.write_function_definition_commands(body, stdout, indent_level + 1)?;
+        }
+        writeln!(stdout, "{}fi", "    ".repeat(indent_level))
+    }
+
+    fn write_if_condition_definition<W>(
+        &self,
+        keyword: &str,
+        condition: &[CommandNode],
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let indent = "    ".repeat(indent_level);
+        let Some((first, rest)) = condition.split_first() else {
+            writeln!(stdout, "{indent}{keyword}")?;
+            writeln!(stdout, "{indent}then")?;
+            return Ok(());
+        };
+
+        let mut first = first.clone();
+        first.words.insert(0, keyword.to_string());
+        let line = self
+            .function_command_description_line(&first, false)
+            .unwrap_or_else(|| first.words.join(" "));
+        writeln!(stdout, "{indent}{line}")?;
+        write_function_definition_heredoc_body(&first, stdout)?;
+        for command in rest {
+            self.write_function_definition_command(command, stdout, indent_level)?;
+        }
+        writeln!(stdout, "{indent}then")
+    }
+
+    fn write_function_definition_commands<W>(
+        &self,
+        commands: &[CommandNode],
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        for command in commands
+            .iter()
+            .filter(|command| function_definition_command_is_printable(command))
+        {
+            if let Some(if_command) = &command.if_command {
+                self.write_if_function_definition(if_command, stdout, indent_level)?;
+            } else {
+                self.write_function_definition_command(command, stdout, indent_level)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_function_definition_command<W>(
+        &self,
+        command: &CommandNode,
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let indent = "    ".repeat(indent_level);
+        if command.heredoc.is_some() {
+            let line = self
+                .function_command_description_line(command, false)
+                .unwrap_or_else(|| command.words.join(" "));
+            writeln!(stdout, "{indent}{line}")?;
+            write_function_definition_heredoc_body(command, stdout)
+        } else {
+            writeln!(stdout, "{indent}{};", command.words.join(" "))
+        }
     }
 
     pub(in crate::executor) fn apply_exported_functions_to_child(&self, process: &mut Command) {

@@ -42,6 +42,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && !cmd.subshell
         && !cmd.subshell_end
         && cmd.for_command.is_none()
+        && cmd.if_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
 }
@@ -69,7 +70,33 @@ pub(in crate::executor) fn command_has_redirect(cmd: &CommandNode) -> bool {
 }
 
 pub(in crate::executor) fn function_body_needs_command_terminators(body: &[CommandNode]) -> bool {
-    body.iter().any(|command| command.heredoc.is_some())
+    body.iter().any(command_or_compound_has_heredoc)
+}
+
+pub(in crate::executor) fn function_definition_command_is_printable(command: &CommandNode) -> bool {
+    !command.words.is_empty() || command.if_command.is_some()
+}
+
+fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
+    command.heredoc.is_some()
+        || command.if_command.as_ref().is_some_and(|if_command| {
+            if_command
+                .condition
+                .iter()
+                .any(command_or_compound_has_heredoc)
+                || if_command
+                    .then_body
+                    .iter()
+                    .any(command_or_compound_has_heredoc)
+                || if_command.elif_branches.iter().any(|branch| {
+                    branch.condition.iter().any(command_or_compound_has_heredoc)
+                        || branch.body.iter().any(command_or_compound_has_heredoc)
+                })
+                || if_command
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|body| body.iter().any(command_or_compound_has_heredoc))
+        })
 }
 
 pub(in crate::executor) fn function_definition_command_omits_terminator(
@@ -193,6 +220,8 @@ pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) 
 pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String {
     let mut text = if let Some(for_command) = &cmd.for_command {
         for_command_source_text(for_command)
+    } else if let Some(if_command) = &cmd.if_command {
+        if_command_source_text(if_command)
     } else if let Some(select_command) = &cmd.select_command {
         select_command_source_text(select_command)
     } else if let Some(case_command) = &cmd.case_command {
@@ -227,6 +256,26 @@ fn for_command_source_text(for_command: &ForCommand) -> String {
             body
         )
     }
+}
+
+fn if_command_source_text(if_command: &IfCommand) -> String {
+    let mut text = format!(
+        "if {}; then {}",
+        bash_command_sequence_text(&if_command.condition),
+        bash_command_sequence_text(&if_command.then_body)
+    );
+    for branch in &if_command.elif_branches {
+        text.push_str(&format!(
+            "; elif {}; then {}",
+            bash_command_sequence_text(&branch.condition),
+            bash_command_sequence_text(&branch.body)
+        ));
+    }
+    if let Some(body) = &if_command.else_body {
+        text.push_str(&format!("; else {}", bash_command_sequence_text(body)));
+    }
+    text.push_str("; fi");
+    text
 }
 
 fn select_command_source_text(select_command: &SelectCommand) -> String {

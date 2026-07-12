@@ -134,6 +134,49 @@ mod semicolon_tests {
     }
 }
 
+mod if_tests {
+    use super::*;
+
+    #[test]
+    fn test_if_command_parses_then_body() {
+        let input = "if true; then echo yes; fi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let if_command = ast.commands[0].if_command.as_ref().unwrap();
+        assert_eq!(if_command.condition[0].words, ["true"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
+        assert!(if_command.elif_branches.is_empty());
+        assert!(if_command.else_body.is_none());
+    }
+
+    #[test]
+    fn test_if_command_parses_elif_and_else() {
+        let input = "if false; then echo no; elif true; then echo yes; else echo bad; fi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let if_command = ast.commands[0].if_command.as_ref().unwrap();
+        assert_eq!(if_command.condition[0].words, ["false"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "no"]);
+        assert_eq!(if_command.elif_branches.len(), 1);
+        assert_eq!(if_command.elif_branches[0].condition[0].words, ["true"]);
+        assert_eq!(if_command.elif_branches[0].body[0].words, ["echo", "yes"]);
+        assert_eq!(
+            if_command.else_body.as_ref().unwrap()[0].words,
+            ["echo", "bad"]
+        );
+    }
+
+    #[test]
+    fn test_if_command_consumes_trailing_redirects() {
+        let input = "if true; then echo yes; fi > out";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert!(ast.commands[0].if_command.is_some());
+        assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
+    }
+}
+
 mod function_tests {
     use super::*;
 
@@ -239,9 +282,13 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
-        assert_eq!(function.body[0].words, ["if", "true"]);
-        assert_eq!(function.body[1].words, ["then", "echo", "yes"]);
-        assert_eq!(function.body[3].words, ["fi"]);
+        let if_command = function.body[0].if_command.as_ref().unwrap();
+        assert_eq!(if_command.condition[0].words, ["true"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
+        assert_eq!(
+            if_command.else_body.as_ref().unwrap()[0].words,
+            ["echo", "no"]
+        );
     }
 
     #[test]

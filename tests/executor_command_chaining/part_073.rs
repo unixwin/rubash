@@ -101,9 +101,8 @@ fn test_if_command_redirects_then_body_stdout() {
     let input = format!("if true; then echo yes; fi > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert!(ast.commands.iter().any(|command| {
-        command.words.first().map(String::as_str) == Some("fi") && command.redirect_out.is_some()
-    }));
+    assert!(ast.commands[0].if_command.is_some());
+    assert!(ast.commands[0].redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

@@ -27,6 +27,9 @@ impl Executor {
         if let Some(for_command) = &cmd.for_command {
             return Some(self.execute_for_command_with_redirects(for_command, cmd));
         }
+        if let Some(if_command) = &cmd.if_command {
+            return Some(self.execute_if_command_with_redirects(cmd, if_command));
+        }
         if let Some(select_command) = &cmd.select_command {
             return Some(self.execute_select_command(cmd, select_command));
         }

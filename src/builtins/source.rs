@@ -14,6 +14,7 @@ mod pipe_source;
 mod simple_if;
 
 pub use execution::{execute_text, execute_text_with_args};
+pub(crate) use flow::normalize_inline_compound_commands;
 pub use pipe_source::execute_pipe_into_source;
 pub use simple_if::execute_simple_if;
 

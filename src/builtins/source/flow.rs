@@ -21,7 +21,7 @@ pub(super) fn command_tail_from(
     Some(tail)
 }
 
-pub(super) fn normalize_inline_compound_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+pub(crate) fn normalize_inline_compound_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
     let mut normalized = Vec::new();
     let mut index = 0usize;
     while index < commands.len() {

@@ -1,0 +1,114 @@
+use super::*;
+use crate::lexer::Token;
+
+pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    if !is_keyword(tokens, start, "if") {
+        return None;
+    }
+
+    let then_index = find_if_then(tokens, start + 1)?;
+    let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
+    let mut index = then_index + 1;
+
+    let (then_body, boundary) = parse_if_section(tokens, index)?;
+    index = boundary;
+
+    let mut elif_branches = Vec::new();
+    while is_keyword(tokens, index, "elif") {
+        let elif_then = find_if_then(tokens, index + 1)?;
+        let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
+        let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
+        elif_branches.push(ElifBranch { condition, body });
+        index = next_boundary;
+    }
+
+    let else_body = if is_keyword(tokens, index, "else") {
+        let (body, next_boundary) = parse_if_section(tokens, index + 1)?;
+        index = next_boundary;
+        Some(body)
+    } else {
+        None
+    };
+
+    if !is_keyword(tokens, index, "fi") {
+        return None;
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.if_command = Some(IfCommand {
+        condition,
+        then_body,
+        elif_branches,
+        else_body,
+    });
+
+    let mut next_i = index + 1;
+    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    Some((command, next_i))
+}
+
+fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < tokens.len() {
+        if opens_compound_body(tokens, index) {
+            depth += 1;
+        } else if is_keyword(tokens, index, "then") {
+            if depth == 0 {
+                return Some(index);
+            }
+        } else if closes_compound_body(tokens, index) {
+            depth = depth.saturating_sub(1);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn parse_if_section(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, usize)> {
+    let mut depth = 0usize;
+    let mut index = start;
+    while index < tokens.len() {
+        if opens_compound_body(tokens, index) {
+            depth += 1;
+        } else if closes_compound_body(tokens, index) {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        } else if depth == 0 && is_keyword(tokens, index, "then") {
+            return None;
+        } else if depth == 0
+            && (is_keyword(tokens, index, "elif") || is_keyword(tokens, index, "else"))
+        {
+            break;
+        }
+        index += 1;
+    }
+
+    tokens.get(index)?;
+    Some((parse_if_body_commands(&tokens[start..index]), index))
+}
+
+fn parse_if_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
+    parse(tokens)
+        .commands
+        .into_iter()
+        .filter(|command| !command_is_empty(command))
+        .collect()
+}
+
+fn opens_compound_body(tokens: &[Token], index: usize) -> bool {
+    matches!(
+        tokens.get(index).map(|token| token.value.as_str()),
+        Some("if" | "for" | "select" | "while" | "until" | "case")
+    )
+}
+
+fn closes_compound_body(tokens: &[Token], index: usize) -> bool {
+    matches!(
+        tokens.get(index).map(|token| token.value.as_str()),
+        Some("fi" | "done" | "esac")
+    )
+}

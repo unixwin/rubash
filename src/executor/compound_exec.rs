@@ -10,6 +10,8 @@ impl Executor {
             .unwrap_or(false);
         let result = if let Some(for_command) = &cmd.for_command {
             self.execute_for_command_with_redirects(for_command, cmd)
+        } else if let Some(if_command) = &cmd.if_command {
+            self.execute_if_command_with_redirects(cmd, if_command)
         } else if let Some(select_command) = &cmd.select_command {
             self.execute_select_command(cmd, select_command)
         } else if let Some(case_command) = &cmd.case_command {
@@ -137,6 +139,89 @@ impl Executor {
             self.exit_code = 0;
         }
         Ok(())
+    }
+
+    pub(in crate::executor) fn execute_if_command_with_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        if_command: &IfCommand,
+    ) -> Result<(), ExecuteError> {
+        if self.if_command_needs_alias_scan(if_command) {
+            let flat = flatten_if_command_for_alias_scan(cmd, if_command);
+            crate::builtins::source::execute_simple_if(self, &Ast { commands: flat }, 0)?;
+            return Ok(());
+        }
+
+        let mut if_command = if_command.clone();
+        apply_if_redirects(self, cmd, &mut if_command)?;
+        self.with_command_input_redirects(cmd, |executor| executor.execute_if_command(&if_command))
+    }
+
+    fn if_command_needs_alias_scan(&self, if_command: &IfCommand) -> bool {
+        if !self.alias_expansion_enabled() {
+            return false;
+        }
+
+        if self.commands_contain_alias_if_control(&if_command.then_body) {
+            return true;
+        }
+        if if_command.elif_branches.iter().any(|branch| {
+            self.commands_contain_alias_if_control(&branch.condition)
+                || self.commands_contain_alias_if_control(&branch.body)
+        }) {
+            return true;
+        }
+        if let Some(body) = &if_command.else_body {
+            return self.commands_contain_alias_if_control(body);
+        }
+        false
+    }
+
+    fn commands_contain_alias_if_control(&self, commands: &[CommandNode]) -> bool {
+        commands.iter().any(|command| {
+            let words = self.expand_aliases(&command.words);
+            matches!(
+                words.first().map(String::as_str),
+                Some("if" | "then" | "elif" | "else" | "fi")
+            )
+        })
+    }
+
+    fn execute_if_command(&mut self, if_command: &IfCommand) -> Result<(), ExecuteError> {
+        if self.if_condition_matches(&if_command.condition)? {
+            return self.execute_ast(&Ast {
+                commands: crate::builtins::source::normalize_inline_compound_commands(
+                    if_command.then_body.clone(),
+                ),
+            });
+        }
+
+        for branch in &if_command.elif_branches {
+            if self.if_condition_matches(&branch.condition)? {
+                return self.execute_ast(&Ast {
+                    commands: crate::builtins::source::normalize_inline_compound_commands(
+                        branch.body.clone(),
+                    ),
+                });
+            }
+        }
+
+        if let Some(body) = &if_command.else_body {
+            return self.execute_ast(&Ast {
+                commands: crate::builtins::source::normalize_inline_compound_commands(body.clone()),
+            });
+        }
+
+        self.exit_code = 0;
+        Ok(())
+    }
+
+    fn if_condition_matches(&mut self, condition: &[CommandNode]) -> Result<bool, ExecuteError> {
+        let ast = Ast {
+            commands: condition.to_vec(),
+        };
+        self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+        Ok(self.exit_code == 0)
     }
 
     pub(in crate::executor) fn execute_coproc_command(
@@ -346,10 +431,90 @@ impl Executor {
 pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) -> bool {
     cmd.words.first().map(String::as_str) == Some("time")
         && (cmd.for_command.is_some()
+            || cmd.if_command.is_some()
             || cmd.select_command.is_some()
             || cmd.case_command.is_some()
             || cmd.coproc_command.is_some()
             || cmd.brace_group.is_some())
+}
+
+fn apply_if_redirects(
+    executor: &mut Executor,
+    cmd: &CommandNode,
+    if_command: &mut IfCommand,
+) -> Result<(), ExecuteError> {
+    apply_redirects_to_commands(executor, cmd, &mut if_command.condition)?;
+    apply_redirects_to_commands(executor, cmd, &mut if_command.then_body)?;
+    for branch in &mut if_command.elif_branches {
+        apply_redirects_to_commands(executor, cmd, &mut branch.condition)?;
+        apply_redirects_to_commands(executor, cmd, &mut branch.body)?;
+    }
+    if let Some(body) = &mut if_command.else_body {
+        apply_redirects_to_commands(executor, cmd, body)?;
+    }
+    Ok(())
+}
+
+fn apply_redirects_to_commands(
+    executor: &mut Executor,
+    cmd: &CommandNode,
+    commands: &mut Vec<CommandNode>,
+) -> Result<(), ExecuteError> {
+    let mut ast = Ast {
+        commands: std::mem::take(commands),
+    };
+    executor.apply_command_output_redirects(cmd, &mut ast)?;
+    *commands = ast.commands;
+    Ok(())
+}
+
+fn flatten_if_command_for_alias_scan(
+    cmd: &CommandNode,
+    if_command: &IfCommand,
+) -> Vec<CommandNode> {
+    let mut commands = Vec::new();
+    push_if_condition(&mut commands, "if", &if_command.condition);
+    commands.push(command_with_words(["then"]));
+    commands.extend(if_command.then_body.clone());
+    for branch in &if_command.elif_branches {
+        push_if_condition(&mut commands, "elif", &branch.condition);
+        commands.push(command_with_words(["then"]));
+        commands.extend(branch.body.clone());
+    }
+    if let Some(body) = &if_command.else_body {
+        commands.push(command_with_words(["else"]));
+        commands.extend(body.clone());
+    }
+    let mut fi = command_with_words(["fi"]);
+    fi.redirect_in = cmd.redirect_in.clone();
+    fi.redirect_out = cmd.redirect_out.clone();
+    fi.append = cmd.append.clone();
+    fi.redirect_err = cmd.redirect_err.clone();
+    fi.redirect_err_append = cmd.redirect_err_append.clone();
+    fi.heredoc = cmd.heredoc.clone();
+    fi.heredoc_delimiter = cmd.heredoc_delimiter.clone();
+    fi.heredoc_redirects = cmd.heredoc_redirects.clone();
+    fi.here_string = cmd.here_string.clone();
+    commands.push(fi);
+    commands
+}
+
+fn push_if_condition(commands: &mut Vec<CommandNode>, keyword: &str, condition: &[CommandNode]) {
+    let Some((first, rest)) = condition.split_first() else {
+        commands.push(command_with_words([keyword]));
+        return;
+    };
+
+    let mut first = first.clone();
+    first.words.insert(0, keyword.to_string());
+    commands.push(first);
+    commands.extend(rest.iter().cloned());
+}
+
+fn command_with_words<const N: usize>(words: [&str; N]) -> CommandNode {
+    let mut command = CommandNode::new();
+    command.words = words.iter().map(|word| (*word).to_string()).collect();
+    command
 }
 
 struct TimePrefixParts {
