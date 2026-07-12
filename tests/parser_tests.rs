@@ -669,12 +669,15 @@ mod case_tests {
         assert_eq!(patterns[0].text, "x");
         assert_eq!(patterns[0].clause_index, 0);
         assert_eq!(patterns[0].pattern_index, 0);
+        assert!(patterns[0].operators.is_empty());
         assert!(!patterns[0].has_glob);
         assert!(!patterns[0].has_extglob);
         assert_eq!(patterns[1].text, "@(foo|bar)");
+        assert_eq!(patterns[1].operators, ["@(", "|"]);
         assert!(patterns[1].has_extglob);
         assert!(!patterns[1].negated_extglob);
         assert_eq!(patterns[2].text, "!(tmp)");
+        assert_eq!(patterns[2].operators, ["!("]);
         assert!(patterns[2].has_extglob);
         assert!(patterns[2].negated_extglob);
 
@@ -682,6 +685,7 @@ mod case_tests {
         assert_eq!(fallback.text, "*");
         assert_eq!(fallback.clause_index, 1);
         assert_eq!(fallback.pattern_index, 0);
+        assert_eq!(fallback.operators, ["*"]);
         assert!(fallback.has_glob);
         assert_eq!(case_command.clauses[1].pattern_open_delimiter, None);
         assert!(case_command.clauses[1].pattern_separators.is_empty());
@@ -701,6 +705,25 @@ mod case_tests {
 
         assert_eq!(clause.terminator, CaseTerminator::Break);
         assert_eq!(clause.terminator_text, None);
+    }
+
+    #[test]
+    fn test_case_pattern_records_glob_operators() {
+        let input = "case $word in src/[ab]??.rs) echo hit ;; **/*.sh) echo shell ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let first = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(first.text, "src/[ab]??.rs");
+        assert_eq!(first.operators, ["[ab]", "?", "?"]);
+        assert!(first.has_glob);
+        assert!(!first.has_extglob);
+
+        let second = &case_command.clauses[1].pattern_nodes[0];
+        assert_eq!(second.text, "**/*.sh");
+        assert_eq!(second.operators, ["**", "*"]);
+        assert!(second.has_glob);
     }
 }
 

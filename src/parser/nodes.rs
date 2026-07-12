@@ -411,6 +411,7 @@ pub struct CaseClause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CasePattern {
     pub text: String,
+    pub operators: Vec<String>,
     pub clause_index: usize,
     pub pattern_index: usize,
     pub has_glob: bool,
@@ -424,6 +425,7 @@ impl CasePattern {
             has_glob: case_pattern_has_glob(&text),
             has_extglob: case_pattern_has_extglob(&text),
             negated_extglob: text.contains("!("),
+            operators: case_pattern_operators(&text),
             text,
             clause_index,
             pattern_index,
@@ -443,6 +445,46 @@ fn case_pattern_has_extglob(pattern: &str) -> bool {
         || pattern.contains("+(")
         || pattern.contains("?(")
         || pattern.contains("!(")
+}
+
+fn case_pattern_operators(pattern: &str) -> Vec<String> {
+    let chars = pattern.chars().collect::<Vec<_>>();
+    let mut operators = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '@' | '!' | '+' | '?' | '*' if chars.get(index + 1) == Some(&'(') => {
+                operators.push(chars[index..=index + 1].iter().collect());
+                index += 2;
+                continue;
+            }
+            '*' if chars.get(index + 1) == Some(&'*') => {
+                operators.push("**".to_string());
+                index += 2;
+                continue;
+            }
+            '*' => operators.push("*".to_string()),
+            '?' => operators.push("?".to_string()),
+            '[' => {
+                let mut end = index + 1;
+                while end < chars.len() && chars[end] != ']' {
+                    if chars[end] == '\\' {
+                        end += 1;
+                    }
+                    end += 1;
+                }
+                if end < chars.len() {
+                    operators.push(chars[index..=end].iter().collect());
+                    index = end + 1;
+                    continue;
+                }
+            }
+            '|' => operators.push("|".to_string()),
+            _ => {}
+        }
+        index += 1;
+    }
+    operators
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
