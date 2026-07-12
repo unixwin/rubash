@@ -97,6 +97,16 @@ impl Executor {
                 continue;
             }
 
+            if command_is_time_prefixed_compound(command) {
+                self.execute_time_prefixed_compound_command(command)?;
+                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
             if self.execute_brace_group_pipeline(command)? {
                 if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
                     index = next_index;
