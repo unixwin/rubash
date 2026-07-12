@@ -1341,11 +1341,15 @@ mod extglob_pattern_tests {
         let patterns = ast.commands[0].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 3);
         assert_eq!(patterns[0].text, "@(alpha|beta)");
+        assert_eq!(patterns[0].open_delimiter, "@(");
+        assert_eq!(patterns[0].close_delimiter, ")");
         assert_eq!(patterns[0].operator, '@');
         assert_eq!(patterns[0].pattern, "alpha|beta");
         assert_eq!(patterns[0].alternatives, ["alpha", "beta"]);
         assert_eq!(patterns[0].word_index, Some(1));
         assert_eq!(patterns[1].text, "!(.tmp)");
+        assert_eq!(patterns[1].open_delimiter, "!(");
+        assert_eq!(patterns[1].close_delimiter, ")");
         assert_eq!(patterns[1].operator, '!');
         assert_eq!(patterns[1].alternatives, [".tmp"]);
         assert_eq!(patterns[1].word_index, Some(2));
@@ -1380,6 +1384,8 @@ mod extglob_pattern_tests {
         let patterns = ast.commands[0].extglob_patterns.as_slice();
         assert_eq!(patterns.len(), 1);
         assert_eq!(patterns[0].text, "*(src|tests)");
+        assert_eq!(patterns[0].open_delimiter, "*(");
+        assert_eq!(patterns[0].close_delimiter, ")");
         assert_eq!(patterns[0].operator, '*');
         assert_eq!(patterns[0].pattern, "src|tests");
         assert_eq!(patterns[0].assignment_name.as_deref(), Some("pattern"));

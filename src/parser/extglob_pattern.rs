@@ -78,8 +78,10 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
     Some((
         ExtglobPattern {
             text: chars[start..=close].iter().collect(),
+            open_delimiter: format!("{operator}("),
             operator,
             pattern,
+            close_delimiter: ")".to_string(),
             alternatives,
             word_index: None,
             assignment_name: None,

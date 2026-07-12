@@ -314,8 +314,10 @@ pub struct BraceExpansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtglobPattern {
     pub text: String,
+    pub open_delimiter: String,
     pub operator: char,
     pub pattern: String,
+    pub close_delimiter: String,
     pub alternatives: Vec<String>,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
