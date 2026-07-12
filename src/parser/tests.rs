@@ -16,6 +16,7 @@ fn test_parse_pipeline() {
     assert_eq!(ast.commands.len(), 1);
     let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
     assert_eq!(pipeline.stages.len(), 2);
+    assert_eq!(pipeline.operators, ["|"]);
     assert_eq!(pipeline.stages[0].words, ["ls"]);
     assert_eq!(pipeline.stages[1].words, ["grep", "foo"]);
 }

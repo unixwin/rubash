@@ -149,8 +149,12 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         }
 
         let mut stages = vec![command];
+        let mut operators = Vec::new();
         index += 1;
         while let Some(command) = commands.get(index) {
+            if stages.last().is_some_and(|stage| stage.pipe.is_some()) {
+                operators.push("|".to_string());
+            }
             stages.push(command.clone());
             index += 1;
             if command.pipe.is_none() {
@@ -176,7 +180,7 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         if let Some(first_stage) = stages.first_mut() {
             first_stage.inverted = false;
         }
-        pipeline.pipeline_command = Some(PipelineCommand { stages });
+        pipeline.pipeline_command = Some(PipelineCommand { stages, operators });
         folded.push(pipeline);
     }
     folded

@@ -54,6 +54,7 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.operators, ["|"]);
         assert_eq!(pipeline.stages[0].words, ["ls"]);
         assert!(pipeline.stages[0].pipe.is_some());
         assert_eq!(pipeline.stages[1].words, ["grep", "foo"]);
@@ -67,6 +68,7 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 3);
+        assert_eq!(pipeline.operators, ["|", "|"]);
         assert_eq!(pipeline.stages[2].words, ["sort"]);
     }
 

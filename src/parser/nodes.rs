@@ -142,6 +142,7 @@ pub struct BraceGroupCommand {
 #[derive(Debug, Clone)]
 pub struct PipelineCommand {
     pub stages: Vec<CommandNode>,
+    pub operators: Vec<String>,
 }
 
 /// Represents commands connected by `&&` and `||`.
