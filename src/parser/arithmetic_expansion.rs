@@ -99,6 +99,8 @@ fn arithmetic_expansion_node(
     let operators = arithmetic_operators(&expression);
     ArithmeticExpansion {
         text: chars[start..=end + 1].iter().collect(),
+        open_delimiter: "$((".to_string(),
+        close_delimiter: "))".to_string(),
         variables: arithmetic_variables(&expression),
         has_assignment: operators
             .iter()

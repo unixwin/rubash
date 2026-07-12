@@ -1032,6 +1032,8 @@ mod arithmetic_expansion_tests {
         let expansions = ast.commands[0].arithmetic_expansions.as_slice();
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "$((n + 1))");
+        assert_eq!(expansions[0].open_delimiter, "$((");
+        assert_eq!(expansions[0].close_delimiter, "))");
         assert_eq!(expansions[0].expression, "n + 1");
         assert_eq!(expansions[0].variables, ["n"]);
         assert_eq!(expansions[0].operators[0].text, "+");
@@ -1064,6 +1066,8 @@ mod arithmetic_expansion_tests {
         let expansions = ast.commands[0].arithmetic_expansions.as_slice();
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "$((2 + 3))");
+        assert_eq!(expansions[0].open_delimiter, "$((");
+        assert_eq!(expansions[0].close_delimiter, "))");
         assert_eq!(expansions[0].expression, "2 + 3");
         assert_eq!(expansions[0].operators[0].text, "+");
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));

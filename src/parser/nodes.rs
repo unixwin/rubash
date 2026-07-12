@@ -266,7 +266,9 @@ pub struct CommandSubstitutionNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArithmeticExpansion {
     pub text: String,
+    pub open_delimiter: String,
     pub expression: String,
+    pub close_delimiter: String,
     pub operators: Vec<ArithmeticOperator>,
     pub variables: Vec<String>,
     pub has_assignment: bool,
