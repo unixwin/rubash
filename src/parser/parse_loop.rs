@@ -103,9 +103,11 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
 
         let mut list_commands = vec![command];
         let mut connectors = Vec::new();
+        let mut operators = Vec::new();
         index += 1;
         while let Some(connector) = list_commands.last().and_then(|command| command.and_or) {
             connectors.push(connector);
+            operators.push(if connector { "&&" } else { "||" }.to_string());
             while commands.get(index).is_some_and(command_is_empty) {
                 index += 1;
             }
@@ -133,6 +135,7 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         list.and_or_list = Some(AndOrListCommand {
             commands: list_commands,
             connectors,
+            operators,
         });
         folded.push(list);
     }

@@ -81,6 +81,7 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
         assert_eq!(list.connectors, [true]);
+        assert_eq!(list.operators, ["&&"]);
         assert!(list.commands[0].pipeline_command.is_some());
         assert_eq!(list.commands[1].words, ["echo", "ok"]);
     }
@@ -93,6 +94,7 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
         assert_eq!(list.connectors, [false, true]);
+        assert_eq!(list.operators, ["||", "&&"]);
         assert_eq!(list.commands[0].words, ["false"]);
         assert_eq!(list.commands[1].words, ["echo", "fallback"]);
         assert_eq!(list.commands[2].words, ["echo", "done"]);

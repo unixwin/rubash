@@ -168,6 +168,7 @@ pub struct PipelineCommand {
 pub struct AndOrListCommand {
     pub commands: Vec<CommandNode>,
     pub connectors: Vec<bool>,
+    pub operators: Vec<String>,
 }
 
 /// Represents `time [-p] [!] command`.
