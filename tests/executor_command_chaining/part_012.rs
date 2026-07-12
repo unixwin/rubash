@@ -295,3 +295,63 @@ fn test_array_at_indices_expand() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "2 3\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_mapfile_u_rejects_invalid_fd_specifications() {
+    let output_path = "target/rubash-mapfile-u-invalid-fd-status.txt";
+    let error_path = "target/rubash-mapfile-u-invalid-fd-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "mapfile -u x arr <<< abc 2> {error_path}; echo word:$? > {output_path}; \
+         readarray -u-1 arr <<< abc 2>> {error_path}; echo compact_negative:$? >> {output_path}; \
+         mapfile -u2147483648 arr <<< abc 2>> {error_path}; echo too_large:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "word:1\ncompact_negative:1\ntoo_large:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("mapfile: x: invalid file descriptor specification"));
+    assert!(error.contains("readarray: -1: invalid file descriptor specification"));
+    assert!(error.contains("mapfile: 2147483648: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_mapfile_u_reports_bad_fd_for_unopened_or_closed_fd() {
+    let output_path = "target/rubash-mapfile-u-bad-fd-status.txt";
+    let error_path = "target/rubash-mapfile-u-bad-fd-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "mapfile -u3 arr 2> {error_path}; echo unopened:$? > {output_path}; \
+         readarray -u 3 arr 3<&- 2>> {error_path}; echo closed:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "unopened:1\nclosed:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("mapfile: 3: invalid file descriptor: Bad file descriptor"));
+    assert!(error.contains("readarray: 3: invalid file descriptor: Bad file descriptor"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}

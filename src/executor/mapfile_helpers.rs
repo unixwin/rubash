@@ -37,6 +37,41 @@ impl Executor {
         Ok(quantum)
     }
 
+    pub(in crate::executor) fn parse_mapfile_fd(
+        &self,
+        command_name: &str,
+        value: &str,
+        stderr: &mut Vec<u8>,
+    ) -> Result<u32, i32> {
+        value
+            .parse::<i32>()
+            .ok()
+            .and_then(|fd| u32::try_from(fd).ok())
+            .ok_or_else(|| {
+                let _ = writeln!(
+                    stderr,
+                    "{}{command_name}: {value}: invalid file descriptor specification",
+                    self.diagnostic_prefix()
+                );
+                1
+            })
+    }
+
+    pub(in crate::executor) fn mapfile_bad_file_descriptor(
+        &mut self,
+        cmd: &CommandNode,
+        command_name: &str,
+        fd: u32,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let _ = writeln!(
+            stderr,
+            "{}{command_name}: {fd}: invalid file descriptor: Bad file descriptor",
+            self.diagnostic_prefix()
+        );
+        self.finish_mapfile_error(cmd, stderr, 1)
+    }
+
     pub(in crate::executor) fn mapfile_missing_option_argument(
         &mut self,
         cmd: &CommandNode,
@@ -109,6 +144,24 @@ impl Executor {
         }
         self.mapfile_virtual_fd_input(fd)
             .or_else(|| self.mapfile_heredoc_fd_input(cmd, fd))
+    }
+
+    pub(in crate::executor) fn mapfile_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
+        if self.env_vars.contains_key(&fd_stdin_key(fd)) {
+            return true;
+        }
+        if cmd
+            .heredoc_redirects
+            .iter()
+            .any(|redirect| redirect.fd == Some(fd) && redirect.body.is_some())
+        {
+            return true;
+        }
+        cmd.redirect_in
+            .as_ref()
+            .is_some_and(|redirect| {
+                redirect.fd == Some(fd) && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+            })
     }
 
     fn mapfile_redirected_fd_input(&mut self, cmd: &CommandNode, fd: u32) -> Option<String> {

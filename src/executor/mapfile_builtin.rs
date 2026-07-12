@@ -115,13 +115,8 @@ impl Executor {
                             &mut stderr,
                         );
                     };
-                    match self.parse_mapfile_usize(
-                        command_name,
-                        word,
-                        "invalid file descriptor",
-                        &mut stderr,
-                    ) {
-                        Ok(value) => read_fd = Some(value as u32),
+                    match self.parse_mapfile_fd(command_name, word, &mut stderr) {
+                        Ok(value) => read_fd = Some(value),
                         Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 2;
@@ -186,13 +181,8 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with("-u") && word.len() > 2 => {
-                    match self.parse_mapfile_usize(
-                        command_name,
-                        &word[2..],
-                        "invalid file descriptor",
-                        &mut stderr,
-                    ) {
-                        Ok(value) => read_fd = Some(value as u32),
+                    match self.parse_mapfile_fd(command_name, &word[2..], &mut stderr) {
+                        Ok(value) => read_fd = Some(value),
                         Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
                     }
                     index += 1;
@@ -220,6 +210,12 @@ impl Executor {
         }
 
         let name = array_name.unwrap_or_else(|| "MAPFILE".to_string());
+        if let Some(fd) = read_fd {
+            if !self.mapfile_fd_is_available(cmd, fd) {
+                return self.mapfile_bad_file_descriptor(cmd, command_name, fd, &mut stderr);
+            }
+        }
+
         if let Some(input) = self.mapfile_input_for_command(cmd, read_fd) {
             let mut values = split_mapfile_input(&input, delimiter, trim_newline)
                 .into_iter()
