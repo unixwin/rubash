@@ -15,10 +15,100 @@ pub(super) fn compound_assignment_from_word(
     let name = name.strip_suffix('+').unwrap_or(name).to_string();
     Some(CompoundAssignment {
         name,
+        elements: compound_assignment_elements(&value),
         value,
         append,
         word_index,
     })
+}
+
+fn compound_assignment_elements(value: &str) -> Vec<CompoundAssignmentElement> {
+    let Some(inner) = value
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+    else {
+        return Vec::new();
+    };
+
+    split_compound_assignment_words(inner)
+        .into_iter()
+        .map(|word| compound_assignment_element(&word))
+        .collect()
+}
+
+fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
+    if let Some((subscript, value)) = split_compound_element_operator(word, "]+=") {
+        return CompoundAssignmentElement {
+            subscript: Some(subscript.to_string()),
+            value: value.to_string(),
+            append: true,
+        };
+    }
+
+    if let Some((subscript, value)) = split_compound_element_operator(word, "]=") {
+        return CompoundAssignmentElement {
+            subscript: Some(subscript.to_string()),
+            value: value.to_string(),
+            append: false,
+        };
+    }
+
+    CompoundAssignmentElement {
+        subscript: None,
+        value: word.to_string(),
+        append: false,
+    }
+}
+
+fn split_compound_element_operator<'a>(
+    word: &'a str,
+    operator: &str,
+) -> Option<(&'a str, &'a str)> {
+    let body = word.strip_prefix('[')?;
+    let pos = body.find(operator)?;
+    Some((&body[..pos], &body[pos + operator.len()..]))
+}
+
+fn split_compound_assignment_words(inner: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut chars = inner.chars();
+    let mut double = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+
+        if ch == '"' {
+            current.push(ch);
+            double = !double;
+            continue;
+        }
+
+        if ch.is_ascii_whitespace() && !double {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    if !current.is_empty() {
+        words.push(current);
+    }
+
+    words
 }
 
 pub(super) fn collect_compound_assignment(

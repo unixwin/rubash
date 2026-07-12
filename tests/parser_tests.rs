@@ -537,6 +537,11 @@ mod assignment_tests {
         assert_eq!(compound[0].value, "(one \"two words\")");
         assert!(!compound[0].append);
         assert_eq!(compound[0].word_index, None);
+        assert_eq!(compound[0].elements.len(), 2);
+        assert_eq!(compound[0].elements[0].subscript, None);
+        assert_eq!(compound[0].elements[0].value, "one");
+        assert_eq!(compound[0].elements[1].subscript, None);
+        assert_eq!(compound[0].elements[1].value, "\"two words\"");
     }
 
     #[test]
@@ -556,6 +561,30 @@ mod assignment_tests {
         assert_eq!(compound[0].value, "(three four)");
         assert!(compound[0].append);
         assert_eq!(compound[0].word_index, None);
+        assert_eq!(compound[0].elements.len(), 2);
+        assert_eq!(compound[0].elements[0].value, "three");
+        assert_eq!(compound[0].elements[1].value, "four");
+    }
+
+    #[test]
+    fn test_compound_assignment_records_indexed_elements() {
+        let input = "arr=([2]=two [name]+=more plain)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].name, "arr");
+        assert_eq!(compound[0].elements.len(), 3);
+        assert_eq!(compound[0].elements[0].subscript.as_deref(), Some("2"));
+        assert_eq!(compound[0].elements[0].value, "two");
+        assert!(!compound[0].elements[0].append);
+        assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("name"));
+        assert_eq!(compound[0].elements[1].value, "more");
+        assert!(compound[0].elements[1].append);
+        assert_eq!(compound[0].elements[2].subscript, None);
+        assert_eq!(compound[0].elements[2].value, "plain");
     }
 
     #[test]

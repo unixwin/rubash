@@ -122,6 +122,15 @@ pub struct CompoundAssignment {
     pub value: String,
     pub append: bool,
     pub word_index: Option<usize>,
+    pub elements: Vec<CompoundAssignmentElement>,
+}
+
+/// Represents one element inside a `name=(...)` compound assignment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompoundAssignmentElement {
+    pub subscript: Option<String>,
+    pub value: String,
+    pub append: bool,
 }
 
 /// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.
