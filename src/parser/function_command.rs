@@ -82,6 +82,24 @@ pub(super) fn parse_function_command(
         return Some((command, next_i));
     }
 
+    if let Some((mut body, body_end)) = parse_function_command_sequence_body(tokens, i) {
+        if let Some(line) = tokens.get(start).map(|token| token.position) {
+            set_body_line(&mut body, line);
+        }
+        let mut command = CommandNode::new();
+        command.line = tokens.get(start).map(|token| token.position);
+        command.function_command = Some(FunctionCommand { name, body });
+        let mut next_i = body_end;
+        collect_trailing_redirections(tokens, &mut next_i, &mut command);
+        while tokens
+            .get(next_i)
+            .is_some_and(|token| token.kind == TokenKind::Semicolon)
+        {
+            next_i += 1;
+        }
+        return Some((command, next_i));
+    }
+
     if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
         if let Some(line) = tokens.get(start).map(|token| token.position) {
             body_command.line = Some(line);
@@ -144,6 +162,52 @@ pub(super) fn parse_function_command(
         next_i += 1;
     }
     Some((command, next_i))
+}
+
+fn parse_function_command_sequence_body(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
+    let end = match tokens.get(start)?.value.as_str() {
+        "if" => matching_function_if_end(tokens, start)?,
+        "while" | "until" => matching_function_loop_end(tokens, start)?,
+        _ => return None,
+    };
+    Some((parse(&tokens[start..=end]).commands, end + 1))
+}
+
+fn matching_function_if_end(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..tokens.len() {
+        if is_keyword(tokens, index, "if") {
+            depth += 1;
+        } else if is_keyword(tokens, index, "fi") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn matching_function_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in start..tokens.len() {
+        if is_keyword(tokens, index, "for")
+            || is_keyword(tokens, index, "while")
+            || is_keyword(tokens, index, "until")
+            || is_keyword(tokens, index, "select")
+        {
+            depth += 1;
+        } else if is_keyword(tokens, index, "done") {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
 }
 
 fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {

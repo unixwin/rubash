@@ -170,6 +170,32 @@ mod function_tests {
         assert_eq!(case_command.word, "$1");
         assert_eq!(case_command.clauses.len(), 2);
     }
+
+    #[test]
+    fn test_function_body_can_be_if_command_sequence() {
+        let input = "foo() if true; then echo yes; else echo no; fi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body[0].words, ["if", "true"]);
+        assert_eq!(function.body[1].words, ["then", "echo", "yes"]);
+        assert_eq!(function.body[3].words, ["fi"]);
+    }
+
+    #[test]
+    fn test_function_body_can_be_while_command_sequence() {
+        let input = "foo() while false; do echo bad; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body[0].words, ["while", "false"]);
+        assert_eq!(function.body[1].words, ["do", "echo", "bad"]);
+        assert_eq!(function.body[2].words, ["done"]);
+    }
 }
 
 mod assignment_tests {

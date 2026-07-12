@@ -285,3 +285,38 @@ fn test_function_body_can_be_case_command() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_function_body_can_be_if_command_sequence() {
+    let output_path = "target/rubash-function-if-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("f() if true; then echo yes > {output_path}; else echo no > {output_path}; fi; f");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_function_body_can_be_while_command_sequence() {
+    let output_path = "target/rubash-function-while-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("n=0; f() while [[ $n -lt 2 ]]; do echo $n >> {output_path}; (( n++ )); done; f");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n");
+    let _ = fs::remove_file(output_path);
+}
