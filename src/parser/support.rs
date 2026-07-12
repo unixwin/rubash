@@ -8,6 +8,7 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
 }
 
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
+    record_command_substitutions_for_word(cmd, cmd.words.len(), &token.value);
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }
@@ -32,6 +33,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.assignments.is_empty()
         && cmd.compound_assignments.is_empty()
         && cmd.process_substitutions.is_empty()
+        && cmd.command_substitutions.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

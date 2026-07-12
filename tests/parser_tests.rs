@@ -570,6 +570,73 @@ mod assignment_tests {
     }
 }
 
+mod command_substitution_tests {
+    use super::*;
+
+    #[test]
+    fn test_command_substitution_records_structured_ast_for_words() {
+        let input = "echo $(printf hi) pre$(date)post `whoami`";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].words,
+            ["echo", "$(printf hi)", "pre$(date)post", "`whoami`"]
+        );
+
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        assert_eq!(substitutions.len(), 3);
+        assert_eq!(substitutions[0].text, "$(printf hi)");
+        assert_eq!(substitutions[0].source, "printf hi");
+        assert!(!substitutions[0].backtick);
+        assert_eq!(substitutions[0].word_index, Some(1));
+        assert_eq!(substitutions[0].assignment_name, None);
+        assert_eq!(substitutions[1].text, "$(date)");
+        assert_eq!(substitutions[1].source, "date");
+        assert_eq!(substitutions[1].word_index, Some(2));
+        assert_eq!(substitutions[2].text, "`whoami`");
+        assert_eq!(substitutions[2].source, "whoami");
+        assert!(substitutions[2].backtick);
+        assert_eq!(substitutions[2].word_index, Some(3));
+    }
+
+    #[test]
+    fn test_assignment_command_substitution_records_structured_ast() {
+        let input = "value=$(printf hi) echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].assignments.get("value").unwrap(),
+            "$(printf hi)"
+        );
+
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "$(printf hi)");
+        assert_eq!(substitutions[0].source, "printf hi");
+        assert_eq!(substitutions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(substitutions[0].word_index, None);
+    }
+
+    #[test]
+    fn test_assignment_word_command_substitution_records_word_index() {
+        let input = "echo value=`printf hi`";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "value=`printf hi`"]);
+
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "`printf hi`");
+        assert_eq!(substitutions[0].source, "printf hi");
+        assert!(substitutions[0].backtick);
+        assert_eq!(substitutions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(substitutions[0].word_index, Some(1));
+    }
+}
+
 mod background_tests {
     use super::*;
 

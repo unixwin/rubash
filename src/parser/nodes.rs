@@ -134,6 +134,16 @@ pub struct ProcessSubstitution {
     pub redirect_fd: Option<u32>,
 }
 
+/// Represents a parsed `$()` or backtick command substitution inside a word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandSubstitutionNode {
+    pub text: String,
+    pub source: String,
+    pub backtick: bool,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -196,6 +206,8 @@ pub struct CommandNode {
     pub compound_assignments: Vec<CompoundAssignment>,
     /// Structured process substitutions parsed from `<(...)` and `>(...)`.
     pub process_substitutions: Vec<ProcessSubstitution>,
+    /// Structured command substitutions parsed from `$()` and backticks.
+    pub command_substitutions: Vec<CommandSubstitutionNode>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -269,6 +281,7 @@ impl CommandNode {
             assignments: std::collections::HashMap::new(),
             compound_assignments: Vec::new(),
             process_substitutions: Vec::new(),
+            command_substitutions: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

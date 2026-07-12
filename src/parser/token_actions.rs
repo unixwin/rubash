@@ -45,6 +45,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             *i = next_i;
                         }
                     }
+                    let assignment_name = var_name.strip_suffix('+').unwrap_or(&var_name);
+                    record_command_substitutions_for_assignment(
+                        &mut state.current_cmd,
+                        assignment_name,
+                        &var_value,
+                        None,
+                    );
                     state.current_cmd.assignments.insert(var_name, var_value);
                 } else {
                     let mut word = token.value.clone();
@@ -66,6 +73,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             word.push_str(&compound_value);
                             *i = next_i;
                         }
+                    }
+                    let word_index = state.current_cmd.words.len();
+                    if let Some((assignment_name, value)) = word.split_once('=') {
+                        record_command_substitutions_for_assignment(
+                            &mut state.current_cmd,
+                            assignment_name.strip_suffix('+').unwrap_or(assignment_name),
+                            value,
+                            Some(word_index),
+                        );
                     }
                     state.current_cmd.words.push(word);
                     state.current_cmd.word_kinds.push(TokenKind::Word);
