@@ -430,7 +430,10 @@ pub struct FunctionCommand {
     pub name: String,
     pub body: Vec<CommandNode>,
     pub keyword: bool,
+    pub keyword_text: Option<String>,
     pub has_parentheses: bool,
+    pub open_paren: Option<String>,
+    pub close_paren: Option<String>,
     pub body_kind: FunctionBodyKind,
     pub body_start: Option<usize>,
     pub body_end: Option<usize>,
@@ -554,7 +557,7 @@ pub struct CommandNode {
     /// `select name [in words ...]; do ...; done`
     pub select_command: Option<Box<SelectCommand>>,
     /// `name() { compound_list; }`
-    pub function_command: Option<FunctionCommand>,
+    pub function_command: Option<Box<FunctionCommand>>,
     /// `{ compound_list; }`
     pub brace_group: Option<BraceGroupCommand>,
     pub coproc_command: Option<CoprocCommand>,

@@ -338,7 +338,10 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "greet");
         assert!(function.keyword);
+        assert_eq!(function.keyword_text.as_deref(), Some("function"));
         assert!(!function.has_parentheses);
+        assert_eq!(function.open_paren, None);
+        assert_eq!(function.close_paren, None);
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert!(function.body_start.is_some());
         assert!(function.body_end.is_some());
@@ -355,7 +358,10 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "greet");
         assert!(function.keyword);
+        assert_eq!(function.keyword_text.as_deref(), Some("function"));
         assert!(function.has_parentheses);
+        assert_eq!(function.open_paren.as_deref(), Some("("));
+        assert_eq!(function.close_paren.as_deref(), Some(")"));
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }
@@ -369,7 +375,10 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo-a");
         assert!(!function.keyword);
+        assert_eq!(function.keyword_text, None);
         assert!(function.has_parentheses);
+        assert_eq!(function.open_paren.as_deref(), Some("("));
+        assert_eq!(function.close_paren.as_deref(), Some(")"));
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
     }

@@ -210,16 +210,19 @@ fn function_command(
     body_kind: FunctionBodyKind,
     body_start: Option<usize>,
     body_end: Option<usize>,
-) -> FunctionCommand {
-    FunctionCommand {
+) -> Box<FunctionCommand> {
+    Box::new(FunctionCommand {
         name,
         body,
         keyword,
+        keyword_text: keyword.then(|| "function".to_string()),
         has_parentheses,
+        open_paren: has_parentheses.then(|| "(".to_string()),
+        close_paren: has_parentheses.then(|| ")".to_string()),
         body_kind,
         body_start,
         body_end,
-    }
+    })
 }
 
 fn parse_function_command_sequence_body(
