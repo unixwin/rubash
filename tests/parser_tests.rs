@@ -573,6 +573,13 @@ mod arithmetic_command_tests {
         assert_eq!(ast.commands.len(), 1);
         let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
         assert_eq!(arithmetic.expression, "n += 2");
+        assert_eq!(arithmetic.variables, ["n"]);
+        assert!(arithmetic.has_assignment);
+        assert!(!arithmetic.has_comparison);
+        assert!(!arithmetic.has_logical);
+        assert!(!arithmetic.has_update);
+        assert_eq!(arithmetic.operators.len(), 1);
+        assert_eq!(arithmetic.operators[0].text, "+=");
         assert_eq!(ast.commands[0].words, ["((", "n += 2", "))"]);
     }
 
@@ -593,6 +600,33 @@ mod arithmetic_command_tests {
         );
         assert_eq!(list.connectors, [true]);
         assert_eq!(list.commands[1].words, ["echo", "ok"]);
+        let arithmetic = list.commands[0].arithmetic_command.as_ref().unwrap();
+        assert_eq!(arithmetic.variables, ["n"]);
+        assert!(arithmetic.has_update);
+        assert_eq!(arithmetic.operators[0].text, "++");
+    }
+
+    #[test]
+    fn test_arithmetic_command_records_operator_metadata() {
+        let input = "(( (a += 1) > b && ! done ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
+
+        assert_eq!(arithmetic.variables, ["a", "b", "done"]);
+        assert!(arithmetic.has_assignment);
+        assert!(arithmetic.has_comparison);
+        assert!(arithmetic.has_logical);
+        assert!(!arithmetic.has_update);
+        let operators = arithmetic
+            .operators
+            .iter()
+            .map(|operator| operator.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(operators.contains(&"+="));
+        assert!(operators.contains(&">"));
+        assert!(operators.contains(&"&&"));
+        assert!(operators.contains(&"!"));
     }
 
     #[test]

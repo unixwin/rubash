@@ -61,6 +61,18 @@ pub struct ArithmeticForCommand {
 #[derive(Debug, Clone)]
 pub struct ArithmeticCommand {
     pub expression: String,
+    pub operators: Vec<ArithmeticOperator>,
+    pub variables: Vec<String>,
+    pub has_assignment: bool,
+    pub has_comparison: bool,
+    pub has_logical: bool,
+    pub has_update: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArithmeticOperator {
+    pub text: String,
+    pub index: usize,
 }
 
 /// Represents an `if condition; then ... [elif ...] [else ...] fi` command.

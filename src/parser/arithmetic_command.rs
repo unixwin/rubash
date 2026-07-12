@@ -79,7 +79,103 @@ fn set_arithmetic_command_words(command: &mut CommandNode, expression: String) {
     command.words.push("((".to_string());
     command.words.push(expression.clone());
     command.words.push("))".to_string());
-    command.arithmetic_command = Some(ArithmeticCommand { expression });
+    command.arithmetic_command = Some(arithmetic_command(expression));
+}
+
+fn arithmetic_command(expression: String) -> ArithmeticCommand {
+    let operators = arithmetic_operators(&expression);
+    ArithmeticCommand {
+        variables: arithmetic_variables(&expression),
+        has_assignment: operators
+            .iter()
+            .any(|operator| is_arithmetic_assignment_operator(&operator.text)),
+        has_comparison: operators
+            .iter()
+            .any(|operator| is_arithmetic_comparison_operator(&operator.text)),
+        has_logical: operators
+            .iter()
+            .any(|operator| matches!(operator.text.as_str(), "&&" | "||" | "!")),
+        has_update: operators
+            .iter()
+            .any(|operator| matches!(operator.text.as_str(), "++" | "--")),
+        operators,
+        expression,
+    }
+}
+
+fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
+    const OPERATORS: &[&str] = &[
+        "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&", "||", "==",
+        "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/", "*", "+", "-",
+        "!", "~", "?", ":",
+    ];
+
+    let mut operators = Vec::new();
+    let mut index = 0;
+    while index < expression.len() {
+        let rest = &expression[index..];
+        if let Some(operator) = OPERATORS
+            .iter()
+            .find(|operator| rest.starts_with(**operator))
+        {
+            operators.push(ArithmeticOperator {
+                text: (*operator).to_string(),
+                index,
+            });
+            index += operator.len();
+        } else {
+            index += rest.chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    operators
+}
+
+fn arithmetic_variables(expression: &str) -> Vec<String> {
+    let chars = expression.char_indices().collect::<Vec<_>>();
+    let mut variables = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (start, ch) = chars[i];
+        if !is_arithmetic_identifier_start(ch) {
+            i += 1;
+            continue;
+        }
+
+        let mut end = start + ch.len_utf8();
+        i += 1;
+        while let Some((index, next)) = chars.get(i).copied() {
+            if !is_arithmetic_identifier_continue(next) {
+                break;
+            }
+            end = index + next.len_utf8();
+            i += 1;
+        }
+
+        let name = expression[start..end].to_string();
+        if !variables.contains(&name) {
+            variables.push(name);
+        }
+    }
+    variables
+}
+
+fn is_arithmetic_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_arithmetic_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
+}
+
+fn is_arithmetic_assignment_operator(operator: &str) -> bool {
+    matches!(
+        operator,
+        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+    )
+}
+
+fn is_arithmetic_comparison_operator(operator: &str) -> bool {
+    matches!(operator, "==" | "!=" | "<" | ">" | "<=" | ">=")
 }
 
 pub(super) fn finish_arithmetic_command(
