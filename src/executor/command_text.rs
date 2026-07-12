@@ -44,6 +44,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && cmd.for_command.is_none()
         && cmd.if_command.is_none()
         && cmd.loop_command.is_none()
+        && cmd.conditional_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
 }
@@ -75,7 +76,10 @@ pub(in crate::executor) fn function_body_needs_command_terminators(body: &[Comma
 }
 
 pub(in crate::executor) fn function_definition_command_is_printable(command: &CommandNode) -> bool {
-    !command.words.is_empty() || command.if_command.is_some() || command.loop_command.is_some()
+    !command.words.is_empty()
+        || command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.conditional_command.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -235,6 +239,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         if_command_source_text(if_command)
     } else if let Some(loop_command) = &cmd.loop_command {
         loop_command_source_text(loop_command)
+    } else if let Some(conditional_command) = &cmd.conditional_command {
+        conditional_command_source_text(conditional_command)
     } else if let Some(select_command) = &cmd.select_command {
         select_command_source_text(select_command)
     } else if let Some(case_command) = &cmd.case_command {
@@ -298,6 +304,10 @@ fn loop_command_source_text(loop_command: &LoopCommand) -> String {
         bash_command_sequence_text(&loop_command.condition),
         bash_command_sequence_text(&loop_command.body)
     )
+}
+
+fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> String {
+    format!("[[ {}", conditional_command.args.join(" "))
 }
 
 fn select_command_source_text(select_command: &SelectCommand) -> String {

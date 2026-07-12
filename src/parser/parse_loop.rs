@@ -141,6 +141,14 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         }
     }
 
+    if command_is_empty(&state.current_cmd) && token.value == "[[" {
+        if let Some((conditional_cmd, next_i)) = parse_conditional_command(tokens, i) {
+            state.ast.commands.push(conditional_cmd);
+            state.current_cmd = CommandNode::new();
+            return Some(next_i);
+        }
+    }
+
     if command_accepts_embedded_arithmetic_command(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
             || token.value.starts_with("(("))

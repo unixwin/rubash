@@ -313,10 +313,48 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
+        let conditional = function.body[0].conditional_command.as_ref().unwrap();
+        assert_eq!(
+            conditional.args,
+            ["$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]
+        );
         assert_eq!(
             function.body[0].words,
             ["[[", "$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]
         );
+    }
+}
+
+mod conditional_tests {
+    use super::*;
+
+    #[test]
+    fn test_conditional_command_parses_args() {
+        let input = "[[ $value == a* && -n $other ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+        assert_eq!(
+            conditional.args,
+            ["$value", "==", "a*", "&&", "-n", "$other", "]]"]
+        );
+        assert_eq!(
+            ast.commands[0].words,
+            ["[[", "$value", "==", "a*", "&&", "-n", "$other", "]]"]
+        );
+    }
+
+    #[test]
+    fn test_conditional_command_consumes_trailing_redirects() {
+        let input = "[[ -n $value ]] > out && echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].conditional_command.is_some());
+        assert!(ast.commands[0].redirect_out.is_some());
+        assert_eq!(ast.commands[0].and_or, Some(true));
+        assert_eq!(ast.commands[1].words, ["echo", "ok"]);
     }
 }
 

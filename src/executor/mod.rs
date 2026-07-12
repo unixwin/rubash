@@ -144,8 +144,9 @@ use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
 use crate::lexer::TokenKind;
 use crate::parser::{
-    ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode, ForCommand,
-    FunctionCommand, IfCommand, LoopCommand, Redirect, SelectCommand,
+    ArithmeticForCommand, Ast, CaseClause, CaseCommand, CaseTerminator, CommandNode,
+    ConditionalCommand, ForCommand, FunctionCommand, IfCommand, LoopCommand, Redirect,
+    SelectCommand,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};

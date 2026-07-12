@@ -58,6 +58,12 @@ pub struct LoopCommand {
     pub until: bool,
 }
 
+/// Represents a `[[ expression ]]` conditional command.
+#[derive(Debug, Clone)]
+pub struct ConditionalCommand {
+    pub args: Vec<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -152,6 +158,8 @@ pub struct CommandNode {
     pub if_command: Option<IfCommand>,
     /// `while/until condition; do body; done`
     pub loop_command: Option<LoopCommand>,
+    /// `[[ expression ]]`
+    pub conditional_command: Option<ConditionalCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `select name [in words ...]; do ...; done`
@@ -189,6 +197,7 @@ impl CommandNode {
             for_command: None,
             if_command: None,
             loop_command: None,
+            conditional_command: None,
             case_command: None,
             select_command: None,
             function_command: None,
