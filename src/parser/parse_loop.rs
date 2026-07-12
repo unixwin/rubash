@@ -37,9 +37,35 @@ pub fn parse(tokens: &[Token]) -> Ast {
     }
 
     state.ast.commands = fold_pipeline_commands(state.ast.commands);
+    state.ast.commands = fold_inverted_commands(state.ast.commands);
     state.ast.commands = fold_and_or_list_commands(state.ast.commands);
     state.ast.commands = fold_background_commands(state.ast.commands);
     state.ast
+}
+
+fn fold_inverted_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    commands
+        .into_iter()
+        .map(|mut command| {
+            if !command.inverted {
+                return command;
+            }
+
+            command.inverted = false;
+            let line = command.line;
+            let and_or = command.and_or.take();
+            let background_flag = command.background;
+            command.background = false;
+            let mut inverted = CommandNode::new();
+            inverted.line = line;
+            inverted.and_or = and_or;
+            inverted.background = background_flag;
+            inverted.inverted_command = Some(InvertedCommand {
+                command: Box::new(command),
+            });
+            inverted
+        })
+        .collect()
 }
 
 fn fold_background_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {

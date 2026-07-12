@@ -214,6 +214,12 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                 redirect,
             );
         }
+        if let Some(inverted_command) = &mut command.inverted_command {
+            apply_stdout_append_redirect(
+                std::slice::from_mut(inverted_command.command.as_mut()),
+                redirect,
+            );
+        }
         if let Some(if_command) = &mut command.if_command {
             apply_stdout_append_redirect(&mut if_command.condition, redirect);
             apply_stdout_append_redirect(&mut if_command.then_body, redirect);
@@ -269,6 +275,12 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         if let Some(background_command) = &mut command.background_command {
             apply_stderr_append_redirect(
                 std::slice::from_mut(background_command.command.as_mut()),
+                redirect,
+            );
+        }
+        if let Some(inverted_command) = &mut command.inverted_command {
+            apply_stderr_append_redirect(
+                std::slice::from_mut(inverted_command.command.as_mut()),
                 redirect,
             );
         }

@@ -65,6 +65,8 @@ fn test_inverted_pipeline_uses_pipefail_status() {
     let input = format!("set -o pipefail; ! false | true; echo $? > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
+    let inverted = ast.commands[1].inverted_command.as_ref().unwrap();
+    assert!(inverted.command.pipeline_command.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

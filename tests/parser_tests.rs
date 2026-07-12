@@ -559,6 +559,33 @@ mod background_tests {
     }
 }
 
+mod inverted_tests {
+    use super::*;
+
+    #[test]
+    fn test_inverted_command_wraps_simple_command() {
+        let input = "! false";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        assert_eq!(inverted.command.words, ["false"]);
+    }
+
+    #[test]
+    fn test_inverted_command_wraps_pipeline() {
+        let input = "! false | true";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        let pipeline = inverted.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.stages[0].words, ["false"]);
+        assert_eq!(pipeline.stages[1].words, ["true"]);
+    }
+}
+
 mod variable_tests {
     use super::*;
 

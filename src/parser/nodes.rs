@@ -109,6 +109,12 @@ pub struct BackgroundCommand {
     pub command: Box<CommandNode>,
 }
 
+/// Represents `! command`.
+#[derive(Debug, Clone)]
+pub struct InvertedCommand {
+    pub command: Box<CommandNode>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -201,6 +207,8 @@ pub struct CommandNode {
     pub time_command: Option<TimeCommand>,
     /// `command &`.
     pub background_command: Option<BackgroundCommand>,
+    /// `! command`.
+    pub inverted_command: Option<InvertedCommand>,
     /// Command is executed inside a subshell grouping `( ... )`.
     pub subshell: bool,
     /// This command closes the current subshell grouping.
@@ -253,6 +261,7 @@ impl CommandNode {
             and_or_list: None,
             time_command: None,
             background_command: None,
+            inverted_command: None,
             subshell: false,
             subshell_end: false,
             for_command: None,

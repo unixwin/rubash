@@ -1,6 +1,18 @@
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_inverted_ast_command(
+        &mut self,
+        inverted_command: &InvertedCommand,
+    ) -> Result<(), ExecuteError> {
+        let ast = Ast {
+            commands: vec![(*inverted_command.command).clone()],
+        };
+        self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+        self.exit_code = invert_exit_status(self.exit_code);
+        Ok(())
+    }
+
     pub(in crate::executor) fn execute_background_ast_command(
         &mut self,
         background_command: &BackgroundCommand,

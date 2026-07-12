@@ -97,6 +97,16 @@ impl Executor {
                 continue;
             }
 
+            if let Some(inverted_command) = &command.inverted_command {
+                self.execute_inverted_ast_command(inverted_command)?;
+                if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+
             if let Some(time_command) = &command.time_command {
                 let execution_result = if command.and_or().is_some() {
                     self.with_errexit_suppressed(|executor| {
