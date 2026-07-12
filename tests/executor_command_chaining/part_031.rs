@@ -66,9 +66,10 @@ fn test_command_uses_external_pwd_when_builtin_is_disabled() {
 
 #[test]
 fn test_command_cd_updates_pwd_for_physical_pwd() {
-    let output_path = "target/rubash-command-cd-physical-pwd-output.txt";
-    let _ = fs::remove_file(output_path);
-    let input = format!("command cd -P /; command pwd -P > {output_path}");
+    let output_path = target_test_path("rubash-command-cd-physical-pwd-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!("command cd -P /; command pwd -P > {shell_output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -82,7 +83,7 @@ fn test_command_cd_updates_pwd_for_physical_pwd() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "/\n");
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "/\n");
     let _ = fs::remove_file(output_path);
 }
 

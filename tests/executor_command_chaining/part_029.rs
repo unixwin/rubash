@@ -223,7 +223,7 @@ fn test_disabled_test_builtin_uses_external_command() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-test\n").unwrap();
+    write_executable(&script_path, "echo external-test\n").unwrap();
     let input = format!(
         "enable -n test; test > {output_path}; enable test; test 1 -eq 1; echo $? >> {output_path}"
     );
