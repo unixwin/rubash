@@ -1,6 +1,26 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
+pub(super) fn compound_assignment_from_word(
+    word: &str,
+    value: String,
+    word_index: Option<usize>,
+) -> Option<CompoundAssignment> {
+    let (name, rhs) = word.split_once('=')?;
+    if !rhs.is_empty() {
+        return None;
+    }
+
+    let append = name.ends_with('+');
+    let name = name.strip_suffix('+').unwrap_or(name).to_string();
+    Some(CompoundAssignment {
+        name,
+        value,
+        append,
+        word_index,
+    })
+}
+
 pub(super) fn collect_compound_assignment(
     tokens: &[Token],
     start: usize,

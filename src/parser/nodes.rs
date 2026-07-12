@@ -115,6 +115,15 @@ pub struct InvertedCommand {
     pub command: Box<CommandNode>,
 }
 
+/// Represents a parsed `name=(...)` or `name+=(...)` compound assignment word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompoundAssignment {
+    pub name: String,
+    pub value: String,
+    pub append: bool,
+    pub word_index: Option<usize>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -173,6 +182,8 @@ pub struct CommandNode {
     pub word_kinds: Vec<TokenKind>,
     /// Variable assignments
     pub assignments: std::collections::HashMap<String, String>,
+    /// Structured compound array assignment words parsed from `name=(...)`.
+    pub compound_assignments: Vec<CompoundAssignment>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -244,6 +255,7 @@ impl CommandNode {
             words: Vec::new(),
             word_kinds: Vec::new(),
             assignments: std::collections::HashMap::new(),
+            compound_assignments: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

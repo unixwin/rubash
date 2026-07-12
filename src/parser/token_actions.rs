@@ -31,6 +31,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
                         {
+                            if let Some(compound_assignment) = compound_assignment_from_word(
+                                &token.value,
+                                compound_value.clone(),
+                                None,
+                            ) {
+                                state
+                                    .current_cmd
+                                    .compound_assignments
+                                    .push(compound_assignment);
+                            }
                             var_value = format!("\x1e{compound_value}");
                             *i = next_i;
                         }
@@ -42,6 +52,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         if let Some((compound_value, next_i)) =
                             collect_compound_assignment(tokens, *i)
                         {
+                            if let Some(compound_assignment) = compound_assignment_from_word(
+                                &token.value,
+                                compound_value.clone(),
+                                Some(state.current_cmd.words.len()),
+                            ) {
+                                state
+                                    .current_cmd
+                                    .compound_assignments
+                                    .push(compound_assignment);
+                            }
                             word.push('\x1e');
                             word.push_str(&compound_value);
                             *i = next_i;

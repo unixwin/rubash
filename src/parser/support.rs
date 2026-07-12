@@ -30,6 +30,7 @@ pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()
+        && cmd.compound_assignments.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

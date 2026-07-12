@@ -521,6 +521,44 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_structured_ast() {
+        let input = "arr=(one \"two words\")";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].assignments.get("arr").unwrap(),
+            "\x1e(one \"two words\")"
+        );
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].name, "arr");
+        assert_eq!(compound[0].value, "(one \"two words\")");
+        assert!(!compound[0].append);
+        assert_eq!(compound[0].word_index, None);
+    }
+
+    #[test]
+    fn test_compound_append_assignment_records_structured_ast() {
+        let input = "arr+=(three four)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].assignments.get("arr+").unwrap(),
+            "\x1e(three four)"
+        );
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].name, "arr");
+        assert_eq!(compound[0].value, "(three four)");
+        assert!(compound[0].append);
+        assert_eq!(compound[0].word_index, None);
+    }
+
+    #[test]
     fn test_escaped_equals_is_command_word_not_assignment() {
         let input = "foo\\=bar > out.txt";
         let tokens = tokenize(input);
@@ -647,6 +685,15 @@ mod quote_removal {
                 "assoc=\x1e(one \"two words\" three \"four words\")"
             ]
         );
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].name, "assoc");
+        assert_eq!(
+            compound[0].value,
+            "(one \"two words\" three \"four words\")"
+        );
+        assert!(!compound[0].append);
+        assert_eq!(compound[0].word_index, Some(2));
     }
 
     #[test]
