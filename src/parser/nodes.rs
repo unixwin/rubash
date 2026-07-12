@@ -124,6 +124,16 @@ pub struct CompoundAssignment {
     pub word_index: Option<usize>,
 }
 
+/// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayElementAssignment {
+    pub name: String,
+    pub subscript: String,
+    pub value: String,
+    pub append: bool,
+    pub word_index: Option<usize>,
+}
+
 /// Represents a parsed `<(...)` or `>(...)` process substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessSubstitution {
@@ -287,6 +297,8 @@ pub struct CommandNode {
     pub assignments: std::collections::HashMap<String, String>,
     /// Structured compound array assignment words parsed from `name=(...)`.
     pub compound_assignments: Vec<CompoundAssignment>,
+    /// Structured array element assignment words parsed from `name[index]=value`.
+    pub array_element_assignments: Vec<ArrayElementAssignment>,
     /// Structured process substitutions parsed from `<(...)` and `>(...)`.
     pub process_substitutions: Vec<ProcessSubstitution>,
     /// Structured command substitutions parsed from `$()` and backticks.
@@ -377,6 +389,7 @@ impl CommandNode {
             word_kinds: Vec::new(),
             assignments: std::collections::HashMap::new(),
             compound_assignments: Vec::new(),
+            array_element_assignments: Vec::new(),
             process_substitutions: Vec::new(),
             command_substitutions: Vec::new(),
             arithmetic_expansions: Vec::new(),

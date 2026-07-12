@@ -16,6 +16,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     record_tilde_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_pathname_patterns_for_word(cmd, cmd.words.len(), &token.value);
     record_word_quotes_for_word(cmd, cmd.words.len(), &token.raw);
+    record_array_element_assignment_for_word(cmd, cmd.words.len(), &token.value);
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }
@@ -39,6 +40,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()
         && cmd.compound_assignments.is_empty()
+        && cmd.array_element_assignments.is_empty()
         && cmd.process_substitutions.is_empty()
         && cmd.command_substitutions.is_empty()
         && cmd.arithmetic_expansions.is_empty()

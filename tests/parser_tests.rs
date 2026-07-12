@@ -559,6 +559,44 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_array_element_assignment_records_structured_ast() {
+        let input = "arr[0]=zero arr[i+1]+=more";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["arr[0]=zero", "arr[i+1]+=more"]);
+
+        let elements = ast.commands[0].array_element_assignments.as_slice();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].name, "arr");
+        assert_eq!(elements[0].subscript, "0");
+        assert_eq!(elements[0].value, "zero");
+        assert!(!elements[0].append);
+        assert_eq!(elements[0].word_index, Some(0));
+        assert_eq!(elements[1].name, "arr");
+        assert_eq!(elements[1].subscript, "i+1");
+        assert_eq!(elements[1].value, "more");
+        assert!(elements[1].append);
+        assert_eq!(elements[1].word_index, Some(1));
+    }
+
+    #[test]
+    fn test_builtin_array_element_assignment_argument_records_word_index() {
+        let input = "declare BASH_ARGV[1]=foo";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["declare", "BASH_ARGV[1]=foo"]);
+
+        let elements = ast.commands[0].array_element_assignments.as_slice();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].name, "BASH_ARGV");
+        assert_eq!(elements[0].subscript, "1");
+        assert_eq!(elements[0].value, "foo");
+        assert_eq!(elements[0].word_index, Some(1));
+    }
+
+    #[test]
     fn test_escaped_equals_is_command_word_not_assignment() {
         let input = "foo\\=bar > out.txt";
         let tokens = tokenize(input);

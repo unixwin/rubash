@@ -5,6 +5,7 @@
 mod arithmetic_command;
 mod arithmetic_expansion;
 mod arithmetic_for;
+mod array_element_assignment;
 mod assignment;
 mod brace_command;
 mod brace_expansion;
@@ -40,6 +41,7 @@ pub use parse_loop::parse;
 use arithmetic_command::*;
 use arithmetic_expansion::*;
 use arithmetic_for::*;
+use array_element_assignment::*;
 use assignment::*;
 use brace_command::*;
 use brace_expansion::*;
