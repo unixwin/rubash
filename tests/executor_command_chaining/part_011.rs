@@ -63,7 +63,7 @@ fn test_external_command_appends_stdout() {
     let _ = fs::remove_dir_all(bin_dir);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-append\n").unwrap();
+    write_executable(&script_path, "echo external-append\n").unwrap();
     let input = format!("emit > {output_path}; emit >> {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -95,7 +95,7 @@ fn test_external_command_appends_stderr() {
     let _ = fs::remove_dir_all(bin_dir);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-error >&2\n").unwrap();
+    write_executable(&script_path, "echo external-error >&2\n").unwrap();
     let input = format!("emiterr 2> {output_path}; emiterr 2>> {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

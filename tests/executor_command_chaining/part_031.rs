@@ -9,7 +9,7 @@ fn test_disabled_pwd_builtin_uses_external_command() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-pwd\n").unwrap();
+    write_executable(&script_path, "echo external-pwd\n").unwrap();
     let input = format!("enable -n pwd; pwd > {output_path}; enable pwd");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -39,7 +39,7 @@ fn test_command_uses_external_pwd_when_builtin_is_disabled() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-command-pwd\n").unwrap();
+    write_executable(&script_path, "echo external-command-pwd\n").unwrap();
     let input = format!("enable -n pwd; command pwd > {output_path}; enable pwd");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -104,7 +104,7 @@ fn test_disabled_status_and_state_builtins_use_external_commands() {
     }
     fs::create_dir_all(bin_dir).unwrap();
     for name in ["true", "false", "hash", "umask"] {
-        fs::write(
+        write_executable(
             format!("{bin_dir}/{name}"),
             format!("echo external-{name}\n"),
         )

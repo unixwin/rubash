@@ -9,7 +9,7 @@ fn test_command_uses_external_test_when_builtin_is_disabled() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-command-test\n").unwrap();
+    write_executable(&script_path, "echo external-command-test\n").unwrap();
     let input = format!("enable -n test; command test > {output_path}; enable test");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -54,9 +54,9 @@ fn test_disabled_read_builtins_use_external_commands() {
         let _ = fs::remove_file(path);
     }
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&read_path, "echo external-read\n").unwrap();
-    fs::write(&mapfile_path, "echo external-mapfile\n").unwrap();
-    fs::write(&readarray_path, "echo external-readarray\n").unwrap();
+    write_executable(&read_path, "echo external-read\n").unwrap();
+    write_executable(&mapfile_path, "echo external-mapfile\n").unwrap();
+    write_executable(&readarray_path, "echo external-readarray\n").unwrap();
     let input = format!(
         "enable -n read mapfile readarray; \
          read value <<< hi > {read_output_path}; \
@@ -113,7 +113,7 @@ fn test_disabled_echo_builtin_uses_external_command() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "printf 'external-echo %s\\n' \"$*\"\n").unwrap();
+    write_executable(&script_path, "printf 'external-echo %s\\n' \"$*\"\n").unwrap();
     let input = format!(
         "enable -n echo; echo hello > {output_path}; enable echo; echo builtin >> {output_path}"
     );
@@ -148,7 +148,7 @@ fn test_command_uses_external_echo_when_builtin_is_disabled() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(
+    write_executable(
         &script_path,
         "printf 'external-command-echo %s\\n' \"$*\"\n",
     )
@@ -185,7 +185,7 @@ fn test_disabled_printf_builtin_uses_external_command() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-printf \"$@\"\n").unwrap();
+    write_executable(&script_path, "echo external-printf \"$@\"\n").unwrap();
     let input = format!(
         "enable -n printf; printf hello > {output_path}; enable printf; printf '%s\\n' builtin >> {output_path}"
     );
@@ -220,7 +220,7 @@ fn test_command_uses_external_printf_when_builtin_is_disabled() {
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(output_path);
     fs::create_dir_all(bin_dir).unwrap();
-    fs::write(&script_path, "echo external-command-printf \"$@\"\n").unwrap();
+    write_executable(&script_path, "echo external-command-printf \"$@\"\n").unwrap();
     let input = format!("enable -n printf; command printf hello > {output_path}; enable printf");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

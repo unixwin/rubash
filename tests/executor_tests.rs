@@ -33,6 +33,22 @@ fn target_test_path(name: &str) -> std::path::PathBuf {
         .join(name)
 }
 
+fn write_executable(
+    path: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    std::fs::write(path.as_ref(), contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = std::fs::metadata(path.as_ref())?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path.as_ref(), permissions)?;
+    }
+    Ok(())
+}
+
 mod simple_execution {
     use super::*;
 

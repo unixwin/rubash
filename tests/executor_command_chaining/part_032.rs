@@ -19,7 +19,7 @@ fn test_disabled_builtin_dispatch_uses_external_commands() {
     }
     fs::create_dir_all(bin_dir).unwrap();
     for name in ["cd", "alias", "type", "command"] {
-        fs::write(
+        write_executable(
             format!("{bin_dir}/{name}"),
             format!("echo external-{name}\n"),
         )

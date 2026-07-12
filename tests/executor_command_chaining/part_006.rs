@@ -127,7 +127,7 @@ fn test_external_command_substitution_captures_stdout() {
     let _ = fs::create_dir_all(bin_dir);
     let _ = fs::remove_file(&helper_path);
     let _ = fs::remove_file(output_path);
-    fs::write(&helper_path, "#!/usr/bin/env bash\nprintf 'a\\nb\\n\\n'\n").unwrap();
+    write_executable(&helper_path, "#!/usr/bin/env bash\nprintf 'a\\nb\\n\\n'\n").unwrap();
     let input = format!(
         "v=$(rubash-comsub-helper); printf 'v=<%s> len:%s\\n' \"$v\" \"${{#v}}\" > {output_path}"
     );

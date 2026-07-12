@@ -199,15 +199,7 @@ fn test_builtin_enable_updates_disabled_builtin_state() {
     let _ = fs::remove_dir_all(&bin_dir);
     let _ = fs::remove_file(&output_path);
     fs::create_dir_all(&bin_dir).unwrap();
-    fs::write(&script_path, "echo external-test\n").unwrap();
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).unwrap();
-    }
+    write_executable(&script_path, "echo external-test\n").unwrap();
     let input = format!("builtin enable -n test; type -t test > {shell_output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
