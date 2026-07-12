@@ -50,6 +50,14 @@ pub struct ElifBranch {
     pub body: Vec<CommandNode>,
 }
 
+/// Represents `while condition; do body; done` or `until condition; do body; done`.
+#[derive(Debug, Clone)]
+pub struct LoopCommand {
+    pub condition: Vec<CommandNode>,
+    pub body: Vec<CommandNode>,
+    pub until: bool,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -142,6 +150,8 @@ pub struct CommandNode {
     pub for_command: Option<ForCommand>,
     /// `if condition; then body; fi`
     pub if_command: Option<IfCommand>,
+    /// `while/until condition; do body; done`
+    pub loop_command: Option<LoopCommand>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<CaseCommand>,
     /// `select name [in words ...]; do ...; done`
@@ -178,6 +188,7 @@ impl CommandNode {
             subshell_end: false,
             for_command: None,
             if_command: None,
+            loop_command: None,
             case_command: None,
             select_command: None,
             function_command: None,

@@ -299,9 +299,10 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
-        assert_eq!(function.body[0].words, ["while", "false"]);
-        assert_eq!(function.body[1].words, ["do", "echo", "bad"]);
-        assert_eq!(function.body[2].words, ["done"]);
+        let loop_command = function.body[0].loop_command.as_ref().unwrap();
+        assert!(!loop_command.until);
+        assert_eq!(loop_command.condition[0].words, ["false"]);
+        assert_eq!(loop_command.body[0].words, ["echo", "bad"]);
     }
 
     #[test]

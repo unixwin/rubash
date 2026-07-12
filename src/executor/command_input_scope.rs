@@ -38,6 +38,10 @@ impl Executor {
             return Some(self.expand_word(here_string));
         }
 
+        if let Some(heredoc) = &cmd.heredoc {
+            return Some(strip_heredoc_body(heredoc));
+        }
+
         cmd.heredoc_redirects
             .iter()
             .rev()

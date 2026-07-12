@@ -81,7 +81,9 @@ fn test_while_false_skips_body() {
     let input = format!("while false; do echo bad > {output_path}; done");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["while", "false"]);
+    let loop_command = ast.commands[0].loop_command.as_ref().unwrap();
+    assert!(!loop_command.until);
+    assert_eq!(loop_command.condition[0].words, ["false"]);
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -98,7 +100,9 @@ fn test_while_true_runs_until_break() {
     let input = format!("while true; do echo loop > {output_path}; break; done");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["while", "true"]);
+    let loop_command = ast.commands[0].loop_command.as_ref().unwrap();
+    assert!(!loop_command.until);
+    assert_eq!(loop_command.condition[0].words, ["true"]);
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

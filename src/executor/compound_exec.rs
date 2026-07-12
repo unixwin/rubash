@@ -12,6 +12,8 @@ impl Executor {
             self.execute_for_command_with_redirects(for_command, cmd)
         } else if let Some(if_command) = &cmd.if_command {
             self.execute_if_command_with_redirects(cmd, if_command)
+        } else if let Some(loop_command) = &cmd.loop_command {
+            self.execute_loop_command_with_redirects(cmd, loop_command)
         } else if let Some(select_command) = &cmd.select_command {
             self.execute_select_command(cmd, select_command)
         } else if let Some(case_command) = &cmd.case_command {
@@ -155,6 +157,102 @@ impl Executor {
         let mut if_command = if_command.clone();
         apply_if_redirects(self, cmd, &mut if_command)?;
         self.with_command_input_redirects(cmd, |executor| executor.execute_if_command(&if_command))
+    }
+
+    pub(in crate::executor) fn execute_loop_command_with_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        loop_command: &LoopCommand,
+    ) -> Result<(), ExecuteError> {
+        let mut loop_command = loop_command.clone();
+        apply_redirects_to_commands(self, cmd, &mut loop_command.body)?;
+        self.with_loop_fd_heredocs(cmd, |executor| {
+            executor.with_command_input_redirects(cmd, |executor| {
+                executor.execute_loop_command(&loop_command)
+            })
+        })
+    }
+
+    fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {
+        let mut ran_body = false;
+        let mut last_body_status = 0;
+
+        loop {
+            let condition = Ast {
+                commands: loop_command.condition.clone(),
+            };
+            self.with_errexit_suppressed(|executor| executor.execute_ast(&condition))?;
+            let condition_matched = self.exit_code == 0;
+            if condition_matched == loop_command.until {
+                break;
+            }
+
+            ran_body = true;
+            let body = Ast {
+                commands: crate::builtins::source::normalize_inline_compound_commands(
+                    loop_command.body.clone(),
+                ),
+            };
+            self.loop_depth += 1;
+            let result = self.execute_ast(&body);
+            self.loop_depth -= 1;
+            match result {
+                Ok(()) => {
+                    last_body_status = self.exit_code;
+                }
+                Err(ExecuteError::Break(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    break;
+                }
+                Err(ExecuteError::Break(level)) => return Err(ExecuteError::Break(level - 1)),
+                Err(ExecuteError::Continue(level)) if level <= 1 => {
+                    self.exit_code = 0;
+                    continue;
+                }
+                Err(ExecuteError::Continue(level)) => {
+                    return Err(ExecuteError::Continue(level - 1));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        if !ran_body {
+            self.exit_code = 0;
+        } else if self.exit_code != 0 {
+            self.exit_code = last_body_status;
+        }
+        Ok(())
+    }
+
+    fn with_loop_fd_heredocs<F>(&mut self, cmd: &CommandNode, f: F) -> Result<(), ExecuteError>
+    where
+        F: FnOnce(&mut Executor) -> Result<(), ExecuteError>,
+    {
+        let mut saved_fd_inputs = Vec::new();
+        for redirect in &cmd.heredoc_redirects {
+            let (Some(fd), Some(body)) = (redirect.fd, redirect.body.clone()) else {
+                continue;
+            };
+            let input_key = fd_stdin_key(fd);
+            let offset_key = fd_stdin_offset_key(fd);
+            let body =
+                strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string();
+            saved_fd_inputs.push((
+                input_key.clone(),
+                self.env_vars.get(&input_key).cloned(),
+                offset_key.clone(),
+                self.env_vars.get(&offset_key).cloned(),
+            ));
+            self.env_vars.insert(input_key, body);
+            self.env_vars.insert(offset_key, "0".to_string());
+        }
+
+        let result = f(self);
+        for (input_key, old_input, offset_key, old_offset) in saved_fd_inputs {
+            restore_optional_env_var(&mut self.env_vars, &input_key, old_input);
+            restore_optional_env_var(&mut self.env_vars, &offset_key, old_offset);
+        }
+        result
     }
 
     fn if_command_needs_alias_scan(&self, if_command: &IfCommand) -> bool {
@@ -432,6 +530,7 @@ pub(in crate::executor) fn command_is_time_prefixed_compound(cmd: &CommandNode) 
     cmd.words.first().map(String::as_str) == Some("time")
         && (cmd.for_command.is_some()
             || cmd.if_command.is_some()
+            || cmd.loop_command.is_some()
             || cmd.select_command.is_some()
             || cmd.case_command.is_some()
             || cmd.coproc_command.is_some()

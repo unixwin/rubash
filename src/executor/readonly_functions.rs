@@ -179,6 +179,10 @@ impl Executor {
                 self.write_if_function_definition(if_command, stdout, indent_level)?;
                 continue;
             }
+            if let Some(loop_command) = &command.loop_command {
+                self.write_loop_function_definition(loop_command, stdout, indent_level)?;
+                continue;
+            }
             if function_definition_command_closes_block(command) {
                 indent_level = indent_level.saturating_sub(1).max(1);
             }
@@ -282,11 +286,57 @@ impl Executor {
         {
             if let Some(if_command) = &command.if_command {
                 self.write_if_function_definition(if_command, stdout, indent_level)?;
+            } else if let Some(loop_command) = &command.loop_command {
+                self.write_loop_function_definition(loop_command, stdout, indent_level)?;
             } else {
                 self.write_function_definition_command(command, stdout, indent_level)?;
             }
         }
         Ok(())
+    }
+
+    fn write_loop_function_definition<W>(
+        &self,
+        loop_command: &LoopCommand,
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        self.write_loop_condition_definition(loop_command, stdout, indent_level)?;
+        self.write_function_definition_commands(&loop_command.body, stdout, indent_level + 1)?;
+        writeln!(stdout, "{}done", "    ".repeat(indent_level))
+    }
+
+    fn write_loop_condition_definition<W>(
+        &self,
+        loop_command: &LoopCommand,
+        stdout: &mut W,
+        indent_level: usize,
+    ) -> io::Result<()>
+    where
+        W: Write,
+    {
+        let keyword = if loop_command.until { "until" } else { "while" };
+        let indent = "    ".repeat(indent_level);
+        let Some((first, rest)) = loop_command.condition.split_first() else {
+            writeln!(stdout, "{indent}{keyword}")?;
+            writeln!(stdout, "{indent}do")?;
+            return Ok(());
+        };
+
+        let mut first = first.clone();
+        first.words.insert(0, keyword.to_string());
+        let line = self
+            .function_command_description_line(&first, false)
+            .unwrap_or_else(|| first.words.join(" "));
+        writeln!(stdout, "{indent}{line}")?;
+        write_function_definition_heredoc_body(&first, stdout)?;
+        for command in rest {
+            self.write_function_definition_command(command, stdout, indent_level)?;
+        }
+        writeln!(stdout, "{indent}do")
     }
 
     fn write_function_definition_command<W>(

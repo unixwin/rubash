@@ -43,6 +43,7 @@ pub(in crate::executor) fn command_has_no_effect(cmd: &CommandNode) -> bool {
         && !cmd.subshell_end
         && cmd.for_command.is_none()
         && cmd.if_command.is_none()
+        && cmd.loop_command.is_none()
         && cmd.case_command.is_none()
         && cmd.function_command.is_none()
 }
@@ -74,7 +75,7 @@ pub(in crate::executor) fn function_body_needs_command_terminators(body: &[Comma
 }
 
 pub(in crate::executor) fn function_definition_command_is_printable(command: &CommandNode) -> bool {
-    !command.words.is_empty() || command.if_command.is_some()
+    !command.words.is_empty() || command.if_command.is_some() || command.loop_command.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -96,6 +97,16 @@ fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
                     .else_body
                     .as_ref()
                     .is_some_and(|body| body.iter().any(command_or_compound_has_heredoc))
+        })
+        || command.loop_command.as_ref().is_some_and(|loop_command| {
+            loop_command
+                .condition
+                .iter()
+                .any(command_or_compound_has_heredoc)
+                || loop_command
+                    .body
+                    .iter()
+                    .any(command_or_compound_has_heredoc)
         })
 }
 
@@ -222,6 +233,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         for_command_source_text(for_command)
     } else if let Some(if_command) = &cmd.if_command {
         if_command_source_text(if_command)
+    } else if let Some(loop_command) = &cmd.loop_command {
+        loop_command_source_text(loop_command)
     } else if let Some(select_command) = &cmd.select_command {
         select_command_source_text(select_command)
     } else if let Some(case_command) = &cmd.case_command {
@@ -276,6 +289,15 @@ fn if_command_source_text(if_command: &IfCommand) -> String {
     }
     text.push_str("; fi");
     text
+}
+
+fn loop_command_source_text(loop_command: &LoopCommand) -> String {
+    format!(
+        "{} {}; do {}; done",
+        if loop_command.until { "until" } else { "while" },
+        bash_command_sequence_text(&loop_command.condition),
+        bash_command_sequence_text(&loop_command.body)
+    )
 }
 
 fn select_command_source_text(select_command: &SelectCommand) -> String {

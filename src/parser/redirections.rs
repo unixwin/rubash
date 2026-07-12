@@ -10,6 +10,12 @@ pub(super) fn collect_trailing_redirections(
         let Some(token) = tokens.get(*index) else {
             break;
         };
+        if token.kind == TokenKind::HereDocBody {
+            fill_pending_heredoc_body(command, &token.value);
+            *index += 1;
+            continue;
+        }
+
         if token.kind == TokenKind::RedirectIn {
             if let Some((target, next_i)) = process_substitution_redirect_target(tokens, *index) {
                 command.redirect_in = Some(Redirect {
@@ -86,16 +92,18 @@ pub(super) fn collect_trailing_redirections(
                 assign_here_string_redirect(command, &token.value, &target.value);
             }
             TokenKind::HereDoc => {
-                // Heredoc delimiter - the body should already be in a HereDocBody token
-                if let Some(body_token) = tokens.get(*index + 2) {
-                    if body_token.kind == TokenKind::HereDocBody {
-                        command.heredoc = Some(body_token.value.clone());
-                        command.heredoc_delimiter = Some(target.value.clone());
-                        *index += 3;
-                        continue;
-                    }
+                let fd = redirect_operator_fd(&token.value)
+                    .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                command.heredoc_redirects.push(HereDocRedirect {
+                    fd,
+                    delimiter: target.value.clone(),
+                    body: None,
+                });
+                if fd.is_none() {
+                    command.heredoc_delimiter = Some(target.value.clone());
                 }
-                command.heredoc_delimiter = Some(target.value.clone());
+                *index += 2;
+                continue;
             }
             _ => break,
         }

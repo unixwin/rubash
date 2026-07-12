@@ -167,7 +167,9 @@ fn test_until_true_skips_body() {
     let input = format!("until true; do echo bad > {output_path}; done");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["until", "true"]);
+    let loop_command = ast.commands[0].loop_command.as_ref().unwrap();
+    assert!(loop_command.until);
+    assert_eq!(loop_command.condition[0].words, ["true"]);
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);

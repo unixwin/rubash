@@ -70,23 +70,22 @@ fn test_parse_arithmetic_loop_conditions_as_condition_words() {
     let tokens =
         tokenize("while (( n < 3 )); do (( n++ )); done; until (( n == 5 )); do (( n++ )); done");
     let ast = parse(&tokens);
-    let words: Vec<Vec<String>> = ast
+    let loops = ast
         .commands
         .iter()
-        .map(|command| command.words.clone())
-        .collect();
+        .filter_map(|command| command.loop_command.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(loops.len(), 2);
 
-    assert_eq!(
-        words,
-        vec![
-            vec!["while", "((", "n < 3", "))"],
-            vec!["do", "((", "n++", "))"],
-            vec!["done"],
-            vec!["until", "((", "n == 5", "))"],
-            vec!["do", "((", "n++", "))"],
-            vec!["done"],
-        ]
-    );
+    let while_command = loops[0];
+    assert!(!while_command.until);
+    assert_eq!(while_command.condition[0].words, ["((", "n < 3", "))"]);
+    assert_eq!(while_command.body[0].words, ["((", "n++", "))"]);
+
+    let until_command = loops[1];
+    assert!(until_command.until);
+    assert_eq!(until_command.condition[0].words, ["((", "n == 5", "))"]);
+    assert_eq!(until_command.body[0].words, ["((", "n++", "))"]);
 }
 
 #[test]
