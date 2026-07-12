@@ -53,6 +53,8 @@ fn test_output_process_substitution_redirect() {
     let process = ast.commands[0].process_substitutions.as_slice();
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].open_delimiter, ">(");
+    assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "cat > out.txt");
     assert_eq!(process[0].commands.len(), 1);
     assert_eq!(process[0].commands[0].words, ["cat"]);
@@ -76,6 +78,8 @@ fn test_output_process_substitution_word() {
     let process = ast.commands[0].process_substitutions.as_slice();
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].open_delimiter, ">(");
+    assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "cat > out.txt");
     assert_eq!(process[0].commands.len(), 1);
     assert_eq!(process[0].commands[0].words, ["cat"]);
@@ -102,6 +106,8 @@ fn test_input_process_substitution_redirect_records_structured_ast() {
     let process = ast.commands[0].process_substitutions.as_slice();
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, "<(printf data)");
+    assert_eq!(process[0].open_delimiter, "<(");
+    assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "printf data");
     assert_eq!(process[0].commands.len(), 1);
     assert_eq!(process[0].commands[0].words, ["printf", "data"]);
@@ -121,6 +127,8 @@ fn test_input_process_substitution_word_records_structured_ast() {
     let process = ast.commands[0].process_substitutions.as_slice();
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, "<(printf a)");
+    assert_eq!(process[0].open_delimiter, "<(");
+    assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "printf a");
     assert_eq!(process[0].commands.len(), 1);
     assert_eq!(process[0].commands[0].words, ["printf", "a"]);

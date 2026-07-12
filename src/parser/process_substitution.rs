@@ -122,7 +122,9 @@ fn collect_process_substitution_target_with_prefix(
     Some((
         ProcessSubstitution {
             target: format!("{prefix}{source})"),
+            open_delimiter: prefix.to_string(),
             source,
+            close_delimiter: ")".to_string(),
             commands,
             output,
             word_index: None,

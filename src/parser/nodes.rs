@@ -244,7 +244,9 @@ pub struct ArrayElementAssignment {
 #[derive(Debug, Clone)]
 pub struct ProcessSubstitution {
     pub target: String,
+    pub open_delimiter: String,
     pub source: String,
+    pub close_delimiter: String,
     pub commands: Vec<CommandNode>,
     pub output: bool,
     pub word_index: Option<usize>,
