@@ -1277,11 +1277,15 @@ mod brace_expansion_tests {
         let expansions = ast.commands[0].brace_expansions.as_slice();
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "{a,b}");
+        assert_eq!(expansions[0].open_delimiter, "{");
+        assert_eq!(expansions[0].close_delimiter, "}");
         assert_eq!(expansions[0].body, "a,b");
         assert!(!expansions[0].range);
         assert_eq!(expansions[0].word_index, Some(1));
         assert_eq!(expansions[0].assignment_name, None);
         assert_eq!(expansions[1].text, "{1..3}");
+        assert_eq!(expansions[1].open_delimiter, "{");
+        assert_eq!(expansions[1].close_delimiter, "}");
         assert_eq!(expansions[1].body, "1..3");
         assert!(expansions[1].range);
         assert_eq!(expansions[1].word_index, Some(2));
@@ -1312,6 +1316,8 @@ mod brace_expansion_tests {
         let expansions = ast.commands[0].brace_expansions.as_slice();
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "{left,right}");
+        assert_eq!(expansions[0].open_delimiter, "{");
+        assert_eq!(expansions[0].close_delimiter, "}");
         assert_eq!(expansions[0].body, "left,right");
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(expansions[0].word_index, Some(1));

@@ -86,7 +86,9 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
                     return Some((
                         BraceExpansion {
                             text: chars[start..=index].iter().collect(),
+                            open_delimiter: "{".to_string(),
                             body: chars[start + 1..index].iter().collect(),
+                            close_delimiter: "}".to_string(),
                             range: has_double_dot && !has_comma,
                             word_index: None,
                             assignment_name: None,

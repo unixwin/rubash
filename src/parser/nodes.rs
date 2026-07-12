@@ -302,7 +302,9 @@ pub struct ParameterExpansion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BraceExpansion {
     pub text: String,
+    pub open_delimiter: String,
     pub body: String,
+    pub close_delimiter: String,
     pub range: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
