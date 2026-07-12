@@ -121,12 +121,14 @@ impl Executor {
         }
         let global_local_values = self.begin_global_declare_for_local_names(&args);
         let posix_function_export_unsets = self.posix_function_declare_unset_export_names(&args);
+        let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
 
         let result = (|| -> Result<i32, ExecuteError> {
             if let Some(redirect) = &cmd.redirect_out {
                 let target = self.expand_word(&redirect.target);
                 let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-                return Ok(crate::builtins::declare::execute_with_io(
+                return Ok(crate::builtins::declare::execute_with_io_named(
+                    command_name,
                     &args,
                     &mut self.env_vars,
                     &mut file,
@@ -140,7 +142,8 @@ impl Executor {
                     .create(true)
                     .append(true)
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
-                return Ok(crate::builtins::declare::execute_with_io(
+                return Ok(crate::builtins::declare::execute_with_io_named(
+                    command_name,
                     &args,
                     &mut self.env_vars,
                     &mut file,
@@ -151,7 +154,8 @@ impl Executor {
             if let Some(redirect) = &cmd.redirect_err {
                 let target = self.expand_word(&redirect.target);
                 if is_null_device(&target) {
-                    return Ok(crate::builtins::declare::execute_with_io(
+                    return Ok(crate::builtins::declare::execute_with_io_named(
+                        command_name,
                         &args,
                         &mut self.env_vars,
                         &mut std::io::stdout().lock(),
@@ -159,7 +163,8 @@ impl Executor {
                     )?);
                 }
                 let mut file = File::create(shell_path_to_windows(&target, &self.env_vars))?;
-                return Ok(crate::builtins::declare::execute_with_io(
+                return Ok(crate::builtins::declare::execute_with_io_named(
+                    command_name,
                     &args,
                     &mut self.env_vars,
                     &mut std::io::stdout().lock(),
@@ -173,7 +178,8 @@ impl Executor {
                     .create(true)
                     .append(true)
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
-                return Ok(crate::builtins::declare::execute_with_io(
+                return Ok(crate::builtins::declare::execute_with_io_named(
+                    command_name,
                     &args,
                     &mut self.env_vars,
                     &mut std::io::stdout().lock(),
@@ -181,9 +187,12 @@ impl Executor {
                 )?);
             }
 
-            Ok(crate::builtins::declare::execute(
+            Ok(crate::builtins::declare::execute_with_io_named(
+                command_name,
                 &args,
                 &mut self.env_vars,
+                &mut std::io::stdout().lock(),
+                &mut std::io::stderr().lock(),
             )?)
         })();
         if result.as_ref().is_ok_and(|status| *status == 0) {

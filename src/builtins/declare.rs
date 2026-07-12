@@ -33,6 +33,7 @@ const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 const COMPOUND_ASSIGNMENT_MARKER: char = '\x1e';
+const EX_USAGE: i32 = 2;
 
 pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::Result<i32> {
     let mut stdout = io::stdout();
@@ -41,6 +42,20 @@ pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::
 }
 
 pub(crate) fn execute_with_io<W, E>(
+    args: &[String],
+    variables: &mut HashMap<String, String>,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_with_io_named("declare", args, variables, stdout, stderr)
+}
+
+pub(crate) fn execute_with_io_named<W, E>(
+    command_name: &str,
     args: &[String],
     variables: &mut HashMap<String, String>,
     stdout: &mut W,
@@ -111,11 +126,11 @@ where
                     _ => {
                         writeln!(
                             stderr,
-                            "{}declare: {}: unsupported option",
+                            "{}{command_name}: -{option}: invalid option",
                             diagnostic_prefix(),
-                            arg
                         )?;
-                        return Ok(EXECUTION_FAILURE);
+                        print_declare_usage(command_name, stderr)?;
+                        return Ok(EX_USAGE);
                     }
                 }
             }
@@ -217,6 +232,23 @@ where
     }
 
     print::print_declare_names(&names, variables, options, attr_status, stdout, stderr)
+}
+
+fn print_declare_usage<W>(command_name: &str, stderr: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    if command_name == "typeset" {
+        writeln!(
+            stderr,
+            "typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]"
+        )
+    } else {
+        writeln!(
+            stderr,
+            "declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
+        )
+    }
 }
 
 #[cfg(test)]

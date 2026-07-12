@@ -80,9 +80,10 @@ fn test_declare_redirects_stderr() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: declare: -Z: unsupported option"));
+    assert!(error.contains("declare: -Z: invalid option"));
+    assert!(error.contains("declare: usage:"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
 }
@@ -100,11 +101,35 @@ fn test_declare_appends_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 1);
+    assert_eq!(executor.last_exit_code(), 2);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: declare: -Z: unsupported option"));
+    assert!(error.contains("declare: -Z: invalid option"));
+    assert!(error.contains("declare: usage:"));
     let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_typeset_invalid_option_uses_typeset_diagnostics() {
+    let error_path = "target/rubash-typeset-invalid-option-error.txt";
+    let status_path = "target/rubash-typeset-invalid-option-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("typeset -Z 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("typeset: -Z: invalid option"));
+    assert!(error.contains("typeset: usage:"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
 }
 
 #[test]
