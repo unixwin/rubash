@@ -181,6 +181,35 @@ fn test_local_invalid_option_reports_usage() {
 }
 
 #[test]
+fn test_local_capital_i_inherits_outer_value() {
+    let output_path = "target/rubash-local-capital-i-output.txt";
+    let error_path = "target/rubash-local-capital-i-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "x=global; y=outer; \
+         f() {{ local -I x 2> {error_path}; printf 'in:%s:<%s>\\n' $? \"$x\" > {output_path}; x=changed; }}; \
+         g() {{ local +I y 2>> {error_path}; printf 'plus:%s:<%s>\\n' $? \"$y\" >> {output_path}; y=inner; }}; \
+         f; g; echo out:$x:$y >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "in:0:<global>\nplus:0:<outer>\nout:global:outer\n"
+    );
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_local_case_conversion_attributes_apply_to_assignments() {
     let output_path = "target/rubash-local-case-attrs-output.txt";
     let _ = fs::remove_file(output_path);

@@ -249,7 +249,9 @@ impl Executor {
             }
             if !declare_args_request_print(&args) {
                 self.save_local_names(&args);
-                self.initialize_non_inherited_locals(&args);
+                if !local_args_request_inherit(&args) {
+                    self.initialize_non_inherited_locals(&args);
+                }
             }
             self.write_local_compound_readonly_assignment_errors(&args, &mut stderr)?;
             crate::builtins::declare::execute_with_io(

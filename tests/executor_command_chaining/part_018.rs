@@ -166,6 +166,35 @@ fn test_declare_capital_g_is_accepted_as_noop_attribute() {
 }
 
 #[test]
+fn test_declare_capital_i_is_accepted_as_noop_attribute() {
+    let output_path = "target/rubash-declare-capital-i-output.txt";
+    let error_path = "target/rubash-declare-capital-i-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "unset RUBASH_DECLARE_CAPITAL_I RUBASH_TYPESET_CAPITAL_I; \
+         declare -I RUBASH_DECLARE_CAPITAL_I=one 2> {error_path}; echo declare:$?:$RUBASH_DECLARE_CAPITAL_I > {output_path}; \
+         typeset +I RUBASH_TYPESET_CAPITAL_I=two 2>> {error_path}; echo typeset:$?:$RUBASH_TYPESET_CAPITAL_I >> {output_path}; \
+         declare -p RUBASH_DECLARE_CAPITAL_I RUBASH_TYPESET_CAPITAL_I >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "declare:0:one\ntypeset:0:two\ndeclare -- RUBASH_DECLARE_CAPITAL_I=\"one\"\ndeclare -- RUBASH_TYPESET_CAPITAL_I=\"two\"\n"
+    );
+    assert_eq!(fs::read_to_string(error_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_builtin_declare_assigns_variable() {
     let output_path = "target/rubash-builtin-declare-output.txt";
     let _ = fs::remove_file(output_path);

@@ -118,10 +118,12 @@ where
                     'n' => unset_nameref = true,
                     'r' if set_attr => readonly = true,
                     'r' => unset_readonly = true,
-                    'g' | 'G' => {
+                    'g' | 'G' | 'I' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
-                        // variable table for now.
+                        // variable table for now. `-I` is a local inheritance
+                        // attribute; outside local it is accepted but does not
+                        // add a printable variable attribute.
                     }
                     _ => {
                         writeln!(

@@ -10,12 +10,17 @@ pub(in crate::executor) fn validate_local_options(args: &[String]) -> Result<(),
         }
         for option in arg[1..].chars() {
             match option {
-                'a' | 'A' | 'f' | 'F' | 'g' | 'i' | 'l' | 'n' | 'p' | 'r' | 't' | 'u' | 'x' => {}
+                'a' | 'A' | 'f' | 'F' | 'g' | 'I' | 'i' | 'l' | 'n' | 'p' | 'r' | 't'
+                | 'u' | 'x' => {}
                 other => return Err(other),
             }
         }
     }
     Ok(())
+}
+
+pub(in crate::executor) fn local_args_request_inherit(args: &[String]) -> bool {
+    declare_args_contain_option(args, 'I', true) || declare_args_contain_option(args, 'I', false)
 }
 
 pub(in crate::executor) fn declare_args_force_global(args: &[String]) -> bool {
