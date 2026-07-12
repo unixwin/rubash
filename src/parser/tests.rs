@@ -203,5 +203,7 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(arithmetic.update, "i++");
     assert_eq!(arithmetic.close_delimiter, "))");
     assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
+    assert_eq!(for_command.body_open_delimiter.as_deref(), Some("do"));
+    assert_eq!(for_command.body_close_delimiter.as_deref(), Some("done"));
     assert_eq!(for_command.body[0].words, ["echo", "$i"]);
 }

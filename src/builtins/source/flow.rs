@@ -81,6 +81,8 @@ fn inline_arithmetic_for_command(
             close_delimiter: "))".to_string(),
         }),
         body_kind: CommandBodyKind::DoDone,
+        body_open_delimiter: Some("do".to_string()),
+        body_close_delimiter: Some("done".to_string()),
         do_keyword: Some("do".to_string()),
         end_keyword: Some("done".to_string()),
         body: normalize_inline_compound_commands(body),

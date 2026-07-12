@@ -115,6 +115,8 @@ fn alias_arithmetic_for_command(
         list_terminator: None,
         arithmetic: Some(arithmetic),
         body_kind: CommandBodyKind::DoDone,
+        body_open_delimiter: Some("do".to_string()),
+        body_close_delimiter: Some("done".to_string()),
         do_keyword: Some("do".to_string()),
         end_keyword: Some("done".to_string()),
         body,

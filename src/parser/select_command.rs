@@ -109,6 +109,8 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
                 end_keyword,
             )
         };
+    let (body_open_delimiter, body_close_delimiter) =
+        command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.select_command = Some(Box::new(SelectCommand {
@@ -119,6 +121,8 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         default_positional,
         list_terminator,
         body_kind,
+        body_open_delimiter,
+        body_close_delimiter,
         do_keyword,
         end_keyword,
         body,

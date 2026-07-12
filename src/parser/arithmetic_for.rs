@@ -116,6 +116,8 @@ pub(super) fn parse_arithmetic_for_command(
                 end_keyword,
             )
         };
+    let (body_open_delimiter, body_close_delimiter) =
+        command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
@@ -134,6 +136,8 @@ pub(super) fn parse_arithmetic_for_command(
             close_delimiter: "))".to_string(),
         }),
         body_kind,
+        body_open_delimiter,
+        body_close_delimiter,
         do_keyword,
         end_keyword,
         body,

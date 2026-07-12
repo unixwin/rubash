@@ -112,6 +112,8 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
                 end_keyword,
             )
         };
+    let (body_open_delimiter, body_close_delimiter) =
+        command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
@@ -123,6 +125,8 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         list_terminator,
         arithmetic: None,
         body_kind,
+        body_open_delimiter,
+        body_close_delimiter,
         do_keyword,
         end_keyword,
         body,
@@ -130,6 +134,20 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let mut next_i = body_end;
     collect_trailing_redirections(tokens, &mut next_i, &mut command);
     Some((command, next_i))
+}
+
+pub(super) fn command_body_delimiters(
+    body_kind: CommandBodyKind,
+    do_keyword: Option<&str>,
+    end_keyword: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    match body_kind {
+        CommandBodyKind::BraceGroup => (Some("{".to_string()), Some("}".to_string())),
+        CommandBodyKind::DoDone => (
+            do_keyword.map(str::to_string),
+            end_keyword.map(str::to_string),
+        ),
+    }
 }
 
 fn parse_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
