@@ -14,6 +14,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     let mut i = start + 2;
     let mut words = Vec::new();
     let mut in_keyword = None;
+    let mut list_terminator = None;
 
     // Optional `in words...`
     let default_positional = if is_keyword(tokens, i, "in") {
@@ -21,6 +22,9 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         i += 1;
         while i < tokens.len() && !is_keyword(tokens, i, "do") {
             if tokens[i].kind == TokenKind::Semicolon {
+                if list_terminator.is_none() {
+                    list_terminator = Some(tokens[i].value.clone());
+                }
                 i += 1;
                 while tokens
                     .get(i)
@@ -55,6 +59,9 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             .get(i)
             .is_some_and(|token| token.kind == TokenKind::Semicolon)
         {
+            if list_terminator.is_none() {
+                list_terminator = Some(tokens[i].value.clone());
+            }
             i += 1;
         }
         true
@@ -110,6 +117,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         in_keyword,
         words,
         default_positional,
+        list_terminator,
         body_kind,
         do_keyword,
         end_keyword,

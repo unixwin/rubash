@@ -112,6 +112,7 @@ fn alias_arithmetic_for_command(
         in_keyword: None,
         words: Vec::new(),
         default_positional: false,
+        list_terminator: None,
         arithmetic: Some(arithmetic),
         body_kind: CommandBodyKind::DoDone,
         do_keyword: Some("do".to_string()),

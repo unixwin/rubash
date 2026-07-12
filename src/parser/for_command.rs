@@ -21,11 +21,15 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let mut i = start + 2;
     let mut words = Vec::new();
     let mut in_keyword = None;
+    let mut list_terminator = None;
     let default_positional = if is_keyword(tokens, i, "in") {
         in_keyword = Some(tokens[i].value.clone());
         i += 1;
         while i < tokens.len() && !is_keyword(tokens, i, "do") {
             if tokens[i].kind == TokenKind::Semicolon {
+                if list_terminator.is_none() {
+                    list_terminator = Some(tokens[i].value.clone());
+                }
                 i += 1;
                 while tokens
                     .get(i)
@@ -59,6 +63,9 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             .get(i)
             .is_some_and(|token| token.kind == TokenKind::Semicolon)
         {
+            if list_terminator.is_none() {
+                list_terminator = Some(tokens[i].value.clone());
+            }
             i += 1;
         }
         true
@@ -113,6 +120,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         in_keyword,
         words,
         default_positional,
+        list_terminator,
         arithmetic: None,
         body_kind,
         do_keyword,

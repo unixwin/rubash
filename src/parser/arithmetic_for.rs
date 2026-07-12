@@ -64,10 +64,14 @@ pub(super) fn parse_arithmetic_for_command(
         return None;
     }
 
+    let mut list_terminator = None;
     while tokens
         .get(i)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
     {
+        if list_terminator.is_none() {
+            list_terminator = Some(tokens[i].value.clone());
+        }
         i += 1;
     }
 
@@ -120,6 +124,7 @@ pub(super) fn parse_arithmetic_for_command(
         in_keyword: None,
         words: Vec::new(),
         default_positional: false,
+        list_terminator,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
             init: parts[0].join(" "),

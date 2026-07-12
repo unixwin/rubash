@@ -71,6 +71,7 @@ fn inline_arithmetic_for_command(
         in_keyword: None,
         words: Vec::new(),
         default_positional: false,
+        list_terminator: None,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
             init: command.words[1].clone(),
