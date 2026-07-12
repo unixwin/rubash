@@ -791,6 +791,64 @@ mod parameter_expansion_tests {
     }
 }
 
+mod brace_expansion_tests {
+    use super::*;
+
+    #[test]
+    fn test_brace_expansion_records_structured_ast_for_words() {
+        let input = "echo {a,b} pre{1..3}post ${not_brace}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(
+            ast.commands[0].words,
+            ["echo", "{a,b}", "pre{1..3}post", "${not_brace}"]
+        );
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].text, "{a,b}");
+        assert_eq!(expansions[0].body, "a,b");
+        assert!(!expansions[0].range);
+        assert_eq!(expansions[0].word_index, Some(1));
+        assert_eq!(expansions[0].assignment_name, None);
+        assert_eq!(expansions[1].text, "{1..3}");
+        assert_eq!(expansions[1].body, "1..3");
+        assert!(expansions[1].range);
+        assert_eq!(expansions[1].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_brace_expansion_skips_command_substitution_source() {
+        let input = "echo $(echo {a,b}) {x,y}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "{x,y}");
+        assert_eq!(expansions[0].body, "x,y");
+        assert_eq!(expansions[0].word_index, Some(2));
+    }
+
+    #[test]
+    fn test_assignment_word_brace_expansion_records_word_index() {
+        let input = "echo value={left,right}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        assert_eq!(ast.commands[0].words, ["echo", "value={left,right}"]);
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "{left,right}");
+        assert_eq!(expansions[0].body, "left,right");
+        assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
+        assert_eq!(expansions[0].word_index, Some(1));
+    }
+}
+
 mod background_tests {
     use super::*;
 

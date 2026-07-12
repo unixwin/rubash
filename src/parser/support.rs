@@ -11,6 +11,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     record_command_substitutions_for_word(cmd, cmd.words.len(), &token.value);
     record_arithmetic_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_parameter_expansions_for_word(cmd, cmd.words.len(), &token.value);
+    record_brace_expansions_for_word(cmd, cmd.words.len(), &token.value);
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }
@@ -38,6 +39,7 @@ pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
         && cmd.command_substitutions.is_empty()
         && cmd.arithmetic_expansions.is_empty()
         && cmd.parameter_expansions.is_empty()
+        && cmd.brace_expansions.is_empty()
         && cmd.heredoc.is_none()
         && cmd.heredoc_delimiter.is_none()
         && cmd.heredoc_redirects.is_empty()

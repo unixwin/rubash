@@ -163,6 +163,16 @@ pub struct ParameterExpansion {
     pub assignment_name: Option<String>,
 }
 
+/// Represents a parsed brace expansion such as `{a,b}` or `{1..3}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BraceExpansion {
+    pub text: String,
+    pub body: String,
+    pub range: bool,
+    pub word_index: Option<usize>,
+    pub assignment_name: Option<String>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -231,6 +241,8 @@ pub struct CommandNode {
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     /// Structured parameter expansions parsed from `$name`, `$?`, and `${...}`.
     pub parameter_expansions: Vec<ParameterExpansion>,
+    /// Structured brace expansions parsed from `{a,b}` and `{1..3}` words.
+    pub brace_expansions: Vec<BraceExpansion>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -307,6 +319,7 @@ impl CommandNode {
             command_substitutions: Vec::new(),
             arithmetic_expansions: Vec::new(),
             parameter_expansions: Vec::new(),
+            brace_expansions: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,
