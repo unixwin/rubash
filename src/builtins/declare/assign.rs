@@ -3,13 +3,13 @@ use std::env;
 use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
-use super::marks::marked_vars;
+use super::marks::{mark_typed, marked_vars, unmark_typed};
 use super::storage::{
     append_array_value, append_assoc_value, eval_arith_value, is_noassign_bash_array,
 };
 use super::{
     ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, EXECUTION_FAILURE, EXECUTION_SUCCESS,
-    READONLY_VARS,
+    DECLARED_UNSET_VARS, READONLY_VARS,
 };
 
 pub(super) fn assign_declare_names<W>(
@@ -18,6 +18,7 @@ pub(super) fn assign_declare_names<W>(
     array: bool,
     assoc: bool,
     integer: bool,
+    mark_unset_declarations: bool,
     stderr: &mut W,
 ) -> io::Result<i32>
 where
@@ -27,6 +28,10 @@ where
     let mut status = EXECUTION_SUCCESS;
     for name in names {
         let Some((var_name, value)) = name.split_once('=') else {
+            let var_name = name.strip_suffix('+').unwrap_or(name);
+            if mark_unset_declarations && !variables.contains_key(var_name) {
+                mark_typed(variables, DECLARED_UNSET_VARS, var_name);
+            }
             continue;
         };
         let (var_name, append) = var_name
@@ -90,6 +95,7 @@ where
             value.to_string()
         };
         variables.insert(var_name.to_string(), value.clone());
+        unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
         env::set_var(var_name, value);
     }
     Ok(status)

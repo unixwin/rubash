@@ -108,6 +108,39 @@ fn test_declare_appends_stderr() {
 }
 
 #[test]
+fn test_declare_capital_g_is_accepted_as_noop_attribute() {
+    let output_path = "target/rubash-declare-capital-g-output.txt";
+    let error_path = "target/rubash-declare-capital-g-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "unset RUBASH_DECLARE_CAPITAL_G RUBASH_DECLARE_PLUS_CAPITAL_G; \
+         declare -G RUBASH_DECLARE_CAPITAL_G 2> {error_path}; echo first:$? > {output_path}; \
+         declare -p RUBASH_DECLARE_CAPITAL_G >> {output_path}; \
+         declare +G RUBASH_DECLARE_PLUS_CAPITAL_G 2>> {error_path}; echo second:$? >> {output_path}; \
+         declare -p RUBASH_DECLARE_PLUS_CAPITAL_G >> {output_path}; \
+         unset RUBASH_DECLARE_CAPITAL_G; \
+         declare -p RUBASH_DECLARE_CAPITAL_G 2>> {error_path}; echo missing:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "first:0\ndeclare -- RUBASH_DECLARE_CAPITAL_G\nsecond:0\ndeclare -- RUBASH_DECLARE_PLUS_CAPITAL_G\nmissing:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("declare: RUBASH_DECLARE_CAPITAL_G: not found"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_builtin_declare_assigns_variable() {
     let output_path = "target/rubash-builtin-declare-output.txt";
     let _ = fs::remove_file(output_path);

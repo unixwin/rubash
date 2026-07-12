@@ -103,7 +103,7 @@ where
                     'n' => unset_nameref = true,
                     'r' if set_attr => readonly = true,
                     'r' => unset_readonly = true,
-                    'g' => {
+                    'g' | 'G' => {
                         // TODO(variables.c/builtins/declare.def): `-g` forces
                         // global scope inside functions. Rubash has one
                         // variable table for now.
@@ -182,7 +182,7 @@ where
         valid_assign_names.push(name);
     }
     let assign_names = valid_assign_names;
-    if assign_declare_names(&assign_names, variables, array, assoc, integer, stderr)?
+    if assign_declare_names(&assign_names, variables, array, assoc, integer, !print, stderr)?
         != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;

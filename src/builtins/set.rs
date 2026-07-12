@@ -29,6 +29,7 @@ pub(super) const INTEGER_VARS: &str = "__RUBASH_INTEGER_VARS";
 pub(super) const UPPERCASE_VARS: &str = "__RUBASH_UPPERCASE_VARS";
 pub(super) const LOWERCASE_VARS: &str = "__RUBASH_LOWERCASE_VARS";
 pub(super) const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
+pub(super) const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 
 /// Execute `set` with arguments after the command name.
 pub fn set(args: &[String], env_vars: &mut HashMap<String, String>) -> io::Result<i32> {
