@@ -320,3 +320,22 @@ fn test_function_body_can_be_while_command_sequence() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_function_body_can_be_conditional_command() {
+    let output_path = "target/rubash-function-conditional-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "f() [[ $1 == a* && $2 -gt 1 ]]; f alpha 2; echo yes:$? > {output_path}; f beta 2; echo no:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes:0\nno:1\n");
+    let _ = fs::remove_file(output_path);
+}

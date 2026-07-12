@@ -196,6 +196,20 @@ mod function_tests {
         assert_eq!(function.body[1].words, ["do", "echo", "bad"]);
         assert_eq!(function.body[2].words, ["done"]);
     }
+
+    #[test]
+    fn test_function_body_can_be_conditional_command() {
+        let input = "foo() [[ $1 == a* && $2 -gt 1 ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        assert_eq!(
+            function.body[0].words,
+            ["[[", "$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]
+        );
+    }
 }
 
 mod assignment_tests {

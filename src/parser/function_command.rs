@@ -169,11 +169,16 @@ fn parse_function_command_sequence_body(
     start: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let end = match tokens.get(start)?.value.as_str() {
+        "[[" => matching_function_conditional_end(tokens, start)?,
         "if" => matching_function_if_end(tokens, start)?,
         "while" | "until" => matching_function_loop_end(tokens, start)?,
         _ => return None,
     };
     Some((parse(&tokens[start..=end]).commands, end + 1))
+}
+
+fn matching_function_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
+    (start..tokens.len()).find(|&index| tokens[index].value == "]]")
 }
 
 fn matching_function_if_end(tokens: &[Token], start: usize) -> Option<usize> {
