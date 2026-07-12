@@ -98,6 +98,7 @@ impl Executor {
                 pattern_nodes,
                 body,
                 terminator: boundary.terminator,
+                terminator_text: boundary.terminator_text,
             });
             if boundary.ended_case {
                 break (boundary.command, boundary.command_index + 1);

@@ -9,6 +9,7 @@ pub(super) struct AliasCaseBoundary<'a> {
     pub(super) command_index: usize,
     pub(super) next_word_index: usize,
     pub(super) terminator: CaseTerminator,
+    pub(super) terminator_text: Option<String>,
     pub(super) ended_case: bool,
 }
 
@@ -145,6 +146,10 @@ fn alias_case_boundary<'a>(
     boundary: usize,
 ) -> AliasCaseBoundary<'a> {
     let terminator = case_terminator_from_word(words.get(boundary).map(String::as_str));
+    let terminator_text = words
+        .get(boundary)
+        .filter(|word| matches!(word.as_str(), ";;" | ";&" | ";;&"))
+        .cloned();
     let mut next_word_index = boundary + 1;
     let ended_case = words.get(boundary).is_some_and(|word| word == "esac")
         || words
@@ -162,6 +167,7 @@ fn alias_case_boundary<'a>(
         command_index,
         next_word_index,
         terminator,
+        terminator_text,
         ended_case,
     }
 }

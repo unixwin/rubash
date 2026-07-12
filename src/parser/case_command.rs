@@ -97,6 +97,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         let body_start = i;
         i = case_body_end(tokens, i);
         let body = parse(&tokens[body_start..i]).commands;
+        let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
         let clause_index = clauses.len();
         let pattern_nodes = case_pattern_nodes(&patterns, clause_index);
@@ -105,6 +106,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
             pattern_nodes,
             body,
             terminator,
+            terminator_text,
         });
 
         if is_case_terminator(tokens, i) {

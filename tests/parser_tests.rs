@@ -571,6 +571,10 @@ mod case_tests {
             CaseTerminator::FallThrough
         );
         assert_eq!(
+            case_command.clauses[0].terminator_text.as_deref(),
+            Some(";&")
+        );
+        assert_eq!(
             case_command.clauses[0].patterns,
             ["x", "@(foo|bar)", "!(tmp)"]
         );
@@ -594,6 +598,21 @@ mod case_tests {
         assert_eq!(fallback.clause_index, 1);
         assert_eq!(fallback.pattern_index, 0);
         assert!(fallback.has_glob);
+        assert_eq!(
+            case_command.clauses[1].terminator_text.as_deref(),
+            Some(";;")
+        );
+    }
+
+    #[test]
+    fn test_case_clause_records_absent_terminator() {
+        let input = "case $word in x) echo hit esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let clause = &ast.commands[0].case_command.as_ref().unwrap().clauses[0];
+
+        assert_eq!(clause.terminator, CaseTerminator::Break);
+        assert_eq!(clause.terminator_text, None);
     }
 }
 

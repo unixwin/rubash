@@ -338,6 +338,7 @@ pub struct CaseClause {
     pub pattern_nodes: Vec<CasePattern>,
     pub body: Vec<CommandNode>,
     pub terminator: CaseTerminator,
+    pub terminator_text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
