@@ -25,6 +25,8 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
         condition,
         condition_terminator,
         do_keyword: tokens[do_index].value.clone(),
+        body_open_delimiter: tokens[do_index].value.clone(),
+        body_close_delimiter: tokens[done_index].value.clone(),
         body,
         end_keyword: tokens[done_index].value.clone(),
         kind,

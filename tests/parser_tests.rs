@@ -285,6 +285,32 @@ mod command_body_kind_tests {
         assert_eq!(second.body_close_delimiter.as_deref(), Some("}"));
         assert_eq!(second.body[0].words, ["echo", "$y"]);
     }
+
+    #[test]
+    fn test_loop_body_delimiters_record_do_done() {
+        let while_tokens = tokenize("while false; do echo bad; done");
+        let while_ast = parse(&while_tokens);
+        let until_tokens = tokenize("until true; do echo ok; done");
+        let until_ast = parse(&until_tokens);
+        let while_command = while_ast.commands[0].loop_command.as_ref().unwrap();
+        let until_command = until_ast.commands[0].loop_command.as_ref().unwrap();
+
+        assert_eq!(while_command.kind, LoopKind::While);
+        assert_eq!(while_command.keyword, "while");
+        assert_eq!(while_command.do_keyword, "do");
+        assert_eq!(while_command.end_keyword, "done");
+        assert_eq!(while_command.body_open_delimiter, "do");
+        assert_eq!(while_command.body_close_delimiter, "done");
+        assert_eq!(while_command.condition_terminator.as_deref(), Some(";"));
+        assert_eq!(while_command.condition[0].words, ["false"]);
+        assert_eq!(while_command.body[0].words, ["echo", "bad"]);
+        assert_eq!(until_command.kind, LoopKind::Until);
+        assert_eq!(until_command.keyword, "until");
+        assert_eq!(until_command.body_open_delimiter, "do");
+        assert_eq!(until_command.body_close_delimiter, "done");
+        assert_eq!(until_command.condition[0].words, ["true"]);
+        assert_eq!(until_command.body[0].words, ["echo", "ok"]);
+    }
 }
 
 mod if_tests {

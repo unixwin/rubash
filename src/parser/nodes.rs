@@ -124,6 +124,8 @@ pub struct LoopCommand {
     pub condition: Vec<CommandNode>,
     pub condition_terminator: Option<String>,
     pub do_keyword: String,
+    pub body_open_delimiter: String,
+    pub body_close_delimiter: String,
     pub body: Vec<CommandNode>,
     pub end_keyword: String,
     pub kind: LoopKind,
