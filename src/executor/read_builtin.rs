@@ -1,5 +1,8 @@
 use super::*;
 
+const READ_USAGE: &str =
+    "read: usage: read [-ers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
+
 impl Executor {
     pub(in crate::executor) fn execute_read(&mut self, cmd: &CommandNode) -> i32 {
         let mut stderr = Vec::new();
@@ -14,6 +17,15 @@ impl Executor {
         let mut index = 1;
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
+                "--" => {
+                    index += 1;
+                    while index < cmd.words.len() {
+                        if is_shell_name(&cmd.words[index]) {
+                            scalar_names.push(cmd.words[index].clone());
+                        }
+                        index += 1;
+                    }
+                }
                 "-a" => {
                     if let Some(name) = cmd.words.get(index + 1).filter(|name| is_shell_name(name))
                     {
@@ -96,7 +108,7 @@ impl Executor {
                     && word.len() > 2
                     && word[1..]
                         .chars()
-                        .all(|ch| matches!(ch, 'e' | 'E' | 'r' | 's')) =>
+                        .all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
                 {
                     raw |= word[1..].contains('r');
                     index += 1;
@@ -193,8 +205,15 @@ impl Executor {
                 word if word.starts_with("-p") && word.len() > 2 => {
                     index += 1;
                 }
-                word if word.starts_with('-') => {
-                    index += 1;
+                word if word.starts_with('-') && word.len() > 1 => {
+                    let option = first_invalid_read_option(word).unwrap_or('?');
+                    let _ = writeln!(
+                        &mut stderr,
+                        "{}read: -{option}: invalid option",
+                        self.diagnostic_prefix()
+                    );
+                    let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                    return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if is_shell_name(word) => {
                     scalar_names.push(word.to_string());
@@ -288,6 +307,12 @@ impl Executor {
         );
         self.finish_read_error(cmd, &stderr, 127)
     }
+}
+
+fn first_invalid_read_option(word: &str) -> Option<char> {
+    let mut chars = word.chars();
+    chars.next()?;
+    chars.find(|ch| !matches!(ch, 'a' | 'd' | 'e' | 'i' | 'n' | 'N' | 'p' | 'r' | 's' | 't' | 'u'))
 }
 
 fn command_closes_stdin(cmd: &CommandNode) -> bool {

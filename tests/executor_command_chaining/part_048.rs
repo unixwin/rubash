@@ -84,6 +84,56 @@ fn test_read_invalid_counts_redirect_stderr() {
 }
 
 #[test]
+fn test_read_invalid_options_fail_with_status_two() {
+    let output_path = "target/rubash-read-invalid-option-status.txt";
+    let error_path = "target/rubash-read-invalid-option-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read -Z value <<< abc 2> {error_path}; echo simple:$? > {output_path}; \
+         read -rsZ value <<< abc 2>> {error_path}; echo compact:$? >> {output_path}; \
+         read -E value <<< abc 2>> {error_path}; echo uppercase:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "simple:2\ncompact:2\nuppercase:2\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert_eq!(error.matches("read: -Z: invalid option").count(), 2);
+    assert!(error.contains("read: -E: invalid option"));
+    assert_eq!(error.matches("read: usage:").count(), 3);
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_read_double_dash_allows_name_arguments() {
+    let output_path = "target/rubash-read-double-dash-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "read -- value extra <<< 'abc def'; printf '%s:%s:%s' \"$?\" \"$value\" \"$extra\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0:abc:def");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_rn_reads_raw_limited_characters() {
     let output_path = "target/rubash-read-rn-output.txt";
     let _ = fs::remove_file(output_path);
