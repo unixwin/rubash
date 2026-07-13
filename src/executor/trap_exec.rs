@@ -292,6 +292,23 @@ impl Executor {
                 return Ok(Some(0));
             }
 
+            if let Some(source) = target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                if let Some(input) = self.process_substitution_output(source) {
+                    self.env_vars.remove(&fd_closed_key(fd));
+                    self.env_vars.insert(fd_stdin_key(fd), input);
+                    self.env_vars
+                        .insert(fd_stdin_offset_key(fd), "0".to_string());
+                    if fd != 0 {
+                        self.env_vars
+                            .insert(fd_dynamic_input_key(fd), "1".to_string());
+                    }
+                    return Ok(Some(0));
+                }
+            }
+
             let path = shell_path_to_windows(&target, &self.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
@@ -403,6 +420,23 @@ impl Executor {
                 self.copy_persistent_input_fd(fd, source_fd);
                 self.copy_persistent_output_fd(fd, source_fd);
                 return Ok(Some(0));
+            }
+
+            if let Some(source) = target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                if let Some(input) = self.process_substitution_output(source) {
+                    let fd = self.allocate_dynamic_fd();
+                    self.env_vars.insert(name.to_string(), fd.to_string());
+                    self.env_vars.remove(&fd_closed_key(fd));
+                    self.env_vars.insert(fd_stdin_key(fd), input);
+                    self.env_vars
+                        .insert(fd_stdin_offset_key(fd), "0".to_string());
+                    self.env_vars
+                        .insert(fd_dynamic_input_key(fd), "1".to_string());
+                    return Ok(Some(0));
+                }
             }
 
             let path = shell_path_to_windows(&target, &self.env_vars);
