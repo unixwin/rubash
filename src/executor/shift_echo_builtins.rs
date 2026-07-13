@@ -203,6 +203,15 @@ impl Executor {
         let echo_args = echo_args_without_background_marker(&cmd.words[1..]);
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut output = Vec::new();
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut output,
+                )?;
+                self.write_output_fd_redirect(&target, &output)?;
+                return Ok(());
+            }
             if target == "&2" {
                 crate::builtins::echo::write_echo(
                     echo_args.iter().map(String::as_str),
@@ -217,6 +226,13 @@ impl Executor {
                 )?;
                 return Ok(());
             }
+            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
+            return Ok(());
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
             if self.has_output_fd_target(&target) {
                 let mut output = Vec::new();
                 crate::builtins::echo::write_echo(
@@ -226,13 +242,6 @@ impl Executor {
                 self.write_output_fd_redirect(&target, &output)?;
                 return Ok(());
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
-            return Ok(());
-        }
-
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_word(&redirect.target);
             if target == "&2" {
                 crate::builtins::echo::write_echo(
                     echo_args.iter().map(String::as_str),
@@ -252,15 +261,6 @@ impl Executor {
                     echo_args.iter().map(String::as_str),
                     &mut std::io::sink(),
                 )?;
-                return Ok(());
-            }
-            if self.has_output_fd_target(&target) {
-                let mut output = Vec::new();
-                crate::builtins::echo::write_echo(
-                    echo_args.iter().map(String::as_str),
-                    &mut output,
-                )?;
-                self.write_output_fd_redirect(&target, &output)?;
                 return Ok(());
             }
             let mut file = OpenOptions::new()

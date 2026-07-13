@@ -11,6 +11,19 @@ impl Executor {
         // later sourced by `.`.
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut stdout = Vec::new();
+                let mut stderr = Vec::new();
+                let status = crate::builtins::printf::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut stdout,
+                    &mut stderr,
+                )?;
+                self.write_output_fd_redirect(&target, &stdout)?;
+                self.write_default_stderr(&stderr)?;
+                return Ok(status);
+            }
             if target == "&2" {
                 return Ok(crate::builtins::printf::execute_with_io(
                     cmd.words[1..].iter().map(String::as_str),
@@ -26,19 +39,6 @@ impl Executor {
                     &mut std::io::sink(),
                     &mut std::io::stderr().lock(),
                 )?);
-            }
-            if self.has_output_fd_target(&target) {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                let status = crate::builtins::printf::execute_with_io(
-                    cmd.words[1..].iter().map(String::as_str),
-                    &mut self.env_vars,
-                    &mut stdout,
-                    &mut stderr,
-                )?;
-                self.write_output_fd_redirect(&target, &stdout)?;
-                self.write_default_stderr(&stderr)?;
-                return Ok(status);
             }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             return Ok(crate::builtins::printf::execute_with_io(

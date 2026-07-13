@@ -10,11 +10,11 @@ impl Executor {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
+            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else if redirect_target_fd(&target) == Some(2) {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
-            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(stdout)?;
@@ -22,11 +22,11 @@ impl Executor {
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
+            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else if redirect_target_fd(&target) == Some(2) {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
-            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -41,13 +41,13 @@ impl Executor {
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
+            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else if redirect_target_fd(&target) == Some(1) {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(stderr)?;
                 } else {
                     std::io::stdout().lock().write_all(stderr)?;
                 }
-            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else if !is_null_device(&target) {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(stderr)?;
@@ -55,13 +55,13 @@ impl Executor {
         } else if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
+            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else if redirect_target_fd(&target) == Some(1) {
                 if let Some(capture) = &mut self.stdout_capture {
                     capture.write_all(stderr)?;
                 } else {
                     std::io::stdout().lock().write_all(stderr)?;
                 }
-            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else {
                 let mut file = OpenOptions::new()
                     .create(true)
