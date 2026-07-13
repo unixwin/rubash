@@ -25,7 +25,9 @@ pub(super) fn collect_trailing_redirections(
                 process_substitution.redirect_fd = fd;
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                command.redirect_in = Some(redirect_node(&token.value, fd, &target, false, false));
+                let redirect = redirect_node(&token.value, fd, &target, false, false);
+                command.redirects.push(redirect.clone());
+                command.redirect_in = Some(redirect);
                 *index = next_i + 1;
                 continue;
             }
@@ -79,16 +81,14 @@ pub(super) fn collect_trailing_redirections(
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
                 if token.kind == TokenKind::RedirectErrAppend {
-                    command.redirect_err_append =
-                        Some(redirect_node(&token.value, Some(2), &target, true, false));
+                    let redirect = redirect_node(&token.value, Some(2), &target, true, false);
+                    command.redirects.push(redirect.clone());
+                    command.redirect_err_append = Some(redirect);
                 } else {
-                    command.redirect_err = Some(redirect_node(
-                        &token.value,
-                        Some(2),
-                        &target,
-                        false,
-                        token.value == "2>|",
-                    ));
+                    let redirect =
+                        redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
+                    command.redirects.push(redirect.clone());
+                    command.redirect_err = Some(redirect);
                 }
                 *index = next_i + 1;
                 continue;
@@ -117,20 +117,23 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::RedirectIn => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                command.redirect_in = Some(redirect_node(
+                let redirect = redirect_node(
                     &token.value,
                     fd,
                     &input_redirect_target(&token.value, &target.value),
                     false,
                     false,
-                ));
+                );
+                command.redirects.push(redirect.clone());
+                command.redirect_in = Some(redirect);
             }
             TokenKind::RedirectOut => {
                 if token.value.ends_with("<>") {
                     let fd = redirect_operator_fd(&token.value)
                         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                    command.redirect_in =
-                        Some(redirect_node(&token.value, fd, &target.value, true, false));
+                    let redirect = redirect_node(&token.value, fd, &target.value, true, false);
+                    command.redirects.push(redirect.clone());
+                    command.redirect_in = Some(redirect);
                 } else {
                     assign_output_redirect(command, &token.value, &target.value, None);
                 }
@@ -172,6 +175,9 @@ pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
 
 pub(super) fn assign_here_string_redirect(command: &mut CommandNode, operator: &str, target: &str) {
     let fd = redirect_operator_fd(operator);
+    command
+        .redirects
+        .push(redirect_node(operator, fd, target, false, false));
     if let Some(fd) = fd {
         command.heredoc_redirects.push(HereDocRedirect {
             fd: Some(fd),
@@ -283,6 +289,9 @@ pub(super) fn redirect_kind(operator: &str, target: &str) -> RedirectKind {
     }
     if operator == "&>>" {
         return RedirectKind::CombinedAppend;
+    }
+    if operator.ends_with("<<<") {
+        return RedirectKind::HereString;
     }
     if operator.ends_with(">>") {
         return RedirectKind::Append;

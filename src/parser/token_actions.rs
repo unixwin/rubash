@@ -209,8 +209,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         .current_cmd
                         .process_substitutions
                         .push(process_substitution);
-                    state.current_cmd.redirect_in =
-                        Some(redirect_node(&token.value, fd, &target, false, false));
+                    let redirect = redirect_node(&token.value, fd, &target, false, false);
+                    state.current_cmd.redirects.push(redirect.clone());
+                    state.current_cmd.redirect_in = Some(redirect);
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
@@ -225,13 +226,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.word_kinds.push(TokenKind::Word);
                     *i = next_i;
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
-                    state.current_cmd.redirect_in = Some(redirect_node(
+                    let redirect = redirect_node(
                         &token.value,
                         fd,
                         &input_redirect_target(&token.value, &tokens[*i + 1].value),
                         false,
                         false,
-                    ));
+                    );
+                    state.current_cmd.redirects.push(redirect.clone());
+                    state.current_cmd.redirect_in = Some(redirect);
                     *i += 1;
                 }
             }
@@ -264,13 +267,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .current_cmd
                     .process_substitutions
                     .push(process_substitution);
-                state.current_cmd.redirect_err = Some(redirect_node(
-                    &token.value,
-                    Some(2),
-                    &target,
-                    false,
-                    token.value == "2>|",
-                ));
+                let redirect =
+                    redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
+                state.current_cmd.redirects.push(redirect.clone());
+                state.current_cmd.redirect_err = Some(redirect);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
@@ -289,8 +289,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .current_cmd
                     .process_substitutions
                     .push(process_substitution);
-                state.current_cmd.redirect_err_append =
-                    Some(redirect_node(&token.value, Some(2), &target, true, false));
+                let redirect = redirect_node(&token.value, Some(2), &target, true, false);
+                state.current_cmd.redirects.push(redirect.clone());
+                state.current_cmd.redirect_err_append = Some(redirect);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)

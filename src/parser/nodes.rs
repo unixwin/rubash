@@ -24,6 +24,7 @@ pub enum RedirectKind {
     ClobberOutput,
     CombinedOutput,
     CombinedAppend,
+    HereString,
     Unknown,
 }
 
@@ -596,6 +597,8 @@ pub struct CommandNode {
     pub pathname_patterns: Vec<PathnamePattern>,
     /// Structured quoted segments parsed from raw shell words.
     pub word_quotes: Vec<WordQuote>,
+    /// Non-heredoc redirections in parse order.
+    pub redirects: Vec<Redirect>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,
     /// Output redirect
@@ -678,6 +681,7 @@ impl CommandNode {
             tilde_expansions: Vec::new(),
             pathname_patterns: Vec::new(),
             word_quotes: Vec::new(),
+            redirects: Vec::new(),
             redirect_in: None,
             redirect_out: None,
             append: None,

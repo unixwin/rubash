@@ -51,6 +51,33 @@ fn test_redirect_target_can_be_brace_expansion_word() {
 }
 
 #[test]
+fn test_redirection_list_records_parse_order() {
+    let input = "echo hello > first 2>&1 >> second < input";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+    let redirects = command.redirects.as_slice();
+
+    assert_eq!(redirects.len(), 4);
+    assert_eq!(redirects[0].operator, ">");
+    assert_eq!(redirects[0].kind, RedirectKind::Output);
+    assert_eq!(redirects[0].target, "first");
+    assert_eq!(redirects[1].operator, "2>&");
+    assert_eq!(redirects[1].kind, RedirectKind::DuplicateOutput);
+    assert_eq!(redirects[1].target, "&1");
+    assert_eq!(redirects[2].operator, ">>");
+    assert_eq!(redirects[2].kind, RedirectKind::Append);
+    assert_eq!(redirects[2].target, "second");
+    assert_eq!(redirects[3].operator, "<");
+    assert_eq!(redirects[3].kind, RedirectKind::Input);
+    assert_eq!(redirects[3].target, "input");
+
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "first");
+    assert_eq!(command.append.as_ref().unwrap().target, "second");
+    assert_eq!(command.redirect_in.as_ref().unwrap().target, "input");
+}
+
+#[test]
 fn test_clobber_output_redirect() {
     let input = "echo hello >| file.txt";
     let tokens = tokenize(input);
