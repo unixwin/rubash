@@ -60,6 +60,18 @@ impl Executor {
         Ok(true)
     }
 
+    pub(in crate::executor) fn output_fd_redirects_to_stdout(&self, target: &str) -> bool {
+        redirect_target_fd(target)
+            .and_then(|fd| self.env_vars.get(&fd_output_key(fd)))
+            .is_some_and(|target| target == FD_STDOUT_TARGET)
+    }
+
+    pub(in crate::executor) fn output_fd_redirects_to_stderr(&self, target: &str) -> bool {
+        redirect_target_fd(target)
+            .and_then(|fd| self.env_vars.get(&fd_output_key(fd)))
+            .is_some_and(|target| target == FD_STDERR_TARGET)
+    }
+
     pub(in crate::executor) fn write_default_stdout(
         &mut self,
         output: &[u8],
@@ -74,6 +86,14 @@ impl Executor {
         }
 
         if let Some(target) = self.env_vars.get(&fd_output_key(1)).cloned() {
+            if target == FD_STDOUT_TARGET {
+                std::io::stdout().lock().write_all(output)?;
+                return Ok(());
+            }
+            if target == FD_STDERR_TARGET {
+                std::io::stderr().lock().write_all(output)?;
+                return Ok(());
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -95,6 +115,14 @@ impl Executor {
         }
 
         if let Some(target) = self.env_vars.get(&fd_output_key(2)).cloned() {
+            if target == FD_STDOUT_TARGET {
+                std::io::stdout().lock().write_all(output)?;
+                return Ok(());
+            }
+            if target == FD_STDERR_TARGET {
+                std::io::stderr().lock().write_all(output)?;
+                return Ok(());
+            }
             if is_null_device(&target) {
                 return Ok(());
             }

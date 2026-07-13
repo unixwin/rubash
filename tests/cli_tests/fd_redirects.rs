@@ -87,6 +87,87 @@ fn c_external_stderr_fd_copy_keeps_original_stdout_before_redirect() {
 }
 
 #[test]
+fn c_external_command_uses_persistent_fd_copied_from_stdout() {
+    let bin_dir = external_fd_copy_bin_dir();
+    let script_path = bin_dir.join("emitout");
+    let literal_fd_path = Path::new("&3");
+    let _ = fs::remove_dir_all(&bin_dir);
+    let _ = fs::remove_file(literal_fd_path);
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(&script_path, "echo external-via-fd\n").unwrap();
+    make_executable(&script_path);
+    let path = path_with_bin_first(&bin_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("PATH", path)
+        .arg("-c")
+        .arg("exec 3>&1; emitout >&3")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "external-via-fd\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(!literal_fd_path.exists());
+    let _ = fs::remove_dir_all(bin_dir);
+}
+
+#[test]
+fn c_external_command_uses_persistent_fd_copied_from_stderr() {
+    let bin_dir = external_fd_copy_bin_dir();
+    let script_path = bin_dir.join("emitout");
+    let literal_fd_path = Path::new("&3");
+    let _ = fs::remove_dir_all(&bin_dir);
+    let _ = fs::remove_file(literal_fd_path);
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(&script_path, "echo external-via-fd\n").unwrap();
+    make_executable(&script_path);
+    let path = path_with_bin_first(&bin_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("PATH", path)
+        .arg("-c")
+        .arg("exec 3>&2; emitout >&3")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "external-via-fd\n");
+    assert!(!literal_fd_path.exists());
+    let _ = fs::remove_dir_all(bin_dir);
+}
+
+#[test]
+fn c_external_stderr_uses_persistent_fd_copied_from_stdout() {
+    let bin_dir = external_fd_copy_bin_dir();
+    let script_path = bin_dir.join("emiterr");
+    let literal_fd_path = Path::new("&3");
+    let _ = fs::remove_dir_all(&bin_dir);
+    let _ = fs::remove_file(literal_fd_path);
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::write(&script_path, "echo external-error-via-fd >&2\n").unwrap();
+    make_executable(&script_path);
+    let path = path_with_bin_first(&bin_dir);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("PATH", path)
+        .arg("-c")
+        .arg("exec 3>&1; emiterr 2>&3")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "external-error-via-fd\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(!literal_fd_path.exists());
+    let _ = fs::remove_dir_all(bin_dir);
+}
+
+#[test]
 fn c_external_combined_redirect_preserves_stderr_first_output() {
     let bin_dir = external_fd_copy_bin_dir();
     let script_path = bin_dir.join("emitboth");

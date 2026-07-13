@@ -69,8 +69,11 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
                 process.stdout(Stdio::null());
-            } else if redirect_target_fd(&target) == Some(2) {
+            } else if redirect_target_fd(&target) == Some(2)
+                || self.output_fd_redirects_to_stderr(&target)
+            {
                 process.stdout(Stdio::piped());
+            } else if self.output_fd_redirects_to_stdout(&target) {
             } else if self.has_output_fd_target(&target) {
                 process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
@@ -111,8 +114,11 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if is_closed_redirect_target(target) {
             process.stdout(Stdio::null());
-        } else if redirect_target_fd(target) == Some(2) {
+        } else if redirect_target_fd(target) == Some(2)
+            || self.output_fd_redirects_to_stderr(target)
+        {
             process.stdout(Stdio::piped());
+        } else if self.output_fd_redirects_to_stdout(target) {
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
         } else if redirect_target_fd(target).is_none() {
@@ -132,8 +138,11 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
                 process.stderr(Stdio::null());
-            } else if redirect_target_fd(&target) == Some(1) {
+            } else if redirect_target_fd(&target) == Some(1)
+                || self.output_fd_redirects_to_stdout(&target)
+            {
                 process.stderr(Stdio::piped());
+            } else if self.output_fd_redirects_to_stderr(&target) {
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
@@ -147,8 +156,11 @@ impl Executor {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
                 process.stderr(Stdio::null());
-            } else if redirect_target_fd(&target) == Some(1) {
+            } else if redirect_target_fd(&target) == Some(1)
+                || self.output_fd_redirects_to_stdout(&target)
+            {
                 process.stderr(Stdio::piped());
+            } else if self.output_fd_redirects_to_stderr(&target) {
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
@@ -251,7 +263,10 @@ impl Executor {
             .as_ref()
             .or(cmd.append.as_ref())
             .map(|redirect| self.expand_word(&redirect.target))
-            .is_some_and(|target| redirect_target_fd(&target) == Some(2))
+            .is_some_and(|target| {
+                redirect_target_fd(&target) == Some(2)
+                    || self.output_fd_redirects_to_stderr(&target)
+            })
     }
 
     fn external_stderr_copies_to_stdout(&self, cmd: &CommandNode) -> bool {
@@ -259,6 +274,9 @@ impl Executor {
             .as_ref()
             .or(cmd.redirect_err_append.as_ref())
             .map(|redirect| self.expand_word(&redirect.target))
-            .is_some_and(|target| redirect_target_fd(&target) == Some(1))
+            .is_some_and(|target| {
+                redirect_target_fd(&target) == Some(1)
+                    || self.output_fd_redirects_to_stdout(&target)
+            })
     }
 }
