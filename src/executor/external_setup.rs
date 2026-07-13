@@ -282,6 +282,7 @@ impl Executor {
             .insert(fd_stdin_offset_key(0), self.virtual_fd_stdin_len(0));
         rewritten.redirect_in = Some(Redirect {
             fd: Some(0),
+            fd_var: None,
             operator: "<".to_string(),
             kind: crate::parser::RedirectKind::Input,
             target: shell_display_path(&path.to_string_lossy()),

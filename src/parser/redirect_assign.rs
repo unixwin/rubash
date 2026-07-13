@@ -11,7 +11,7 @@ pub(super) fn assign_redirect_out_target(
     {
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
-        assign_output_redirect(command, &tokens[index].value, &target, None);
+        assign_output_redirect(command, &tokens[index].value, &target, None, None);
         return Some(next_i);
     }
 
@@ -20,10 +20,12 @@ pub(super) fn assign_redirect_out_target(
     {
         let fd = redirect_operator_fd(&tokens[index].value)
             .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+        let fd_var = redirect_fd_var_prefix(tokens, index);
         process_substitution.redirect_fd = fd;
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
-        let redirect = redirect_node(&tokens[index].value, fd, &target, false, false);
+        let redirect =
+            redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, false, false);
         command.redirects.push(redirect.clone());
         command.redirect_out = Some(redirect);
         return Some(next_i);
@@ -43,13 +45,15 @@ pub(super) fn assign_redirect_out_target(
     let target = redirect_target_token(tokens, index)?;
     let fd = redirect_operator_fd(&tokens[index].value)
         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+    let fd_var = redirect_fd_var_prefix(tokens, index);
     if tokens[index].value.ends_with("<>") {
-        let redirect = redirect_node(&tokens[index].value, fd, &target.value, true, false);
+        let redirect =
+            redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target.value, true, false);
         command.redirects.push(redirect.clone());
         command.redirect_in = Some(redirect);
         return Some(index + 1);
     }
-    assign_output_redirect(command, &tokens[index].value, &target.value, fd);
+    assign_output_redirect(command, &tokens[index].value, &target.value, fd, fd_var);
     Some(index + 1)
 }
 
@@ -63,7 +67,7 @@ pub(super) fn assign_append_target(
     {
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
-        assign_append_redirect(command, &tokens[index].value, &target, None);
+        assign_append_redirect(command, &tokens[index].value, &target, None, None);
         return Some(next_i);
     }
 
@@ -72,10 +76,12 @@ pub(super) fn assign_append_target(
     {
         let fd = redirect_operator_fd(&tokens[index].value)
             .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
+        let fd_var = redirect_fd_var_prefix(tokens, index);
         process_substitution.redirect_fd = fd;
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
-        let redirect = redirect_node(&tokens[index].value, fd, &target, true, false);
+        let redirect =
+            redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, true, false);
         command.redirects.push(redirect.clone());
         command.append = Some(redirect);
         return Some(next_i);
@@ -84,7 +90,13 @@ pub(super) fn assign_append_target(
     let target = redirect_target_token(tokens, index)?;
     let fd = redirect_operator_fd(&tokens[index].value)
         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
-    assign_append_redirect(command, &tokens[index].value, &target.value, fd);
+    assign_append_redirect(
+        command,
+        &tokens[index].value,
+        &target.value,
+        fd,
+        redirect_fd_var_prefix(tokens, index),
+    );
     Some(index + 1)
 }
 
@@ -146,10 +158,12 @@ pub(super) fn assign_output_redirect(
     operator: &str,
     target: &str,
     fd: Option<u32>,
+    fd_var: Option<String>,
 ) {
-    let redirect = redirect_node(
+    let redirect = redirect_node_with_fd_var(
         operator,
         fd,
+        fd_var,
         &redirect_target(operator, target),
         false,
         operator == ">|",
@@ -166,8 +180,9 @@ pub(super) fn assign_append_redirect(
     operator: &str,
     target: &str,
     fd: Option<u32>,
+    fd_var: Option<String>,
 ) {
-    let redirect = redirect_node(operator, fd, target, true, false);
+    let redirect = redirect_node_with_fd_var(operator, fd, fd_var, target, true, false);
     command.redirects.push(redirect.clone());
     command.append = Some(redirect);
     if operator == "&>>" {

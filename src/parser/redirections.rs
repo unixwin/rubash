@@ -22,10 +22,12 @@ pub(super) fn collect_trailing_redirections(
             {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                let fd_var = redirect_fd_var_prefix(tokens, *index);
                 process_substitution.redirect_fd = fd;
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                let redirect = redirect_node(&token.value, fd, &target, false, false);
+                let redirect =
+                    redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                 command.redirects.push(redirect.clone());
                 command.redirect_in = Some(redirect);
                 *index = next_i + 1;
@@ -39,7 +41,7 @@ pub(super) fn collect_trailing_redirections(
             {
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                assign_output_redirect(command, &token.value, &target, None);
+                assign_output_redirect(command, &token.value, &target, None, None);
                 *index = next_i + 1;
                 continue;
             }
@@ -49,10 +51,18 @@ pub(super) fn collect_trailing_redirections(
             {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                let fd_var = redirect_fd_var_prefix(tokens, *index);
                 process_substitution.redirect_fd = fd;
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                command.redirect_out = Some(redirect_node(&token.value, fd, &target, false, false));
+                command.redirect_out = Some(redirect_node_with_fd_var(
+                    &token.value,
+                    fd,
+                    fd_var,
+                    &target,
+                    false,
+                    false,
+                ));
                 *index = next_i + 1;
                 continue;
             }
@@ -64,7 +74,7 @@ pub(super) fn collect_trailing_redirections(
             {
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
-                assign_append_redirect(command, &token.value, &target, None);
+                assign_append_redirect(command, &token.value, &target, None, None);
                 *index = next_i + 1;
                 continue;
             }
@@ -103,6 +113,7 @@ pub(super) fn collect_trailing_redirections(
                     command,
                     &token.value,
                     process_substitution,
+                    redirect_fd_var_prefix(tokens, *index),
                 );
                 *index = next_i + 1;
                 continue;
@@ -117,9 +128,10 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::RedirectIn => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                let redirect = redirect_node(
+                let redirect = redirect_node_with_fd_var(
                     &token.value,
                     fd,
+                    redirect_fd_var_prefix(tokens, *index),
                     &input_redirect_target(&token.value, &target.value),
                     false,
                     false,
@@ -131,15 +143,34 @@ pub(super) fn collect_trailing_redirections(
                 if token.value.ends_with("<>") {
                     let fd = redirect_operator_fd(&token.value)
                         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                    let redirect = redirect_node(&token.value, fd, &target.value, true, false);
+                    let redirect = redirect_node_with_fd_var(
+                        &token.value,
+                        fd,
+                        redirect_fd_var_prefix(tokens, *index),
+                        &target.value,
+                        true,
+                        false,
+                    );
                     command.redirects.push(redirect.clone());
                     command.redirect_in = Some(redirect);
                 } else {
-                    assign_output_redirect(command, &token.value, &target.value, None);
+                    assign_output_redirect(
+                        command,
+                        &token.value,
+                        &target.value,
+                        None,
+                        redirect_fd_var_prefix(tokens, *index),
+                    );
                 }
             }
             TokenKind::Append => {
-                assign_append_redirect(command, &token.value, &target.value, None);
+                assign_append_redirect(
+                    command,
+                    &token.value,
+                    &target.value,
+                    None,
+                    redirect_fd_var_prefix(tokens, *index),
+                );
             }
             TokenKind::RedirectErr => {
                 assign_redirect_err_target(tokens, *index, command);
@@ -148,14 +179,20 @@ pub(super) fn collect_trailing_redirections(
                 assign_redirect_err_append_target(tokens, *index, command);
             }
             TokenKind::HereString => {
-                assign_here_string_redirect(command, &token.value, &target.value);
+                assign_here_string_redirect(
+                    command,
+                    &token.value,
+                    &target.value,
+                    redirect_fd_var_prefix(tokens, *index),
+                );
             }
             TokenKind::HereDoc => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                command.redirects.push(redirect_node(
+                command.redirects.push(redirect_node_with_fd_var(
                     &token.value,
                     fd,
+                    redirect_fd_var_prefix(tokens, *index),
                     &target.value,
                     false,
                     false,
@@ -180,11 +217,16 @@ pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
     take_redirect_fd_prefix(cmd)
 }
 
-pub(super) fn assign_here_string_redirect(command: &mut CommandNode, operator: &str, target: &str) {
+pub(super) fn assign_here_string_redirect(
+    command: &mut CommandNode,
+    operator: &str,
+    target: &str,
+    fd_var: Option<String>,
+) {
     let fd = redirect_operator_fd(operator);
-    command
-        .redirects
-        .push(redirect_node(operator, fd, target, false, false));
+    command.redirects.push(redirect_node_with_fd_var(
+        operator, fd, fd_var, target, false, false,
+    ));
     if let Some(fd) = fd {
         command.heredoc_redirects.push(HereDocRedirect {
             fd: Some(fd),
@@ -204,12 +246,13 @@ pub(super) fn assign_here_string_process_substitution(
     command: &mut CommandNode,
     operator: &str,
     mut process_substitution: ProcessSubstitution,
+    fd_var: Option<String>,
 ) {
     let fd = redirect_operator_fd(operator);
     process_substitution.redirect_fd = fd;
     let target = process_substitution.target.clone();
     command.process_substitutions.push(process_substitution);
-    assign_here_string_redirect(command, operator, &target);
+    assign_here_string_redirect(command, operator, &target, fd_var);
 }
 
 pub(super) fn redirect_target_token(tokens: &[Token], index: usize) -> Option<&Token> {
@@ -245,6 +288,27 @@ pub(super) fn take_adjacent_redirect_fd_prefix(
     take_redirect_fd_prefix(cmd)
 }
 
+pub(super) fn redirect_fd_var_prefix(tokens: &[Token], redirect_index: usize) -> Option<String> {
+    let previous = redirect_index
+        .checked_sub(1)
+        .and_then(|index| tokens.get(index))?;
+    let name = previous.value.strip_prefix('{')?.strip_suffix('}')?;
+    if is_shell_identifier(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+fn is_shell_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    matches!(first, '_' | 'a'..='z' | 'A'..='Z')
+        && chars.all(|ch| matches!(ch, '_' | 'a'..='z' | 'A'..='Z' | '0'..='9'))
+}
+
 pub(super) fn redirect_operator_fd(operator: &str) -> Option<u32> {
     let digits = operator
         .chars()
@@ -265,12 +329,26 @@ pub(super) fn redirect_node(
 ) -> Redirect {
     Redirect {
         fd,
+        fd_var: None,
         operator: operator.to_string(),
         kind: redirect_kind(operator, target),
         target: target.to_string(),
         append,
         clobber,
     }
+}
+
+pub(super) fn redirect_node_with_fd_var(
+    operator: &str,
+    fd: Option<u32>,
+    fd_var: Option<String>,
+    target: &str,
+    append: bool,
+    clobber: bool,
+) -> Redirect {
+    let mut redirect = redirect_node(operator, fd, target, append, clobber);
+    redirect.fd_var = fd_var;
+    redirect
 }
 
 pub(super) fn redirect_kind(operator: &str, target: &str) -> RedirectKind {

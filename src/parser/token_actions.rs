@@ -200,6 +200,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let fd = redirect_operator_fd(&token.value).or_else(|| {
                     take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
                 });
+                let fd_var = redirect_fd_var_prefix(tokens, *i);
                 if let Some((mut process_substitution, next_i)) =
                     process_substitution_redirect_target(tokens, *i)
                 {
@@ -209,7 +210,8 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         .current_cmd
                         .process_substitutions
                         .push(process_substitution);
-                    let redirect = redirect_node(&token.value, fd, &target, false, false);
+                    let redirect =
+                        redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                     state.current_cmd.redirects.push(redirect.clone());
                     state.current_cmd.redirect_in = Some(redirect);
                     *i = next_i;
@@ -226,9 +228,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.word_kinds.push(TokenKind::Word);
                     *i = next_i;
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
-                    let redirect = redirect_node(
+                    let redirect = redirect_node_with_fd_var(
                         &token.value,
                         fd,
+                        fd_var,
                         &input_redirect_target(&token.value, &tokens[*i + 1].value),
                         false,
                         false,
@@ -306,9 +309,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter_token = &tokens[*i + 1];
                 let delimiter = delimiter_token.value.clone();
-                state.current_cmd.redirects.push(redirect_node(
+                state.current_cmd.redirects.push(redirect_node_with_fd_var(
                     &token.value,
                     fd,
+                    redirect_fd_var_prefix(tokens, *i),
                     &delimiter,
                     false,
                     false,
@@ -333,6 +337,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     &mut state.current_cmd,
                     &token.value,
                     process_substitution,
+                    redirect_fd_var_prefix(tokens, *i),
                 );
                 *i = next_i;
             } else if *i + 1 < tokens.len()
@@ -348,6 +353,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     &mut state.current_cmd,
                     &token.value,
                     &tokens[*i + 1].value,
+                    redirect_fd_var_prefix(tokens, *i),
                 );
                 *i += 1;
             }

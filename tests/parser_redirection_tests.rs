@@ -187,8 +187,10 @@ fn test_dynamic_fd_append_process_substitution_redirect() {
     assert_eq!(ast.commands[0].words, ["exec", "{fd}"]);
     let redirect = ast.commands[0].append.as_ref().unwrap();
     assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
     assert_eq!(redirect.operator, ">>");
     assert_eq!(redirect.target, ">(cat > out.txt)");
+    assert_eq!(ast.commands[0].redirects[0].fd_var.as_deref(), Some("fd"));
     let process = ast.commands[0].process_substitutions.as_slice();
     assert_eq!(process.len(), 1);
     assert_eq!(process[0].target, ">(cat > out.txt)");
@@ -196,6 +198,23 @@ fn test_dynamic_fd_append_process_substitution_redirect() {
     assert!(process[0].output);
     assert_eq!(process[0].word_index, None);
     assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
+fn test_dynamic_fd_output_redirect_records_fd_var() {
+    let input = "exec {fd}> out";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["exec", "{fd}"]);
+    let redirect = command.redirect_out.as_ref().unwrap();
+    assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
+    assert_eq!(redirect.operator, ">");
+    assert_eq!(redirect.target, "out");
+    assert_eq!(command.redirects[0].fd_var.as_deref(), Some("fd"));
 }
 
 #[test]
@@ -733,6 +752,43 @@ fn test_here_string_fd_prefix_maps_to_fd_input() {
     assert_eq!(
         command.heredoc_redirects[0].body.as_deref(),
         Some("\x1dalpha")
+    );
+}
+
+#[test]
+fn test_dynamic_fd_here_string_redirect_records_fd_var() {
+    let input = "exec {fd}<<<alpha";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["exec", "{fd}"]);
+    let redirect = &command.redirects[0];
+    assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
+    assert_eq!(redirect.operator, "<<<");
+    assert_eq!(redirect.kind, RedirectKind::HereString);
+    assert_eq!(redirect.target, "alpha");
+    assert_eq!(command.here_string.as_deref(), Some("alpha"));
+}
+
+#[test]
+fn test_dynamic_fd_heredoc_redirect_records_fd_var() {
+    let input = "exec {fd}<<EOF\nalpha\nEOF";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["exec", "{fd}"]);
+    let redirect = &command.redirects[0];
+    assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.fd_var.as_deref(), Some("fd"));
+    assert_eq!(redirect.operator, "<<");
+    assert_eq!(redirect.kind, RedirectKind::HereDoc);
+    assert_eq!(redirect.target, "EOF");
+    assert_eq!(
+        command.heredoc_redirects[0].body.as_deref(),
+        Some("alpha\n")
     );
 }
 

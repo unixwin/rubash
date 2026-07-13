@@ -4,6 +4,7 @@ use crate::lexer::TokenKind;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Redirect {
     pub fd: Option<u32>,
+    pub fd_var: Option<String>,
     pub operator: String,
     pub kind: RedirectKind,
     pub target: String,
