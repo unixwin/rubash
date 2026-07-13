@@ -1,4 +1,4 @@
-use super::{parse, ProcessSubstitution};
+use super::{command_boundary_keyword_allowed, parse, ProcessSubstitution};
 use crate::lexer::{Token, TokenKind};
 
 pub(super) fn process_substitution_redirect_target(
@@ -174,9 +174,13 @@ fn collect_process_substitution_target_with_prefix(
     let mut depth = 1usize;
     let mut case_depth = 0usize;
     while index < tokens.len() {
-        if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "case" {
+        let boundary = index == source_start || command_boundary_keyword_allowed(tokens, index);
+        if boundary && tokens[index].kind == TokenKind::Keyword && tokens[index].value == "case" {
             case_depth += 1;
-        } else if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "esac" {
+        } else if boundary
+            && tokens[index].kind == TokenKind::Keyword
+            && tokens[index].value == "esac"
+        {
             case_depth = case_depth.saturating_sub(1);
         } else if case_depth == 0
             && tokens[index].kind == TokenKind::Keyword

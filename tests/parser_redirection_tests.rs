@@ -333,6 +333,24 @@ fn test_process_substitution_keeps_case_pattern_parentheses() {
 }
 
 #[test]
+fn test_process_substitution_keeps_case_argument() {
+    let input = "cat <(echo case; echo in) >(echo case; echo out)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 2);
+    assert_eq!(process[0].source, "echo case ; echo in");
+    assert_eq!(process[0].commands.len(), 2);
+    assert_eq!(process[0].commands[0].words, ["echo", "case"]);
+    assert_eq!(process[0].commands[1].words, ["echo", "in"]);
+    assert_eq!(process[1].source, "echo case ; echo out");
+    assert_eq!(process[1].commands.len(), 2);
+    assert_eq!(process[1].commands[0].words, ["echo", "case"]);
+    assert_eq!(process[1].commands[1].words, ["echo", "out"]);
+}
+
+#[test]
 fn test_input_redirect() {
     let input = "cat < input.txt";
     let tokens = tokenize(input);
