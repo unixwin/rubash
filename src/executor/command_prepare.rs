@@ -79,6 +79,7 @@ impl Executor {
                 status = 1;
             }
         }
+        self.apply_no_output_builtin_redirects(cmd)?;
         self.exit_code = status;
         if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
             return Err(ExecuteError::ExitCode(self.exit_code));

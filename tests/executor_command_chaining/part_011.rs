@@ -146,6 +146,28 @@ fn test_redirects_without_spaces_around_operator() {
 }
 
 #[test]
+fn test_redirection_only_command_touches_output_files() {
+    let output_path = "target/rubash-redirection-only-output.txt";
+    let append_path = "target/rubash-redirection-only-append.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(append_path);
+    fs::write(output_path, "seed\n").unwrap();
+    let input = format!("> {output_path}; >> {append_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    assert_eq!(fs::read_to_string(append_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(append_path);
+}
+
+#[test]
 fn test_mapfile_t_reads_here_string_into_array() {
     let output_path = "target/rubash-mapfile-t-output.txt";
     let _ = fs::remove_file(output_path);
