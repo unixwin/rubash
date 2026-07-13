@@ -416,49 +416,6 @@ mod pipeline_tests {
     }
 
     #[test]
-    fn test_prefix_redirections_attach_to_compound_commands() {
-        let if_tokens = tokenize("> out if true; then echo yes; fi && echo done");
-        let if_ast = parse(&if_tokens);
-        let if_list = if_ast.commands[0].and_or_list.as_ref().unwrap();
-        assert!(if_list.commands[0].if_command.is_some());
-        assert_eq!(
-            if_list.commands[0].redirect_out.as_ref().unwrap().target,
-            "out"
-        );
-        assert_eq!(if_list.commands[1].words, ["echo", "done"]);
-
-        let loop_tokens = tokenize("2> err while test ok; do echo body; done");
-        let loop_ast = parse(&loop_tokens);
-        assert!(loop_ast.commands[0].loop_command.is_some());
-        assert_eq!(
-            loop_ast.commands[0].redirect_err.as_ref().unwrap().target,
-            "err"
-        );
-
-        let case_tokens = tokenize("< input case $x in a) echo a ;; esac");
-        let case_ast = parse(&case_tokens);
-        assert!(case_ast.commands[0].case_command.is_some());
-        assert_eq!(
-            case_ast.commands[0].redirect_in.as_ref().unwrap().target,
-            "input"
-        );
-    }
-
-    #[test]
-    fn test_prefix_inversion_and_redirection_attach_to_compound_command() {
-        let tokens = tokenize("! > out { false; }");
-        let ast = parse(&tokens);
-        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
-
-        assert_eq!(inverted.operator, "!");
-        assert!(inverted.command.brace_group.is_some());
-        assert_eq!(
-            inverted.command.redirect_out.as_ref().unwrap().target,
-            "out"
-        );
-    }
-
-    #[test]
     fn test_subshell_command_keeps_case_pattern_parentheses() {
         let input = "( case beta in alpha) printf alpha ;; beta) printf beta ;; esac )";
         let tokens = tokenize(input);

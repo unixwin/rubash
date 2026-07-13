@@ -519,9 +519,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 }
 
 fn command_allows_compound_start(command: &CommandNode) -> bool {
-    command_is_empty(command)
-        || command_is_pending_inversion(command)
-        || command_is_pending_compound_prefix(command)
+    command_is_empty(command) || command_is_pending_inversion(command)
 }
 
 fn command_is_pending_inversion(command: &CommandNode) -> bool {
@@ -533,78 +531,13 @@ fn command_is_pending_inversion(command: &CommandNode) -> bool {
     command_is_empty(&without_inversion)
 }
 
-fn command_is_pending_compound_prefix(command: &CommandNode) -> bool {
-    let has_prefix = command.inverted
-        || command.redirect_in.is_some()
-        || command.redirect_out.is_some()
-        || command.append.is_some()
-        || command.redirect_err.is_some()
-        || command.redirect_err_append.is_some()
-        || command.heredoc.is_some()
-        || command.heredoc_delimiter.is_some()
-        || !command.heredoc_redirects.is_empty()
-        || command.here_string.is_some();
-    if !has_prefix {
-        return false;
-    }
-
-    let mut without_prefix = command.clone();
-    without_prefix.inverted = false;
-    without_prefix.redirect_in = None;
-    without_prefix.redirect_out = None;
-    without_prefix.append = None;
-    without_prefix.redirect_err = None;
-    without_prefix.redirect_err_append = None;
-    without_prefix.heredoc = None;
-    without_prefix.heredoc_delimiter = None;
-    without_prefix.heredoc_redirects.clear();
-    without_prefix.here_string = None;
-    command_is_empty(&without_prefix)
-}
-
 fn push_compound_command(state: &mut ParseState, mut command: CommandNode) {
-    merge_compound_prefix(&mut command, &mut state.current_cmd);
     if command_is_pending_inversion(&state.current_cmd) {
         command.inverted = !command.inverted;
         command.line = command.line.or(state.current_cmd.line);
     }
     state.ast.commands.push(command);
     state.current_cmd = CommandNode::new();
-}
-
-fn merge_compound_prefix(command: &mut CommandNode, prefix: &mut CommandNode) {
-    command.line = prefix.line.or(command.line);
-    if prefix.inverted {
-        command.inverted = !command.inverted;
-        prefix.inverted = false;
-    }
-    if command.redirect_in.is_none() {
-        command.redirect_in = prefix.redirect_in.take();
-    }
-    if command.redirect_out.is_none() {
-        command.redirect_out = prefix.redirect_out.take();
-    }
-    if command.append.is_none() {
-        command.append = prefix.append.take();
-    }
-    if command.redirect_err.is_none() {
-        command.redirect_err = prefix.redirect_err.take();
-    }
-    if command.redirect_err_append.is_none() {
-        command.redirect_err_append = prefix.redirect_err_append.take();
-    }
-    if command.heredoc.is_none() {
-        command.heredoc = prefix.heredoc.take();
-    }
-    if command.heredoc_delimiter.is_none() {
-        command.heredoc_delimiter = prefix.heredoc_delimiter.take();
-    }
-    if command.here_string.is_none() {
-        command.here_string = prefix.here_string.take();
-    }
-    if command.heredoc_redirects.is_empty() {
-        command.heredoc_redirects = std::mem::take(&mut prefix.heredoc_redirects);
-    }
 }
 
 fn parse_time_prefixed_compound_command(
