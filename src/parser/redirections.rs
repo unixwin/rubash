@@ -46,6 +46,33 @@ pub(super) fn collect_trailing_redirections(
             }
         }
 
+        if matches!(
+            token.kind,
+            TokenKind::RedirectErr | TokenKind::RedirectErrAppend
+        ) {
+            if let Some((mut process_substitution, next_i)) =
+                stderr_process_substitution_redirect_target(tokens, *index)
+            {
+                process_substitution.redirect_fd = Some(2);
+                let target = process_substitution.target.clone();
+                command.process_substitutions.push(process_substitution);
+                if token.kind == TokenKind::RedirectErrAppend {
+                    command.redirect_err_append =
+                        Some(redirect_node(&token.value, Some(2), &target, true, false));
+                } else {
+                    command.redirect_err = Some(redirect_node(
+                        &token.value,
+                        Some(2),
+                        &target,
+                        false,
+                        token.value == "2>|",
+                    ));
+                }
+                *index = next_i + 1;
+                continue;
+            }
+        }
+
         let Some(target) = tokens.get(*index + 1).filter(|next| {
             matches!(
                 next.kind,

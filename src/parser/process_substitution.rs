@@ -58,6 +58,26 @@ pub(super) fn output_process_substitution_redirect_target(
     collect_output_process_substitution_target(tokens, redirect_index + 3)
 }
 
+pub(super) fn stderr_process_substitution_redirect_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(ProcessSubstitution, usize)> {
+    if !matches!(
+        tokens.get(redirect_index)?.kind,
+        TokenKind::RedirectErr | TokenKind::RedirectErrAppend
+    ) || !tokens
+        .get(redirect_index + 1)
+        .is_some_and(|token| token.kind == TokenKind::RedirectOut && token.value == ">")
+        || !tokens
+            .get(redirect_index + 2)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        return None;
+    }
+
+    collect_output_process_substitution_target(tokens, redirect_index + 3)
+}
+
 pub(super) fn output_process_substitution_word_target(
     tokens: &[Token],
     redirect_index: usize,

@@ -118,6 +118,28 @@ fn test_output_process_substitution_redirect_feeds_command_stdin() {
 }
 
 #[test]
+fn test_stderr_process_substitution_redirect_feeds_command_stdin() {
+    let output_path = "target/rubash-stderr-process-subst-redirect-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -u x value 2> >(cat > {output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(
+        ast.commands[0].redirect_err.as_ref().unwrap().target,
+        ">(cat > target/rubash-stderr-process-subst-redirect-output.txt)"
+    );
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("read: x: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_output_process_substitution_word_feeds_command_stdin() {
     let input_path = "target/rubash-output-process-subst-word-input.txt";
     let mirror_path = "target/rubash-output-process-subst-word-mirror.txt";

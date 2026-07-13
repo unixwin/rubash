@@ -257,13 +257,44 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
         TokenKind::RedirectErr => {
             note_command_line(&mut state.current_cmd, token);
-            if let Some(next_i) = assign_redirect_err_target(tokens, *i, &mut state.current_cmd) {
+            if let Some((mut process_substitution, next_i)) =
+                stderr_process_substitution_redirect_target(tokens, *i)
+            {
+                process_substitution.redirect_fd = Some(2);
+                let target = process_substitution.target.clone();
+                state
+                    .current_cmd
+                    .process_substitutions
+                    .push(process_substitution);
+                state.current_cmd.redirect_err = Some(redirect_node(
+                    &token.value,
+                    Some(2),
+                    &target,
+                    false,
+                    token.value == "2>|",
+                ));
+                *i = next_i;
+            } else if let Some(next_i) =
+                assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
+            {
                 *i = next_i;
             }
         }
         TokenKind::RedirectErrAppend => {
             note_command_line(&mut state.current_cmd, token);
-            if let Some(next_i) =
+            if let Some((mut process_substitution, next_i)) =
+                stderr_process_substitution_redirect_target(tokens, *i)
+            {
+                process_substitution.redirect_fd = Some(2);
+                let target = process_substitution.target.clone();
+                state
+                    .current_cmd
+                    .process_substitutions
+                    .push(process_substitution);
+                state.current_cmd.redirect_err_append =
+                    Some(redirect_node(&token.value, Some(2), &target, true, false));
+                *i = next_i;
+            } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
             {
                 *i = next_i;

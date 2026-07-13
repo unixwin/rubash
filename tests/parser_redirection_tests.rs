@@ -69,6 +69,27 @@ fn test_output_process_substitution_redirect() {
 }
 
 #[test]
+fn test_stderr_process_substitution_redirect() {
+    let input = "printf err >&2 2> >(cat > err.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(
+        ast.commands[0].redirect_err.as_ref().unwrap().target,
+        ">(cat > err.txt)"
+    );
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > err.txt)");
+    assert_eq!(process[0].open_delimiter, ">(");
+    assert_eq!(process[0].operator, ">");
+    assert_eq!(process[0].source, "cat > err.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, Some(2));
+}
+
+#[test]
 fn test_output_process_substitution_word() {
     let input = "tee >(cat > out.txt)";
     let tokens = tokenize(input);
