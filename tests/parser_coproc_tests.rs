@@ -70,6 +70,21 @@ fn test_named_coproc_parses_subshell_body() {
 }
 
 #[test]
+fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
+    let input = "coproc MYC ( case beta in alpha) printf alpha ;; beta) printf beta ;; esac )";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::Subshell);
+    assert_eq!(coproc.body_open_delimiter.as_deref(), Some("("));
+    assert_eq!(coproc.body_close_delimiter.as_deref(), Some(")"));
+    assert!(coproc.body.as_ref().unwrap()[0].case_command.is_some());
+}
+
+#[test]
 fn test_named_coproc_parses_for_body() {
     let input = "coproc MYC for x in a b; do echo $x; done";
     let tokens = tokenize(input);

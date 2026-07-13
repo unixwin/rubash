@@ -123,10 +123,15 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             i += 1; // consume `(`
             let body_start = i;
             let mut depth = 1usize;
+            let mut case_depth = 0usize;
             while i < tokens.len() {
-                if is_keyword(tokens, i, "(") {
+                if is_keyword(tokens, i, "case") {
+                    case_depth += 1;
+                } else if is_keyword(tokens, i, "esac") {
+                    case_depth = case_depth.saturating_sub(1);
+                } else if case_depth == 0 && is_keyword(tokens, i, "(") {
                     depth += 1;
-                } else if is_keyword(tokens, i, ")") {
+                } else if case_depth == 0 && is_keyword(tokens, i, ")") {
                     depth -= 1;
                     if depth == 0 {
                         break;

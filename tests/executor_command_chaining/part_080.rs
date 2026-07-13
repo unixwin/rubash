@@ -828,6 +828,25 @@ fn test_function_body_can_be_subshell_command() {
 }
 
 #[test]
+fn test_function_subshell_body_keeps_case_pattern_parentheses() {
+    let output_path = "target/rubash-function-subshell-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "f() ( case beta in alpha) printf alpha ;; beta) printf beta ;; esac ); f > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_conditional_command() {
     let output_path = "target/rubash-function-conditional-body-output.txt";
     let _ = fs::remove_file(output_path);
@@ -876,6 +895,40 @@ fn test_named_coproc_executes_for_body() {
         thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(output, "a\nb\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
+fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
+    let output_path = "target/rubash-coproc-subshell-case-output.txt";
+    let status_path = "target/rubash-coproc-subshell-case-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC ( case beta in alpha) printf alpha > {output_path} ;; beta) printf beta > {output_path} ;; esac ); echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "beta" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "beta");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }

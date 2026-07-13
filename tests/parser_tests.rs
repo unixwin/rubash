@@ -625,6 +625,21 @@ mod function_tests {
     }
 
     #[test]
+    fn test_parenthesized_function_body_keeps_case_pattern_parentheses() {
+        let input = "foo() ( case beta in alpha) printf alpha ;; beta) printf beta ;; esac )";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(function.body_kind, FunctionBodyKind::Subshell);
+        assert_eq!(function.body_open_delimiter.as_deref(), Some("("));
+        assert_eq!(function.body_close_delimiter.as_deref(), Some(")"));
+        assert_eq!(function.body.len(), 1);
+        assert!(function.body[0].case_command.is_some());
+    }
+
+    #[test]
     fn test_function_keyword_name_can_look_like_assignment() {
         let input = "function foo=bar { echo hi; }";
         let tokens = tokenize(input);
