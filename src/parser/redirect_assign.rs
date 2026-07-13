@@ -38,7 +38,7 @@ pub(super) fn assign_redirect_out_target(
     let target = redirect_target_token(tokens, index)?;
     let fd = redirect_operator_fd(&tokens[index].value)
         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, index));
-    if tokens[index].value == "<>" {
+    if tokens[index].value.ends_with("<>") {
         command.redirect_in = Some(redirect_node(
             &tokens[index].value,
             fd,

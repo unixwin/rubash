@@ -71,14 +71,11 @@ pub(super) fn collect_trailing_redirections(
                 ));
             }
             TokenKind::RedirectOut => {
-                if token.value == "<>" {
-                    command.redirect_in = Some(redirect_node(
-                        &token.value,
-                        None,
-                        &target.value,
-                        true,
-                        false,
-                    ));
+                if token.value.ends_with("<>") {
+                    let fd = redirect_operator_fd(&token.value)
+                        .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                    command.redirect_in =
+                        Some(redirect_node(&token.value, fd, &target.value, true, false));
                 } else {
                     assign_output_redirect(command, &token.value, &target.value, None);
                 }
@@ -193,7 +190,7 @@ pub(super) fn redirect_kind(operator: &str, target: &str) -> RedirectKind {
             RedirectKind::DuplicateOutput
         };
     }
-    if operator == "<>" {
+    if operator.ends_with("<>") {
         return RedirectKind::ReadWrite;
     }
     if operator == "&>" {

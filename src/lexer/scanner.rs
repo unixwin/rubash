@@ -191,7 +191,7 @@ impl<'a> Lexer<'a> {
                 }
             }
             '0'..='9' if c != '2' && self.peek() == Some('<') => {
-                Some(self.finish_number_token(start))
+                Some(self.finish_prefixed_input_redirect(start))
             }
             '2' => {
                 if self.peek() == Some('>') {
@@ -209,7 +209,7 @@ impl<'a> Lexer<'a> {
                         Some(Token::new(TokenKind::RedirectErr, "2>", start))
                     }
                 } else if self.peek() == Some('<') {
-                    Some(self.finish_number_token(start))
+                    Some(self.finish_prefixed_input_redirect(start))
                 } else {
                     self.skip_word();
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
@@ -294,6 +294,23 @@ impl<'a> Lexer<'a> {
             '}' => Some(Token::new(TokenKind::Keyword, "}", start)),
             _ => Some(self.finish_word_token(start, true)),
         }
+    }
+
+    fn finish_prefixed_input_redirect(&mut self, start: usize) -> Token {
+        if self.peek_after(1) == Some('<') {
+            return self.finish_number_token(start);
+        }
+
+        self.advance();
+        if matches!(self.peek(), Some('>' | '&')) {
+            self.advance();
+        }
+        let kind = if self.slice(start).ends_with("<>") {
+            TokenKind::RedirectOut
+        } else {
+            TokenKind::RedirectIn
+        };
+        Token::new(kind, self.slice(start), start)
     }
 }
 

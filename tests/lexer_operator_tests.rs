@@ -110,6 +110,16 @@ fn test_read_write_redirect() {
 }
 
 #[test]
+fn test_read_write_redirect_fd_prefix_without_space() {
+    let input = "read -u 3 value 3<>input.txt";
+    let tokens = tokenize(input);
+    assert_eq!(tokens.len(), 6);
+    assert_eq!(tokens[4].kind, TokenKind::RedirectOut);
+    assert_eq!(tokens[4].value, "3<>");
+    assert_eq!(tokens[5].value, "input.txt");
+}
+
+#[test]
 fn test_append_redirect() {
     let input = "echo hello >> file.txt";
     let tokens = tokenize(input);

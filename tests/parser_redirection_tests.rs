@@ -273,6 +273,22 @@ fn test_read_write_redirect_maps_to_stdin() {
 }
 
 #[test]
+fn test_read_write_redirect_fd_prefix_maps_to_stdin_fd() {
+    let input = "read -u 3 value 3<>input.txt";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    let redirect = command.redirect_in.as_ref().unwrap();
+    assert_eq!(redirect.fd, Some(3));
+    assert_eq!(redirect.target, "input.txt");
+    assert_eq!(redirect.operator, "3<>");
+    assert_eq!(redirect.kind, RedirectKind::ReadWrite);
+    assert!(redirect.append);
+    assert_eq!(command.words, ["read", "-u", "3", "value"]);
+}
+
+#[test]
 fn test_append_redirect() {
     let input = "echo hello >> file.txt";
     let tokens = tokenize(input);
