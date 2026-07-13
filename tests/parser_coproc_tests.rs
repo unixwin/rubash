@@ -68,6 +68,19 @@ fn test_coproc_simple_command_keeps_process_substitution_words() {
 }
 
 #[test]
+fn test_coproc_simple_command_keeps_reserved_word_arguments() {
+    let input = "coproc echo alpha if done esac";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name, None);
+    assert_eq!(coproc.words, ["echo", "alpha", "if", "done", "esac"]);
+    assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
+}
+
+#[test]
 fn test_named_coproc_parses_subshell_body() {
     let input = "coproc MYC ( echo hi )";
     let tokens = tokenize(input);

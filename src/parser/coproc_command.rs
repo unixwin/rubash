@@ -127,7 +127,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     // Simple command: collect remaining tokens as words
     let mut words = Vec::new();
     while i < tokens.len() {
-        if let Some((word, next_i)) = collect_compound_word_value(tokens, i) {
+        if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
             words.push(word);
             i = next_i;
         } else {
