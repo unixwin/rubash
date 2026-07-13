@@ -386,6 +386,8 @@ fn parse_time_prefixed_compound_command(
         parse_select_command(tokens, i)?
     } else if is_keyword(tokens, i, "coproc") {
         parse_coproc_command(tokens, i)?
+    } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
+        parse_conditional_command(tokens, i)?
     } else if is_keyword(tokens, i, "{")
         || tokens.get(i).is_some_and(|token| {
             token.kind == TokenKind::Keyword

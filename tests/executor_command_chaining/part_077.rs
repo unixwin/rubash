@@ -487,6 +487,38 @@ fn test_time_prefix_executes_arithmetic_command() {
 }
 
 #[test]
+fn test_time_prefix_executes_conditional_command() {
+    let output_path = "target/rubash-time-conditional-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=ok; time -p [[ $value == ok ]]; echo true:$? > {output_path}; \
+         time -p [[ $value == bad ]]; echo false:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[1].time_command.is_some());
+    assert!(ast.commands[3].time_command.is_some());
+    assert!(ast.commands[1]
+        .time_command
+        .as_ref()
+        .unwrap()
+        .command
+        .conditional_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "true:0\nfalse:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_prefix_executes_brace_group() {
     let output_path = "target/rubash-time-brace-group-output.txt";
     let _ = fs::remove_file(output_path);

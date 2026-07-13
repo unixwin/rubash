@@ -154,6 +154,22 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_parses_conditional_command() {
+        let input = "time -p [[ $value == ok ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p"]);
+        assert!(time_command.posix_format);
+        let conditional = time_command.command.conditional_command.as_ref().unwrap();
+        assert_eq!(conditional.open_delimiter, "[[");
+        assert_eq!(conditional.close_delimiter, "]]");
+        assert_eq!(conditional.args, ["$value", "==", "ok", "]]"]);
+    }
+
+    #[test]
     fn test_time_prefix_parses_if_command_sequence() {
         let input = "time -p if true; then echo yes; fi";
         let tokens = tokenize(input);
