@@ -184,6 +184,28 @@ fn test_named_coproc_parses_time_prefixed_body() {
 }
 
 #[test]
+fn test_named_coproc_parses_time_prefixed_pipeline_body() {
+    let input = "coproc MYC time echo hi | wc -c";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    let time_command = coproc.body.as_ref().unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+    assert_eq!(time_command.keyword, "time");
+    let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.operators, ["|"]);
+    assert_eq!(pipeline.stages[0].words, ["echo", "hi"]);
+    assert_eq!(pipeline.stages[1].words, ["wc", "-c"]);
+}
+
+#[test]
 fn test_named_coproc_parses_arithmetic_body() {
     let input = "coproc MYC (( 1 + 1 ))";
     let tokens = tokenize(input);

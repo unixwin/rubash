@@ -1057,6 +1057,23 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_body_can_be_time_prefixed_pipeline() {
+        let input = "foo() time echo hi | wc -c";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        let time_command = function.body[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].words, ["echo", "hi"]);
+        assert_eq!(pipeline.stages[1].words, ["wc", "-c"]);
+    }
+
+    #[test]
     fn test_function_body_can_be_arithmetic_command() {
         let input = "foo() (( 1 + 1 ))";
         let tokens = tokenize(input);

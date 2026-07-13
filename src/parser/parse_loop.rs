@@ -609,3 +609,33 @@ pub(super) fn parse_time_prefixed_compound_command(
     });
     Some((timed, next_i))
 }
+
+pub(super) fn parse_time_prefixed_shell_command(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(CommandNode, usize)> {
+    if let Some(parsed) = parse_time_prefixed_compound_command(tokens, start) {
+        return Some(parsed);
+    }
+
+    if !is_keyword(tokens, start, "time") {
+        return None;
+    }
+
+    let mut end = start + 1;
+    while tokens.get(end).is_some_and(|token| {
+        !matches!(
+            token.kind,
+            TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
+        )
+    }) {
+        end += 1;
+    }
+
+    let mut commands = parse(&tokens[start..end]).commands;
+    if commands.len() != 1 {
+        return None;
+    }
+
+    Some((commands.remove(0), end))
+}
