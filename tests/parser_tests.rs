@@ -943,6 +943,26 @@ mod function_tests {
             ["[[", "$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]
         );
     }
+
+    #[test]
+    fn test_function_sequence_body_keeps_reserved_word_arguments() {
+        let if_tokens = tokenize("foo() if echo then; then echo fi; fi");
+        let if_ast = parse(&if_tokens);
+        let if_function = if_ast.commands[0].function_command.as_ref().unwrap();
+        let if_command = if_function.body[0].if_command.as_ref().unwrap();
+
+        let loop_tokens = tokenize("bar() while echo do; do echo done; break; done");
+        let loop_ast = parse(&loop_tokens);
+        let loop_function = loop_ast.commands[0].function_command.as_ref().unwrap();
+        let loop_command = loop_function.body[0].loop_command.as_ref().unwrap();
+
+        assert_eq!(if_function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(if_command.condition[0].words, ["echo", "then"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "fi"]);
+        assert_eq!(loop_function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(loop_command.condition[0].words, ["echo", "do"]);
+        assert_eq!(loop_command.body[0].words, ["echo", "done"]);
+    }
 }
 
 mod conditional_tests {

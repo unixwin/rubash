@@ -153,6 +153,32 @@ fn test_named_coproc_parses_conditional_body() {
 }
 
 #[test]
+fn test_coproc_sequence_body_keeps_reserved_word_arguments() {
+    let if_tokens = tokenize("coproc MYC if echo then; then echo fi; fi");
+    let if_ast = parse(&if_tokens);
+    let if_coproc = if_ast.commands[0].coproc_command.as_ref().unwrap();
+    let if_command = if_coproc.body.as_ref().unwrap()[0]
+        .if_command
+        .as_ref()
+        .unwrap();
+
+    let loop_tokens = tokenize("coproc MYC while echo do; do echo done; break; done");
+    let loop_ast = parse(&loop_tokens);
+    let loop_coproc = loop_ast.commands[0].coproc_command.as_ref().unwrap();
+    let loop_command = loop_coproc.body.as_ref().unwrap()[0]
+        .loop_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(if_coproc.body_kind, CoprocBodyKind::CommandSequence);
+    assert_eq!(if_command.condition[0].words, ["echo", "then"]);
+    assert_eq!(if_command.then_body[0].words, ["echo", "fi"]);
+    assert_eq!(loop_coproc.body_kind, CoprocBodyKind::CommandSequence);
+    assert_eq!(loop_command.condition[0].words, ["echo", "do"]);
+    assert_eq!(loop_command.body[0].words, ["echo", "done"]);
+}
+
+#[test]
 fn test_coproc_command_consumes_pipe_stderr_operator() {
     let input = "coproc MYC { echo hi; } |& grep hi";
     let tokens = tokenize(input);

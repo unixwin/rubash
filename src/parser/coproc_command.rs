@@ -215,9 +215,10 @@ fn matching_coproc_conditional_end(tokens: &[Token], start: usize) -> Option<usi
 fn matching_coproc_if_end(tokens: &[Token], start: usize) -> Option<usize> {
     let mut depth = 0usize;
     for index in start..tokens.len() {
-        if is_keyword(tokens, index, "if") {
+        let boundary = index == start || command_boundary_keyword_allowed(tokens, index);
+        if boundary && is_keyword(tokens, index, "if") {
             depth += 1;
-        } else if is_keyword(tokens, index, "fi") {
+        } else if boundary && is_keyword(tokens, index, "fi") {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return Some(index);
@@ -230,13 +231,15 @@ fn matching_coproc_if_end(tokens: &[Token], start: usize) -> Option<usize> {
 fn matching_coproc_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
     let mut depth = 0usize;
     for index in start..tokens.len() {
-        if is_keyword(tokens, index, "for")
-            || is_keyword(tokens, index, "while")
-            || is_keyword(tokens, index, "until")
-            || is_keyword(tokens, index, "select")
+        let boundary = index == start || command_boundary_keyword_allowed(tokens, index);
+        if boundary
+            && (is_keyword(tokens, index, "for")
+                || is_keyword(tokens, index, "while")
+                || is_keyword(tokens, index, "until")
+                || is_keyword(tokens, index, "select"))
         {
             depth += 1;
-        } else if is_keyword(tokens, index, "done") {
+        } else if boundary && is_keyword(tokens, index, "done") {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return Some(index);
