@@ -4,8 +4,8 @@
 
 use rubash::lexer::tokenize;
 use rubash::parser::{
-    parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, FunctionBodyKind, LoopKind,
-    QuoteKind,
+    parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, ConditionalPatternKind,
+    FunctionBodyKind, LoopKind, QuoteKind,
 };
 
 #[path = "parser_coproc_tests.rs"]
@@ -1238,6 +1238,22 @@ mod conditional_tests {
             ["$value", "a*"]
         );
         assert_eq!(
+            conditional.expression.children[0]
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .kind,
+            ConditionalPatternKind::Glob
+        );
+        assert_eq!(
+            conditional.expression.children[0]
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .text,
+            "a*"
+        );
+        assert_eq!(
             conditional.expression.children[1].kind,
             ConditionalExpressionKind::Unary
         );
@@ -1302,9 +1318,21 @@ mod conditional_tests {
             regex.expression.operands,
             ["shellmath_add", "shellmath_(add|subtract|multiply)$"]
         );
+        assert_eq!(
+            regex.expression.pattern_operand.as_ref().unwrap().kind,
+            ConditionalPatternKind::Regex
+        );
+        assert_eq!(
+            regex.expression.pattern_operand.as_ref().unwrap().text,
+            "shellmath_(add|subtract|multiply)$"
+        );
         assert_eq!(capture.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(capture.expression.operator.as_deref(), Some("=~"));
         assert_eq!(capture.expression.operands, ["2:bad", "^([0-9]+):(.*)"]);
+        assert_eq!(
+            capture.expression.pattern_operand.as_ref().unwrap().kind,
+            ConditionalPatternKind::Regex
+        );
     }
 
     #[test]

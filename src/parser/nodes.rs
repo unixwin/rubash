@@ -158,8 +158,23 @@ pub struct ConditionalExpression {
     pub open_delimiter: Option<String>,
     pub operator: Option<String>,
     pub operands: Vec<String>,
+    pub pattern_operand: Option<ConditionalPatternOperand>,
     pub children: Vec<ConditionalExpression>,
     pub close_delimiter: Option<String>,
+}
+
+/// Represents a pattern-like right-hand operand in `[[ lhs == pat ]]` or
+/// `[[ lhs =~ regex ]]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionalPatternOperand {
+    pub text: String,
+    pub kind: ConditionalPatternKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalPatternKind {
+    Glob,
+    Regex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

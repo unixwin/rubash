@@ -65,6 +65,7 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
             open_delimiter: Some("(".to_string()),
             operator: None,
             operands: Vec::new(),
+            pattern_operand: None,
             children: vec![conditional_expression(inner)],
             close_delimiter: Some(")".to_string()),
         };
@@ -83,6 +84,7 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
             open_delimiter: None,
             operator: Some("!".to_string()),
             operands: Vec::new(),
+            pattern_operand: None,
             children: vec![conditional_expression(&args[1..])],
             close_delimiter: None,
         };
@@ -130,6 +132,7 @@ fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalE
         open_delimiter: None,
         operator: Some(args[index].clone()),
         operands: Vec::new(),
+        pattern_operand: None,
         children: vec![
             conditional_expression(&args[..index]),
             conditional_expression(&args[index + 1..]),
@@ -146,11 +149,28 @@ fn conditional_leaf(
     ConditionalExpression {
         kind,
         open_delimiter: None,
+        pattern_operand: conditional_pattern_operand(operator.as_deref(), operands),
         operator,
         operands: operands.to_vec(),
         children: Vec::new(),
         close_delimiter: None,
     }
+}
+
+fn conditional_pattern_operand(
+    operator: Option<&str>,
+    operands: &[String],
+) -> Option<ConditionalPatternOperand> {
+    let rhs = operands.get(1)?;
+    let kind = match operator? {
+        "=" | "==" | "!=" => ConditionalPatternKind::Glob,
+        "=~" => ConditionalPatternKind::Regex,
+        _ => return None,
+    };
+    Some(ConditionalPatternOperand {
+        text: rhs.clone(),
+        kind,
+    })
 }
 
 fn top_level_operator(args: &[String], operator: &str) -> Option<usize> {
