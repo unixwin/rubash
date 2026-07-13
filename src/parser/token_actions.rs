@@ -425,6 +425,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             // TODO(parse.y): Reserved words are only reserved in specific
             // parser states. If an ordinary command has already started,
             // keep the token text so alias expansion can reparse it later.
+            if matches!(token.value.as_str(), "{" | "}") && !command_is_empty(&state.current_cmd) {
+                note_command_line(&mut state.current_cmd, token);
+                push_command_word(&mut state.current_cmd, token);
+                return TokenAction::Advance;
+            }
+
             if !matches!(token.value.as_str(), "(" | ")" | "{" | "}") {
                 note_command_line(&mut state.current_cmd, token);
                 push_command_word(&mut state.current_cmd, token);

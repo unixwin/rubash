@@ -120,10 +120,14 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
     ) || (previous.kind == TokenKind::Keyword
         && matches!(
             previous.value.as_str(),
-            "then" | "do" | "else" | "elif" | "}"
+            "{" | "then" | "do" | "else" | "elif" | "}"
         ))
         || (previous.kind == TokenKind::Word
             && matches!(previous.raw.as_str(), ";;" | ";&" | ";;&"))
+}
+
+pub(super) fn is_boundary_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
+    command_boundary_keyword_allowed(tokens, index) && is_keyword(tokens, index, value)
 }
 
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {

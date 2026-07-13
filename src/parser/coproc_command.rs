@@ -290,9 +290,9 @@ fn parse_split_brace_body(tokens: &[Token], start: usize) -> Option<(Vec<Command
     let mut depth = 1usize;
     let mut i = start + 1;
     while i < tokens.len() {
-        if is_keyword(tokens, i, "{") {
+        if is_boundary_keyword(tokens, i, "{") {
             depth += 1;
-        } else if is_keyword(tokens, i, "}") {
+        } else if is_boundary_keyword(tokens, i, "}") {
             depth -= 1;
             if depth == 0 {
                 break;

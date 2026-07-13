@@ -355,6 +355,18 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_brace_group_keeps_brace_arguments() {
+        let input = "{ echo } arg; echo after; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let brace_group = ast.commands[0].brace_group.as_ref().unwrap();
+
+        assert_eq!(brace_group.body.len(), 2);
+        assert_eq!(brace_group.body[0].words, ["echo", "}", "arg"]);
+        assert_eq!(brace_group.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_brace_group_command_consumes_pipe_stderr_operator() {
         let input = "{ echo hi; } |& grep hi";
         let tokens = tokenize(input);
@@ -688,6 +700,18 @@ mod function_tests {
         assert!(function.body_end.is_some());
         assert_eq!(function.body.len(), 1);
         assert_eq!(function.body[0].words, ["echo", "hi"]);
+    }
+
+    #[test]
+    fn test_function_body_keeps_brace_arguments() {
+        let input = "function greet { echo } arg; echo after; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(function.body.len(), 2);
+        assert_eq!(function.body[0].words, ["echo", "}", "arg"]);
+        assert_eq!(function.body[1].words, ["echo", "after"]);
     }
 
     #[test]

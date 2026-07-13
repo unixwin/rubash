@@ -135,9 +135,9 @@ pub(super) fn parse_function_command(
     let body_start = i;
     let mut depth = 1usize;
     while i < tokens.len() {
-        if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "{" {
+        if is_boundary_keyword(tokens, i, "{") {
             depth += 1;
-        } else if tokens[i].kind == TokenKind::Keyword && tokens[i].value == "}" {
+        } else if is_boundary_keyword(tokens, i, "}") {
             depth -= 1;
             if depth == 0 {
                 break;

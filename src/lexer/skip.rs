@@ -154,12 +154,19 @@ impl<'a> Lexer<'a> {
     pub(super) fn skip_brace(&mut self) {
         let mut depth = 1usize;
         let mut comment_start = true;
+        let mut saw_top_level_whitespace = false;
         while let Some(c) = self.advance() {
             if c == '\n' {
+                if depth == 1 {
+                    saw_top_level_whitespace = true;
+                }
                 comment_start = true;
                 continue;
             }
             if c.is_whitespace() {
+                if depth == 1 {
+                    saw_top_level_whitespace = true;
+                }
                 comment_start = true;
                 continue;
             }
@@ -178,7 +185,13 @@ impl<'a> Lexer<'a> {
                     comment_start = false;
                     depth -= 1;
                     if depth == 0 {
-                        break;
+                        if !saw_top_level_whitespace {
+                            break;
+                        }
+                        if self.brace_close_can_end_compact_group() {
+                            break;
+                        }
+                        depth = 1;
                     }
                 }
                 '$' => {
@@ -217,6 +230,41 @@ impl<'a> Lexer<'a> {
             }
         }
     }
+
+    fn brace_close_can_end_compact_group(&self) -> bool {
+        let rest = from_utf8(&self.input[self.position..]).unwrap_or("");
+        let mut saw_blank = false;
+        for (index, ch) in rest.char_indices() {
+            match ch {
+                ' ' | '\t' | '\r' => {
+                    saw_blank = true;
+                    continue;
+                }
+                '\n' => return true,
+                ';' | '|' | '&' | '<' | '>' | ')' => return true,
+                _ if !saw_blank => return true,
+                _ if ch.is_ascii_digit()
+                    && rest[index..].chars().any(|c| matches!(c, '<' | '>')) =>
+                {
+                    return true;
+                }
+                _ => return brace_close_followed_by_reserved_word(&rest[index..]),
+            }
+        }
+        true
+    }
+}
+
+fn brace_close_followed_by_reserved_word(rest: &str) -> bool {
+    const RESERVED: &[&str] = &["do", "done", "elif", "else", "esac", "fi", "then"];
+
+    RESERVED.iter().any(|word| {
+        rest.strip_prefix(word).is_some_and(|tail| {
+            tail.chars().next().is_none_or(|ch| {
+                ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | ')' | '(')
+            })
+        })
+    })
 }
 
 fn update_command_substitution_case_depth(

@@ -179,9 +179,9 @@ fn parse_for_brace_body(tokens: &[Token], index: usize) -> Option<(Vec<CommandNo
     let mut depth = 1usize;
     let mut i = index + 1;
     while i < tokens.len() {
-        if is_keyword(tokens, i, "{") {
+        if is_boundary_keyword(tokens, i, "{") {
             depth += 1;
-        } else if is_keyword(tokens, i, "}") {
+        } else if is_boundary_keyword(tokens, i, "}") {
             depth -= 1;
             if depth == 0 {
                 break;
