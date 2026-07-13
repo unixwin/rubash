@@ -1896,6 +1896,21 @@ mod inverted_tests {
         assert_eq!(pipeline.stages[0].words, ["false"]);
         assert_eq!(pipeline.stages[1].words, ["true"]);
     }
+
+    #[test]
+    fn test_inverted_command_wraps_compound_command() {
+        let input = "! for value in one; do false; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        assert_eq!(inverted.operator, "!");
+        let for_command = inverted.command.for_command.as_ref().unwrap();
+        assert_eq!(for_command.keyword, "for");
+        assert_eq!(for_command.variable, "value");
+        assert_eq!(for_command.words, ["one"]);
+        assert_eq!(for_command.body[0].words, ["false"]);
+    }
 }
 
 mod variable_tests {

@@ -206,44 +206,40 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if token.kind == TokenKind::Keyword
         && token.value == "time"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((time_cmd, next_i)) = parse_time_prefixed_compound_command(tokens, i) {
-            state.ast.commands.push(time_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, time_cmd);
             return Some(next_i);
         }
     }
 
     if token.kind == TokenKind::Keyword
         && token.value == "if"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((if_cmd, next_i)) = parse_if_command(tokens, i) {
-            state.ast.commands.push(if_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, if_cmd);
             return Some(next_i);
         }
     }
 
     if token.kind == TokenKind::Keyword
         && matches!(token.value.as_str(), "while" | "until")
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((loop_cmd, next_i)) = parse_loop_command(tokens, i) {
-            state.ast.commands.push(loop_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, loop_cmd);
             return Some(next_i);
         }
     }
 
     if token.kind == TokenKind::Keyword
         && token.value == "for"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((for_cmd, next_i)) = parse_for_command(tokens, i) {
-            state.ast.commands.push(for_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, for_cmd);
             return Some(next_i);
         }
     }
@@ -261,63 +257,57 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if token.kind == TokenKind::Keyword
         && token.value == "case"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((case_cmd, next_i)) = parse_case_command(tokens, i) {
-            state.ast.commands.push(case_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, case_cmd);
             return Some(next_i);
         }
     }
 
     if token.kind == TokenKind::Keyword
         && token.value == "select"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((select_cmd, next_i)) = parse_select_command(tokens, i) {
-            state.ast.commands.push(select_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, select_cmd);
             return Some(next_i);
         }
     }
 
     if token.kind == TokenKind::Keyword
         && token.value == "coproc"
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((coproc_cmd, next_i)) = parse_coproc_command(tokens, i) {
-            state.ast.commands.push(coproc_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, coproc_cmd);
             return Some(next_i);
         }
     }
 
-    if command_is_empty(&state.current_cmd)
+    if command_allows_compound_start(&state.current_cmd)
         && ((token.kind == TokenKind::Keyword && token.value == "(")
             || token.value.starts_with("(("))
     {
         if let Some((arith_cmd, next_i)) = parse_arithmetic_command(tokens, i) {
-            state.ast.commands.push(arith_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, arith_cmd);
             return Some(next_i);
         }
     }
 
-    if command_is_empty(&state.current_cmd) && token.value == "[[" {
+    if command_allows_compound_start(&state.current_cmd) && token.value == "[[" {
         if let Some((conditional_cmd, next_i)) = parse_conditional_command(tokens, i) {
-            state.ast.commands.push(conditional_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, conditional_cmd);
             return Some(next_i);
         }
     }
 
-    if command_is_empty(&state.current_cmd)
+    if command_allows_compound_start(&state.current_cmd)
         && token.kind == TokenKind::Keyword
         && token.value == "("
     {
         if let Some((subshell_cmd, next_i)) = parse_subshell_command(tokens, i) {
-            state.ast.commands.push(subshell_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, subshell_cmd);
             return Some(next_i);
         }
     }
@@ -338,15 +328,36 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         }
     }
 
-    if command_is_empty(&state.current_cmd) {
+    if command_allows_compound_start(&state.current_cmd) {
         if let Some((brace_cmd, next_i)) = parse_brace_group_command(tokens, i) {
-            state.ast.commands.push(brace_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, brace_cmd);
             return Some(next_i);
         }
     }
 
     None
+}
+
+fn command_allows_compound_start(command: &CommandNode) -> bool {
+    command_is_empty(command) || command_is_pending_inversion(command)
+}
+
+fn command_is_pending_inversion(command: &CommandNode) -> bool {
+    if !command.inverted {
+        return false;
+    }
+    let mut without_inversion = command.clone();
+    without_inversion.inverted = false;
+    command_is_empty(&without_inversion)
+}
+
+fn push_compound_command(state: &mut ParseState, mut command: CommandNode) {
+    if command_is_pending_inversion(&state.current_cmd) {
+        command.inverted = !command.inverted;
+        command.line = command.line.or(state.current_cmd.line);
+    }
+    state.ast.commands.push(command);
+    state.current_cmd = CommandNode::new();
 }
 
 fn parse_time_prefixed_compound_command(
