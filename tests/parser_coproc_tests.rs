@@ -160,6 +160,30 @@ fn test_named_coproc_parses_for_body() {
 }
 
 #[test]
+fn test_named_coproc_parses_time_prefixed_body() {
+    let input = "coproc MYC time -p for x in a; do echo $x; done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert!(coproc.words.is_empty());
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    let time_command = coproc.body.as_ref().unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+    assert_eq!(time_command.keyword, "time");
+    assert_eq!(time_command.prefix_words, ["-p"]);
+    assert!(time_command.posix_format);
+    let for_command = time_command.command.for_command.as_ref().unwrap();
+    assert_eq!(for_command.variable, "x");
+    assert_eq!(for_command.words, ["a"]);
+    assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+}
+
+#[test]
 fn test_named_coproc_parses_arithmetic_body() {
     let input = "coproc MYC (( 1 + 1 ))";
     let tokens = tokenize(input);
