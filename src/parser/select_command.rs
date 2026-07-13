@@ -20,7 +20,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     let default_positional = if is_keyword(tokens, i, "in") {
         in_keyword = Some(tokens[i].value.clone());
         i += 1;
-        while i < tokens.len() && !is_keyword(tokens, i, "do") {
+        while i < tokens.len() {
             if tokens[i].kind == TokenKind::Semicolon {
                 if list_terminator.is_none() {
                     list_terminator = Some(tokens[i].value.clone());
@@ -32,6 +32,9 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
                 {
                     i += 1;
                 }
+                if is_keyword(tokens, i, "do") {
+                    break;
+                }
                 if select_brace_body_start(tokens, i) {
                     break;
                 }
@@ -40,7 +43,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             if select_brace_body_start(tokens, i) {
                 return None;
             }
-            if let Some((word, next_i)) = collect_compound_word_value(tokens, i) {
+            if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
                 words.push(word);
                 i = next_i;
                 continue;

@@ -50,6 +50,18 @@ pub(super) fn collect_compound_word_value(
     None
 }
 
+pub(super) fn collect_compound_or_keyword_word_value(
+    tokens: &[Token],
+    index: usize,
+) -> Option<(String, usize)> {
+    collect_compound_word_value(tokens, index).or_else(|| {
+        tokens
+            .get(index)
+            .filter(|token| token.kind == TokenKind::Keyword)
+            .map(|token| (token.value.clone(), index + 1))
+    })
+}
+
 pub(super) fn set_body_line(body: &mut [CommandNode], line: usize) {
     // TODO(parse.y): Bash preserves source locations through compound command
     // parsing. Rubash reparses inline function bodies from text today, so

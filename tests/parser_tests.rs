@@ -517,6 +517,24 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_words_keep_reserved_words() {
+        let for_tokens = tokenize("for x in do done; do echo $x; done");
+        let for_ast = parse(&for_tokens);
+        let select_tokens = tokenize("select x in do done; do echo $x; done");
+        let select_ast = parse(&select_tokens);
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(for_command.words, ["do", "done"]);
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+        assert_eq!(select_command.words, ["do", "done"]);
+        assert_eq!(select_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(select_command.body[0].words, ["echo", "$x"]);
+    }
+
+    #[test]
     fn test_loop_bodies_keep_case_patterns_named_like_delimiters() {
         let for_tokens = tokenize("for x in one; do case done in done) echo for ;; esac; done");
         let for_ast = parse(&for_tokens);
