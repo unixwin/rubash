@@ -71,41 +71,34 @@ fn condition_terminator_before(tokens: &[Token], then_index: usize) -> Option<St
 }
 
 fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
-    let mut depth = 0usize;
+    let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if opens_compound_body(tokens, index) {
-            depth += 1;
-        } else if is_keyword(tokens, index, "then") {
-            if depth == 0 {
-                return Some(index);
-            }
-        } else if closes_compound_body(tokens, index) {
-            depth = depth.saturating_sub(1);
+        if stack.is_empty() && is_keyword(tokens, index, "then") {
+            return Some(index);
         }
+        update_compound_boundary_stack(tokens, index, &mut stack);
         index += 1;
     }
     None
 }
 
 fn parse_if_section(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, usize)> {
-    let mut depth = 0usize;
+    let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if opens_compound_body(tokens, index) {
-            depth += 1;
-        } else if closes_compound_body(tokens, index) {
-            if depth == 0 {
-                break;
-            }
-            depth -= 1;
-        } else if depth == 0 && is_keyword(tokens, index, "then") {
+        if stack.is_empty() && matches!(tokens[index].value.as_str(), "fi" | "done" | "esac") {
+            break;
+        }
+        if stack.is_empty() && is_keyword(tokens, index, "then") {
             return None;
-        } else if depth == 0
+        }
+        if stack.is_empty()
             && (is_keyword(tokens, index, "elif") || is_keyword(tokens, index, "else"))
         {
             break;
         }
+        update_compound_boundary_stack(tokens, index, &mut stack);
         index += 1;
     }
 
@@ -119,18 +112,4 @@ fn parse_if_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
-}
-
-fn opens_compound_body(tokens: &[Token], index: usize) -> bool {
-    matches!(
-        tokens.get(index).map(|token| token.value.as_str()),
-        Some("if" | "for" | "select" | "while" | "until" | "case")
-    )
-}
-
-fn closes_compound_body(tokens: &[Token], index: usize) -> bool {
-    matches!(
-        tokens.get(index).map(|token| token.value.as_str()),
-        Some("fi" | "done" | "esac")
-    )
 }

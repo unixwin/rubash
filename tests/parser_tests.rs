@@ -494,6 +494,42 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_loop_bodies_keep_case_patterns_named_like_delimiters() {
+        let for_tokens = tokenize("for x in one; do case done in done) echo for ;; esac; done");
+        let for_ast = parse(&for_tokens);
+        let while_tokens = tokenize("while true; do case done in done) echo while ;; esac; done");
+        let while_ast = parse(&while_tokens);
+        let select_tokens =
+            tokenize("select x in one; do case done in done) echo select ;; esac; done");
+        let select_ast = parse(&select_tokens);
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let while_command = while_ast.commands[0].loop_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert!(for_command.body[0].case_command.is_some());
+        assert_eq!(
+            for_command.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["done"]
+        );
+        assert!(while_command.body[0].case_command.is_some());
+        assert_eq!(
+            while_command.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["done"]
+        );
+        assert!(select_command.body[0].case_command.is_some());
+        assert_eq!(
+            select_command.body[0]
+                .case_command
+                .as_ref()
+                .unwrap()
+                .clauses[0]
+                .patterns,
+            ["done"]
+        );
+    }
+
+    #[test]
     fn test_loop_body_delimiters_record_do_done() {
         let while_tokens = tokenize("while false; do echo bad; done");
         let while_ast = parse(&while_tokens);
@@ -1141,6 +1177,19 @@ mod case_tests {
         assert_eq!(clause.pattern_separators, ["|"]);
         assert_eq!(clause.pattern_nodes[0].text, "$(printf x)");
         assert_eq!(clause.pattern_nodes[1].text, "{a,b}");
+    }
+
+    #[test]
+    fn test_case_pattern_keeps_reserved_word_text() {
+        let input = "case done in done|fi|esac) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let clause = &case_command.clauses[0];
+
+        assert_eq!(case_command.word, "done");
+        assert_eq!(clause.patterns, ["done", "fi", "esac"]);
+        assert_eq!(clause.pattern_separators, ["|", "|"]);
     }
 
     #[test]

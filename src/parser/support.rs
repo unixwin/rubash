@@ -65,6 +65,56 @@ pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
         .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == value)
 }
 
+pub(super) fn update_compound_boundary_stack(
+    tokens: &[Token],
+    index: usize,
+    stack: &mut Vec<&'static str>,
+) {
+    if stack
+        .last()
+        .is_some_and(|expected| is_keyword(tokens, index, expected))
+    {
+        stack.pop();
+        return;
+    }
+
+    if stack.last().is_some_and(|expected| *expected == "esac")
+        || !compound_opener_allowed(tokens, index)
+    {
+        return;
+    }
+
+    if is_keyword(tokens, index, "if") {
+        stack.push("fi");
+    } else if matches!(
+        tokens.get(index).map(|token| token.value.as_str()),
+        Some("for" | "select" | "while" | "until")
+    ) {
+        stack.push("done");
+    } else if is_keyword(tokens, index, "case") {
+        stack.push("esac");
+    }
+}
+
+fn compound_opener_allowed(tokens: &[Token], index: usize) -> bool {
+    let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
+        return true;
+    };
+
+    matches!(
+        previous.kind,
+        TokenKind::Semicolon
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Pipe
+            | TokenKind::PipeErr
+            | TokenKind::Background
+    ) || matches!(
+        previous.value.as_str(),
+        "then" | "do" | "else" | "elif" | ";;" | ";&" | ";;&"
+    )
+}
+
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()

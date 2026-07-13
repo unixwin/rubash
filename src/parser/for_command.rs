@@ -77,20 +77,12 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             i += 1;
 
             let body_start = i;
-            let mut depth = 0usize;
+            let mut stack = Vec::new();
             while i < tokens.len() {
-                if is_keyword(tokens, i, "for")
-                    || is_keyword(tokens, i, "while")
-                    || is_keyword(tokens, i, "until")
-                    || is_keyword(tokens, i, "select")
-                {
-                    depth += 1;
-                } else if is_keyword(tokens, i, "done") {
-                    if depth == 0 {
-                        break;
-                    }
-                    depth -= 1;
+                if stack.is_empty() && is_keyword(tokens, i, "done") {
+                    break;
                 }
+                update_compound_boundary_stack(tokens, i, &mut stack);
                 i += 1;
             }
 

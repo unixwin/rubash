@@ -5,7 +5,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     // TODO(parse.y/execute_cmd.c): GNU Bash supports extglob patterns, nested
     // compound lists, and redirections on the compound command. This covers the
     // common `case word in pattern) list terminator` shape.
-    let (word, mut i) = collect_compound_word_value(tokens, start + 1)?;
+    let (word, mut i) = collect_case_word(tokens, start + 1)?;
     while i < tokens.len() && !is_keyword(tokens, i, "in") {
         i += 1;
     }
@@ -84,6 +84,9 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                         in_extglob = 0;
                     }
                 }
+                TokenKind::Keyword => {
+                    current_pattern.push_str(&tokens[i].value);
+                }
                 TokenKind::Pipe => {
                     // Pipe separates case patterns (not inside extglob)
                     if in_extglob == 0 {
@@ -141,6 +144,15 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         end_keyword: tokens[i].value.clone(),
     }));
     Some(finish_compound_command(command, tokens, i + 1))
+}
+
+fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, usize)> {
+    collect_compound_word_value(tokens, index).or_else(|| {
+        tokens
+            .get(index)
+            .filter(|token| token.kind == TokenKind::Keyword)
+            .map(|token| (token.value.clone(), index + 1))
+    })
 }
 
 pub(super) fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {
