@@ -58,12 +58,15 @@ impl Executor {
             return None;
         }
 
-        let mut parts = Vec::new();
-        push_alias_arithmetic_part(ast.commands.get(command_index)?, &words[1..], &mut parts);
+        let mut parts = vec![alias_arithmetic_part(
+            ast.commands.get(command_index)?,
+            &words[1..],
+        )];
         let mut index = command_index + 1;
         while parts.len() < 3 {
             let command = ast.commands.get(index)?;
             if alias_arithmetic_empty_command(command) {
+                parts.push(String::new());
                 index += 1;
                 continue;
             }
@@ -72,8 +75,17 @@ impl Executor {
             {
                 break;
             }
-            push_alias_arithmetic_part(command, &command.words, &mut parts);
+            parts.push(alias_arithmetic_part(command, &command.words));
             index += 1;
+        }
+
+        if parts.len() == 2
+            && ast.commands.get(index).is_some_and(|command| {
+                command.brace_group.is_some()
+                    || command.words.first().map(String::as_str) == Some("do")
+            })
+        {
+            parts.push(String::new());
         }
 
         if parts.len() != 3 {
@@ -120,13 +132,6 @@ fn alias_arithmetic_for_command(
         do_keyword: Some("do".to_string()),
         end_keyword: Some("done".to_string()),
         body,
-    }
-}
-
-fn push_alias_arithmetic_part(command: &CommandNode, words: &[String], parts: &mut Vec<String>) {
-    let part = alias_arithmetic_part(command, words);
-    if !part.is_empty() {
-        parts.push(part);
     }
 }
 
