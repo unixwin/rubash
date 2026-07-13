@@ -33,14 +33,18 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         };
 
         let mut patterns = Vec::new();
+        let mut raw_patterns = Vec::new();
         let mut pattern_separators = Vec::new();
         let mut current_pattern = String::new();
+        let mut current_raw_pattern = String::new();
         let mut in_extglob = 0i32;
         while i < tokens.len() {
             // Check if this is a ) that ends the case pattern (not inside extglob)
             if is_keyword(tokens, i, ")") && in_extglob == 0 {
                 patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
+                raw_patterns.push(current_raw_pattern.clone());
                 current_pattern.clear();
+                current_raw_pattern.clear();
                 break;
             }
             match tokens[i].kind {
@@ -57,12 +61,15 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                         // Collect the full extglob pattern
                         let extglob = collect_extglob_pattern(tokens, &mut i);
                         current_pattern.push_str(&extglob);
+                        current_raw_pattern.push_str(&extglob);
                     } else {
                         current_pattern.push_str(text);
+                        current_raw_pattern.push_str(&tokens[i].raw);
                     }
                 }
                 TokenKind::Variable => {
                     current_pattern.push_str(&tokens[i].value);
+                    current_raw_pattern.push_str(&tokens[i].raw);
                 }
                 // Handle `!(` as extglob negation pattern
                 TokenKind::Keyword
@@ -72,13 +79,16 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                 {
                     let extglob = collect_extglob_pattern_from_bang(tokens, &mut i);
                     current_pattern.push_str(&extglob);
+                    current_raw_pattern.push_str(&extglob);
                 }
                 TokenKind::Keyword if tokens[i].value == "(" => {
                     current_pattern.push('(');
+                    current_raw_pattern.push_str(&tokens[i].raw);
                     in_extglob += 1;
                 }
                 TokenKind::Keyword if tokens[i].value == ")" => {
                     current_pattern.push(')');
+                    current_raw_pattern.push_str(&tokens[i].raw);
                     in_extglob -= 1;
                     if in_extglob < 0 {
                         in_extglob = 0;
@@ -86,15 +96,19 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                 }
                 TokenKind::Keyword => {
                     current_pattern.push_str(&tokens[i].value);
+                    current_raw_pattern.push_str(&tokens[i].raw);
                 }
                 TokenKind::Pipe => {
                     // Pipe separates case patterns (not inside extglob)
                     if in_extglob == 0 {
                         patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
+                        raw_patterns.push(current_raw_pattern.clone());
                         pattern_separators.push(tokens[i].value.clone());
                         current_pattern.clear();
+                        current_raw_pattern.clear();
                     } else {
                         current_pattern.push('|');
+                        current_raw_pattern.push_str(&tokens[i].raw);
                     }
                 }
                 _ => {}
@@ -113,7 +127,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
         let clause_index = clauses.len();
-        let pattern_nodes = case_pattern_nodes(&patterns, clause_index);
+        let pattern_nodes = case_pattern_nodes(&patterns, &raw_patterns, clause_index);
         clauses.push(CaseClause {
             pattern_open_delimiter,
             patterns,
@@ -159,12 +173,20 @@ pub(super) fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {
     pattern.replace('\\', "\x18")
 }
 
-fn case_pattern_nodes(patterns: &[String], clause_index: usize) -> Vec<CasePattern> {
+fn case_pattern_nodes(
+    patterns: &[String],
+    raw_patterns: &[String],
+    clause_index: usize,
+) -> Vec<CasePattern> {
     patterns
         .iter()
         .enumerate()
         .map(|(pattern_index, pattern)| {
-            CasePattern::new(pattern.clone(), clause_index, pattern_index)
+            let raw_pattern = raw_patterns
+                .get(pattern_index)
+                .cloned()
+                .unwrap_or_else(|| pattern.clone());
+            CasePattern::new_with_raw(pattern.clone(), raw_pattern, clause_index, pattern_index)
         })
         .collect()
 }

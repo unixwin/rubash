@@ -421,6 +421,7 @@ pub struct CaseClause {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CasePattern {
     pub text: String,
+    pub raw_text: String,
     pub operators: Vec<String>,
     pub extglob_patterns: Vec<ExtglobPattern>,
     pub brace_expansions: Vec<BraceExpansion>,
@@ -435,15 +436,26 @@ pub struct CasePattern {
 
 impl CasePattern {
     pub fn new(text: String, clause_index: usize, pattern_index: usize) -> Self {
+        Self::new_with_raw(text.clone(), text, clause_index, pattern_index)
+    }
+
+    pub fn new_with_raw(
+        text: String,
+        raw_text: String,
+        clause_index: usize,
+        pattern_index: usize,
+    ) -> Self {
+        let operators = case_pattern_operators(&raw_text);
         Self {
-            has_glob: case_pattern_has_glob(&text),
-            has_extglob: case_pattern_has_extglob(&text),
-            negated_extglob: text.contains("!("),
-            operators: case_pattern_operators(&text),
+            has_glob: case_pattern_has_glob(&operators),
+            has_extglob: case_pattern_has_extglob(&operators),
+            negated_extglob: operators.iter().any(|operator| operator == "!("),
+            operators,
             extglob_patterns: super::extglob_patterns_in_word(&text),
             brace_expansions: super::brace_expansions_in_word(&text),
             parameter_expansions: super::parameter_expansions_in_word(&text),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&text),
+            raw_text,
             text,
             clause_index,
             pattern_index,
@@ -451,25 +463,51 @@ impl CasePattern {
     }
 }
 
-fn case_pattern_has_glob(pattern: &str) -> bool {
-    pattern
-        .chars()
-        .any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+fn case_pattern_has_glob(operators: &[String]) -> bool {
+    operators
+        .iter()
+        .any(|operator| operator == "*" || operator == "?" || operator.starts_with('['))
 }
 
-fn case_pattern_has_extglob(pattern: &str) -> bool {
-    pattern.contains("@(")
-        || pattern.contains("*(")
-        || pattern.contains("+(")
-        || pattern.contains("?(")
-        || pattern.contains("!(")
+fn case_pattern_has_extglob(operators: &[String]) -> bool {
+    operators
+        .iter()
+        .any(|operator| matches!(operator.as_str(), "@(" | "*(" | "+(" | "?(" | "!("))
 }
 
-fn case_pattern_operators(pattern: &str) -> Vec<String> {
-    let chars = pattern.chars().collect::<Vec<_>>();
+fn case_pattern_operators(raw_pattern: &str) -> Vec<String> {
+    let chars = raw_pattern.chars().collect::<Vec<_>>();
     let mut operators = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+            if let Some(next_index) = skip_case_pattern_quoted(&chars, index + 2, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+            if let Some(next_index) = skip_case_pattern_quoted(&chars, index + 2, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '\'' {
+            if let Some(next_index) = skip_case_pattern_quoted(&chars, index + 1, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '"' {
+            if let Some(next_index) = skip_case_pattern_quoted(&chars, index + 1, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
         match chars[index] {
             '@' | '!' | '+' | '?' | '*' if chars.get(index + 1) == Some(&'(') => {
                 operators.push(chars[index..=index + 1].iter().collect());
@@ -498,11 +536,38 @@ fn case_pattern_operators(pattern: &str) -> Vec<String> {
                 }
             }
             '|' => operators.push("|".to_string()),
+            '\\' => {
+                index += 2;
+                continue;
+            }
             _ => {}
         }
         index += 1;
     }
     operators
+}
+
+fn skip_case_pattern_quoted(chars: &[char], start: usize, delimiter: char) -> Option<usize> {
+    let mut index = start;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if delimiter == '"' && ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == delimiter {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

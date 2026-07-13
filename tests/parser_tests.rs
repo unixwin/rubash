@@ -1515,6 +1515,29 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_ignores_quoted_glob_operators() {
+        let input = "case $word in \"*\"|'?'|$'[ab]'|plain\"*\"?.rs) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let patterns = &case_command.clauses[0].pattern_nodes;
+
+        assert_eq!(patterns[0].text, "*");
+        assert_eq!(patterns[0].raw_text, "\"*\"");
+        assert!(patterns[0].operators.is_empty());
+        assert!(!patterns[0].has_glob);
+        assert_eq!(patterns[1].text, "?");
+        assert!(patterns[1].operators.is_empty());
+        assert!(!patterns[1].has_glob);
+        assert_eq!(patterns[2].text, "[ab]");
+        assert!(patterns[2].operators.is_empty());
+        assert!(!patterns[2].has_glob);
+        assert_eq!(patterns[3].text, "plain*?.rs");
+        assert_eq!(patterns[3].operators, ["?"]);
+        assert!(patterns[3].has_glob);
+    }
+
+    #[test]
     fn test_case_pattern_records_nested_extglob_nodes() {
         let input = "case $word in @(a|+(b|c))) echo hit ;; esac";
         let tokens = tokenize(input);
