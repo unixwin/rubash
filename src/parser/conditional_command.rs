@@ -99,6 +99,15 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
             Some(op.clone()),
             &[left.clone(), right.clone()],
         ),
+        [left, op, rhs @ ..]
+            if is_conditional_binary_operator(op) && conditional_rhs_fragments_can_join(rhs) =>
+        {
+            conditional_leaf(
+                ConditionalExpressionKind::Binary,
+                Some(op.clone()),
+                &[left.clone(), rhs.join("")],
+            )
+        }
         [word] => conditional_leaf(
             ConditionalExpressionKind::Word,
             None,
@@ -106,6 +115,13 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
         ),
         _ => conditional_leaf(ConditionalExpressionKind::Unknown, None, args),
     }
+}
+
+fn conditional_rhs_fragments_can_join(rhs: &[String]) -> bool {
+    rhs.len() > 1
+        && rhs
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "(" | ")" | "|") || arg.contains('('))
 }
 
 fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalExpression {

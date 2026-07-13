@@ -1275,6 +1275,39 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_joins_pattern_rhs_fragments() {
+        let extglob_tokens = tokenize("[[ foo == @(foo|bar) ]]");
+        let extglob_ast = parse(&extglob_tokens);
+        let regex_tokens = tokenize("[[ shellmath_add =~ shellmath_(add|subtract|multiply)$ ]]");
+        let regex_ast = parse(&regex_tokens);
+        let capture_tokens = tokenize("[[ '2:bad' =~ ^([0-9]+):(.*) ]]");
+        let capture_ast = parse(&capture_tokens);
+
+        let extglob = extglob_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap();
+        let regex = regex_ast.commands[0].conditional_command.as_ref().unwrap();
+        let capture = capture_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(extglob.expression.kind, ConditionalExpressionKind::Binary);
+        assert_eq!(extglob.expression.operator.as_deref(), Some("=="));
+        assert_eq!(extglob.expression.operands, ["foo", "@(foo|bar)"]);
+        assert_eq!(regex.expression.kind, ConditionalExpressionKind::Binary);
+        assert_eq!(regex.expression.operator.as_deref(), Some("=~"));
+        assert_eq!(
+            regex.expression.operands,
+            ["shellmath_add", "shellmath_(add|subtract|multiply)$"]
+        );
+        assert_eq!(capture.expression.kind, ConditionalExpressionKind::Binary);
+        assert_eq!(capture.expression.operator.as_deref(), Some("=~"));
+        assert_eq!(capture.expression.operands, ["2:bad", "^([0-9]+):(.*)"]);
+    }
+
+    #[test]
     fn test_conditional_command_records_readonly_unary_expression() {
         let input = "[[ -R UID ]]";
         let tokens = tokenize(input);
