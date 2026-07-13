@@ -43,15 +43,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 Some(("{".to_string(), "}".to_string())),
                 Some(body),
             ));
-            let mut next_i = i + 1;
-            collect_trailing_redirections(tokens, &mut next_i, &mut command);
-            while tokens
-                .get(next_i)
-                .is_some_and(|t| t.kind == TokenKind::Semicolon)
-            {
-                next_i += 1;
-            }
-            return Some((command, next_i));
+            return Some(finish_coproc_command(command, tokens, i + 1));
         }
 
         if is_keyword(tokens, i, "{") {
@@ -65,15 +57,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 Some((tokens[i].value.clone(), tokens[close_i].value.clone())),
                 Some(body),
             ));
-            let mut next_i = close_i + 1;
-            collect_trailing_redirections(tokens, &mut next_i, &mut command);
-            while tokens
-                .get(next_i)
-                .is_some_and(|t| t.kind == TokenKind::Semicolon)
-            {
-                next_i += 1;
-            }
-            return Some((command, next_i));
+            return Some(finish_coproc_command(command, tokens, close_i + 1));
         }
 
         if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
@@ -86,15 +70,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 None,
                 Some(body),
             ));
-            let mut next_i = body_end;
-            collect_trailing_redirections(tokens, &mut next_i, &mut command);
-            while tokens
-                .get(next_i)
-                .is_some_and(|t| t.kind == TokenKind::Semicolon)
-            {
-                next_i += 1;
-            }
-            return Some((command, next_i));
+            return Some(finish_coproc_command(command, tokens, body_end));
         }
 
         if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
@@ -107,15 +83,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 None,
                 Some(vec![body_command]),
             ));
-            let mut next_i = body_end;
-            collect_trailing_redirections(tokens, &mut next_i, &mut command);
-            while tokens
-                .get(next_i)
-                .is_some_and(|t| t.kind == TokenKind::Semicolon)
-            {
-                next_i += 1;
-            }
-            return Some((command, next_i));
+            return Some(finish_coproc_command(command, tokens, body_end));
         }
 
         // Subshell body: ( ... )
@@ -150,15 +118,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                     Some(("(".to_string(), tokens[i].value.clone())),
                     Some(body),
                 ));
-                let mut next_i = i + 1;
-                collect_trailing_redirections(tokens, &mut next_i, &mut command);
-                while tokens
-                    .get(next_i)
-                    .is_some_and(|t| t.kind == TokenKind::Semicolon)
-                {
-                    next_i += 1;
-                }
-                return Some((command, next_i));
+                return Some(finish_coproc_command(command, tokens, i + 1));
             }
         }
     }
@@ -191,15 +151,22 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         None,
         None,
     ));
-    let mut next_i = i;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    Some(finish_coproc_command(command, tokens, i))
+}
+
+fn finish_coproc_command(
+    command: CommandNode,
+    tokens: &[Token],
+    index: usize,
+) -> (CommandNode, usize) {
+    let (command, mut next_i) = finish_compound_command(command, tokens, index);
     while tokens
         .get(next_i)
-        .is_some_and(|t| t.kind == TokenKind::Semicolon)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
     {
         next_i += 1;
     }
-    Some((command, next_i))
+    (command, next_i)
 }
 
 fn coproc_command(

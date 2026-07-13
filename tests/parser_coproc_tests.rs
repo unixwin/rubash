@@ -138,3 +138,30 @@ fn test_named_coproc_parses_conditional_body() {
         ["[[", "$value", "==", "ok", "]]"]
     );
 }
+
+#[test]
+fn test_coproc_command_consumes_pipe_stderr_operator() {
+    let input = "coproc MYC { echo hi; } |& grep hi";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.operators, ["|&"]);
+    assert_eq!(pipeline.stages[0].pipe, Some(2));
+    assert!(pipeline.stages[0].coproc_command.is_some());
+    assert_eq!(pipeline.stages[1].words, ["grep", "hi"]);
+}
+
+#[test]
+fn test_coproc_command_consumes_and_or_connector() {
+    let input = "coproc MYC { echo hi; } && echo done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let list = ast.commands[0].and_or_list.as_ref().unwrap();
+    assert_eq!(list.connectors, [true]);
+    assert!(list.commands[0].coproc_command.is_some());
+    assert_eq!(list.commands[1].words, ["echo", "done"]);
+}
