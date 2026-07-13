@@ -751,6 +751,64 @@ fn test_function_body_can_be_while_command_sequence() {
 }
 
 #[test]
+fn test_function_body_can_be_select_command() {
+    let output_path = "target/rubash-function-select-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "f() select choice in inner; do echo $choice > {output_path}; break; done <<< 1; f"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_function_body_can_be_coproc_command() {
+    let output_path = "target/rubash-function-coproc-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("f() coproc MYC (( 1 )); f; echo pid:${{MYC_PID:+set}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "pid:set\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_function_body_can_be_subshell_command() {
+    let output_path = "target/rubash-function-subshell-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "f() ( x=inner; echo in:$x > {output_path} ); x=outer; f; echo out:$x >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "in:inner\nout:outer\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_conditional_command() {
     let output_path = "target/rubash-function-conditional-body-output.txt";
     let _ = fs::remove_file(output_path);
