@@ -165,6 +165,33 @@ fn test_set_noglob_with_positional_operands() {
 }
 
 #[test]
+fn test_extglob_pathname_expansion_matches_files() {
+    let dir_path = "target/rubash-extglob-pathname";
+    let output_path = "target/rubash-extglob-pathname-output.txt";
+    let _ = fs::remove_dir_all(dir_path);
+    let _ = fs::remove_file(output_path);
+    fs::create_dir_all(dir_path).unwrap();
+    fs::write(format!("{dir_path}/keep.txt"), "keep").unwrap();
+    fs::write(format!("{dir_path}/note.md"), "note").unwrap();
+    fs::write(format!("{dir_path}/skip.tmp"), "skip").unwrap();
+    let input = format!("shopt -s extglob; printf '%s\\n' {dir_path}/!(*.tmp) > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "target/rubash-extglob-pathname/keep.txt\ntarget/rubash-extglob-pathname/note.md\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
 fn test_set_noexec_updates_shell_option() {
     let tokens = tokenize("set -n");
     let ast = parse(&tokens);

@@ -22,6 +22,14 @@ fn contains_glob_or_extglob(word: &str) -> bool {
     false
 }
 
+fn contains_extglob(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    chars
+        .iter()
+        .enumerate()
+        .any(|(i, ch)| matches!(ch, '@' | '*' | '+' | '?' | '!') && chars.get(i + 1) == Some(&'('))
+}
+
 /// Expand glob patterns (* ? [...]) in a word against the filesystem.
 pub(crate) fn pathname_expand_word(
     word: &str,
@@ -44,6 +52,7 @@ pub(crate) fn pathname_expand_word(
     let dotglob = shopt_enabled(env_vars, "dotglob");
     let nocaseglob = shopt_enabled(env_vars, "nocaseglob");
     let globstar = shopt_enabled(env_vars, "globstar");
+    let extglob = shopt_enabled(env_vars, "extglob");
 
     if word.contains("**") && globstar {
         return globstar_expand(word, nullglob, nocaseglob, dotglob);
@@ -65,7 +74,9 @@ pub(crate) fn pathname_expand_word(
             if !include_dotfiles && name.starts_with('.') {
                 return None;
             }
-            let matched = if nocaseglob {
+            let matched = if extglob && contains_extglob(pattern) {
+                extglob_pattern_matches(pattern, &name, nocaseglob)
+            } else if nocaseglob {
                 case_pattern_matches_nocase(pattern, &name)
             } else {
                 super::case_pattern_matches(pattern, &name)
@@ -95,6 +106,16 @@ fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
     let pattern_lower = pattern.to_lowercase();
     let word_lower = word.to_lowercase();
     super::case_pattern_matches(&pattern_lower, &word_lower)
+}
+
+fn extglob_pattern_matches(pattern: &str, word: &str, nocaseglob: bool) -> bool {
+    if nocaseglob {
+        let pattern_lower = pattern.to_lowercase();
+        let word_lower = word.to_lowercase();
+        super::conditional::extglob_case_pattern_matches(&pattern_lower, &word_lower)
+    } else {
+        super::conditional::extglob_case_pattern_matches(pattern, word)
+    }
 }
 
 fn globstar_expand(
