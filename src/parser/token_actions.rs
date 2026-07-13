@@ -321,6 +321,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     &token.value,
                     delimiter_token,
                     fd,
+                    redirect_fd_var_prefix(tokens, *i),
                 ));
                 if fd.is_none() {
                     state.current_cmd.heredoc_delimiter = Some(delimiter);

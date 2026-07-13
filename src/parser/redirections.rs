@@ -197,9 +197,12 @@ pub(super) fn collect_trailing_redirections(
                     false,
                     false,
                 ));
-                command
-                    .heredoc_redirects
-                    .push(heredoc_redirect(&token.value, target, fd));
+                command.heredoc_redirects.push(heredoc_redirect(
+                    &token.value,
+                    target,
+                    fd,
+                    redirect_fd_var_prefix(tokens, *index),
+                ));
                 if fd.is_none() {
                     command.heredoc_delimiter = Some(target.value.clone());
                 }
@@ -225,11 +228,17 @@ pub(super) fn assign_here_string_redirect(
 ) {
     let fd = redirect_operator_fd(operator);
     command.redirects.push(redirect_node_with_fd_var(
-        operator, fd, fd_var, target, false, false,
+        operator,
+        fd,
+        fd_var.clone(),
+        target,
+        false,
+        false,
     ));
     if let Some(fd) = fd {
         command.heredoc_redirects.push(HereDocRedirect {
             fd: Some(fd),
+            fd_var: fd_var.clone(),
             operator: operator.to_string(),
             delimiter: "<<<".to_string(),
             strip_tabs: false,
@@ -457,9 +466,11 @@ pub(super) fn heredoc_redirect(
     operator: &str,
     delimiter: &Token,
     fd: Option<u32>,
+    fd_var: Option<String>,
 ) -> HereDocRedirect {
     HereDocRedirect {
         fd,
+        fd_var,
         operator: operator.to_string(),
         delimiter: delimiter.value.clone(),
         strip_tabs: operator.ends_with("<<-"),

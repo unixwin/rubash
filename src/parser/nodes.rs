@@ -34,6 +34,7 @@ pub enum RedirectKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HereDocRedirect {
     pub fd: Option<u32>,
+    pub fd_var: Option<String>,
     pub operator: String,
     pub delimiter: String,
     pub strip_tabs: bool,

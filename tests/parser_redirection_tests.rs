@@ -668,6 +668,7 @@ fn test_heredoc_redirect_records_operator_metadata() {
     assert_eq!(command.heredoc_redirects.len(), 1);
     let redirect = &command.heredoc_redirects[0];
     assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.fd_var, None);
     assert_eq!(redirect.operator, "<<");
     assert_eq!(redirect.delimiter, "EOF");
     assert!(!redirect.strip_tabs);
@@ -727,6 +728,7 @@ fn test_fd_heredoc_redirect_records_operator_metadata() {
     assert_eq!(command.heredoc_redirects.len(), 1);
     let redirect = &command.heredoc_redirects[0];
     assert_eq!(redirect.fd, Some(3));
+    assert_eq!(redirect.fd_var, None);
     assert_eq!(redirect.operator, "3<<");
     assert_eq!(redirect.delimiter, "EOF");
     assert!(!redirect.strip_tabs);
@@ -744,6 +746,7 @@ fn test_here_string_fd_prefix_maps_to_fd_input() {
     assert!(command.here_string.is_none());
     assert_eq!(command.heredoc_redirects.len(), 1);
     assert_eq!(command.heredoc_redirects[0].fd, Some(3));
+    assert_eq!(command.heredoc_redirects[0].fd_var, None);
     assert_eq!(command.heredoc_redirects[0].operator, "3<<<");
     assert_eq!(command.heredoc_redirects[0].delimiter, "<<<");
     assert!(!command.heredoc_redirects[0].strip_tabs);
@@ -786,6 +789,8 @@ fn test_dynamic_fd_heredoc_redirect_records_fd_var() {
     assert_eq!(redirect.operator, "<<");
     assert_eq!(redirect.kind, RedirectKind::HereDoc);
     assert_eq!(redirect.target, "EOF");
+    assert_eq!(command.heredoc_redirects[0].fd, None);
+    assert_eq!(command.heredoc_redirects[0].fd_var.as_deref(), Some("fd"));
     assert_eq!(
         command.heredoc_redirects[0].body.as_deref(),
         Some("alpha\n")

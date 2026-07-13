@@ -47,11 +47,13 @@ fn test_parse_multiple_heredoc_redirects_with_fd() {
     assert_eq!(ast.commands[0].words, vec!["done"]);
     assert_eq!(ast.commands[0].heredoc_redirects.len(), 2);
     assert_eq!(ast.commands[0].heredoc_redirects[0].fd, None);
+    assert_eq!(ast.commands[0].heredoc_redirects[0].fd_var, None);
     assert_eq!(
         ast.commands[0].heredoc_redirects[0].body.as_deref(),
         Some("one\n")
     );
     assert_eq!(ast.commands[0].heredoc_redirects[1].fd, Some(3));
+    assert_eq!(ast.commands[0].heredoc_redirects[1].fd_var, None);
     assert_eq!(
         ast.commands[0].heredoc_redirects[1].body.as_deref(),
         Some("two\n")
