@@ -618,15 +618,7 @@ pub(super) fn parse_time_prefixed_shell_command(
         return None;
     }
 
-    let mut end = start + 1;
-    while tokens.get(end).is_some_and(|token| {
-        !matches!(
-            token.kind,
-            TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
-        )
-    }) {
-        end += 1;
-    }
+    let end = time_prefixed_shell_command_end(tokens, start + 1);
 
     let mut commands = parse(&tokens[start..end]).commands;
     if commands.len() != 1 {
@@ -634,6 +626,43 @@ pub(super) fn parse_time_prefixed_shell_command(
     }
 
     Some((commands.remove(0), end))
+}
+
+fn time_prefixed_shell_command_end(tokens: &[Token], mut index: usize) -> usize {
+    let mut stack = Vec::new();
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    while let Some(token) = tokens.get(index) {
+        if stack.is_empty()
+            && paren_depth == 0
+            && brace_depth == 0
+            && matches!(
+                token.kind,
+                TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
+            )
+        {
+            break;
+        }
+
+        update_compound_boundary_stack(tokens, index, &mut stack);
+        if stack.last().copied() != Some("esac") && command_boundary_keyword_allowed(tokens, index)
+        {
+            if is_keyword(tokens, index, "(") {
+                paren_depth += 1;
+            } else if is_keyword(tokens, index, ")") {
+                paren_depth = paren_depth.saturating_sub(1);
+            } else if is_keyword(tokens, index, "{") {
+                brace_depth += 1;
+            } else if is_keyword(tokens, index, "}") {
+                brace_depth = brace_depth.saturating_sub(1);
+            }
+        }
+
+        index += 1;
+    }
+
+    index
 }
 
 pub(super) fn time_prefixed_shell_command_allows_simple_pipeline(

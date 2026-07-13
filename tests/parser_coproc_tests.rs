@@ -203,6 +203,58 @@ fn test_named_coproc_time_pipeline_keeps_inversion_prefix() {
 }
 
 #[test]
+fn test_named_coproc_time_pipeline_allows_compound_later_stages() {
+    let if_tokens = tokenize("coproc MYC time echo hi | if read value; then echo $value; fi");
+    let if_ast = parse(&if_tokens);
+    let subshell_tokens = tokenize("coproc MYC time echo hi | ( read value; echo $value )");
+    let subshell_ast = parse(&subshell_tokens);
+    let brace_tokens = tokenize("coproc MYC time echo hi | { read value; echo $value; }");
+    let brace_ast = parse(&brace_tokens);
+
+    let if_time = if_ast.commands[0]
+        .coproc_command
+        .as_ref()
+        .unwrap()
+        .body
+        .as_ref()
+        .unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+    let subshell_time = subshell_ast.commands[0]
+        .coproc_command
+        .as_ref()
+        .unwrap()
+        .body
+        .as_ref()
+        .unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+    let brace_time = brace_ast.commands[0]
+        .coproc_command
+        .as_ref()
+        .unwrap()
+        .body
+        .as_ref()
+        .unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+
+    let if_pipeline = if_time.command.pipeline_command.as_ref().unwrap();
+    let subshell_pipeline = subshell_time.command.pipeline_command.as_ref().unwrap();
+    let brace_pipeline = brace_time.command.pipeline_command.as_ref().unwrap();
+
+    assert_eq!(if_pipeline.operators, ["|"]);
+    assert_eq!(subshell_pipeline.operators, ["|"]);
+    assert_eq!(brace_pipeline.operators, ["|"]);
+    assert!(if_pipeline.stages[1].if_command.is_some());
+    assert!(subshell_pipeline.stages[1].subshell_command.is_some());
+    assert!(brace_pipeline.stages[1].brace_group.is_some());
+}
+
+#[test]
 fn test_coproc_time_compound_body_is_not_named_shell_command() {
     let cases = [
         "coproc MYC time -p for x in a; do echo $x; done",
