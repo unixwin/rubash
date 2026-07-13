@@ -27,6 +27,15 @@ impl Executor {
                     &mut std::io::stderr().lock(),
                 )?);
             }
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                return Ok(crate::builtins::printf::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut file,
+                    &mut std::io::stderr().lock(),
+                )?);
+            }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             return Ok(crate::builtins::printf::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
@@ -38,6 +47,15 @@ impl Executor {
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                return Ok(crate::builtins::printf::execute_with_io(
+                    cmd.words[1..].iter().map(String::as_str),
+                    &mut self.env_vars,
+                    &mut file,
+                    &mut std::io::stderr().lock(),
+                )?);
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)

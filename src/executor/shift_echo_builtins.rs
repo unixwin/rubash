@@ -217,6 +217,11 @@ impl Executor {
                 )?;
                 return Ok(());
             }
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
+                return Ok(());
+            }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
             return Ok(());
@@ -243,6 +248,11 @@ impl Executor {
                     echo_args.iter().map(String::as_str),
                     &mut std::io::sink(),
                 )?;
+                return Ok(());
+            }
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
                 return Ok(());
             }
             let mut file = OpenOptions::new()

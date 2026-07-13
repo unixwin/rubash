@@ -132,6 +132,10 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        if let Some(status) = self.execute_dynamic_fd_exec_redirect(cmd)? {
+            return Ok(status);
+        }
+
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
@@ -189,15 +193,91 @@ impl Executor {
         )?)
     }
 
+    fn execute_dynamic_fd_exec_redirect(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<i32>, ExecuteError> {
+        let Some(name) = cmd.words.get(1).and_then(|word| dynamic_fd_var_name(word)) else {
+            return Ok(None);
+        };
+        if cmd.words.len() != 2 {
+            return Ok(None);
+        }
+
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                if let Some(fd) = self
+                    .env_vars
+                    .get(name)
+                    .and_then(|value| value.parse::<u32>().ok())
+                {
+                    self.env_vars.remove(&fd_output_key(fd));
+                }
+                self.env_vars.remove(name);
+                return Ok(Some(0));
+            }
+
+            let fd = self.allocate_dynamic_output_fd();
+            self.create_redirect_output(&target, redirect.clobber)?;
+            self.env_vars.insert(name.to_string(), fd.to_string());
+            self.env_vars.insert(fd_output_key(fd), target);
+            return Ok(Some(0));
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            let fd = self.allocate_dynamic_output_fd();
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            self.env_vars.insert(name.to_string(), fd.to_string());
+            self.env_vars.insert(fd_output_key(fd), target);
+            return Ok(Some(0));
+        }
+
+        Ok(None)
+    }
+
+    fn allocate_dynamic_output_fd(&self) -> u32 {
+        (10..1024)
+            .find(|fd| !self.env_vars.contains_key(&fd_output_key(*fd)))
+            .unwrap_or(10)
+    }
+
     pub(in crate::executor) fn execute_exec_command(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         let status = self.execute_exec(cmd)?;
+        let dynamic_fd_redirect = is_dynamic_fd_exec_redirect(cmd);
         self.exit_code = status;
-        if crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
+        if !dynamic_fd_redirect && crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
             return Err(ExecuteError::ExitCode(status));
         }
         Ok(())
     }
+}
+
+fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
+    cmd.words.len() == 2
+        && cmd
+            .words
+            .get(1)
+            .and_then(|word| dynamic_fd_var_name(word))
+            .is_some()
+        && (cmd.redirect_out.is_some() || cmd.append.is_some())
+}
+
+fn dynamic_fd_var_name(word: &str) -> Option<&str> {
+    let name = word.strip_prefix('{')?.strip_suffix('}')?;
+    let mut chars = name.chars();
+    let first = chars.next()?;
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    chars
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        .then_some(name)
 }

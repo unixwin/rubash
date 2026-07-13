@@ -13,6 +13,28 @@ impl Executor {
         File::create(path)
     }
 
+    pub(in crate::executor) fn open_output_fd_append(&self, target: &str) -> io::Result<File> {
+        let fd = redirect_target_fd(target)
+            .and_then(|fd| self.env_vars.get(&fd_output_key(fd)))
+            .cloned();
+        let Some(path) = fd else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "bad file descriptor",
+            ));
+        };
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(shell_path_to_windows(&path, &self.env_vars))
+    }
+
+    pub(in crate::executor) fn has_output_fd_target(&self, target: &str) -> bool {
+        redirect_target_fd(target)
+            .map(|fd| self.env_vars.contains_key(&fd_output_key(fd)))
+            .unwrap_or(false)
+    }
+
     pub(in crate::executor) fn apply_simple_set_flags(&mut self, args: &[String]) -> bool {
         if args.is_empty() {
             return false;
