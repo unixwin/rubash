@@ -21,7 +21,9 @@ pub(super) fn parse_function_command(
         return None;
     }
 
-    let has_parentheses = tokens.get(i).is_some_and(|token| token.value == "(");
+    let has_parentheses = tokens.get(i).is_some_and(|token| {
+        token.value == "(" && tokens.get(i + 1).is_some_and(|next| next.value == ")")
+    });
     if has_parentheses {
         if tokens.get(i + 1)?.value != ")" {
             return None;
