@@ -49,6 +49,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             element_index,
             brace_expansions: brace_expansions_in_word(value),
             parameter_expansions: parameter_expansions_in_word(value),
+            arithmetic_expansions: arithmetic_expansions_in_word(value),
         };
     }
 
@@ -61,6 +62,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             element_index,
             brace_expansions: brace_expansions_in_word(value),
             parameter_expansions: parameter_expansions_in_word(value),
+            arithmetic_expansions: arithmetic_expansions_in_word(value),
         };
     }
 
@@ -72,6 +74,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         element_index,
         brace_expansions: brace_expansions_in_word(word),
         parameter_expansions: parameter_expansions_in_word(word),
+        arithmetic_expansions: arithmetic_expansions_in_word(word),
     }
 }
 

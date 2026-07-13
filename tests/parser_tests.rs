@@ -2411,6 +2411,19 @@ mod assignment_tests {
             Some("five six")
         );
         assert_eq!(compound[0].elements[2].value, "\"$[count + 1]\"");
+        assert_eq!(compound[0].elements[2].arithmetic_expansions.len(), 1);
+        assert_eq!(
+            compound[0].elements[2].arithmetic_expansions[0].open_delimiter,
+            "$["
+        );
+        assert_eq!(
+            compound[0].elements[2].arithmetic_expansions[0].expression,
+            "count + 1"
+        );
+        assert_eq!(
+            compound[0].elements[2].arithmetic_expansions[0].variables,
+            ["count"]
+        );
     }
 
     #[test]
