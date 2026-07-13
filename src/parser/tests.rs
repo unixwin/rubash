@@ -207,3 +207,18 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(for_command.body_close_delimiter.as_deref(), Some("done"));
     assert_eq!(for_command.body[0].words, ["echo", "$i"]);
 }
+
+#[test]
+fn test_parse_compact_arithmetic_for_empty_test() {
+    let tokens = tokenize("for ((i=0;;i++)); do echo $i; done");
+    let ast = parse(&tokens);
+    let for_command = ast.commands[0].for_command.as_ref().unwrap();
+    let arithmetic = for_command.arithmetic.as_ref().unwrap();
+
+    assert_eq!(arithmetic.init, "i=0");
+    assert_eq!(arithmetic.test, "");
+    assert_eq!(arithmetic.update, "i++");
+    assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+    assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
+    assert_eq!(for_command.body[0].words, ["echo", "$i"]);
+}

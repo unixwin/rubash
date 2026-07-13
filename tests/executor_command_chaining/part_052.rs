@@ -79,6 +79,25 @@ fn test_arithmetic_for_loop_break_continue_and_empty_test() {
 }
 
 #[test]
+fn test_compact_arithmetic_for_empty_test_executes() {
+    let output_path = "target/rubash-compact-arithmetic-for-empty-test-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "for ((i=0;;i++)); do echo $i >> {output_path}; if (( i == 2 )); then break; fi; done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n2\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_arithmetic_for_loop_exit_status_matches_body_or_zero_iterations() {
     let output_path = "target/rubash-arithmetic-for-status-output.txt";
     let _ = fs::remove_file(output_path);

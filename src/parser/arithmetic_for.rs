@@ -36,6 +36,15 @@ pub(super) fn parse_arithmetic_for_command(
             continue;
         }
 
+        if paren_depth == 0 && tokens[i].value == ";;" {
+            part_index += 2;
+            if part_index > 2 {
+                return None;
+            }
+            i += 1;
+            continue;
+        }
+
         if is_keyword(tokens, i, "(") {
             paren_depth += 1;
             parts[part_index].push(tokens[i].value.clone());
