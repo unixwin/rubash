@@ -150,18 +150,6 @@ pub(super) fn assign_redirect_err_append_target(
     Some(index + 1)
 }
 
-fn redirect_target_token(tokens: &[Token], index: usize) -> Option<&Token> {
-    tokens.get(index + 1).filter(|target| {
-        matches!(
-            target.kind,
-            TokenKind::Word
-                | TokenKind::Variable
-                | TokenKind::CommandSubst
-                | TokenKind::HereDocBody
-        )
-    })
-}
-
 pub(super) fn assign_output_redirect(
     command: &mut CommandNode,
     operator: &str,

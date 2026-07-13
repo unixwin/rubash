@@ -109,15 +109,7 @@ pub(super) fn collect_trailing_redirections(
             }
         }
 
-        let Some(target) = tokens.get(*index + 1).filter(|next| {
-            matches!(
-                next.kind,
-                TokenKind::Word
-                    | TokenKind::Variable
-                    | TokenKind::CommandSubst
-                    | TokenKind::HereDocBody
-            )
-        }) else {
+        let Some(target) = redirect_target_token(tokens, *index) else {
             break;
         };
 
@@ -205,6 +197,24 @@ pub(super) fn assign_here_string_process_substitution(
     let target = process_substitution.target.clone();
     command.process_substitutions.push(process_substitution);
     assign_here_string_redirect(command, operator, &target);
+}
+
+pub(super) fn redirect_target_token(tokens: &[Token], index: usize) -> Option<&Token> {
+    tokens
+        .get(index + 1)
+        .filter(|target| is_redirect_target_token(target))
+}
+
+pub(super) fn is_redirect_target_token(token: &Token) -> bool {
+    matches!(
+        token.kind,
+        TokenKind::Word
+            | TokenKind::Variable
+            | TokenKind::Assignment
+            | TokenKind::CommandSubst
+            | TokenKind::BraceExpand
+            | TokenKind::HereDocBody
+    )
 }
 
 pub(super) fn take_adjacent_redirect_fd_prefix(

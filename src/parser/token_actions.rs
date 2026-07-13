@@ -224,9 +224,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.words.push(target);
                     state.current_cmd.word_kinds.push(TokenKind::Word);
                     *i = next_i;
-                } else if *i + 1 < tokens.len()
-                    && matches!(tokens[*i + 1].kind, TokenKind::Word | TokenKind::Variable)
-                {
+                } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     state.current_cmd.redirect_in = Some(redirect_node(
                         &token.value,
                         fd,

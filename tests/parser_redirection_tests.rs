@@ -28,6 +28,29 @@ fn test_output_redirect_without_space_after_word() {
 }
 
 #[test]
+fn test_redirect_target_can_look_like_assignment_word() {
+    let input = "echo hello > name=value";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["echo", "hello"]);
+    assert!(command.assignments.is_empty());
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "name=value");
+}
+
+#[test]
+fn test_redirect_target_can_be_brace_expansion_word() {
+    let input = "echo hello > {out,err}";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["echo", "hello"]);
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "{out,err}");
+}
+
+#[test]
 fn test_clobber_output_redirect() {
     let input = "echo hello >| file.txt";
     let tokens = tokenize(input);
@@ -332,6 +355,20 @@ fn test_input_redirect_without_space() {
 }
 
 #[test]
+fn test_input_redirect_target_can_be_command_substitution_word() {
+    let input = "cat < $(printf input.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["cat"]);
+    assert_eq!(
+        command.redirect_in.as_ref().unwrap().target,
+        "$(printf input.txt)"
+    );
+}
+
+#[test]
 fn test_input_redirect_fd_prefix_without_space() {
     let input = "cat 0<input.txt";
     let tokens = tokenize(input);
@@ -483,6 +520,17 @@ fn test_trailing_here_string_process_substitution_word() {
     assert_eq!(command.process_substitutions.len(), 1);
     assert_eq!(command.process_substitutions[0].target, "<(printf data)");
     assert_eq!(command.process_substitutions[0].source, "printf data");
+}
+
+#[test]
+fn test_trailing_redirect_target_can_look_like_assignment_word() {
+    let input = "{ echo hello; } > name=value";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert!(command.brace_group.is_some());
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "name=value");
 }
 
 #[test]
