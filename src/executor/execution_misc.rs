@@ -30,6 +30,14 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
         .flatten()
 }
 
+pub(in crate::executor) fn stdio_output_target(fd: u32) -> Option<&'static str> {
+    match fd {
+        1 => Some(FD_STDOUT_TARGET),
+        2 => Some(FD_STDERR_TARGET),
+        _ => None,
+    }
+}
+
 pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -> bool {
     cmd.heredoc
         .as_deref()

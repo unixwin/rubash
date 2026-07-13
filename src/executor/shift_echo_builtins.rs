@@ -218,8 +218,12 @@ impl Executor {
                 return Ok(());
             }
             if self.has_output_fd_target(&target) {
-                let mut file = self.open_output_fd_append(&target)?;
-                crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
+                let mut output = Vec::new();
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut output,
+                )?;
+                self.write_output_fd_redirect(&target, &output)?;
                 return Ok(());
             }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
@@ -251,8 +255,12 @@ impl Executor {
                 return Ok(());
             }
             if self.has_output_fd_target(&target) {
-                let mut file = self.open_output_fd_append(&target)?;
-                crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut file)?;
+                let mut output = Vec::new();
+                crate::builtins::echo::write_echo(
+                    echo_args.iter().map(String::as_str),
+                    &mut output,
+                )?;
+                self.write_output_fd_redirect(&target, &output)?;
                 return Ok(());
             }
             let mut file = OpenOptions::new()

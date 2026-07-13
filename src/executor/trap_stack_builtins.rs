@@ -14,6 +14,7 @@ impl Executor {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
+            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(stdout)?;
@@ -25,6 +26,7 @@ impl Executor {
                 std::io::stderr().lock().write_all(stdout)?;
             } else if redirect_target_fd(&target) == Some(1) {
                 std::io::stdout().lock().write_all(stdout)?;
+            } else if self.write_output_fd_redirect(&target, stdout)? {
             } else {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -45,6 +47,7 @@ impl Executor {
                 } else {
                     std::io::stdout().lock().write_all(stderr)?;
                 }
+            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else if !is_null_device(&target) {
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(stderr)?;
@@ -58,6 +61,7 @@ impl Executor {
                 } else {
                     std::io::stdout().lock().write_all(stderr)?;
                 }
+            } else if self.write_output_fd_redirect(&target, stderr)? {
             } else {
                 let mut file = OpenOptions::new()
                     .create(true)

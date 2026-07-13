@@ -76,6 +76,32 @@ fn c_command_redirects_stdout_with_default_fd_duplication() {
 }
 
 #[test]
+fn c_command_exec_numeric_fd_copies_default_stdout() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("exec 3>&1; echo via-fd >&3")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "via-fd\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn c_command_exec_numeric_fd_copies_default_stderr() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("exec 3>&2; echo via-fd >&3")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "via-fd\n");
+}
+
+#[test]
 fn script_file_uses_script_name_and_positional_arguments() {
     let script_path = Path::new("target").join("rubash-cli-script-args.sh");
     fs::create_dir_all("target").unwrap();

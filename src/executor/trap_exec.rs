@@ -317,6 +317,10 @@ impl Executor {
         } else if let Some(target) = self.env_vars.get(&fd_output_key(source_fd)).cloned() {
             self.env_vars.remove(&fd_closed_key(target_fd));
             self.env_vars.insert(fd_output_key(target_fd), target);
+        } else if let Some(target) = stdio_output_target(source_fd) {
+            self.env_vars.remove(&fd_closed_key(target_fd));
+            self.env_vars
+                .insert(fd_output_key(target_fd), target.to_string());
         } else {
             self.env_vars.remove(&fd_output_key(target_fd));
             self.env_vars.remove(&fd_closed_key(target_fd));

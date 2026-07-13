@@ -23,10 +23,41 @@ impl Executor {
                 "bad file descriptor",
             ));
         };
+        if matches!(path.as_str(), FD_STDOUT_TARGET | FD_STDERR_TARGET) {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "stdio file descriptor",
+            ));
+        }
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(shell_path_to_windows(&path, &self.env_vars))
+    }
+
+    pub(in crate::executor) fn write_output_fd_redirect(
+        &mut self,
+        target: &str,
+        output: &[u8],
+    ) -> Result<bool, ExecuteError> {
+        let Some(fd) = redirect_target_fd(target) else {
+            return Ok(false);
+        };
+        let Some(fd_target) = self.env_vars.get(&fd_output_key(fd)).cloned() else {
+            return Ok(false);
+        };
+        match fd_target.as_str() {
+            FD_STDOUT_TARGET => std::io::stdout().lock().write_all(output)?,
+            FD_STDERR_TARGET => std::io::stderr().lock().write_all(output)?,
+            path => {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(path, &self.env_vars))?;
+                file.write_all(output)?;
+            }
+        }
+        Ok(true)
     }
 
     pub(in crate::executor) fn write_default_stdout(
