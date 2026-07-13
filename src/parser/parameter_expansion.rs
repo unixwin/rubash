@@ -226,11 +226,11 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
 }
 
 fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<String>) {
-    if let Some(name) = parameter.strip_prefix('#') {
+    if let Some(name) = parameter.strip_prefix('#').filter(|name| !name.is_empty()) {
         return (name.to_string(), Some("#".to_string()), true, None);
     }
 
-    if let Some(name) = parameter.strip_prefix('!') {
+    if let Some(name) = parameter.strip_prefix('!').filter(|name| !name.is_empty()) {
         return (name.to_string(), Some("!".to_string()), true, None);
     }
 
