@@ -93,6 +93,23 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_wraps_simple_command_in_and_or_list() {
+        let input = "time -p ! false || echo fallback";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        assert_eq!(list.operators, ["||"]);
+        let time_command = list.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p", "!"]);
+        assert!(time_command.posix_format);
+        assert!(time_command.inverted);
+        assert_eq!(time_command.command.words, ["false"]);
+        assert_eq!(list.commands[1].words, ["echo", "fallback"]);
+    }
+
+    #[test]
     fn test_multiple_pipeline() {
         let input = "ls | grep foo | sort";
         let tokens = tokenize(input);

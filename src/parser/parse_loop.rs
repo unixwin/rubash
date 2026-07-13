@@ -38,6 +38,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
 
     state.ast.commands = fold_pipeline_commands(state.ast.commands);
     state.ast.commands = fold_time_pipeline_commands(state.ast.commands);
+    state.ast.commands = fold_time_simple_commands(state.ast.commands);
     state.ast.commands = fold_inverted_commands(state.ast.commands);
     state.ast.commands = fold_and_or_list_commands(state.ast.commands);
     state.ast.commands = fold_background_commands(state.ast.commands);
@@ -243,7 +244,62 @@ struct TimePipelinePrefix {
 
 fn time_prefix_from_pipeline(pipeline: &mut PipelineCommand) -> Option<TimePipelinePrefix> {
     let first = pipeline.stages.first_mut()?;
-    if first.words.first().map(String::as_str) != Some("time") {
+    time_prefix_from_command(first)
+}
+
+fn fold_time_simple_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    commands
+        .into_iter()
+        .map(|mut command| {
+            if !command_is_time_simple_candidate(&command) {
+                return command;
+            }
+            let Some(prefix) = time_prefix_from_command(&mut command) else {
+                return command;
+            };
+
+            let line = command.line;
+            let and_or = command.and_or.take();
+            let background = command.background;
+            command.background = false;
+            let mut timed = CommandNode::new();
+            timed.line = line;
+            timed.and_or = and_or;
+            timed.background = background;
+            timed.time_command = Some(TimeCommand {
+                keyword: prefix.keyword,
+                prefix_words: prefix.prefix_words,
+                command: Box::new(command),
+                posix_format: prefix.posix_format,
+                inverted: prefix.inverted,
+            });
+            timed
+        })
+        .collect()
+}
+
+fn command_is_time_simple_candidate(command: &CommandNode) -> bool {
+    command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.time_command.is_none()
+        && command.background_command.is_none()
+        && command.inverted_command.is_none()
+        && !command.inverted
+        && command.for_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.if_command.is_none()
+        && command.loop_command.is_none()
+        && command.conditional_command.is_none()
+        && command.subshell_command.is_none()
+        && command.case_command.is_none()
+        && command.select_command.is_none()
+        && command.function_command.is_none()
+        && command.brace_group.is_none()
+        && command.coproc_command.is_none()
+}
+
+fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePrefix> {
+    if command.words.first().map(String::as_str) != Some("time") {
         return None;
     }
 
@@ -251,7 +307,7 @@ fn time_prefix_from_pipeline(pipeline: &mut PipelineCommand) -> Option<TimePipel
     let mut posix_format = false;
     let mut inverted = false;
     let mut prefix_words = Vec::new();
-    while let Some(word) = first.words.get(index).map(String::as_str) {
+    while let Some(word) = command.words.get(index).map(String::as_str) {
         match word {
             "-p" | "--" | "!" => {
                 prefix_words.push(word.to_string());
@@ -265,14 +321,15 @@ fn time_prefix_from_pipeline(pipeline: &mut PipelineCommand) -> Option<TimePipel
             _ => break,
         }
     }
-    if index >= first.words.len() {
+    if index >= command.words.len() {
         return None;
     }
 
-    let keyword = first.words[0].clone();
-    first.words = first.words[index..].to_vec();
-    if first.word_kinds.len() == first.words.len() + index {
-        first.word_kinds = first.word_kinds[index..].to_vec();
+    let keyword = command.words[0].clone();
+    let old_word_len = command.words.len();
+    command.words = command.words[index..].to_vec();
+    if command.word_kinds.len() == old_word_len {
+        command.word_kinds = command.word_kinds[index..].to_vec();
     }
     Some(TimePipelinePrefix {
         keyword,

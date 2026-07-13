@@ -257,8 +257,9 @@ fn test_time_command_redirects_timed_command_stdout() {
     let input = format!("time -p echo hi > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words[0], "time");
-    assert!(ast.commands[0].redirect_out.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert_eq!(time_command.command.words, ["echo", "hi"]);
+    assert!(time_command.command.redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
@@ -276,8 +277,10 @@ fn test_time_command_inverts_timed_status_with_redirect() {
     let input = format!("time ! false > {output_path}; echo $? >> {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert_eq!(ast.commands[0].words, ["time", "!", "false"]);
-    assert!(ast.commands[0].redirect_out.is_some());
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert!(time_command.inverted);
+    assert_eq!(time_command.command.words, ["false"]);
+    assert!(time_command.command.redirect_out.is_some());
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
