@@ -67,7 +67,9 @@ fn parameter_expansions_in_word(word: &str) -> Vec<ParameterExpansion> {
                 continue;
             }
             if let Some((expansion, next_index)) = braced_parameter_expansion(&chars, index) {
+                let nested = parameter_expansions_in_word(&expansion.parameter);
                 expansions.push(expansion);
+                expansions.extend(nested);
                 index = next_index;
                 continue;
             }

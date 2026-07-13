@@ -2653,6 +2653,38 @@ mod parameter_expansion_tests {
     }
 
     #[test]
+    fn test_parameter_expansion_records_nested_expansions() {
+        let input =
+            "echo ${outer:-${inner:-fallback}} ${name/${old:-x}/${new:-y}} ${array[${idx:-0}]}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 7);
+        assert_eq!(expansions[0].text, "${outer:-${inner:-fallback}}");
+        assert_eq!(expansions[0].name, "outer");
+        assert_eq!(expansions[0].operator.as_deref(), Some(":-"));
+        assert_eq!(expansions[0].word.as_deref(), Some("${inner:-fallback}"));
+        assert_eq!(expansions[1].text, "${inner:-fallback}");
+        assert_eq!(expansions[1].name, "inner");
+        assert_eq!(expansions[1].operator.as_deref(), Some(":-"));
+        assert_eq!(expansions[2].text, "${name/${old:-x}/${new:-y}}");
+        assert_eq!(expansions[2].name, "name");
+        assert_eq!(expansions[2].operator.as_deref(), Some("/"));
+        assert_eq!(expansions[2].word.as_deref(), Some("${old:-x}/${new:-y}"));
+        assert_eq!(expansions[3].text, "${old:-x}");
+        assert_eq!(expansions[3].name, "old");
+        assert_eq!(expansions[4].text, "${new:-y}");
+        assert_eq!(expansions[4].name, "new");
+        assert_eq!(expansions[5].text, "${array[${idx:-0}]}");
+        assert_eq!(expansions[5].name, "array[${idx:-0}]");
+        assert_eq!(expansions[5].operator, None);
+        assert_eq!(expansions[6].text, "${idx:-0}");
+        assert_eq!(expansions[6].name, "idx");
+    }
+
+    #[test]
     fn test_parameter_expansion_does_not_treat_array_at_as_transform_operator() {
         let input = "echo ${array[@]} ${array[*]@Q}";
         let tokens = tokenize(input);

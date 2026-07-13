@@ -162,9 +162,41 @@ impl<'a> Lexer<'a> {
         }
     }
     pub(super) fn skip_braced(&mut self) {
+        let mut depth = 1usize;
+        let mut double = false;
+        let mut escaped = false;
         while let Some(c) = self.advance() {
-            if c == '}' {
-                break;
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+
+            match c {
+                '"' => double = !double,
+                '$' if self.peek() == Some('{') => {
+                    self.advance();
+                    depth += 1;
+                }
+                '$' if self.peek() == Some('(') => {
+                    self.advance();
+                    self.skip_cmd_subst();
+                }
+                '$' if self.peek() == Some('[') => {
+                    self.advance();
+                    self.skip_arith_bracket();
+                }
+                '}' if !double => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
             }
         }
     }

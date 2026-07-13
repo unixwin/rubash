@@ -38,6 +38,25 @@ fn test_command_substitution_here_string_does_not_swallow_following_heredoc() {
 }
 
 #[test]
+fn test_nested_braced_parameter_stays_in_one_word() {
+    let tokens = tokenize("echo ${outer:-${inner:-fallback}} ${array[${idx:-0}]}");
+
+    assert_eq!(tokens[1].value, "${outer:-${inner:-fallback}}");
+    assert_eq!(tokens[2].value, "${array[${idx:-0}]}");
+    assert!(tokens
+        .iter()
+        .all(|token| token.value != "}" || token.kind == TokenKind::HereDocBody));
+}
+
+#[test]
+fn test_braced_parameter_single_quotes_do_not_swallow_closing_brace() {
+    let tokens = tokenize("echo ${IFS+'bar} ${v/$'\\''/x}");
+
+    assert_eq!(tokens[1].value, "${IFS+'bar}");
+    assert_eq!(tokens[2].value, "${v/$'\\''/x}");
+}
+
+#[test]
 fn test_comment_skip() {
     let tokens = tokenize("ls # comment");
     assert_eq!(tokens[0].value, "ls");
