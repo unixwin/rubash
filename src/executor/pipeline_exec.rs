@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::external_setup::shared_combined_output_process_substitution;
 
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
@@ -29,10 +30,17 @@ impl Executor {
         command: &CommandNode,
     ) -> Result<bool, ExecuteError> {
         if let Some(brace_group) = &command.brace_group {
+            let mut redirect_command = command.clone();
+            let group_outputs =
+                self.materialize_compound_output_process_substitutions(&mut redirect_command)?;
             let mut body = brace_group.body.clone();
-            self.apply_brace_group_redirects(command, &mut body)?;
+            self.apply_brace_group_redirects(&redirect_command, &mut body)?;
             let ast = Ast { commands: body };
-            self.with_command_input_redirects(command, |executor| executor.execute_ast(&ast))?;
+            let result =
+                self.with_command_input_redirects(command, |executor| executor.execute_ast(&ast));
+            let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+            result?;
+            finish_result?;
             return Ok(true);
         }
 
@@ -64,6 +72,103 @@ impl Executor {
         let ast = crate::parser::parse(&tokens);
         self.execute_ast(&ast)?;
         Ok(true)
+    }
+
+    fn materialize_compound_output_process_substitutions(
+        &mut self,
+        command: &mut CommandNode,
+    ) -> Result<Vec<(PathBuf, String)>, ExecuteError> {
+        let mut outputs = Vec::new();
+        if let Some(source) = shared_combined_output_process_substitution(
+            command.redirect_out.as_ref(),
+            command.redirect_err_append.as_ref(),
+        ) {
+            let path = self.empty_process_substitution_temp()?;
+            let display_path = shell_display_path(&path.to_string_lossy());
+            if let Some(redirect) = &mut command.redirect_out {
+                redirect.target = display_path.clone();
+            }
+            if let Some(redirect) = &mut command.redirect_err_append {
+                redirect.target = display_path;
+            }
+            outputs.push((path, source));
+        }
+        if let Some(source) = shared_combined_output_process_substitution(
+            command.append.as_ref(),
+            command.redirect_err_append.as_ref(),
+        ) {
+            let path = self.empty_process_substitution_temp()?;
+            let display_path = shell_display_path(&path.to_string_lossy());
+            if let Some(redirect) = &mut command.append {
+                redirect.target = display_path.clone();
+            }
+            if let Some(redirect) = &mut command.redirect_err_append {
+                redirect.target = display_path;
+            }
+            outputs.push((path, source));
+        }
+
+        if let Some(output) =
+            self.materialize_compound_output_redirect(&mut command.redirect_out)?
+        {
+            outputs.push(output);
+        }
+        if let Some(output) = self.materialize_compound_output_redirect(&mut command.append)? {
+            outputs.push(output);
+        }
+        if let Some(output) =
+            self.materialize_compound_output_redirect(&mut command.redirect_err)?
+        {
+            outputs.push(output);
+        }
+        if let Some(output) =
+            self.materialize_compound_output_redirect(&mut command.redirect_err_append)?
+        {
+            outputs.push(output);
+        }
+        Ok(outputs)
+    }
+
+    fn materialize_compound_output_redirect(
+        &mut self,
+        redirect: &mut Option<Redirect>,
+    ) -> Result<Option<(PathBuf, String)>, ExecuteError> {
+        let Some(redirect) = redirect else {
+            return Ok(None);
+        };
+        let Some(source) = redirect
+            .target
+            .strip_prefix(">(")
+            .and_then(|target| target.strip_suffix(')'))
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        let path = self.empty_process_substitution_temp()?;
+        redirect.target = shell_display_path(&path.to_string_lossy());
+        Ok(Some((path, source)))
+    }
+
+    fn finish_compound_output_process_substitutions(
+        &mut self,
+        outputs: Vec<(PathBuf, String)>,
+    ) -> Result<(), ExecuteError> {
+        let mut error = None;
+        for (path, source) in outputs {
+            if error.is_none() {
+                let input = fs::read_to_string(&path).unwrap_or_default();
+                if let Err(output_error) =
+                    self.execute_persistent_output_process_substitution(&source, input)
+                {
+                    error = Some(output_error);
+                }
+            }
+            let _ = fs::remove_file(path);
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_simple_pipeline(

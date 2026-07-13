@@ -24,7 +24,7 @@ fn exec_keeps_output_process_substitution(words: &[String], redirect: &Redirect)
         || matches!(words, [command, fd] if command == "exec" && dynamic_fd_word(fd).is_some())
 }
 
-fn shared_combined_output_process_substitution(
+pub(in crate::executor) fn shared_combined_output_process_substitution(
     first: Option<&Redirect>,
     second: Option<&Redirect>,
 ) -> Option<String> {

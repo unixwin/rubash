@@ -451,7 +451,7 @@ impl Executor {
         Ok(())
     }
 
-    fn execute_persistent_output_process_substitution(
+    pub(in crate::executor) fn execute_persistent_output_process_substitution(
         &mut self,
         source: &str,
         input: String,
