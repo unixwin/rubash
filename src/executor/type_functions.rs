@@ -73,6 +73,13 @@ impl Executor {
         command: &CommandNode,
         terminates_plain_commands: bool,
     ) -> Option<String> {
+        if function_definition_command_uses_source_text(command) {
+            let line = bash_command_source_text(command);
+            if !line.trim().is_empty() {
+                return Some(line);
+            }
+        }
+
         if command.words.is_empty() {
             return None;
         }
