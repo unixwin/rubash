@@ -235,7 +235,8 @@ fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<Str
     }
 
     for operator in [
-        ":-", ":=", ":?", ":+", "##", "%%", "//", "-", "=", "?", "+", "#", "%", "/",
+        ":-", ":=", ":?", ":+", "##", "%%", "//", "^^", ",,", "~~", "-", "=", "?", "+", "#", "%",
+        "/", "^", ",", "~", "@",
     ] {
         if let Some(index) = top_level_operator(parameter, operator) {
             return (
@@ -256,6 +257,7 @@ fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
     let mut index = 0usize;
     let mut brace_depth = 0usize;
     let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
     let mut single = false;
     let mut double = false;
     while index < chars.len() {
@@ -275,6 +277,8 @@ fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
             '}' if !single && !double && brace_depth > 0 => brace_depth -= 1,
             '(' if !single && !double => paren_depth += 1,
             ')' if !single && !double && paren_depth > 0 => paren_depth -= 1,
+            '[' if !single && !double => bracket_depth += 1,
+            ']' if !single && !double && bracket_depth > 0 => bracket_depth -= 1,
             _ => {}
         }
 
@@ -282,6 +286,7 @@ fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
             && !double
             && brace_depth == 0
             && paren_depth == 0
+            && bracket_depth == 0
             && chars[index..].starts_with(&operator_chars)
             && operator_can_start(parameter, index, operator)
         {

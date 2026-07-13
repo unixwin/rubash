@@ -2399,6 +2399,52 @@ mod parameter_expansion_tests {
         assert!(!expansions[1].operator_prefix);
         assert_eq!(expansions[1].word.as_deref(), Some("prefix"));
     }
+
+    #[test]
+    fn test_parameter_expansion_records_transform_operators() {
+        let input = "echo ${name^} ${name^^[a-z]} ${name,} ${name,,[A-Z]} ${path~glob} ${name@Q}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 6);
+        assert_eq!(expansions[0].name, "name");
+        assert_eq!(expansions[0].operator.as_deref(), Some("^"));
+        assert_eq!(expansions[0].word.as_deref(), Some(""));
+        assert_eq!(expansions[1].name, "name");
+        assert_eq!(expansions[1].operator.as_deref(), Some("^^"));
+        assert_eq!(expansions[1].word.as_deref(), Some("[a-z]"));
+        assert_eq!(expansions[2].name, "name");
+        assert_eq!(expansions[2].operator.as_deref(), Some(","));
+        assert_eq!(expansions[2].word.as_deref(), Some(""));
+        assert_eq!(expansions[3].name, "name");
+        assert_eq!(expansions[3].operator.as_deref(), Some(",,"));
+        assert_eq!(expansions[3].word.as_deref(), Some("[A-Z]"));
+        assert_eq!(expansions[4].name, "path");
+        assert_eq!(expansions[4].operator.as_deref(), Some("~"));
+        assert_eq!(expansions[4].word.as_deref(), Some("glob"));
+        assert_eq!(expansions[5].name, "name");
+        assert_eq!(expansions[5].operator.as_deref(), Some("@"));
+        assert_eq!(expansions[5].word.as_deref(), Some("Q"));
+    }
+
+    #[test]
+    fn test_parameter_expansion_does_not_treat_array_at_as_transform_operator() {
+        let input = "echo ${array[@]} ${array[*]@Q}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].name, "array[@]");
+        assert_eq!(expansions[0].operator, None);
+        assert_eq!(expansions[0].word, None);
+        assert_eq!(expansions[1].name, "array[*]");
+        assert_eq!(expansions[1].operator.as_deref(), Some("@"));
+        assert_eq!(expansions[1].word.as_deref(), Some("Q"));
+    }
 }
 
 mod brace_expansion_tests {
