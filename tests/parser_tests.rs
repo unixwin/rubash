@@ -1396,6 +1396,23 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_keeps_process_substitution_elements() {
+        let input = "arr=(<(:) >(:) [two]=<(:))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].value, "(<(:) >(:) [two]=<(:))");
+        assert_eq!(compound[0].elements.len(), 3);
+        assert_eq!(compound[0].elements[0].value, "<(:)");
+        assert_eq!(compound[0].elements[1].value, ">(:)");
+        assert_eq!(compound[0].elements[2].subscript.as_deref(), Some("two"));
+        assert_eq!(compound[0].elements[2].value, "<(:)");
+    }
+
+    #[test]
     fn test_array_element_assignment_records_structured_ast() {
         let input = "arr[0]=zero arr[i+1]+=more";
         let tokens = tokenize(input);

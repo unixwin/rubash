@@ -1,5 +1,5 @@
 use super::*;
-use crate::lexer::{Token, TokenKind};
+use crate::lexer::Token;
 
 pub(super) fn compound_assignment_from_word(
     word: &str,
@@ -131,6 +131,13 @@ pub(super) fn collect_compound_assignment(
     let mut values = Vec::new();
     while i < tokens.len() && !is_keyword(tokens, i, ")") {
         if let Some((left, rhs)) = compound_subscript_assignment(&tokens[i].value) {
+            if rhs.is_empty() {
+                if let Some((word, next_i)) = collect_compound_word_value(tokens, i + 1) {
+                    values.push(format!("{}{}", left, quote_compound_assignment_word(&word)));
+                    i = next_i;
+                    continue;
+                }
+            }
             values.push(format!("{}{}", left, quote_compound_assignment_word(rhs)));
             i += 1;
             continue;
@@ -158,27 +165,27 @@ pub(super) fn collect_compound_assignment(
                 j += 1;
             }
 
-            if j + 1 < tokens.len() && matches!(tokens[j].value.as_str(), "=" | "+=") {
-                values.push(format!(
-                    "[{}]{}{}",
-                    quote_compound_assignment_word(&subscript),
-                    tokens[j].value,
-                    quote_compound_assignment_word(&tokens[j + 1].value)
-                ));
-                i = j + 2;
-                continue;
+            if matches!(
+                tokens.get(j).map(|token| token.value.as_str()),
+                Some("=" | "+=")
+            ) {
+                if let Some((rhs, next_i)) = collect_compound_word_value(tokens, j + 1) {
+                    values.push(format!(
+                        "[{}]{}{}",
+                        quote_compound_assignment_word(&subscript),
+                        tokens[j].value,
+                        quote_compound_assignment_word(&rhs)
+                    ));
+                    i = next_i;
+                    continue;
+                }
             }
         }
 
-        if matches!(
-            tokens[i].kind,
-            TokenKind::Word
-                | TokenKind::Variable
-                | TokenKind::Assignment
-                | TokenKind::CommandSubst
-                | TokenKind::BraceExpand
-        ) {
-            values.push(quote_compound_assignment_word(&tokens[i].value));
+        if let Some((word, next_i)) = collect_compound_word_value(tokens, i) {
+            values.push(quote_compound_assignment_word(&word));
+            i = next_i;
+            continue;
         }
         i += 1;
     }
