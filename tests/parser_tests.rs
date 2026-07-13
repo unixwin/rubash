@@ -1239,7 +1239,7 @@ mod case_tests {
 
     #[test]
     fn test_case_clause_records_absent_terminator() {
-        let input = "case $word in x) echo hit esac";
+        let input = "case $word in x) echo hit; esac";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         let clause = &ast.commands[0].case_command.as_ref().unwrap().clauses[0];
@@ -1332,6 +1332,21 @@ mod case_tests {
         assert_eq!(clause.body.len(), 2);
         assert_eq!(clause.body[0].words, ["echo", ";;"]);
         assert_eq!(clause.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
+    fn test_case_body_keeps_esac_after_quoted_terminator_word() {
+        let input = "case $x in x) echo \";;\" esac; echo after ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let clause = &case_command.clauses[0];
+
+        assert_eq!(case_command.clauses.len(), 1);
+        assert_eq!(clause.body.len(), 2);
+        assert_eq!(clause.body[0].words, ["echo", ";;", "esac"]);
+        assert_eq!(clause.body[1].words, ["echo", "after"]);
+        assert_eq!(clause.terminator_text.as_deref(), Some(";;"));
     }
 
     #[test]

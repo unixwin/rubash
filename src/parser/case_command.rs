@@ -266,7 +266,9 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
     let mut stack = Vec::new();
     while index < tokens.len() {
         if stack.is_empty()
-            && (is_keyword(tokens, index, "esac") || is_case_terminator(tokens, index))
+            && (is_case_terminator(tokens, index)
+                || (command_boundary_keyword_allowed(tokens, index)
+                    && is_keyword(tokens, index, "esac")))
         {
             break;
         }
