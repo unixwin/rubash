@@ -66,7 +66,7 @@ impl Executor {
                 file.write_all(stderr)?;
             }
         } else {
-            std::io::stderr().lock().write_all(stderr)?;
+            self.write_default_stderr(stderr)?;
         }
 
         Ok(())

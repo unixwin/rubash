@@ -137,7 +137,7 @@ impl Executor {
         }
 
         if cmd.words.len() == 1 {
-            if let Some(status) = self.execute_stdout_only_exec_redirect(cmd)? {
+            if let Some(status) = self.execute_stdio_only_exec_redirect(cmd)? {
                 return Ok(status);
             }
         }
@@ -199,7 +199,7 @@ impl Executor {
         )?)
     }
 
-    fn execute_stdout_only_exec_redirect(
+    fn execute_stdio_only_exec_redirect(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {
@@ -221,6 +221,31 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
             self.env_vars.insert(fd_output_key(1), target);
+            return Ok(Some(0));
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                self.env_vars.remove(&fd_output_key(2));
+                return Ok(Some(0));
+            }
+            if !is_null_device(&target) {
+                self.create_redirect_output(&target, redirect.clobber)?;
+            }
+            self.env_vars.insert(fd_output_key(2), target);
+            return Ok(Some(0));
+        }
+
+        if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            if !is_null_device(&target) {
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.env_vars))?;
+            }
+            self.env_vars.insert(fd_output_key(2), target);
             return Ok(Some(0));
         }
 

@@ -14,10 +14,13 @@ impl Executor {
         };
 
         if crate::builtins::enable::is_disabled(&self.env_vars, name) {
-            eprintln!(
+            let mut stderr = Vec::new();
+            writeln!(
+                &mut stderr,
                 "{}builtin: {name}: not a shell builtin",
                 self.diagnostic_prefix()
-            );
+            )?;
+            self.write_default_stderr(&stderr)?;
             self.exit_code = 1;
             return Ok(());
         }

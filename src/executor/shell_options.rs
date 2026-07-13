@@ -51,6 +51,26 @@ impl Executor {
         Ok(())
     }
 
+    pub(in crate::executor) fn write_default_stderr(
+        &mut self,
+        output: &[u8],
+    ) -> Result<(), ExecuteError> {
+        if let Some(target) = self.env_vars.get(&fd_output_key(2)).cloned() {
+            if is_null_device(&target) {
+                return Ok(());
+            }
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(output)?;
+            return Ok(());
+        }
+
+        std::io::stderr().lock().write_all(output)?;
+        Ok(())
+    }
+
     pub(in crate::executor) fn has_output_fd_target(&self, target: &str) -> bool {
         redirect_target_fd(target)
             .map(|fd| self.env_vars.contains_key(&fd_output_key(fd)))

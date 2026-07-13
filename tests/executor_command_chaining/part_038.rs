@@ -59,6 +59,28 @@ fn test_exec_stdout_redirect_persists_for_following_commands() {
 }
 
 #[test]
+fn test_exec_stderr_redirect_persists_for_following_commands() {
+    let error_path = target_test_path("rubash-exec-persistent-stderr-output.txt");
+    let shell_error_path = shell_test_path(&error_path);
+    let _ = fs::remove_file(&error_path);
+    let input = format!(
+        "exec 2> {shell_error_path}; builtin no_such_rubash_builtin_one; builtin no_such_rubash_builtin_two"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 1);
+    let error = fs::read_to_string(&error_path).unwrap();
+    assert!(error.contains("builtin: no_such_rubash_builtin_one: not a shell builtin"));
+    assert!(error.contains("builtin: no_such_rubash_builtin_two: not a shell builtin"));
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_exec_child_environment_contains_only_exported_variables() {
     let output_path = target_test_path("rubash-exec-child-env-output.txt");
     let _ = fs::remove_file(&output_path);

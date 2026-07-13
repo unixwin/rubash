@@ -157,10 +157,13 @@ impl Executor {
             }
             "shift" => self.execute_shift(&args[1..]),
             _ => {
-                eprintln!(
+                let mut stderr = Vec::new();
+                writeln!(
+                    &mut stderr,
                     "{}builtin: {name}: not a shell builtin",
                     self.diagnostic_prefix()
-                );
+                )?;
+                self.write_default_stderr(&stderr)?;
                 self.exit_code = 1;
                 Ok(())
             }
