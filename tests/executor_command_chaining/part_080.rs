@@ -1040,3 +1040,35 @@ fn test_named_coproc_executes_arithmetic_body_without_stderr() {
     let _ = fs::remove_file(status_path);
     let _ = fs::remove_file(error_path);
 }
+
+#[test]
+fn test_named_coproc_redirects_stderr_to_file() {
+    let status_path = "target/rubash-coproc-stderr-redirect-status.txt";
+    let error_path = "target/rubash-coproc-stderr-redirect-error.txt";
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "coproc MYC {{ printf coproc-error >&2; }} 2> {error_path}; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut error = String::new();
+    for _ in 0..20 {
+        error = fs::read_to_string(error_path).unwrap_or_default();
+        if error == "coproc-error" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(error, "coproc-error");
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(error_path);
+}

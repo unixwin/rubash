@@ -394,7 +394,7 @@ impl Executor {
 
     pub(in crate::executor) fn execute_coproc_command(
         &mut self,
-        _cmd: &CommandNode,
+        cmd: &CommandNode,
         coproc_cmd: &crate::parser::CoprocCommand,
     ) -> Result<(), ExecuteError> {
         let array_name = coproc_cmd
@@ -448,6 +448,7 @@ impl Executor {
             child.stdin(stdin_writer);
             child.stdout(stdout_reader);
             child.stderr(Stdio::inherit());
+            self.apply_coproc_redirects(cmd, &mut child)?;
 
             match child.spawn() {
                 Ok(child_proc) => {
@@ -478,6 +479,74 @@ impl Executor {
         } else {
             eprintln!("{}coproc: failed to create pipes", self.diagnostic_prefix());
             self.exit_code = 1;
+        }
+
+        Ok(())
+    }
+
+    fn apply_coproc_redirects(
+        &self,
+        cmd: &CommandNode,
+        child: &mut Command,
+    ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) == 0 {
+                let target = self.expand_word(&redirect.target);
+                if is_closed_redirect_target(&target) {
+                    child.stdin(Stdio::null());
+                } else if redirect_target_fd(&target).is_none() {
+                    child.stdin(Stdio::from(File::open(shell_path_to_windows(
+                        &target,
+                        &self.env_vars,
+                    ))?));
+                }
+            }
+        }
+
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                child.stdout(Stdio::null());
+            } else if redirect_target_fd(&target).is_none() {
+                child.stdout(Stdio::from(
+                    self.create_redirect_output(&target, redirect.clobber)?,
+                ));
+            }
+        } else if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                child.stdout(Stdio::null());
+            } else if redirect_target_fd(&target).is_none() {
+                child.stdout(Stdio::from(
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.env_vars))?,
+                ));
+            }
+        }
+
+        if let Some(redirect) = &cmd.redirect_err {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                child.stderr(Stdio::null());
+            } else if redirect_target_fd(&target).is_none() {
+                child.stderr(Stdio::from(
+                    self.create_redirect_output(&target, redirect.clobber)?,
+                ));
+            }
+        } else if let Some(redirect) = &cmd.redirect_err_append {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                child.stderr(Stdio::null());
+            } else if redirect_target_fd(&target).is_none() {
+                child.stderr(Stdio::from(
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.env_vars))?,
+                ));
+            }
         }
 
         Ok(())
