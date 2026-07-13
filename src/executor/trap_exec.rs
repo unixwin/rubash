@@ -279,14 +279,16 @@ impl Executor {
 
         if let Some(redirect) = &cmd.redirect_in {
             let fd = redirect.fd.unwrap_or(0);
-            if fd != 0 {
-                return Ok(None);
-            }
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
                 self.env_vars.remove(&fd_stdin_key(fd));
                 self.env_vars.remove(&fd_stdin_offset_key(fd));
+                self.env_vars.remove(&fd_dynamic_input_key(fd));
                 self.env_vars.insert(fd_closed_key(fd), "1".to_string());
+                return Ok(Some(0));
+            }
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                self.copy_persistent_input_fd(fd, source_fd);
                 return Ok(Some(0));
             }
 
@@ -303,6 +305,10 @@ impl Executor {
             self.env_vars.insert(fd_stdin_key(fd), input);
             self.env_vars
                 .insert(fd_stdin_offset_key(fd), "0".to_string());
+            if fd != 0 {
+                self.env_vars
+                    .insert(fd_dynamic_input_key(fd), "1".to_string());
+            }
             return Ok(Some(0));
         }
 
@@ -427,12 +433,32 @@ impl Executor {
 
         let source_key = fd_stdin_key(source_fd);
         let Some(input) = self.env_vars.get(&source_key).cloned() else {
+            if source_fd == 0
+                && self
+                    .env_vars
+                    .get(INHERIT_PROCESS_STDIN)
+                    .is_some_and(|value| value == "1")
+            {
+                self.env_vars
+                    .insert(fd_stdin_key(target_fd), FD_PROCESS_STDIN_TARGET.to_string());
+                self.env_vars.remove(&fd_stdin_offset_key(target_fd));
+                self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+                self.env_vars.remove(&fd_closed_key(target_fd));
+                return;
+            }
             self.env_vars.remove(&fd_stdin_key(target_fd));
             self.env_vars.remove(&fd_stdin_offset_key(target_fd));
             self.env_vars.remove(&fd_dynamic_input_key(target_fd));
             self.env_vars.remove(&fd_closed_key(target_fd));
             return;
         };
+        if input == FD_PROCESS_STDIN_TARGET {
+            self.env_vars.insert(fd_stdin_key(target_fd), input);
+            self.env_vars.remove(&fd_stdin_offset_key(target_fd));
+            self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+            self.env_vars.remove(&fd_closed_key(target_fd));
+            return;
+        }
         let offset = self
             .env_vars
             .get(&fd_stdin_offset_key(source_fd))
