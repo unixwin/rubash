@@ -228,6 +228,27 @@ fn test_declare_lower_f_prints_compound_function_bodies() {
 }
 
 #[test]
+fn test_declare_lower_f_prints_nested_function_definition_body() {
+    let output_path = "target/rubash-declare-f-nested-function-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "outer() {{ inner() {{ echo nested; }}; inner; }}; declare -f outer > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("    inner() { echo nested; }"));
+    assert!(output.contains("    inner\n"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_declare_prints_function_here_strings_like_bash() {
     let output_path = target_test_path("rubash-declare-function-herestr-output.txt");
     let shell_output_path = shell_test_path(&output_path);

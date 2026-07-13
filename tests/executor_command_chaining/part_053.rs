@@ -244,3 +244,25 @@ fn test_declare_fx_exports_function_to_child_rubash() {
     assert_eq!(fs::read_to_string(&output_path).unwrap(), "child\n");
     let _ = fs::remove_file(&output_path);
 }
+
+#[test]
+fn test_declare_fx_exports_nested_function_body_to_child_rubash() {
+    let output_path = target_test_path("rubash-declare-export-nested-function-child-output.txt");
+    let _ = fs::remove_file(&output_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+    let input = format!(
+        "outer() {{ inner() {{ echo nested; }}; inner; }}; \
+         declare -fx outer; {rubash} -c outer > {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "nested\n");
+    let _ = fs::remove_file(&output_path);
+}

@@ -146,8 +146,8 @@ use crate::lexer::TokenKind;
 use crate::parser::{
     AndOrListCommand, ArithmeticCommand, ArithmeticForCommand, Ast, BackgroundCommand, CaseClause,
     CaseCommand, CaseTerminator, CommandBodyKind, CommandNode, ConditionalCommand, ForCommand,
-    FunctionCommand, IfCommand, InvertedCommand, LoopCommand, PipelineCommand, Redirect,
-    SelectCommand, SubshellCommand, TimeCommand,
+    FunctionBodyKind, FunctionCommand, IfCommand, InvertedCommand, LoopCommand, PipelineCommand,
+    Redirect, SelectCommand, SubshellCommand, TimeCommand,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};

@@ -71,6 +71,13 @@ pub(in crate::executor) fn exported_function_env_value(body: &[CommandNode]) -> 
 }
 
 pub(in crate::executor) fn exported_function_command_text(command: &CommandNode) -> Option<String> {
+    if function_definition_command_uses_source_text(command) {
+        let line = bash_command_source_text(command);
+        if !line.trim().is_empty() {
+            return Some(line);
+        }
+    }
+
     if command.words.is_empty() && command.assignments.is_empty() {
         return None;
     }

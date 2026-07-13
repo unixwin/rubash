@@ -105,6 +105,7 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
         || command.select_command.is_some()
         || command.brace_group.is_some()
         || command.coproc_command.is_some()
+        || command.function_command.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -213,6 +214,7 @@ pub(in crate::executor) fn function_definition_command_uses_source_text(
         || command.select_command.is_some()
         || command.brace_group.is_some()
         || command.coproc_command.is_some()
+        || command.function_command.is_some()
 }
 
 pub(in crate::executor) fn write_function_definition_heredoc_body<W>(
@@ -336,6 +338,8 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
         case_command_source_text(case_command)
     } else if let Some(coproc_command) = &cmd.coproc_command {
         coproc_command_source_text(coproc_command)
+    } else if let Some(function_command) = &cmd.function_command {
+        function_command_source_text(function_command)
     } else if let Some(brace_group) = &cmd.brace_group {
         format!("{{ {}; }}", bash_command_sequence_text(&brace_group.body))
     } else {
@@ -537,6 +541,50 @@ fn coproc_command_source_text(coproc_command: &crate::parser::CoprocCommand) -> 
         text.push_str(&coproc_command.words.join(" "));
     }
     text
+}
+
+fn function_command_source_text(function_command: &crate::parser::FunctionCommand) -> String {
+    let mut text = if function_command.keyword {
+        format!("function {}", function_command.name)
+    } else {
+        function_command.name.clone()
+    };
+    if function_command.has_parentheses {
+        text.push_str("()");
+    }
+
+    let body = bash_command_sequence_text(&function_command.body);
+    match function_command.body_kind {
+        FunctionBodyKind::BraceGroup => format!(
+            "{} {} {}; {}",
+            text,
+            function_command
+                .body_open_delimiter
+                .as_deref()
+                .unwrap_or("{"),
+            body,
+            function_command
+                .body_close_delimiter
+                .as_deref()
+                .unwrap_or("}")
+        ),
+        FunctionBodyKind::Subshell => format!(
+            "{} {} {} {}",
+            text,
+            function_command
+                .body_open_delimiter
+                .as_deref()
+                .unwrap_or("("),
+            body,
+            function_command
+                .body_close_delimiter
+                .as_deref()
+                .unwrap_or(")")
+        ),
+        FunctionBodyKind::CommandSequence | FunctionBodyKind::CompoundCommand => {
+            format!("{text} {body}")
+        }
+    }
 }
 
 fn append_source_redirects(text: &mut String, cmd: &CommandNode) {

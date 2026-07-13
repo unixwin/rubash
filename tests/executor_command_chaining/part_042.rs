@@ -213,6 +213,26 @@ fn test_type_prints_compound_function_bodies() {
 }
 
 #[test]
+fn test_type_prints_nested_function_definition_body() {
+    let output_path = "target/rubash-type-nested-function-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("outer() {{ inner() {{ echo nested; }}; inner; }}; type outer > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("    inner() { echo nested; }"));
+    assert!(output.contains("    inner\n"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_declare_pf_prints_condition_heredocs() {
     let output_path = "target/rubash-declare-function-condition-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
