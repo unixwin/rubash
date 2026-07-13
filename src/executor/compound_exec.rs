@@ -199,9 +199,22 @@ impl Executor {
             return Ok(());
         }
 
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut if_command = if_command.clone();
-        apply_if_redirects(self, cmd, &mut if_command)?;
-        self.with_command_input_redirects(cmd, |executor| executor.execute_if_command(&if_command))
+        let result = apply_if_redirects(self, &redirect_cmd, &mut if_command).and_then(|()| {
+            self.with_command_input_redirects(cmd, |executor| {
+                executor.execute_if_command(&if_command)
+            })
+        });
+        let status = self.exit_code;
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        self.exit_code = status;
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_loop_command_with_redirects(
@@ -209,13 +222,25 @@ impl Executor {
         cmd: &CommandNode,
         loop_command: &LoopCommand,
     ) -> Result<(), ExecuteError> {
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut loop_command = loop_command.clone();
-        apply_redirects_to_commands(self, cmd, &mut loop_command.body)?;
-        self.with_loop_fd_heredocs(cmd, |executor| {
-            executor.with_command_input_redirects(cmd, |executor| {
-                executor.execute_loop_command(&loop_command)
-            })
-        })
+        let result = apply_redirects_to_commands(self, &redirect_cmd, &mut loop_command.body)
+            .and_then(|()| {
+                self.with_loop_fd_heredocs(cmd, |executor| {
+                    executor.with_command_input_redirects(cmd, |executor| {
+                        executor.execute_loop_command(&loop_command)
+                    })
+                })
+            });
+        let status = self.exit_code;
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        self.exit_code = status;
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_subshell_command_with_redirects(
