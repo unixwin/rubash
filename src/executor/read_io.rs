@@ -86,6 +86,10 @@ impl Executor {
             return Some(line);
         }
 
+        if self.env_vars.contains_key(&fd_closed_key(0)) {
+            return None;
+        }
+
         // If FUNCTION_STDIN is set (from heredoc or redirect), only read from it.
         // Do NOT fall through to process stdin - that would block on the terminal.
         if self.env_vars.contains_key(FUNCTION_STDIN) {

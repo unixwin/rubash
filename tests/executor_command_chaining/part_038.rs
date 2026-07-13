@@ -59,6 +59,27 @@ fn test_exec_stdout_redirect_persists_for_following_commands() {
 }
 
 #[test]
+fn test_exec_stdout_close_persists_until_reopened() {
+    let output_path = target_test_path("rubash-exec-close-stdout-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!(
+        "exec > {shell_output_path}; echo before; exec 1>&-; echo hidden; \
+         exec > {shell_output_path}; echo after"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "after\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_exec_stderr_redirect_persists_for_following_commands() {
     let error_path = target_test_path("rubash-exec-persistent-stderr-output.txt");
     let shell_error_path = shell_test_path(&error_path);
@@ -77,6 +98,29 @@ fn test_exec_stderr_redirect_persists_for_following_commands() {
     let error = fs::read_to_string(&error_path).unwrap();
     assert!(error.contains("builtin: no_such_rubash_builtin_one: not a shell builtin"));
     assert!(error.contains("builtin: no_such_rubash_builtin_two: not a shell builtin"));
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_exec_stderr_close_persists_until_reopened() {
+    let error_path = target_test_path("rubash-exec-close-stderr-output.txt");
+    let shell_error_path = shell_test_path(&error_path);
+    let _ = fs::remove_file(&error_path);
+    let input = format!(
+        "exec 2> {shell_error_path}; builtin no_such_before; exec 2>&-; \
+         builtin no_such_hidden; exec 2> {shell_error_path}; builtin no_such_after"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 1);
+    let error = fs::read_to_string(&error_path).unwrap();
+    assert!(error.contains("builtin: no_such_after: not a shell builtin"));
+    assert!(!error.contains("no_such_hidden"));
     let _ = fs::remove_file(error_path);
 }
 
@@ -137,6 +181,32 @@ fn test_exec_stdin_redirect_persists_for_following_reads() {
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(&output_path).unwrap(), "first/second\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_stdin_close_persists_for_following_reads() {
+    let input_path = target_test_path("rubash-exec-close-stdin-input.txt");
+    let output_path = target_test_path("rubash-exec-close-stdin-output.txt");
+    let shell_input_path = shell_test_path(&input_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&output_path);
+    fs::write(&input_path, "first\nsecond\n").unwrap();
+    let input = format!(
+        "exec < {shell_input_path}; read a; exec 0<&-; read b; \
+         echo $a/$b:$? > {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "first/:1\n");
     let _ = fs::remove_file(input_path);
     let _ = fs::remove_file(output_path);
 }

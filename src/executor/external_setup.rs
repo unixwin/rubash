@@ -41,6 +41,8 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 {
                 process.stdin(Stdio::from(file));
             }
+        } else if self.env_vars.contains_key(&fd_closed_key(0)) {
+            process.stdin(Stdio::null());
         }
 
         Ok(())

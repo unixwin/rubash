@@ -38,6 +38,10 @@ impl Executor {
             return Ok(());
         }
 
+        if self.env_vars.contains_key(&fd_closed_key(1)) {
+            return Ok(());
+        }
+
         if let Some(target) = self.env_vars.get(&fd_output_key(1)).cloned() {
             let mut file = OpenOptions::new()
                 .create(true)
@@ -55,6 +59,10 @@ impl Executor {
         &mut self,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
+        if self.env_vars.contains_key(&fd_closed_key(2)) {
+            return Ok(());
+        }
+
         if let Some(target) = self.env_vars.get(&fd_output_key(2)).cloned() {
             if is_null_device(&target) {
                 return Ok(());

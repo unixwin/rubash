@@ -85,7 +85,9 @@ impl Executor {
         }
 
         if !redirected {
-            if let Some(target) = self.env_vars.get(&fd_output_key(1)) {
+            if self.env_vars.contains_key(&fd_closed_key(1)) {
+                process.stdout(Stdio::null());
+            } else if let Some(target) = self.env_vars.get(&fd_output_key(1)) {
                 if is_null_device(target) {
                     process.stdout(Stdio::null());
                 } else {
@@ -161,7 +163,9 @@ impl Executor {
         }
 
         if !redirected {
-            if let Some(target) = self.env_vars.get(&fd_output_key(2)) {
+            if self.env_vars.contains_key(&fd_closed_key(2)) {
+                process.stderr(Stdio::null());
+            } else if let Some(target) = self.env_vars.get(&fd_output_key(2)) {
                 if is_null_device(target) {
                     process.stderr(Stdio::null());
                 } else {
