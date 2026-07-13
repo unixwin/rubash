@@ -21,6 +21,35 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     cmd.word_kinds.push(token.kind.clone());
 }
 
+pub(super) fn collect_compound_word_value(
+    tokens: &[Token],
+    index: usize,
+) -> Option<(String, usize)> {
+    if let Some((process_substitution, next_i)) = process_substitution_word_target(tokens, index) {
+        return Some((process_substitution.target, next_i + 1));
+    }
+
+    if let Some((process_substitution, next_i)) =
+        output_process_substitution_word_target(tokens, index)
+    {
+        return Some((process_substitution.target, next_i + 1));
+    }
+
+    let token = tokens.get(index)?;
+    if matches!(
+        token.kind,
+        TokenKind::Word
+            | TokenKind::Variable
+            | TokenKind::Assignment
+            | TokenKind::CommandSubst
+            | TokenKind::BraceExpand
+    ) {
+        return Some((token.value.clone(), index + 1));
+    }
+
+    None
+}
+
 pub(super) fn set_body_line(body: &mut [CommandNode], line: usize) {
     // TODO(parse.y): Bash preserves source locations through compound command
     // parsing. Rubash reparses inline function bodies from text today, so

@@ -45,15 +45,10 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             if for_brace_body_start(tokens, i) {
                 return None;
             }
-            if matches!(
-                tokens[i].kind,
-                TokenKind::Word
-                    | TokenKind::Variable
-                    | TokenKind::Assignment
-                    | TokenKind::CommandSubst
-                    | TokenKind::BraceExpand
-            ) {
-                words.push(tokens[i].value.clone());
+            if let Some((word, next_i)) = collect_compound_word_value(tokens, i) {
+                words.push(word);
+                i = next_i;
+                continue;
             }
             i += 1;
         }

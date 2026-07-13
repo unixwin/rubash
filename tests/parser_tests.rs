@@ -480,6 +480,20 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_words_keep_process_substitution() {
+        let for_tokens = tokenize("for x in <(printf a) >(cat); do :; done");
+        let for_ast = parse(&for_tokens);
+        let select_tokens = tokenize("select x in <(printf a) >(cat); do :; done");
+        let select_ast = parse(&select_tokens);
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(for_command.words, ["<(printf a)", ">(cat)"]);
+        assert_eq!(select_command.words, ["<(printf a)", ">(cat)"]);
+    }
+
+    #[test]
     fn test_loop_body_delimiters_record_do_done() {
         let while_tokens = tokenize("while false; do echo bad; done");
         let while_ast = parse(&while_tokens);
