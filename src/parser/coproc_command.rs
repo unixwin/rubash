@@ -60,19 +60,6 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             return Some(finish_coproc_command(command, tokens, close_i + 1));
         }
 
-        if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
-            let mut command = CommandNode::new();
-            command.line = tokens.get(start).map(|t| t.position);
-            command.coproc_command = Some(coproc_command(
-                name,
-                Vec::new(),
-                CoprocBodyKind::CommandSequence,
-                None,
-                Some(body),
-            ));
-            return Some(finish_coproc_command(command, tokens, body_end));
-        }
-
         if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
@@ -82,6 +69,19 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 CoprocBodyKind::CompoundCommand,
                 None,
                 Some(vec![body_command]),
+            ));
+            return Some(finish_coproc_command(command, tokens, body_end));
+        }
+
+        if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.coproc_command = Some(coproc_command(
+                name,
+                Vec::new(),
+                CoprocBodyKind::CommandSequence,
+                None,
+                Some(body),
             ));
             return Some(finish_coproc_command(command, tokens, body_end));
         }
@@ -257,9 +257,12 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
 
     match tokens.get(start)?.value.as_str() {
         "for" => parse_for_command(tokens, start),
+        "if" => parse_if_command(tokens, start),
+        "while" | "until" => parse_loop_command(tokens, start),
         "case" => parse_case_command(tokens, start),
         "select" => parse_select_command(tokens, start),
         "coproc" => parse_coproc_command(tokens, start),
+        "[[" => parse_conditional_command(tokens, start),
         _ => None,
     }
 }

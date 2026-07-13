@@ -187,11 +187,31 @@ fn test_named_coproc_parses_conditional_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert!(coproc.words.is_empty());
-    assert_eq!(coproc.body_kind, CoprocBodyKind::CommandSequence);
-    assert_eq!(
-        coproc.body.as_ref().unwrap()[0].words,
-        ["[[", "$value", "==", "ok", "]]"]
-    );
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    let conditional = coproc.body.as_ref().unwrap()[0]
+        .conditional_command
+        .as_ref()
+        .unwrap();
+    assert_eq!(conditional.args, ["$value", "==", "ok", "]]"]);
+}
+
+#[test]
+fn test_named_coproc_parses_select_body() {
+    let input = "coproc MYC select choice in alpha beta; do echo $choice; break; done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let select = coproc.body.as_ref().unwrap()[0]
+        .select_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(select.variable, "choice");
+    assert_eq!(select.words, ["alpha", "beta"]);
+    assert_eq!(select.body[0].words, ["echo", "$choice"]);
 }
 
 #[test]
@@ -205,7 +225,7 @@ fn test_coproc_conditional_body_keeps_quoted_closing_delimiter_word() {
         .as_ref()
         .unwrap();
 
-    assert_eq!(coproc.body_kind, CoprocBodyKind::CommandSequence);
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
     assert_eq!(conditional.args, ["value", "==", "]]", "]]"]);
     assert_eq!(conditional.expression.operands, ["value", "]]"]);
 }
@@ -228,12 +248,24 @@ fn test_coproc_sequence_body_keeps_reserved_word_arguments() {
         .as_ref()
         .unwrap();
 
-    assert_eq!(if_coproc.body_kind, CoprocBodyKind::CommandSequence);
+    let until_tokens = tokenize("coproc MYC until echo do; do echo done; break; done");
+    let until_ast = parse(&until_tokens);
+    let until_coproc = until_ast.commands[0].coproc_command.as_ref().unwrap();
+    let until_command = until_coproc.body.as_ref().unwrap()[0]
+        .loop_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(if_coproc.body_kind, CoprocBodyKind::CompoundCommand);
     assert_eq!(if_command.condition[0].words, ["echo", "then"]);
     assert_eq!(if_command.then_body[0].words, ["echo", "fi"]);
-    assert_eq!(loop_coproc.body_kind, CoprocBodyKind::CommandSequence);
+    assert_eq!(loop_coproc.body_kind, CoprocBodyKind::CompoundCommand);
     assert_eq!(loop_command.condition[0].words, ["echo", "do"]);
     assert_eq!(loop_command.body[0].words, ["echo", "done"]);
+    assert_eq!(until_coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert!(until_command.until);
+    assert_eq!(until_command.condition[0].words, ["echo", "do"]);
+    assert_eq!(until_command.body[0].words, ["echo", "done"]);
 }
 
 #[test]
