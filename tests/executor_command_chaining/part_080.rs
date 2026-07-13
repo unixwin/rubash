@@ -635,6 +635,25 @@ fn test_exec_dynamic_fd_output_process_substitution_runs_on_close() {
 }
 
 #[test]
+fn test_exec_stderr_process_substitution_runs_on_close() {
+    let output_path = "target/rubash-stderr-process-substitution.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "exec 2> >(cat > {output_path}); printf '%s\\n' alpha >&2; printf '%s\\n' beta >&2; exec 2>&-"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_append_output_process_substitution_feeds_command_stdin() {
     let output_path = "target/rubash-append-output-process-substitution.txt";
     let _ = fs::remove_file(output_path);
