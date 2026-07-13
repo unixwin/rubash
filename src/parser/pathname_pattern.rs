@@ -4,8 +4,9 @@ pub(super) fn record_pathname_patterns_for_word(
     command: &mut CommandNode,
     word_index: usize,
     word: &str,
+    raw: &str,
 ) {
-    let patterns = pathname_patterns_in_word(word)
+    let patterns = pathname_patterns_in_word(word, raw)
         .into_iter()
         .map(|mut pattern| {
             pattern.word_index = Some(word_index);
@@ -14,12 +15,12 @@ pub(super) fn record_pathname_patterns_for_word(
     command.pathname_patterns.extend(patterns);
 }
 
-fn pathname_patterns_in_word(word: &str) -> Vec<PathnamePattern> {
+fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePattern> {
     if word.contains('=') {
         return Vec::new();
     }
 
-    let chars = word.chars().collect::<Vec<_>>();
+    let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     let mut has_star = false;
     let mut has_question = false;
@@ -28,6 +29,34 @@ fn pathname_patterns_in_word(word: &str) -> Vec<PathnamePattern> {
     let mut operators = Vec::new();
 
     while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '\'' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '"' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
         if chars[index] == '`' {
             if let Some(next_index) = skip_backtick(&chars, index) {
                 index = next_index;
@@ -114,6 +143,29 @@ fn skip_bracket_class(chars: &[char], start: usize) -> Option<usize> {
             ']' => return Some(index + 1),
             '\\' => index += 1,
             _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_quoted(chars: &[char], start: usize, delimiter: char) -> Option<usize> {
+    let mut index = start;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if delimiter == '"' && ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == delimiter {
+            return Some(index + 1);
         }
         index += 1;
     }

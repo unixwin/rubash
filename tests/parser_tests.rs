@@ -3116,6 +3116,36 @@ mod pathname_pattern_tests {
         assert_eq!(patterns[0].text, "plain*.rs");
         assert_eq!(patterns[0].word_index, Some(2));
     }
+
+    #[test]
+    fn test_quoted_pathname_operators_are_not_recorded() {
+        let input = "echo \"*.rs\" '\\?' $'[*]' $\"**\" plain*.rs";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].pathname_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "plain*.rs");
+        assert_eq!(patterns[0].operators, ["*"]);
+        assert_eq!(patterns[0].word_index, Some(5));
+    }
+
+    #[test]
+    fn test_only_unquoted_pathname_operators_are_recorded() {
+        let input = "echo prefix\"*\"?.rs";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].pathname_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "prefix*?.rs");
+        assert_eq!(patterns[0].operators, ["?"]);
+        assert!(!patterns[0].has_star);
+        assert!(patterns[0].has_question);
+        assert_eq!(patterns[0].word_index, Some(1));
+    }
 }
 
 mod word_quote_tests {
