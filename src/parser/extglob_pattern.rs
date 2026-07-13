@@ -66,7 +66,9 @@ fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
         if matches!(chars[index], '@' | '!' | '+' | '?' | '*') && chars.get(index + 1) == Some(&'(')
         {
             if let Some((pattern, next_index)) = extglob_pattern(&chars, index) {
+                let nested = extglob_patterns_in_word(&pattern.pattern);
                 patterns.push(pattern);
+                patterns.extend(nested);
                 index = next_index;
                 continue;
             }

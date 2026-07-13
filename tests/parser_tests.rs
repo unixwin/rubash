@@ -2862,7 +2862,7 @@ mod extglob_pattern_tests {
         );
 
         let patterns = ast.commands[0].extglob_patterns.as_slice();
-        assert_eq!(patterns.len(), 3);
+        assert_eq!(patterns.len(), 4);
         assert_eq!(patterns[0].text, "@(alpha|beta)");
         assert_eq!(patterns[0].open_delimiter, "@(");
         assert_eq!(patterns[0].close_delimiter, ")");
@@ -2883,6 +2883,11 @@ mod extglob_pattern_tests {
         assert_eq!(patterns[2].operators, ["|"]);
         assert_eq!(patterns[2].alternatives, ["a", "+(b|c)"]);
         assert_eq!(patterns[2].word_index, Some(3));
+        assert_eq!(patterns[3].text, "+(b|c)");
+        assert_eq!(patterns[3].pattern, "b|c");
+        assert_eq!(patterns[3].operators, ["|"]);
+        assert_eq!(patterns[3].alternatives, ["b", "c"]);
+        assert_eq!(patterns[3].word_index, Some(3));
     }
 
     #[test]
