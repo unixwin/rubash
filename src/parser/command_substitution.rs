@@ -68,6 +68,8 @@ fn dollar_command_substitution(
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
@@ -80,11 +82,12 @@ fn dollar_command_substitution(
             index += 1;
             continue;
         }
+        update_command_substitution_case_depth(ch, single, double, &mut word, &mut case_depth);
         match ch {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
-            '(' if !single && !double => depth += 1,
-            ')' if !single && !double => {
+            '(' if !single && !double && case_depth == 0 => depth += 1,
+            ')' if !single && !double && case_depth == 0 => {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let text = chars[start..=index].iter().collect();
@@ -97,6 +100,31 @@ fn dollar_command_substitution(
         index += 1;
     }
     None
+}
+
+fn update_command_substitution_case_depth(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+) {
+    if single || double {
+        word.clear();
+        return;
+    }
+
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        word.push(ch);
+        return;
+    }
+
+    match word.as_str() {
+        "case" => *case_depth += 1,
+        "esac" => *case_depth = case_depth.saturating_sub(1),
+        _ => {}
+    }
+    word.clear();
 }
 
 fn backtick_command_substitution(

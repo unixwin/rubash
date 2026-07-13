@@ -102,49 +102,13 @@ impl Executor {
             }
         }
 
-        // For words with embedded $(...) that may call shell functions,
-        // use the mutable expansion path which handles functions.
-        if (word.contains("$(") || word.contains('`')) && self.has_function_in_word(word) {
+        // Embedded $() substitutions may contain full command lists or
+        // compound commands, so use the mutable path that can execute an AST.
+        if word.contains("$(") {
             return self.expand_embedded_parameters_mut(word);
         }
 
         self.expand_word(word)
-    }
-
-    /// Check if a word contains a command substitution that calls a shell function.
-    pub(in crate::executor) fn has_function_in_word(&self, word: &str) -> bool {
-        // Check for $(...) command substitutions
-        let mut chars = word.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '$' && chars.peek() == Some(&'(') {
-                chars.next(); // skip (
-                if chars.peek() == Some(&'(') {
-                    // Arithmetic, skip
-                    continue;
-                }
-                // Collect until matching )
-                let mut depth = 1;
-                let mut source = String::new();
-                for ch in chars.by_ref() {
-                    match ch {
-                        '(' => depth += 1,
-                        ')' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    source.push(ch);
-                }
-                let first_word = source.split_whitespace().next().unwrap_or("");
-                if !first_word.is_empty() && self.functions.contains_key(first_word) {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     pub(in crate::executor) fn expand_parameter_named_value(&self, name: &str) -> String {

@@ -5,10 +5,13 @@ use super::scanner::Lexer;
 impl<'a> Lexer<'a> {
     pub(super) fn skip_cmd_subst(&mut self) {
         let mut depth = 1;
+        let mut case_depth = 0usize;
+        let mut word = String::new();
         while let Some(c) = self.advance() {
+            update_command_substitution_case_depth(c, false, false, &mut word, &mut case_depth);
             match c {
-                '(' => depth += 1,
-                ')' => {
+                '(' if case_depth == 0 => depth += 1,
+                ')' if case_depth == 0 => {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -214,4 +217,29 @@ impl<'a> Lexer<'a> {
             }
         }
     }
+}
+
+fn update_command_substitution_case_depth(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+) {
+    if single || double {
+        word.clear();
+        return;
+    }
+
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        word.push(ch);
+        return;
+    }
+
+    match word.as_str() {
+        "case" => *case_depth += 1,
+        "esac" => *case_depth = case_depth.saturating_sub(1),
+        _ => {}
+    }
+    word.clear();
 }

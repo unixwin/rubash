@@ -194,6 +194,73 @@ fn test_command_list_substitution_captures_stdout() {
 }
 
 #[test]
+fn test_case_command_substitution_captures_stdout() {
+    let output_path = "target/rubash-case-command-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(case beta in alpha) printf alpha ;; beta) printf beta ;; esac); \
+         printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "v=<beta> status:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_and_or_command_substitution_captures_stdout() {
+    let output_path = "target/rubash-and-or-command-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(false || printf fallback); printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "v=<fallback> status:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_multi_command_substitution_keeps_assignments_local() {
+    let output_path = "target/rubash-multi-command-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(x=inner; printf \"$x\"); printf 'v=<%s> x=<%s> status:%s\\n' \"$v\" \"$x\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "v=<inner> x=<> status:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_command_substitution_captures_timed_stdout() {
     let output_path = "target/rubash-time-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);

@@ -129,6 +129,8 @@ impl Executor {
                     let mut single = false;
                     let mut double = false;
                     let mut escaped = false;
+                    let mut case_depth = 0usize;
+                    let mut word = String::new();
                     while let Some(source_ch) = chars.next() {
                         if escaped {
                             source.push(source_ch);
@@ -140,6 +142,13 @@ impl Executor {
                             escaped = true;
                             continue;
                         }
+                        update_command_substitution_case_depth(
+                            source_ch,
+                            single,
+                            double,
+                            &mut word,
+                            &mut case_depth,
+                        );
                         match source_ch {
                             '\'' if !double => {
                                 single = !single;
@@ -152,11 +161,11 @@ impl Executor {
                             '<' if !single && !double && chars.peek().copied() == Some('<') => {
                                 copy_command_substitution_heredoc(&mut chars, &mut source);
                             }
-                            '(' if !single && !double => {
+                            '(' if !single && !double && case_depth == 0 => {
                                 depth += 1;
                                 source.push(source_ch);
                             }
-                            ')' if !single && !double => {
+                            ')' if !single && !double && case_depth == 0 => {
                                 depth -= 1;
                                 if depth == 0 {
                                     break;
@@ -219,4 +228,29 @@ impl Executor {
         self.expand_embedded_parameters(&protected)
             .replace(PROTECTED_ESCAPED_SINGLE_QUOTE, "\x17")
     }
+}
+
+fn update_command_substitution_case_depth(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+) {
+    if single || double {
+        word.clear();
+        return;
+    }
+
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        word.push(ch);
+        return;
+    }
+
+    match word.as_str() {
+        "case" => *case_depth += 1,
+        "esac" => *case_depth = case_depth.saturating_sub(1),
+        _ => {}
+    }
+    word.clear();
 }

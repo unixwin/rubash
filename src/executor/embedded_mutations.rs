@@ -37,6 +37,8 @@ impl Executor {
                 let mut single = false;
                 let mut double = false;
                 let mut escaped = false;
+                let mut case_depth = 0usize;
+                let mut word = String::new();
                 for source_ch in chars.by_ref() {
                     if escaped {
                         source.push(source_ch);
@@ -48,6 +50,13 @@ impl Executor {
                         escaped = true;
                         continue;
                     }
+                    update_command_substitution_case_depth(
+                        source_ch,
+                        single,
+                        double,
+                        &mut word,
+                        &mut case_depth,
+                    );
                     match source_ch {
                         '\'' if !double => {
                             single = !single;
@@ -57,11 +66,11 @@ impl Executor {
                             double = !double;
                             source.push(source_ch);
                         }
-                        '(' if !single && !double => {
+                        '(' if !single && !double && case_depth == 0 => {
                             depth += 1;
                             source.push(source_ch);
                         }
-                        ')' if !single && !double => {
+                        ')' if !single && !double && case_depth == 0 => {
                             depth = depth.saturating_sub(1);
                             if depth == 0 {
                                 break;
@@ -120,6 +129,9 @@ impl Executor {
         let words = self.expand_aliases(&split_shell_words(source));
         if let Some(output) = self.run_function_command_substitution(&words) {
             return output;
+        }
+        if command_substitution_uses_specialized_path(self, source, &words) {
+            return self.expand_command_substitution(source);
         }
         if let Some(output) = self.run_ast_command_substitution(source) {
             return output;
@@ -280,12 +292,15 @@ impl Executor {
 }
 
 fn command_substitution_needs_ast_execution(ast: &Ast) -> bool {
-    ast.commands.iter().any(command_has_compound_substitution)
-        || (ast.commands.len() > 1
-            && ast
-                .commands
-                .iter()
-                .all(command_is_safe_builtin_substitution))
+    ast.commands.iter().any(command_has_ast_substitution_shape)
+        || (ast.commands.len() > 1 && ast.commands.iter().all(command_is_ast_list_substitution))
+}
+
+fn command_has_ast_substitution_shape(command: &CommandNode) -> bool {
+    command.and_or_list.is_some()
+        || command.inverted_command.is_some()
+        || command.background_command.is_some()
+        || command_has_compound_substitution(command)
 }
 
 fn command_has_compound_substitution(command: &CommandNode) -> bool {
@@ -318,11 +333,21 @@ fn command_has_compound_substitution(command: &CommandNode) -> bool {
         || command.conditional_command.is_some()
 }
 
-fn command_is_safe_builtin_substitution(command: &CommandNode) -> bool {
+fn command_is_ast_list_substitution(command: &CommandNode) -> bool {
+    if !command_has_simple_substitution_shape(command) {
+        return false;
+    }
+    if !command.assignments.is_empty() {
+        return true;
+    }
     matches!(
         command.words.first().map(String::as_str),
         Some("echo" | "printf" | "true" | "false" | ":" | "pwd")
-    ) && command.pipeline_command.is_none()
+    )
+}
+
+fn command_has_simple_substitution_shape(command: &CommandNode) -> bool {
+    command.pipeline_command.is_none()
         && command.and_or_list.is_none()
         && command.inverted_command.is_none()
         && command.background_command.is_none()
@@ -337,4 +362,42 @@ fn command_is_safe_builtin_substitution(command: &CommandNode) -> bool {
         && command.brace_group.is_none()
         && command.arithmetic_command.is_none()
         && command.conditional_command.is_none()
+}
+
+fn command_substitution_uses_specialized_path(
+    executor: &Executor,
+    source: &str,
+    words: &[String],
+) -> bool {
+    source.contains("<<")
+        || words.iter().any(|word| word == "|")
+        || words.first().map(String::as_str) == Some("time")
+        || executor
+            .command_substitution_cd_pwd_output(source)
+            .is_some()
+}
+
+fn update_command_substitution_case_depth(
+    ch: char,
+    single: bool,
+    double: bool,
+    word: &mut String,
+    case_depth: &mut usize,
+) {
+    if single || double {
+        word.clear();
+        return;
+    }
+
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        word.push(ch);
+        return;
+    }
+
+    match word.as_str() {
+        "case" => *case_depth += 1,
+        "esac" => *case_depth = case_depth.saturating_sub(1),
+        _ => {}
+    }
+    word.clear();
 }

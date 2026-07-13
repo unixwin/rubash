@@ -1308,6 +1308,22 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_case_pattern_parentheses() {
+        let input = "echo $(case beta in alpha) printf alpha ;; beta) printf beta ;; esac)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(
+            substitutions[0].source,
+            "case beta in alpha) printf alpha ;; beta) printf beta ;; esac"
+        );
+        assert_eq!(substitutions[0].commands.len(), 1);
+        assert!(substitutions[0].commands[0].case_command.is_some());
+    }
+
+    #[test]
     fn test_assignment_word_command_substitution_records_word_index() {
         let input = "echo value=`printf hi`";
         let tokens = tokenize(input);
