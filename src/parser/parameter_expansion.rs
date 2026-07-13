@@ -55,6 +55,10 @@ fn parameter_expansions_in_word(word: &str) -> Vec<ParameterExpansion> {
         }
 
         if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(next_index) = skip_braced_command_substitution(&chars, index) {
+                index = next_index;
+                continue;
+            }
             if let Some((expansion, next_index)) = braced_parameter_expansion(&chars, index) {
                 expansions.push(expansion);
                 index = next_index;
@@ -122,6 +126,51 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
                         },
                         index + 1,
                     ));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_braced_command_substitution(chars: &[char], start: usize) -> Option<usize> {
+    let body_start = start + 2;
+    let pipe_output = chars.get(body_start) == Some(&'|');
+    if !pipe_output && !chars.get(body_start).is_some_and(|ch| ch.is_whitespace()) {
+        return None;
+    }
+
+    let mut index = if pipe_output {
+        body_start + 1
+    } else {
+        body_start
+    };
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double => depth += 1,
+            '}' if !single && !double => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + 1);
                 }
             }
             _ => {}

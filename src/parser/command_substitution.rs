@@ -46,6 +46,14 @@ fn command_substitutions_in_word(word: &str) -> Vec<CommandSubstitutionNode> {
             }
         }
 
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some((substitution, next_index)) = braced_command_substitution(&chars, index) {
+                substitutions.push(substitution);
+                index = next_index;
+                continue;
+            }
+        }
+
         if chars[index] == '`' {
             if let Some((substitution, next_index)) = backtick_command_substitution(&chars, index) {
                 substitutions.push(substitution);
@@ -102,7 +110,64 @@ fn dollar_command_substitution(
                 if depth == 0 {
                     let text = chars[start..=index].iter().collect();
                     let source = chars[start + 2..index].iter().collect();
-                    return Some((command_substitution_node(text, source, false), index + 1));
+                    return Some((
+                        command_substitution_node(text, source, false, false, false),
+                        index + 1,
+                    ));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn braced_command_substitution(
+    chars: &[char],
+    start: usize,
+) -> Option<(CommandSubstitutionNode, usize)> {
+    let body_start = start + 2;
+    let pipe_output = chars.get(body_start) == Some(&'|');
+    if !pipe_output && !chars.get(body_start).is_some_and(|ch| ch.is_whitespace()) {
+        return None;
+    }
+
+    let source_start = if pipe_output {
+        body_start + 1
+    } else {
+        body_start
+    };
+    let mut index = source_start;
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double => depth += 1,
+            '}' if !single && !double => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let text = chars[start..=index].iter().collect();
+                    let source = chars[source_start..index].iter().collect();
+                    return Some((
+                        command_substitution_node(text, source, false, true, pipe_output),
+                        index + 1,
+                    ));
                 }
             }
             _ => {}
@@ -199,7 +264,10 @@ fn backtick_command_substitution(
         if ch == '`' {
             let text = chars[start..=index].iter().collect();
             let source = chars[start + 1..index].iter().collect();
-            return Some((command_substitution_node(text, source, true), index + 1));
+            return Some((
+                command_substitution_node(text, source, true, false, false),
+                index + 1,
+            ));
         }
         index += 1;
     }
@@ -210,11 +278,19 @@ fn command_substitution_node(
     text: String,
     source: String,
     backtick: bool,
+    current_shell: bool,
+    pipe_output: bool,
 ) -> CommandSubstitutionNode {
     let tokens = crate::lexer::tokenize(&source);
     let commands = parse(&tokens).commands;
     let (open_delimiter, operator, close_delimiter) = if backtick {
         ("`".to_string(), "`".to_string(), "`".to_string())
+    } else if current_shell {
+        (
+            "${".to_string(),
+            if pipe_output { "${|" } else { "${" }.to_string(),
+            "}".to_string(),
+        )
     } else {
         ("$(".to_string(), "$".to_string(), ")".to_string())
     };
@@ -226,6 +302,8 @@ fn command_substitution_node(
         close_delimiter,
         commands,
         backtick,
+        current_shell,
+        pipe_output,
         word_index: None,
         assignment_name: None,
     }

@@ -2047,6 +2047,49 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_braced_command_substitution_records_current_shell_ast() {
+        let input = "echo ${ echo hi; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let command = &ast.commands[0];
+        let substitutions = command.command_substitutions.as_slice();
+
+        assert_eq!(command.words, ["echo", "${ echo hi; }"]);
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "${ echo hi; }");
+        assert_eq!(substitutions[0].open_delimiter, "${");
+        assert_eq!(substitutions[0].operator, "${");
+        assert_eq!(substitutions[0].close_delimiter, "}");
+        assert_eq!(substitutions[0].source, " echo hi; ");
+        assert!(!substitutions[0].backtick);
+        assert!(substitutions[0].current_shell);
+        assert!(!substitutions[0].pipe_output);
+        assert_eq!(substitutions[0].commands[0].words, ["echo", "hi"]);
+        assert!(command.parameter_expansions.is_empty());
+    }
+
+    #[test]
+    fn test_pipe_braced_command_substitution_records_operator() {
+        let input = "echo ${| REPLY=hi; } ${USER:-guest}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let command = &ast.commands[0];
+        let substitutions = command.command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "${| REPLY=hi; }");
+        assert_eq!(substitutions[0].open_delimiter, "${");
+        assert_eq!(substitutions[0].operator, "${|");
+        assert_eq!(substitutions[0].close_delimiter, "}");
+        assert_eq!(substitutions[0].source, " REPLY=hi; ");
+        assert!(substitutions[0].current_shell);
+        assert!(substitutions[0].pipe_output);
+        assert_eq!(substitutions[0].commands[0].assignments["REPLY"], "hi");
+        assert_eq!(command.parameter_expansions.len(), 1);
+        assert_eq!(command.parameter_expansions[0].text, "${USER:-guest}");
+    }
+
+    #[test]
     fn test_assignment_word_command_substitution_records_word_index() {
         let input = "echo value=`printf hi`";
         let tokens = tokenize(input);

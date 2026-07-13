@@ -284,6 +284,8 @@ pub struct CommandSubstitutionNode {
     pub close_delimiter: String,
     pub commands: Vec<CommandNode>,
     pub backtick: bool,
+    pub current_shell: bool,
+    pub pipe_output: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
 }
