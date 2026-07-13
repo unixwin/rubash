@@ -512,6 +512,23 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_body_can_be_arithmetic_command() {
+        let input = "foo() (( 1 + 1 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(function.body_open_delimiter, None);
+        assert_eq!(function.body_close_delimiter, None);
+        let arithmetic = function.body[0].arithmetic_command.as_ref().unwrap();
+        assert_eq!(arithmetic.open_delimiter, "((");
+        assert_eq!(arithmetic.close_delimiter, "))");
+        assert_eq!(arithmetic.expression, "1 + 1");
+    }
+
+    #[test]
     fn test_function_body_can_be_case_command() {
         let input = "foo() case $1 in a) echo alpha ;; *) echo other ;; esac";
         let tokens = tokenize(input);
