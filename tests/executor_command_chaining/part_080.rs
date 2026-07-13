@@ -562,6 +562,23 @@ fn test_read_u_reads_fd_here_string() {
 }
 
 #[test]
+fn test_external_command_reads_fd_here_string() {
+    let output_path = "target/rubash-external-fd-here-string-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat <&3 3<<<alpha > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipeline_feeds_while_command_stage() {
     let output_path = "target/rubash-pipeline-while-stage-output.txt";
     let _ = fs::remove_file(output_path);

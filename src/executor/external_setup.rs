@@ -115,6 +115,10 @@ impl Executor {
                             redirect.target = shell_display_path(&path.to_string_lossy());
                             files.inputs.push(path);
                         }
+                    } else if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
+                        let path = self.write_process_substitution_temp(&input)?;
+                        redirect.target = shell_display_path(&path.to_string_lossy());
+                        files.inputs.push(path);
                     }
                 }
             }
@@ -293,5 +297,22 @@ impl Executor {
             .get(&fd_stdin_key(fd))
             .map(|input| input.len().to_string())
             .unwrap_or_else(|| "0".to_string())
+    }
+
+    fn external_fd_heredoc_input(&self, cmd: &CommandNode, fd: u32) -> Option<String> {
+        let body = cmd
+            .heredoc_redirects
+            .iter()
+            .rev()
+            .find(|redirect| redirect.fd == Some(fd))?
+            .body
+            .as_deref()?;
+        if let Some(word) = body.strip_prefix('\x1d') {
+            let mut input =
+                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
+            input.push('\n');
+            return Some(input);
+        }
+        Some(strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string())
     }
 }
