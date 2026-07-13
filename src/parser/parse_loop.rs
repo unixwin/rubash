@@ -536,7 +536,7 @@ fn push_compound_command(state: &mut ParseState, mut command: CommandNode) {
     state.current_cmd = CommandNode::new();
 }
 
-pub(super) fn parse_time_prefixed_compound_command(
+fn parse_time_prefixed_compound_command(
     tokens: &[Token],
     start: usize,
 ) -> Option<(CommandNode, usize)> {
