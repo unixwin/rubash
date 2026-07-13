@@ -65,7 +65,9 @@ fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {
 
         if chars[index] == '{' {
             if let Some((expansion, next_index)) = brace_expansion(&chars, index) {
+                let nested = brace_expansions_in_word(&expansion.body);
                 expansions.push(expansion);
+                expansions.extend(nested);
                 index = next_index;
                 continue;
             }

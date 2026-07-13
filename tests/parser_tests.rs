@@ -2814,6 +2814,34 @@ mod brace_expansion_tests {
     }
 
     #[test]
+    fn test_brace_expansion_records_nested_expansions() {
+        let input = "echo {a,{b,c}} pre{1..3,{x,y}}post";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 4);
+        assert_eq!(expansions[0].text, "{a,{b,c}}");
+        assert_eq!(expansions[0].body, "a,{b,c}");
+        assert_eq!(expansions[0].operators, [","]);
+        assert_eq!(expansions[0].word_index, Some(1));
+        assert_eq!(expansions[1].text, "{b,c}");
+        assert_eq!(expansions[1].body, "b,c");
+        assert_eq!(expansions[1].operators, [","]);
+        assert_eq!(expansions[1].word_index, Some(1));
+        assert_eq!(expansions[2].text, "{1..3,{x,y}}");
+        assert_eq!(expansions[2].body, "1..3,{x,y}");
+        assert_eq!(expansions[2].operators, ["..", ","]);
+        assert!(!expansions[2].range);
+        assert_eq!(expansions[2].word_index, Some(2));
+        assert_eq!(expansions[3].text, "{x,y}");
+        assert_eq!(expansions[3].body, "x,y");
+        assert_eq!(expansions[3].operators, [","]);
+        assert_eq!(expansions[3].word_index, Some(2));
+    }
+
+    #[test]
     fn test_brace_expansion_skips_command_substitution_source() {
         let input = "echo $(echo {a,b}) {x,y}";
         let tokens = tokenize(input);
