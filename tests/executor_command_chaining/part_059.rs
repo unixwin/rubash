@@ -192,6 +192,41 @@ fn test_extglob_pathname_expansion_matches_files() {
 }
 
 #[test]
+fn test_pathname_expansion_matches_intermediate_segments() {
+    let base_path = "target/rubash-glob-segments";
+    let one_dir = format!("{base_path}/dir-one");
+    let two_dir = format!("{base_path}/dir-two");
+    let output_path = "target/rubash-glob-segments-output.txt";
+    let _ = fs::remove_dir_all(base_path);
+    let _ = fs::remove_file(output_path);
+    fs::create_dir_all(&one_dir).unwrap();
+    fs::create_dir_all(&two_dir).unwrap();
+    fs::write(format!("{one_dir}/file.txt"), "one").unwrap();
+    fs::write(format!("{two_dir}/file.txt"), "two").unwrap();
+    fs::write(format!("{two_dir}/trace.log"), "trace").unwrap();
+    let input = format!(
+        "printf '%s\\n' {base_path}/dir-*/*.txt > {output_path}; \
+         shopt -s extglob; printf '%s\\n' {base_path}/dir-@(two)/*.log >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "target/rubash-glob-segments/dir-one/file.txt\n\
+         target/rubash-glob-segments/dir-two/file.txt\n\
+         target/rubash-glob-segments/dir-two/trace.log\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(base_path);
+}
+
+#[test]
 fn test_set_noexec_updates_shell_option() {
     let tokens = tokenize("set -n");
     let ast = parse(&tokens);

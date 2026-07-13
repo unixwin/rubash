@@ -58,6 +58,10 @@ pub(crate) fn pathname_expand_word(
         return globstar_expand(word, nullglob, nocaseglob, dotglob);
     }
 
+    if word.contains('/') {
+        return pathname_expand_segments(word, nullglob, nocaseglob, dotglob, extglob);
+    }
+
     let (dir_path, pattern) = match word.rsplit_once('/') {
         Some((d, p)) => (d.to_string(), p),
         None => (".".to_string(), word.as_ref()),
@@ -74,13 +78,7 @@ pub(crate) fn pathname_expand_word(
             if !include_dotfiles && name.starts_with('.') {
                 return None;
             }
-            let matched = if extglob && contains_extglob(pattern) {
-                extglob_pattern_matches(pattern, &name, nocaseglob)
-            } else if nocaseglob {
-                case_pattern_matches_nocase(pattern, &name)
-            } else {
-                super::case_pattern_matches(pattern, &name)
-            };
+            let matched = pathname_pattern_matches(pattern, &name, nocaseglob, extglob);
             if matched {
                 if dir_path == "." {
                     Some(name)
@@ -100,6 +98,97 @@ pub(crate) fn pathname_expand_word(
     }
     matches.sort();
     Some(matches)
+}
+
+fn pathname_expand_segments(
+    word: &str,
+    nullglob: bool,
+    nocaseglob: bool,
+    dotglob: bool,
+    extglob: bool,
+) -> Option<Vec<String>> {
+    let parts: Vec<&str> = word.split('/').collect();
+    let mut prefixes = if word.starts_with('/') {
+        vec!["/".to_string()]
+    } else {
+        vec![String::new()]
+    };
+    let mut saw_pattern = false;
+
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let is_last = index == parts.len() - 1;
+        let part_has_pattern = contains_glob_or_extglob(part);
+        saw_pattern |= part_has_pattern;
+        let mut next = Vec::new();
+
+        for prefix in &prefixes {
+            if part_has_pattern {
+                let dir = if prefix.is_empty() {
+                    "."
+                } else {
+                    prefix.as_str()
+                };
+                let entries = match fs::read_dir(dir) {
+                    Ok(entries) => entries,
+                    Err(_) => continue,
+                };
+                let include_dotfiles = dotglob || part.starts_with('.');
+                for entry in entries.filter_map(Result::ok) {
+                    let Some(name) = entry.file_name().into_string().ok() else {
+                        continue;
+                    };
+                    if !include_dotfiles && name.starts_with('.') {
+                        continue;
+                    }
+                    if pathname_pattern_matches(part, &name, nocaseglob, extglob) {
+                        next.push(join_path_segment(prefix, &name));
+                    }
+                }
+            } else {
+                let candidate = join_path_segment(prefix, part);
+                if !is_last || !saw_pattern || Path::new(&candidate).exists() {
+                    next.push(candidate);
+                }
+            }
+        }
+
+        prefixes = next;
+        if prefixes.is_empty() {
+            break;
+        }
+    }
+
+    if prefixes.is_empty() {
+        if nullglob {
+            return Some(Vec::new());
+        }
+        return None;
+    }
+    prefixes.sort();
+    Some(prefixes)
+}
+
+fn join_path_segment(prefix: &str, segment: &str) -> String {
+    if prefix.is_empty() {
+        segment.to_string()
+    } else if prefix == "/" {
+        format!("/{segment}")
+    } else {
+        format!("{prefix}/{segment}")
+    }
+}
+
+fn pathname_pattern_matches(pattern: &str, word: &str, nocaseglob: bool, extglob: bool) -> bool {
+    if extglob && contains_extglob(pattern) {
+        extglob_pattern_matches(pattern, word, nocaseglob)
+    } else if nocaseglob {
+        case_pattern_matches_nocase(pattern, word)
+    } else {
+        super::case_pattern_matches(pattern, word)
+    }
 }
 
 fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
