@@ -304,6 +304,7 @@ pub struct CompoundAssignmentElement {
     pub append: bool,
     pub element_index: usize,
     pub brace_expansions: Vec<BraceExpansion>,
+    pub parameter_expansions: Vec<ParameterExpansion>,
 }
 
 /// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.

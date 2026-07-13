@@ -2389,6 +2389,27 @@ mod assignment_tests {
         assert_eq!(compound[0].elements.len(), 3);
         assert_eq!(compound[0].elements[0].value, "\"$(printf \\\"a b\\\")\"");
         assert_eq!(compound[0].elements[1].value, "\"${value:-five six}\"");
+        assert_eq!(compound[0].elements[1].parameter_expansions.len(), 1);
+        assert_eq!(
+            compound[0].elements[1].parameter_expansions[0].text,
+            "${value:-five six}"
+        );
+        assert_eq!(
+            compound[0].elements[1].parameter_expansions[0].name,
+            "value"
+        );
+        assert_eq!(
+            compound[0].elements[1].parameter_expansions[0]
+                .operator
+                .as_deref(),
+            Some(":-")
+        );
+        assert_eq!(
+            compound[0].elements[1].parameter_expansions[0]
+                .word
+                .as_deref(),
+            Some("five six")
+        );
         assert_eq!(compound[0].elements[2].value, "\"$[count + 1]\"");
     }
 
