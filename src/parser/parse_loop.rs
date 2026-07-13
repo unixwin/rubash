@@ -595,10 +595,15 @@ fn parse_time_prefixed_compound_command(
         return None;
     };
 
+    let pipe = command.pipe.take();
     let and_or = command.and_or.take();
+    let background = command.background;
+    command.background = false;
     let mut timed = CommandNode::new();
     timed.line = tokens.get(start).map(|token| token.position);
+    timed.pipe = pipe;
     timed.and_or = and_or;
+    timed.background = background;
     timed.time_command = Some(TimeCommand {
         keyword: tokens[start].value.clone(),
         prefix_words,

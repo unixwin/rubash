@@ -584,6 +584,26 @@ fn test_time_prefix_executes_brace_group() {
 }
 
 #[test]
+fn test_time_prefix_brace_group_pipeline_feeds_next_stage() {
+    let output_path = "target/rubash-time-brace-pipeline-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time {{ echo one; }} | wc -l > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].time_command.is_some());
+    assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_inversion_prefix_executes_brace_group() {
     let output_path = "target/rubash-time-inverted-brace-group-output.txt";
     let _ = fs::remove_file(output_path);

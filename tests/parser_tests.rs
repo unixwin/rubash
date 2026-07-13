@@ -303,6 +303,20 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_brace_group_consumes_pipe_operator() {
+        let input = "time { echo one; } | wc -l";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].pipe, Some(1));
+        let time_command = pipeline.stages[0].time_command.as_ref().unwrap();
+        assert!(time_command.command.brace_group.is_some());
+        assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    }
+
+    #[test]
     fn test_brace_group_command_consumes_redirect_and_connector() {
         let input = "{ echo hi; } > out && echo done";
         let tokens = tokenize(input);
