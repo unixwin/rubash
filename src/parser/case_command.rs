@@ -288,7 +288,7 @@ pub(super) fn case_terminator(tokens: &[Token], index: usize) -> Option<CaseTerm
         return None;
     }
 
-    match token.value.as_str() {
+    match token.raw.as_str() {
         ";;" => Some(CaseTerminator::Break),
         ";&" => Some(CaseTerminator::FallThrough),
         ";;&" => Some(CaseTerminator::TestNext),

@@ -1320,6 +1320,21 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_body_keeps_quoted_terminator_words() {
+        let input = "case $x in x) echo \";;\"; echo after ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let clause = &case_command.clauses[0];
+
+        assert_eq!(case_command.clauses.len(), 1);
+        assert_eq!(clause.terminator, CaseTerminator::Break);
+        assert_eq!(clause.body.len(), 2);
+        assert_eq!(clause.body[0].words, ["echo", ";;"]);
+        assert_eq!(clause.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_case_body_keeps_nested_select_command() {
         let input =
             "case $word in x) select choice in a; do echo $choice; break; done <<< 1 ;; esac";
