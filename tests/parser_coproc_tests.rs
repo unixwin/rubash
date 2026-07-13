@@ -55,6 +55,19 @@ fn test_coproc_simple_command_does_not_treat_first_word_as_name() {
 }
 
 #[test]
+fn test_coproc_simple_command_keeps_process_substitution_words() {
+    let input = "coproc cat <(:) >(:)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name, None);
+    assert_eq!(coproc.words, ["cat", "<(:)", ">(:)"]);
+    assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
+}
+
+#[test]
 fn test_named_coproc_parses_subshell_body() {
     let input = "coproc MYC ( echo hi )";
     let tokens = tokenize(input);
