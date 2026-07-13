@@ -375,6 +375,21 @@ impl Executor {
             return Ok(None);
         }
 
+        if cmd.here_string.is_some() {
+            let Some(input) = self.stdin_string_for_command(cmd) else {
+                return Ok(None);
+            };
+            let fd = self.allocate_dynamic_fd();
+            self.env_vars.insert(name.to_string(), fd.to_string());
+            self.env_vars.remove(&fd_closed_key(fd));
+            self.env_vars.insert(fd_stdin_key(fd), input);
+            self.env_vars
+                .insert(fd_stdin_offset_key(fd), "0".to_string());
+            self.env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
+            return Ok(Some(0));
+        }
+
         if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
@@ -549,7 +564,10 @@ fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
             .get(1)
             .and_then(|word| dynamic_fd_var_name(word))
             .is_some()
-        && (cmd.redirect_in.is_some() || cmd.redirect_out.is_some() || cmd.append.is_some())
+        && (cmd.redirect_in.is_some()
+            || cmd.redirect_out.is_some()
+            || cmd.append.is_some()
+            || cmd.here_string.is_some())
 }
 
 fn dynamic_fd_var_name(word: &str) -> Option<&str> {
