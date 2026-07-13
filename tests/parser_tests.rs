@@ -606,6 +606,31 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_definition_consumes_and_or_connector() {
+        let input = "foo() { echo hi; } && echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        assert_eq!(list.connectors, [true]);
+        assert!(list.commands[0].function_command.is_some());
+        assert_eq!(list.commands[1].words, ["echo", "done"]);
+    }
+
+    #[test]
+    fn test_function_definition_consumes_pipe_operator() {
+        let input = "foo() { echo hi; } | cat";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].pipe, Some(1));
+        assert!(pipeline.stages[0].function_command.is_some());
+        assert_eq!(pipeline.stages[1].words, ["cat"]);
+    }
+
+    #[test]
     fn test_compact_function_definition_consumes_trailing_redirects() {
         let input = "foo(){ echo hi; } > out; echo done";
         let tokens = tokenize(input);

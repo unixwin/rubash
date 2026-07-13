@@ -64,15 +64,7 @@ pub(super) fn parse_function_command(
             Some(i),
             Some(i),
         ));
-        let mut next_i = i + 1;
-        collect_trailing_redirections(tokens, &mut next_i, &mut command);
-        while tokens
-            .get(next_i)
-            .is_some_and(|token| token.kind == TokenKind::Semicolon)
-        {
-            next_i += 1;
-        }
-        return Some((command, next_i));
+        return Some(finish_function_command(command, tokens, i + 1));
     }
     if let Some((mut body_command, body_end)) = parse_function_compound_body(tokens, i) {
         if let Some(line) = tokens.get(start).map(|token| token.position) {
@@ -89,15 +81,7 @@ pub(super) fn parse_function_command(
             Some(i),
             body_end.checked_sub(1),
         ));
-        let mut next_i = body_end;
-        collect_trailing_redirections(tokens, &mut next_i, &mut command);
-        while tokens
-            .get(next_i)
-            .is_some_and(|token| token.kind == TokenKind::Semicolon)
-        {
-            next_i += 1;
-        }
-        return Some((command, next_i));
+        return Some(finish_function_command(command, tokens, body_end));
     }
 
     if tokens.get(i).is_some_and(|token| token.value == "(") {
@@ -116,15 +100,7 @@ pub(super) fn parse_function_command(
             Some(i),
             Some(close_i),
         ));
-        let mut next_i = close_i + 1;
-        collect_trailing_redirections(tokens, &mut next_i, &mut command);
-        while tokens
-            .get(next_i)
-            .is_some_and(|token| token.kind == TokenKind::Semicolon)
-        {
-            next_i += 1;
-        }
-        return Some((command, next_i));
+        return Some(finish_function_command(command, tokens, close_i + 1));
     }
 
     if let Some((mut body, body_end)) = parse_function_command_sequence_body(tokens, i) {
@@ -142,15 +118,7 @@ pub(super) fn parse_function_command(
             Some(i),
             body_end.checked_sub(1),
         ));
-        let mut next_i = body_end;
-        collect_trailing_redirections(tokens, &mut next_i, &mut command);
-        while tokens
-            .get(next_i)
-            .is_some_and(|token| token.kind == TokenKind::Semicolon)
-        {
-            next_i += 1;
-        }
-        return Some((command, next_i));
+        return Some(finish_function_command(command, tokens, body_end));
     }
 
     if tokens.get(i)?.value != "{" {
@@ -193,15 +161,22 @@ pub(super) fn parse_function_command(
         Some(body_start),
         i.checked_sub(1),
     ));
-    let mut next_i = i + 1;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
+    Some(finish_function_command(command, tokens, i + 1))
+}
+
+fn finish_function_command(
+    command: CommandNode,
+    tokens: &[Token],
+    index: usize,
+) -> (CommandNode, usize) {
+    let (command, mut next_i) = finish_compound_command(command, tokens, index);
     while tokens
         .get(next_i)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
     {
         next_i += 1;
     }
-    Some((command, next_i))
+    (command, next_i)
 }
 
 fn function_command(
