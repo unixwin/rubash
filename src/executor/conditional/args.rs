@@ -171,6 +171,7 @@ pub(in crate::executor) fn is_conditional_operator(s: &str) -> bool {
             | "-n"
             | "-z"
             | "-v"
+            | "-R"
             | "-o"
             | "-a"
             | "-b"

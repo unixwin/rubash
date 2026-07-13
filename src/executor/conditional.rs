@@ -6,7 +6,10 @@
 
 use std::collections::BTreeMap;
 
-use super::{mark_env_name, unescape_remaining_shell_escapes, Executor, ARRAY_VARS};
+use super::{
+    is_marked_var, mark_env_name, unescape_remaining_shell_escapes, Executor, ARRAY_VARS,
+    READONLY_VARS,
+};
 use crate::executor::arithmetic::eval_mutable_arith_value_with_random;
 use crate::executor::arrays::format_indexed_array_storage;
 
@@ -65,6 +68,12 @@ impl Executor {
                 operand,
                 &self.env_vars,
             )),
+            [op, operand, end] if op == "-R" && end == "]]" => {
+                i32::from(!is_marked_var(&self.env_vars, READONLY_VARS, operand))
+            }
+            [op, operand] if op == "-R" => {
+                i32::from(!is_marked_var(&self.env_vars, READONLY_VARS, operand))
+            }
             [op, operand, end] if op == "-o" && end == "]]" => {
                 i32::from(!self.conditional_shell_option_unary(operand))
             }

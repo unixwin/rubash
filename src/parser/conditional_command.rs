@@ -172,6 +172,7 @@ fn is_conditional_unary_operator(op: &str) -> bool {
             | "-O"
             | "-o"
             | "-p"
+            | "-R"
             | "-r"
             | "-S"
             | "-s"

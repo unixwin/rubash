@@ -816,6 +816,21 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_records_readonly_unary_expression() {
+        let input = "[[ -R UID ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Unary
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("-R"));
+        assert_eq!(conditional.expression.operands, ["UID"]);
+    }
+
+    #[test]
     fn test_conditional_command_consumes_trailing_redirects() {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);
