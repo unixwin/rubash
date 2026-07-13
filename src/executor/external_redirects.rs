@@ -69,6 +69,8 @@ impl Executor {
                 process.stdout(Stdio::null());
             } else if redirect_target_fd(&target) == Some(2) {
                 process.stdout(Stdio::piped());
+            } else if self.has_output_fd_target(&target) {
+                process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
                 let mut file = OpenOptions::new()
                     .create(true)
@@ -92,6 +94,8 @@ impl Executor {
             process.stdout(Stdio::null());
         } else if redirect_target_fd(target) == Some(2) {
             process.stdout(Stdio::piped());
+        } else if self.has_output_fd_target(target) {
+            process.stdout(Stdio::from(self.open_output_fd_append(target)?));
         } else if redirect_target_fd(target).is_none() {
             let file = self.create_redirect_output(target, clobber)?;
             process.stdout(Stdio::from(file));
@@ -110,6 +114,8 @@ impl Executor {
                 process.stderr(Stdio::null());
             } else if redirect_target_fd(&target) == Some(1) {
                 process.stderr(Stdio::piped());
+            } else if self.has_output_fd_target(&target) {
+                process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
                 let file = self.create_redirect_output(&target, redirect.clobber)?;
                 process.stderr(Stdio::from(file));
@@ -122,6 +128,8 @@ impl Executor {
                 process.stderr(Stdio::null());
             } else if redirect_target_fd(&target) == Some(1) {
                 process.stderr(Stdio::piped());
+            } else if self.has_output_fd_target(&target) {
+                process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
                 let mut file = OpenOptions::new()
                     .create(true)

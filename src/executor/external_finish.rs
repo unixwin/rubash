@@ -8,10 +8,20 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                file.write_all(output)?;
+                return Ok(());
+            }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             file.write_all(output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
+            if self.has_output_fd_target(&target) {
+                let mut file = self.open_output_fd_append(&target)?;
+                file.write_all(output)?;
+                return Ok(());
+            }
             let mut file = OpenOptions::new()
                 .create(true)
                 .append(true)
