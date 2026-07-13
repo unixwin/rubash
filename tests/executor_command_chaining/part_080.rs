@@ -545,6 +545,24 @@ fn test_exec_dynamic_fd_here_string_persists_for_external_command() {
 }
 
 #[test]
+fn test_exec_dynamic_fd_heredoc_persists_for_external_command() {
+    let output_path = "target/rubash-dynamic-fd-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("exec {{fd}}<<EOF\nalpha\nbeta\nEOF\ncat <&$fd > {output_path}; exec {{fd}}<&-");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_input_fd_close_makes_read_fail_without_hanging() {
     let output_path = "target/rubash-input-fd-close-output.txt";
     let _ = fs::remove_file(output_path);

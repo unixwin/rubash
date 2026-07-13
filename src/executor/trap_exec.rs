@@ -375,7 +375,7 @@ impl Executor {
             return Ok(None);
         }
 
-        if cmd.here_string.is_some() {
+        if cmd.here_string.is_some() || cmd.heredoc.is_some() {
             let Some(input) = self.stdin_string_for_command(cmd) else {
                 return Ok(None);
             };
@@ -567,7 +567,8 @@ fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
         && (cmd.redirect_in.is_some()
             || cmd.redirect_out.is_some()
             || cmd.append.is_some()
-            || cmd.here_string.is_some())
+            || cmd.here_string.is_some()
+            || cmd.heredoc.is_some())
 }
 
 fn dynamic_fd_var_name(word: &str) -> Option<&str> {
