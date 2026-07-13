@@ -39,6 +39,14 @@ pub(super) fn process_substitution_word_target(
     collect_process_substitution_target(tokens, redirect_index + 2)
 }
 
+pub(super) fn any_process_substitution_word_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(ProcessSubstitution, usize)> {
+    process_substitution_word_target(tokens, redirect_index)
+        .or_else(|| output_process_substitution_word_target(tokens, redirect_index))
+}
+
 pub(super) fn output_process_substitution_redirect_target(
     tokens: &[Token],
     redirect_index: usize,

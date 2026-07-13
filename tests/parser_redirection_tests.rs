@@ -490,6 +490,23 @@ fn test_here_string_process_substitution_word() {
 }
 
 #[test]
+fn test_here_string_output_process_substitution_word() {
+    let input = "read x <<< >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["read", "x"]);
+    assert_eq!(command.here_string.as_deref(), Some(">(cat > out.txt)"));
+    assert_eq!(command.process_substitutions.len(), 1);
+    assert_eq!(command.process_substitutions[0].target, ">(cat > out.txt)");
+    assert_eq!(command.process_substitutions[0].source, "cat > out.txt");
+    assert!(command.process_substitutions[0].output);
+    assert_eq!(command.process_substitutions[0].word_index, None);
+    assert_eq!(command.process_substitutions[0].redirect_fd, None);
+}
+
+#[test]
 fn test_fd_here_string_process_substitution_word() {
     let input = "read -u 3 x 3<<< <(printf data)";
     let tokens = tokenize(input);
@@ -520,6 +537,21 @@ fn test_trailing_here_string_process_substitution_word() {
     assert_eq!(command.process_substitutions.len(), 1);
     assert_eq!(command.process_substitutions[0].target, "<(printf data)");
     assert_eq!(command.process_substitutions[0].source, "printf data");
+}
+
+#[test]
+fn test_trailing_here_string_output_process_substitution_word() {
+    let input = "{ read x; } <<< >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert!(command.brace_group.is_some());
+    assert_eq!(command.here_string.as_deref(), Some(">(cat > out.txt)"));
+    assert_eq!(command.process_substitutions.len(), 1);
+    assert_eq!(command.process_substitutions[0].target, ">(cat > out.txt)");
+    assert_eq!(command.process_substitutions[0].source, "cat > out.txt");
+    assert!(command.process_substitutions[0].output);
 }
 
 #[test]

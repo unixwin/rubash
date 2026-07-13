@@ -97,7 +97,7 @@ pub(super) fn collect_trailing_redirections(
 
         if token.kind == TokenKind::HereString {
             if let Some((process_substitution, next_i)) =
-                process_substitution_word_target(tokens, *index + 1)
+                any_process_substitution_word_target(tokens, *index + 1)
             {
                 assign_here_string_process_substitution(
                     command,
