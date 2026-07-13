@@ -292,6 +292,42 @@ fn test_time_command_inverts_timed_status_with_redirect() {
 }
 
 #[test]
+fn test_outer_inversion_wraps_time_simple_command() {
+    let output_path = "target/rubash-inverted-time-simple-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("! time false; echo status:$? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].inverted_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_outer_inversion_wraps_time_pipeline_command() {
+    let output_path = "target/rubash-inverted-time-pipeline-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("! time echo alpha | grep beta; echo status:$? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].inverted_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_prefix_executes_for_command() {
     let output_path = "target/rubash-time-for-output.txt";
     let _ = fs::remove_file(output_path);

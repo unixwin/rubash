@@ -110,6 +110,32 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_inversion_wraps_time_simple_command() {
+        let input = "! time -p false";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        let time_command = inverted.command.time_command.as_ref().unwrap();
+        assert!(time_command.posix_format);
+        assert!(!time_command.inverted);
+        assert_eq!(time_command.command.words, ["false"]);
+    }
+
+    #[test]
+    fn test_inversion_wraps_time_pipeline_command() {
+        let input = "! time echo alpha | grep beta";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let inverted = ast.commands[0].inverted_command.as_ref().unwrap();
+        let time_command = inverted.command.time_command.as_ref().unwrap();
+        let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages[0].words, ["echo", "alpha"]);
+        assert_eq!(pipeline.stages[1].words, ["grep", "beta"]);
+    }
+
+    #[test]
     fn test_multiple_pipeline() {
         let input = "ls | grep foo | sort";
         let tokens = tokenize(input);

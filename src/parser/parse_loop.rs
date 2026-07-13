@@ -215,12 +215,15 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             };
 
             let line = command.line;
+            let inverted = command.inverted;
             let and_or = command.and_or.take();
             let background = command.background;
+            command.inverted = false;
             command.background = false;
             command.and_or = None;
             let mut timed = CommandNode::new();
             timed.line = line;
+            timed.inverted = inverted;
             timed.and_or = and_or;
             timed.background = background;
             timed.time_command = Some(TimeCommand {
@@ -259,11 +262,14 @@ fn fold_time_simple_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             };
 
             let line = command.line;
+            let inverted = command.inverted;
             let and_or = command.and_or.take();
             let background = command.background;
+            command.inverted = false;
             command.background = false;
             let mut timed = CommandNode::new();
             timed.line = line;
+            timed.inverted = inverted;
             timed.and_or = and_or;
             timed.background = background;
             timed.time_command = Some(TimeCommand {
@@ -284,7 +290,6 @@ fn command_is_time_simple_candidate(command: &CommandNode) -> bool {
         && command.time_command.is_none()
         && command.background_command.is_none()
         && command.inverted_command.is_none()
-        && !command.inverted
         && command.for_command.is_none()
         && command.arithmetic_command.is_none()
         && command.if_command.is_none()
