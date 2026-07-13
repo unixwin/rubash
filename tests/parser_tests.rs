@@ -968,6 +968,19 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_conditional_body_keeps_quoted_closing_delimiter_word() {
+        let input = "foo() [[ value == \"]]\" ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        let conditional = function.body[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(conditional.args, ["value", "==", "]]", "]]"]);
+        assert_eq!(conditional.expression.operands, ["value", "]]"]);
+    }
+
+    #[test]
     fn test_function_sequence_body_keeps_reserved_word_arguments() {
         let if_tokens = tokenize("foo() if echo then; then echo fi; fi");
         let if_ast = parse(&if_tokens);

@@ -166,6 +166,22 @@ fn test_named_coproc_parses_conditional_body() {
 }
 
 #[test]
+fn test_coproc_conditional_body_keeps_quoted_closing_delimiter_word() {
+    let input = "coproc MYC [[ value == \"]]\" ]]";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let conditional = coproc.body.as_ref().unwrap()[0]
+        .conditional_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CommandSequence);
+    assert_eq!(conditional.args, ["value", "==", "]]", "]]"]);
+    assert_eq!(conditional.expression.operands, ["value", "]]"]);
+}
+
+#[test]
 fn test_coproc_sequence_body_keeps_reserved_word_arguments() {
     let if_tokens = tokenize("coproc MYC if echo then; then echo fi; fi");
     let if_ast = parse(&if_tokens);

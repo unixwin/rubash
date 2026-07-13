@@ -210,7 +210,7 @@ fn parse_coproc_command_sequence_body(
 }
 
 fn matching_coproc_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
-    (start..tokens.len()).find(|&index| tokens[index].value == "]]")
+    (start..tokens.len()).find(|&index| tokens[index].raw == "]]")
 }
 
 fn matching_coproc_if_end(tokens: &[Token], start: usize) -> Option<usize> {

@@ -224,7 +224,7 @@ fn parse_function_command_sequence_body(
 }
 
 fn matching_function_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
-    (start..tokens.len()).find(|&index| tokens[index].value == "]]")
+    (start..tokens.len()).find(|&index| tokens[index].raw == "]]")
 }
 
 fn matching_function_if_end(tokens: &[Token], start: usize) -> Option<usize> {
