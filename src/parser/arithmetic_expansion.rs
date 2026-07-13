@@ -48,6 +48,13 @@ fn arithmetic_expansions_in_word(word: &str) -> Vec<ArithmeticExpansion> {
                 continue;
             }
         }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+            if let Some((expansion, next_index)) = bracket_arithmetic_expansion(&chars, index) {
+                expansions.push(expansion);
+                index = next_index;
+                continue;
+            }
+        }
         index += 1;
     }
     expansions
@@ -79,8 +86,48 @@ fn arithmetic_expansion(chars: &[char], start: usize) -> Option<(ArithmeticExpan
             ')' if !single && !double && chars.get(index + 1) == Some(&')') => {
                 let expression = chars[start + 3..index].iter().collect::<String>();
                 return Some((
-                    arithmetic_expansion_node(chars, start, index, expression),
+                    arithmetic_expansion_node(chars, start, index, "$((", "))", expression),
                     index + 2,
+                ));
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn bracket_arithmetic_expansion(
+    chars: &[char],
+    start: usize,
+) -> Option<(ArithmeticExpansion, usize)> {
+    let mut index = start + 2;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double => depth += 1,
+            ']' if !single && !double && depth > 0 => depth -= 1,
+            ']' if !single && !double => {
+                let expression = chars[start + 2..index].iter().collect::<String>();
+                return Some((
+                    arithmetic_expansion_node(chars, start, index, "$[", "]", expression),
+                    index + 1,
                 ));
             }
             _ => {}
@@ -94,13 +141,17 @@ fn arithmetic_expansion_node(
     chars: &[char],
     start: usize,
     end: usize,
+    open_delimiter: &str,
+    close_delimiter: &str,
     expression: String,
 ) -> ArithmeticExpansion {
     let operators = arithmetic_operators(&expression);
     ArithmeticExpansion {
-        text: chars[start..=end + 1].iter().collect(),
-        open_delimiter: "$((".to_string(),
-        close_delimiter: "))".to_string(),
+        text: chars[start..=end + close_delimiter.len() - 1]
+            .iter()
+            .collect(),
+        open_delimiter: open_delimiter.to_string(),
+        close_delimiter: close_delimiter.to_string(),
         variables: arithmetic_variables(&expression),
         has_assignment: operators
             .iter()

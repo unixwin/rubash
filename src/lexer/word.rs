@@ -114,6 +114,10 @@ impl<'a> Lexer<'a> {
                             self.advance();
                             self.skip_cmd_subst();
                         }
+                        Some('[') => {
+                            self.advance();
+                            self.skip_arith_bracket();
+                        }
                         Some('\'') => {
                             self.advance();
                             self.skip_ansi_c_single();

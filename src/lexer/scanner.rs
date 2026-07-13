@@ -245,6 +245,14 @@ impl<'a> Lexer<'a> {
                     }
                     Some(Token::new(TokenKind::Variable, self.slice(start), start))
                 }
+                Some('[') => {
+                    self.advance();
+                    self.skip_arith_bracket();
+                    if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
+                        return Some(self.finish_word_token(start, false));
+                    }
+                    Some(Token::new(TokenKind::Word, self.slice(start), start))
+                }
                 _ => {
                     let pos = self.position;
                     self.skip_word();

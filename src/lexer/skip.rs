@@ -29,6 +29,23 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    pub(super) fn skip_arith_bracket(&mut self) {
+        let mut depth = 0usize;
+        while let Some(c) = self.advance() {
+            match c {
+                '[' => depth += 1,
+                ']' if depth > 0 => depth -= 1,
+                ']' => break,
+                '\'' => self.skip_single(),
+                '"' => self.skip_double(),
+                '\\' => {
+                    self.advance();
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(super) fn skip_heredoc_in_command_substitution(&mut self) {
         self.advance();
         let strip_tabs = if self.peek() == Some('-') {

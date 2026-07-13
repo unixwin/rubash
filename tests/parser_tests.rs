@@ -2206,6 +2206,35 @@ mod arithmetic_expansion_tests {
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("value"));
         assert_eq!(expansions[0].word_index, Some(1));
     }
+
+    #[test]
+    fn test_bracket_arithmetic_expansion_records_structured_ast() {
+        let input = "echo $[count += 1] value=$[array[0] + 2]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let command = &ast.commands[0];
+
+        assert_eq!(
+            command.words,
+            ["echo", "$[count += 1]", "value=$[array[0] + 2]"]
+        );
+        let expansions = command.arithmetic_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].text, "$[count += 1]");
+        assert_eq!(expansions[0].open_delimiter, "$[");
+        assert_eq!(expansions[0].close_delimiter, "]");
+        assert_eq!(expansions[0].expression, "count += 1");
+        assert_eq!(expansions[0].variables, ["count"]);
+        assert!(expansions[0].has_assignment);
+        assert_eq!(expansions[0].operators[0].text, "+=");
+        assert_eq!(expansions[0].word_index, Some(1));
+        assert_eq!(expansions[0].assignment_name, None);
+        assert_eq!(expansions[1].text, "$[array[0] + 2]");
+        assert_eq!(expansions[1].expression, "array[0] + 2");
+        assert_eq!(expansions[1].word_index, Some(2));
+        assert_eq!(expansions[1].assignment_name.as_deref(), Some("value"));
+        assert!(command.pathname_patterns.is_empty());
+    }
 }
 
 mod parameter_expansion_tests {

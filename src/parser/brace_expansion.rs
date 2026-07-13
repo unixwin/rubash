@@ -49,6 +49,13 @@ fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {
             }
         }
 
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+            if let Some(next_index) = skip_dollar_bracket(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
         if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
             if let Some(next_index) = skip_braced_parameter(&chars, index) {
                 index = next_index;
@@ -145,6 +152,37 @@ fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {
                     return Some(index + 1);
                 }
             }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_dollar_bracket(chars: &[char], start: usize) -> Option<usize> {
+    let mut index = start + 2;
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double => depth += 1,
+            ']' if !single && !double && depth > 0 => depth -= 1,
+            ']' if !single && !double => return Some(index + 1),
             _ => {}
         }
         index += 1;
