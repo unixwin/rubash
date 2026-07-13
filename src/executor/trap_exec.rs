@@ -136,6 +136,12 @@ impl Executor {
             return Ok(status);
         }
 
+        if cmd.words.len() == 1 {
+            if let Some(status) = self.execute_stdout_only_exec_redirect(cmd)? {
+                return Ok(status);
+            }
+        }
+
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
@@ -191,6 +197,34 @@ impl Executor {
             &cmd.words[1..],
             &self.env_vars,
         )?)
+    }
+
+    fn execute_stdout_only_exec_redirect(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<i32>, ExecuteError> {
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                self.env_vars.remove(&fd_output_key(1));
+                return Ok(Some(0));
+            }
+            self.create_redirect_output(&target, redirect.clobber)?;
+            self.env_vars.insert(fd_output_key(1), target);
+            return Ok(Some(0));
+        }
+
+        if let Some(redirect) = &cmd.append {
+            let target = self.expand_word(&redirect.target);
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            self.env_vars.insert(fd_output_key(1), target);
+            return Ok(Some(0));
+        }
+
+        Ok(None)
     }
 
     fn execute_dynamic_fd_exec_redirect(

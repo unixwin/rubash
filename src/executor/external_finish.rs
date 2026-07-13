@@ -2,7 +2,7 @@ use super::*;
 
 impl Executor {
     pub(in crate::executor) fn write_cat_output(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
@@ -28,7 +28,7 @@ impl Executor {
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
             file.write_all(output)?;
         } else {
-            print!("{}", String::from_utf8_lossy(output));
+            self.write_default_stdout(output)?;
         }
         Ok(())
     }

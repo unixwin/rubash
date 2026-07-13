@@ -36,6 +36,29 @@ fn test_exec_double_dash_stops_option_parsing() {
 }
 
 #[test]
+fn test_exec_stdout_redirect_persists_for_following_commands() {
+    let output_path = target_test_path("rubash-exec-persistent-stdout-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!(
+        "exec > {shell_output_path}; value=$(echo captured); echo first; echo value:$value"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "first\nvalue:captured\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_exec_child_environment_contains_only_exported_variables() {
     let output_path = target_test_path("rubash-exec-child-env-output.txt");
     let _ = fs::remove_file(&output_path);

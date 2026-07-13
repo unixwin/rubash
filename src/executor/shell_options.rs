@@ -29,6 +29,28 @@ impl Executor {
             .open(shell_path_to_windows(&path, &self.env_vars))
     }
 
+    pub(in crate::executor) fn write_default_stdout(
+        &mut self,
+        output: &[u8],
+    ) -> Result<(), ExecuteError> {
+        if let Some(capture) = &mut self.stdout_capture {
+            capture.write_all(output)?;
+            return Ok(());
+        }
+
+        if let Some(target) = self.env_vars.get(&fd_output_key(1)).cloned() {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(shell_path_to_windows(&target, &self.env_vars))?;
+            file.write_all(output)?;
+            return Ok(());
+        }
+
+        std::io::stdout().lock().write_all(output)?;
+        Ok(())
+    }
+
     pub(in crate::executor) fn has_output_fd_target(&self, target: &str) -> bool {
         redirect_target_fd(target)
             .map(|fd| self.env_vars.contains_key(&fd_output_key(fd)))

@@ -263,11 +263,9 @@ impl Executor {
             return Ok(());
         }
 
-        if let Some(capture) = &mut self.stdout_capture {
-            crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), capture)?;
-        } else {
-            crate::builtins::echo::execute(&echo_args)?;
-        }
+        let mut output = Vec::new();
+        crate::builtins::echo::write_echo(echo_args.iter().map(String::as_str), &mut output)?;
+        self.write_default_stdout(&output)?;
         Ok(())
     }
 }

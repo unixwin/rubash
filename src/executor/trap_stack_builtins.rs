@@ -32,10 +32,8 @@ impl Executor {
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
                 file.write_all(stdout)?;
             }
-        } else if let Some(capture) = &mut self.stdout_capture {
-            capture.write_all(stdout)?;
         } else {
-            std::io::stdout().lock().write_all(stdout)?;
+            self.write_default_stdout(stdout)?;
         }
 
         if let Some(redirect) = &cmd.redirect_err {
