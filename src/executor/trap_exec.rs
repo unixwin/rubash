@@ -316,6 +316,14 @@ impl Executor {
                 return Ok(Some(0));
             }
 
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                let fd = self.allocate_dynamic_fd();
+                self.env_vars.insert(name.to_string(), fd.to_string());
+                self.copy_persistent_input_fd(fd, source_fd);
+                self.copy_persistent_output_fd(fd, source_fd);
+                return Ok(Some(0));
+            }
+
             let path = shell_path_to_windows(&target, &self.env_vars);
             if redirect.append {
                 let _ = OpenOptions::new()
@@ -369,6 +377,27 @@ impl Executor {
         }
 
         Ok(None)
+    }
+
+    fn copy_persistent_input_fd(&mut self, target_fd: u32, source_fd: u32) {
+        let source_key = fd_stdin_key(source_fd);
+        let Some(input) = self.env_vars.get(&source_key).cloned() else {
+            self.env_vars.remove(&fd_stdin_key(target_fd));
+            self.env_vars.remove(&fd_stdin_offset_key(target_fd));
+            self.env_vars.remove(&fd_dynamic_input_key(target_fd));
+            return;
+        };
+        let offset = self
+            .env_vars
+            .get(&fd_stdin_offset_key(source_fd))
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let remaining = input.get(offset..).unwrap_or_default().to_string();
+        self.env_vars.insert(fd_stdin_key(target_fd), remaining);
+        self.env_vars
+            .insert(fd_stdin_offset_key(target_fd), "0".to_string());
+        self.env_vars
+            .insert(fd_dynamic_input_key(target_fd), "1".to_string());
     }
 
     fn allocate_dynamic_fd(&self) -> u32 {

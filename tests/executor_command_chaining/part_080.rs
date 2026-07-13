@@ -390,6 +390,29 @@ fn test_exec_dynamic_input_fd_reads_through_named_fd() {
 }
 
 #[test]
+fn test_exec_dynamic_input_fd_copies_persistent_stdin_redirect() {
+    let input_path = "target/rubash-dynamic-input-fd-copy-stdin.txt";
+    let output_path = "target/rubash-dynamic-input-fd-copy-stdin-output.txt";
+    fs::write(input_path, "alpha\nbeta\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "exec < {input_path}; read first; exec {{fd}}<&0; read -u $fd second; \
+         exec {{fd}}<&-; echo $first/$second > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_external_command_reads_dynamic_input_fd() {
     let input_path = "target/rubash-external-dynamic-input-fd.txt";
     let output_path = "target/rubash-external-dynamic-input-fd-output.txt";
