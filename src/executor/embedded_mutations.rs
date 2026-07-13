@@ -121,7 +121,64 @@ impl Executor {
         if let Some(output) = self.run_function_command_substitution(&words) {
             return output;
         }
+        if let Some(output) = self.run_ast_command_substitution(source) {
+            return output;
+        }
         self.expand_command_substitution(source)
+    }
+
+    pub(in crate::executor) fn run_ast_command_substitution(
+        &mut self,
+        source: &str,
+    ) -> Option<String> {
+        if source.contains("<<") {
+            return None;
+        }
+
+        let tokens = crate::lexer::tokenize(source);
+        let ast = crate::parser::parse(&tokens);
+        if !command_substitution_needs_ast_execution(&ast) {
+            return None;
+        }
+
+        let saved_env = self.env_vars.clone();
+        let saved_functions = self.functions.clone();
+        let saved_function_redirects = self.function_definition_redirects.clone();
+        let saved_aliases = self.aliases.clone();
+        let saved_exit_code = self.exit_code;
+        let saved_dir = env::current_dir().ok();
+        let saved_depth = self.subshell_depth.get();
+        self.subshell_depth.set(saved_depth + 1);
+
+        let saved_capture = self.stdout_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        let result = self.execute_ast(&ast);
+        let output = self.stdout_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_capture;
+
+        let status = match result {
+            Ok(()) => self.exit_code,
+            Err(ExecuteError::Return(status)) => status,
+            Err(ExecuteError::ExitCode(status)) => status,
+            Err(_) => 1,
+        };
+
+        self.restore_shell_env(saved_env);
+        self.functions = saved_functions;
+        self.function_definition_redirects = saved_function_redirects;
+        self.aliases = saved_aliases;
+        if let Some(saved_dir) = saved_dir {
+            let _ = env::set_current_dir(saved_dir);
+        }
+        self.subshell_depth.set(saved_depth);
+        self.exit_code = saved_exit_code;
+        self.last_command_substitution_status.set(Some(status));
+
+        Some(
+            String::from_utf8_lossy(&output)
+                .trim_end_matches('\n')
+                .to_string(),
+        )
     }
 
     pub(in crate::executor) fn run_function_command_substitution(
@@ -220,4 +277,64 @@ impl Executor {
 
         output
     }
+}
+
+fn command_substitution_needs_ast_execution(ast: &Ast) -> bool {
+    ast.commands.iter().any(command_has_compound_substitution)
+        || (ast.commands.len() > 1
+            && ast
+                .commands
+                .iter()
+                .all(command_is_safe_builtin_substitution))
+}
+
+fn command_has_compound_substitution(command: &CommandNode) -> bool {
+    command.pipeline_command.as_ref().is_some_and(|pipeline| {
+        pipeline
+            .stages
+            .iter()
+            .any(command_has_compound_substitution)
+    }) || command
+        .and_or_list
+        .as_ref()
+        .is_some_and(|list| list.commands.iter().any(command_has_compound_substitution))
+        || command
+            .inverted_command
+            .as_ref()
+            .is_some_and(|inverted| command_has_compound_substitution(&inverted.command))
+        || command
+            .time_command
+            .as_ref()
+            .is_some_and(|time| command_has_compound_substitution(&time.command))
+        || command.for_command.is_some()
+        || command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.select_command.is_some()
+        || command.case_command.is_some()
+        || command.coproc_command.is_some()
+        || command.subshell_command.is_some()
+        || command.brace_group.is_some()
+        || command.arithmetic_command.is_some()
+        || command.conditional_command.is_some()
+}
+
+fn command_is_safe_builtin_substitution(command: &CommandNode) -> bool {
+    matches!(
+        command.words.first().map(String::as_str),
+        Some("echo" | "printf" | "true" | "false" | ":" | "pwd")
+    ) && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.inverted_command.is_none()
+        && command.background_command.is_none()
+        && command.time_command.is_none()
+        && command.for_command.is_none()
+        && command.if_command.is_none()
+        && command.loop_command.is_none()
+        && command.select_command.is_none()
+        && command.case_command.is_none()
+        && command.coproc_command.is_none()
+        && command.subshell_command.is_none()
+        && command.brace_group.is_none()
+        && command.arithmetic_command.is_none()
+        && command.conditional_command.is_none()
 }
