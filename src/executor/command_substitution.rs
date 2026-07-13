@@ -30,9 +30,11 @@ impl Executor {
             return String::new();
         }
         if let Some(path) = source.strip_prefix('<') {
-            let expanded = self.expand_word(path.trim());
+            let raw_path = path.trim();
+            let allow_glob = !readfile_path_is_quoted(raw_path);
+            let expanded = self.expand_word(raw_path);
             let path = strip_matching_quotes(&expanded);
-            if let Some(path) = self.command_substitution_read_path(&path) {
+            if let Some(path) = self.command_substitution_read_path(&path, allow_glob) {
                 return fs::read_to_string(path)
                     .map(|value| {
                         self.last_command_substitution_status.set(Some(0));
@@ -253,8 +255,9 @@ impl Executor {
     pub(in crate::executor) fn command_substitution_read_path(
         &self,
         path: &str,
+        allow_glob: bool,
     ) -> Option<PathBuf> {
-        if !path.contains('*') || self.posix_mode_enabled() {
+        if !allow_glob || !path.contains('*') || self.posix_mode_enabled() {
             return Some(shell_path_to_windows(path, &self.env_vars));
         }
 
@@ -275,4 +278,8 @@ impl Executor {
         matches.sort();
         matches.into_iter().next()
     }
+}
+
+fn readfile_path_is_quoted(path: &str) -> bool {
+    path.chars().any(|ch| matches!(ch, '\'' | '"' | '\\'))
 }

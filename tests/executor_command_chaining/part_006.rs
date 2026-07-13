@@ -125,6 +125,30 @@ fn test_read_file_command_substitution_removes_quotes_from_path() {
 }
 
 #[test]
+fn test_quoted_read_file_command_substitution_does_not_expand_glob() {
+    let input_path = "target/rubash-readfile-command-substitution-quoted-glob-input.txt";
+    let output_path = "target/rubash-readfile-command-substitution-quoted-glob-output.txt";
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+    fs::write(input_path, "globbed\n").unwrap();
+    let input = format!(
+        "v=$(<\"target/rubash-readfile-command-substitution-quoted-glob-*.txt\"); \
+         printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<> status:1\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_file_command_substitution_missing_file_sets_status() {
     let missing_path = "target/rubash-readfile-command-substitution-missing.txt";
     let output_path = "target/rubash-readfile-command-substitution-missing-output.txt";
