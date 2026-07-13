@@ -100,10 +100,7 @@ impl Executor {
             .or_else(|| self.read_inherited_process_stdin(delimiter, char_limit, exact_char_limit))
     }
 
-    pub(in crate::executor) fn process_substitution_output(
-        &mut self,
-        source: &str,
-    ) -> Option<String> {
+    pub(crate) fn process_substitution_output(&mut self, source: &str) -> Option<String> {
         let tokens = crate::lexer::tokenize(source);
         let ast = crate::parser::parse(&tokens);
         if ast.commands.is_empty() {

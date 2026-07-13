@@ -110,6 +110,20 @@ where
     };
     let filename = invocation.filename;
 
+    if let Some(process_source) = filename
+        .strip_prefix("<(")
+        .and_then(|filename| filename.strip_suffix(')'))
+    {
+        if let Some(source) = executor.process_substitution_output(process_source) {
+            return execution::execute_text_maybe_redirected(
+                executor,
+                &source,
+                invocation.args,
+                redirect_cmd,
+            );
+        }
+    }
+
     if is_null_device(filename) {
         executor.set_exit_code(0);
         return Ok(());

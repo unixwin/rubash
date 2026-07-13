@@ -148,6 +148,42 @@ fn test_source_appends_body_stdout_and_stderr() {
 }
 
 #[test]
+fn test_source_process_substitution_updates_current_shell() {
+    let output_path = "target/rubash-source-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "source <(printf 'RUBASH_SOURCE_PS=ok\\n'); echo $RUBASH_SOURCE_PS > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "ok\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_source_process_substitution_uses_source_arguments() {
+    let output_path = "target/rubash-source-process-substitution-args-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("source <(printf 'echo sourced:$1 > {output_path}\\n') arg");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "sourced:arg\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_builtin_return_returns_from_function() {
     let output_path = "target/rubash-builtin-return-output.txt";
     let _ = fs::remove_file(output_path);
