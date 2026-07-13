@@ -159,6 +159,21 @@ impl Executor {
         command: &CommandNode,
         input: &str,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        if let Some(time_command) = &command.time_command {
+            let Some((output, stderr, status)) =
+                self.execute_pipeline_stage(&time_command.command, input)?
+            else {
+                return Ok(None);
+            };
+            print_posix_time();
+            let status = if time_command.inverted {
+                invert_exit_status(status)
+            } else {
+                status
+            };
+            return Ok(Some((output, stderr, status)));
+        }
+
         if command_is_compound_pipeline_stage(command) {
             return self
                 .execute_compound_pipeline_stage(command, input)

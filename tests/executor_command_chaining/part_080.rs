@@ -518,6 +518,46 @@ fn test_pipe_stderr_operator_feeds_next_stage() {
 }
 
 #[test]
+fn test_time_command_can_be_pipeline_stage() {
+    let output_path = "target/rubash-time-pipeline-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf 'alpha\\n' | time cat > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[1].time_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_inverted_time_command_pipeline_stage_flips_status() {
+    let output_path = "target/rubash-inverted-time-pipeline-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "printf 'alpha\\n' | time ! grep beta > {output_path}; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[1].time_command.as_ref().unwrap().inverted);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipeline_feeds_brace_group_stage() {
     let output_path = "target/rubash-pipeline-brace-stage-output.txt";
     let _ = fs::remove_file(output_path);

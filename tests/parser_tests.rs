@@ -136,6 +136,22 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_wraps_non_initial_pipeline_stage() {
+        let input = "printf alpha | time cat | wc -c";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 3);
+        assert_eq!(pipeline.stages[0].words, ["printf", "alpha"]);
+        let time_command = pipeline.stages[1].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.command.words, ["cat"]);
+        assert_eq!(pipeline.stages[1].pipe, Some(1));
+        assert_eq!(pipeline.stages[2].words, ["wc", "-c"]);
+    }
+
+    #[test]
     fn test_multiple_pipeline() {
         let input = "ls | grep foo | sort";
         let tokens = tokenize(input);

@@ -177,6 +177,8 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             continue;
         }
 
+        fold_time_pipeline_stage_commands(&mut stages);
+
         let first = stages.first().expect("pipeline has a first stage");
         let last = stages.last().expect("pipeline has a last stage");
         let mut pipeline = CommandNode::new();
@@ -201,6 +203,41 @@ fn looks_like_case_pattern_alternate(stages: &[CommandNode]) -> bool {
         return false;
     }
     first.words.len() >= 4 && stages.len() >= 2
+}
+
+fn fold_time_pipeline_stage_commands(stages: &mut [CommandNode]) {
+    for stage in stages.iter_mut().skip(1) {
+        let folded = fold_time_pipeline_stage_command(std::mem::take(stage));
+        *stage = folded;
+    }
+}
+
+fn fold_time_pipeline_stage_command(mut command: CommandNode) -> CommandNode {
+    if !command_is_time_simple_candidate(&command) {
+        return command;
+    }
+    let Some(prefix) = time_prefix_from_command(&mut command) else {
+        return command;
+    };
+
+    let mut timed = CommandNode::new();
+    timed.line = command.line;
+    timed.inverted = command.inverted;
+    timed.pipe = command.pipe.take();
+    timed.redirect_in = command.redirect_in.clone();
+    timed.redirect_out = command.redirect_out.clone();
+    timed.append = command.append.clone();
+    timed.redirect_err = command.redirect_err.clone();
+    timed.redirect_err_append = command.redirect_err_append.clone();
+    command.inverted = false;
+    timed.time_command = Some(TimeCommand {
+        keyword: prefix.keyword,
+        prefix_words: prefix.prefix_words,
+        command: Box::new(command),
+        posix_format: prefix.posix_format,
+        inverted: prefix.inverted,
+    });
+    timed
 }
 
 fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
