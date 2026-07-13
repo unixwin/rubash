@@ -416,6 +416,17 @@ mod pipeline_tests {
         assert_eq!(subshell.body.len(), 1);
         assert!(subshell.body[0].case_command.is_some());
     }
+
+    #[test]
+    fn test_subshell_command_keeps_case_argument() {
+        let input = "( echo case; echo ok )";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let subshell = ast.commands[0].subshell_command.as_ref().unwrap();
+
+        assert_eq!(subshell.body[0].words, ["echo", "case"]);
+        assert_eq!(subshell.body[1].words, ["echo", "ok"]);
+    }
 }
 
 mod semicolon_tests {
@@ -815,6 +826,18 @@ mod function_tests {
         assert_eq!(function.body_close_delimiter.as_deref(), Some(")"));
         assert_eq!(function.body.len(), 1);
         assert!(function.body[0].case_command.is_some());
+    }
+
+    #[test]
+    fn test_parenthesized_function_body_keeps_case_argument() {
+        let input = "foo() ( echo case; echo ok )";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(function.body_kind, FunctionBodyKind::Subshell);
+        assert_eq!(function.body[0].words, ["echo", "case"]);
+        assert_eq!(function.body[1].words, ["echo", "ok"]);
     }
 
     #[test]

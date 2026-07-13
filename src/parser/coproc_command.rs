@@ -93,9 +93,10 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             let mut depth = 1usize;
             let mut case_depth = 0usize;
             while i < tokens.len() {
-                if is_keyword(tokens, i, "case") {
+                let boundary = i == body_start || command_boundary_keyword_allowed(tokens, i);
+                if boundary && is_keyword(tokens, i, "case") {
                     case_depth += 1;
-                } else if is_keyword(tokens, i, "esac") {
+                } else if boundary && is_keyword(tokens, i, "esac") {
                     case_depth = case_depth.saturating_sub(1);
                 } else if case_depth == 0 && is_keyword(tokens, i, "(") {
                     depth += 1;

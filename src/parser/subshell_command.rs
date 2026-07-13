@@ -27,9 +27,10 @@ fn matching_subshell_end(tokens: &[Token], start: usize) -> Option<usize> {
     let mut case_depth = 0usize;
     let mut index = start + 1;
     while index < tokens.len() {
-        if is_keyword(tokens, index, "case") {
+        let boundary = index == start + 1 || command_boundary_keyword_allowed(tokens, index);
+        if boundary && is_keyword(tokens, index, "case") {
             case_depth += 1;
-        } else if is_keyword(tokens, index, "esac") {
+        } else if boundary && is_keyword(tokens, index, "esac") {
             case_depth = case_depth.saturating_sub(1);
         } else if case_depth == 0 && is_keyword(tokens, index, "(") {
             depth += 1;

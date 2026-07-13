@@ -98,6 +98,19 @@ fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
 }
 
 #[test]
+fn test_named_coproc_subshell_keeps_case_argument() {
+    let input = "coproc MYC ( echo case; echo ok )";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let body = coproc.body.as_ref().unwrap();
+
+    assert_eq!(coproc.body_kind, CoprocBodyKind::Subshell);
+    assert_eq!(body[0].words, ["echo", "case"]);
+    assert_eq!(body[1].words, ["echo", "ok"]);
+}
+
+#[test]
 fn test_named_coproc_parses_for_body() {
     let input = "coproc MYC for x in a b; do echo $x; done";
     let tokens = tokenize(input);
