@@ -52,6 +52,8 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             arithmetic_expansions: arithmetic_expansions_in_word(value),
             extglob_patterns: extglob_patterns_in_word(value),
             pathname_patterns: pathname_patterns_in_word(value, value),
+            tilde_expansions: tilde_expansions_in_word(value),
+            word_quotes: word_quotes_in_raw(value),
         };
     }
 
@@ -67,6 +69,8 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             arithmetic_expansions: arithmetic_expansions_in_word(value),
             extglob_patterns: extglob_patterns_in_word(value),
             pathname_patterns: pathname_patterns_in_word(value, value),
+            tilde_expansions: tilde_expansions_in_word(value),
+            word_quotes: word_quotes_in_raw(value),
         };
     }
 
@@ -81,6 +85,8 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         arithmetic_expansions: arithmetic_expansions_in_word(word),
         extglob_patterns: extglob_patterns_in_word(word),
         pathname_patterns: pathname_patterns_in_word(word, word),
+        tilde_expansions: tilde_expansions_in_word(word),
+        word_quotes: word_quotes_in_raw(word),
     }
 }
 

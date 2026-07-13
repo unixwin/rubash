@@ -31,7 +31,7 @@ pub(super) fn record_tilde_expansions_for_assignment(
     command.tilde_expansions.extend(expansions);
 }
 
-fn tilde_expansions_in_word(word: &str) -> Vec<TildeExpansion> {
+pub(super) fn tilde_expansions_in_word(word: &str) -> Vec<TildeExpansion> {
     if word.starts_with('\x1b') {
         return Vec::new();
     }

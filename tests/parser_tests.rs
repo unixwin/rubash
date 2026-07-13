@@ -2394,6 +2394,47 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_tilde_and_quote_elements() {
+        let input = "arr=(~/src [home]=~+/bin \"two words\" 'line two')";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].elements.len(), 4);
+
+        let home = &compound[0].elements[0];
+        assert_eq!(home.value, "~/src");
+        assert_eq!(home.tilde_expansions.len(), 1);
+        assert_eq!(home.tilde_expansions[0].text, "~/src");
+        assert_eq!(home.tilde_expansions[0].prefix, "~");
+        assert_eq!(home.tilde_expansions[0].suffix, "/src");
+
+        let indexed = &compound[0].elements[1];
+        assert_eq!(indexed.subscript.as_deref(), Some("home"));
+        assert_eq!(indexed.value, "~+/bin");
+        assert_eq!(indexed.tilde_expansions.len(), 1);
+        assert_eq!(indexed.tilde_expansions[0].prefix, "~+");
+        assert_eq!(indexed.tilde_expansions[0].suffix, "/bin");
+
+        let quoted = &compound[0].elements[2];
+        assert_eq!(quoted.value, "\"two words\"");
+        assert!(quoted.tilde_expansions.is_empty());
+        assert_eq!(quoted.word_quotes.len(), 1);
+        assert_eq!(quoted.word_quotes[0].text, "\"two words\"");
+        assert_eq!(quoted.word_quotes[0].body, "two words");
+        assert_eq!(quoted.word_quotes[0].kind, QuoteKind::Double);
+
+        let single_quoted = &compound[0].elements[3];
+        assert_eq!(single_quoted.value, "\"line two\"");
+        assert_eq!(single_quoted.word_quotes.len(), 1);
+        assert_eq!(single_quoted.word_quotes[0].text, "\"line two\"");
+        assert_eq!(single_quoted.word_quotes[0].body, "line two");
+        assert_eq!(single_quoted.word_quotes[0].kind, QuoteKind::Double);
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_process_substitution_elements() {
         let input = "arr=(<(:) >(:) [two]=<(:))";
         let tokens = tokenize(input);

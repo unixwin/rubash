@@ -308,6 +308,8 @@ pub struct CompoundAssignmentElement {
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
     pub pathname_patterns: Vec<PathnamePattern>,
+    pub tilde_expansions: Vec<TildeExpansion>,
+    pub word_quotes: Vec<WordQuote>,
 }
 
 /// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.

@@ -22,7 +22,7 @@ pub(super) fn record_word_quotes_for_assignment(
     command.word_quotes.extend(quotes);
 }
 
-fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
+pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut quotes = Vec::new();
     let mut index = 0usize;
