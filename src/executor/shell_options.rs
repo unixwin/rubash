@@ -72,6 +72,12 @@ impl Executor {
             .is_some_and(|target| target == FD_STDERR_TARGET)
     }
 
+    pub(in crate::executor) fn input_fd_redirects_to_process_stdin(&self, target: &str) -> bool {
+        redirect_target_fd(target)
+            .and_then(|fd| self.env_vars.get(&fd_stdin_key(fd)))
+            .is_some_and(|target| target == FD_PROCESS_STDIN_TARGET)
+    }
+
     pub(in crate::executor) fn write_default_stdout(
         &mut self,
         output: &[u8],

@@ -153,6 +153,31 @@ fn c_command_exec_numeric_fd_copies_default_stdin_for_read_u() {
 }
 
 #[test]
+fn c_command_external_uses_persistent_fd_copied_from_stdin() {
+    let rubash = shell_test_path(Path::new(env!("CARGO_BIN_EXE_rubash")));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(format!("exec 3<&0; {rubash} -c 'cat' <&3"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"external-stdin\n")
+        .unwrap();
+    let output = child.wait_with_output().expect("wait rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "external-stdin\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_file_uses_script_name_and_positional_arguments() {
     let script_path = Path::new("target").join("rubash-cli-script-args.sh");
     fs::create_dir_all("target").unwrap();

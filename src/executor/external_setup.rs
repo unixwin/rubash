@@ -28,6 +28,9 @@ impl Executor {
                 }
                 return Ok(());
             }
+            if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
+                return Ok(());
+            }
             let path = shell_path_to_windows(&target, &self.env_vars);
             let file = if redirect.append {
                 OpenOptions::new()
