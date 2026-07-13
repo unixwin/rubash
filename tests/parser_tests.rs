@@ -1392,6 +1392,13 @@ mod conditional_tests {
             .unwrap()
             .extglob_patterns
             .is_empty());
+        assert!(regex
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap()
+            .brace_expansions
+            .is_empty());
         assert_eq!(capture.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(capture.expression.operator.as_deref(), Some("=~"));
         assert_eq!(capture.expression.operands, ["2:bad", "^([0-9]+):(.*)"]);
@@ -1421,6 +1428,25 @@ mod conditional_tests {
         assert_eq!(pattern.extglob_patterns[1].text, "+(test|bench)");
         assert_eq!(pattern.extglob_patterns[1].alternatives, ["test", "bench"]);
         assert!(pattern.has_extglob);
+    }
+
+    #[test]
+    fn test_conditional_command_records_brace_pattern_operand() {
+        let input = "[[ name == src/{bin,{test,bench}}/*.rs ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+        let pattern = conditional.expression.pattern_operand.as_ref().unwrap();
+
+        assert_eq!(pattern.kind, ConditionalPatternKind::Glob);
+        assert_eq!(pattern.text, "src/{bin,{test,bench}}/*.rs");
+        assert_eq!(pattern.operators, ["*"]);
+        assert_eq!(pattern.brace_expansions.len(), 2);
+        assert_eq!(pattern.brace_expansions[0].text, "{bin,{test,bench}}");
+        assert_eq!(pattern.brace_expansions[0].operators, [","]);
+        assert_eq!(pattern.brace_expansions[1].text, "{test,bench}");
+        assert_eq!(pattern.brace_expansions[1].operators, [","]);
+        assert!(pattern.has_glob);
     }
 
     #[test]
