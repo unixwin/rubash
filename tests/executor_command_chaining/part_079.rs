@@ -46,7 +46,7 @@ fn test_alias_introduced_arithmetic_for_accepts_empty_init() {
     let output_path = "target/rubash-alias-arithmetic-for-empty-init-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "shopt -s expand_aliases; alias f=for; (( i = 0 )); \
+        "shopt -s expand_aliases; alias f=for; i=0; \
          f (( ; i < 3; i++ )); do echo $i; done > {output_path}"
     );
     let tokens = tokenize(&input);

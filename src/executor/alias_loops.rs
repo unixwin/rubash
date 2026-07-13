@@ -153,7 +153,7 @@ impl Executor {
         while ast
             .commands
             .get(command_index)
-            .is_some_and(|command| command.words.is_empty())
+            .is_some_and(|command| command.words.is_empty() && command_has_no_effect(command))
         {
             command_index += 1;
         }
