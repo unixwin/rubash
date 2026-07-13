@@ -227,11 +227,14 @@ impl Executor {
         let saved_depth = self.subshell_depth.get();
         self.subshell_depth.set(saved_depth + 1);
 
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut body = Ast {
             commands: subshell_command.body.clone(),
         };
         let result = self
-            .apply_command_output_redirects(cmd, &mut body)
+            .apply_command_output_redirects(&redirect_cmd, &mut body)
             .and_then(|()| {
                 self.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body))
             });
@@ -239,8 +242,12 @@ impl Executor {
 
         self.restore_shell_env(saved_env);
         self.subshell_depth.set(saved_depth);
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
         self.exit_code = status;
-        result
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     fn execute_loop_command(&mut self, loop_command: &LoopCommand) -> Result<(), ExecuteError> {

@@ -74,7 +74,7 @@ impl Executor {
         Ok(true)
     }
 
-    fn materialize_compound_output_process_substitutions(
+    pub(in crate::executor) fn materialize_compound_output_process_substitutions(
         &mut self,
         command: &mut CommandNode,
     ) -> Result<Vec<(PathBuf, String)>, ExecuteError> {
@@ -149,7 +149,7 @@ impl Executor {
         Ok(Some((path, source)))
     }
 
-    fn finish_compound_output_process_substitutions(
+    pub(in crate::executor) fn finish_compound_output_process_substitutions(
         &mut self,
         outputs: Vec<(PathBuf, String)>,
     ) -> Result<(), ExecuteError> {
