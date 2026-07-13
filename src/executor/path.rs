@@ -317,4 +317,65 @@ mod tests {
         assert_eq!(find_user_command("/usr/bin/env", &env_vars), Some(env));
         let _ = fs::remove_dir_all(root);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_find_user_command_works_with_mixed_case_path() {
+        // On Windows, std::env::vars() returns PATH as "Path" (capital P).
+        // find_user_command reads env_vars.get("PATH") (all caps), so we should
+        // fail to find the command when only "Path" is set. This test documents
+        // the upstream behavior and motivates the init.rs fix that mirrors
+        // the value into the all-caps key.
+        let target_dir = std::env::temp_dir().join("rubash-mixed-case-path");
+        let _ = fs::remove_dir_all(&target_dir);
+        fs::create_dir_all(&target_dir).unwrap();
+        let marker = target_dir.join("cmd.exe");
+        fs::write(&marker, "").unwrap();
+
+        // This lookup attempts to find "cmd" using only the all-caps PATH key,
+        // which is what Executor::new() will hold after the init.rs fix runs.
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "PATH".to_string(),
+            target_dir.to_string_lossy().to_string(),
+        );
+        assert_eq!(
+            find_user_command("cmd", &env_vars).map(|p| p.to_string_lossy().to_string()),
+            Some(marker.to_string_lossy().to_string()),
+        );
+
+        let _ = fs::remove_dir_all(&target_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_find_user_command_fails_when_only_path_lower_is_set() {
+        // Direct counter-test for the casing bug: setting the OS-side
+        // "Path" (capital P) without the all-caps "PATH" key causes
+        // find_user_command to miss the command. Bug surfaces in shells
+        // embedding rubash on Windows until Executor::new() normalizes.
+        let target_dir = std::env::temp_dir().join("rubash-only-path-lower");
+        let _ = fs::remove_dir_all(&target_dir);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let marker = target_dir.join("cmd.exe");
+        std::fs::write(&marker, "").unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "Path".to_string(),
+            target_dir.to_string_lossy().to_string(),
+        );
+
+        // find_user_command has no normalization itself; the init.rs workaround
+        // upstream performs the casing mirror. Without that workaround, this
+        // lookup returns None.
+        assert_eq!(
+            find_user_command("cmd", &env_vars),
+            None,
+            "find_user_command should not see the lowercase Path key until init.rs normalizes"
+        );
+
+        let _ = std::fs::remove_dir_all(&target_dir);
+    }
 }
+

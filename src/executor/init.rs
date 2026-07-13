@@ -3,6 +3,15 @@ use super::*;
 impl Executor {
     pub fn new() -> Self {
         let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        // On Windows, std::env::vars() returns PATH as "Path" (capital P).
+        // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
+        // which is a case-sensitive HashMap lookup — it misses on Windows.
+        // Mirror the value into the all-caps key so external command lookup works.
+        #[cfg(windows)]
+        if let Some(path_val) = env_vars.remove("Path") {
+            env_vars.entry("PATH".to_string()).or_insert(path_val);
+        }
+
         let imported_functions = import_exported_functions_from_env(&env_vars);
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
@@ -106,3 +115,4 @@ impl Executor {
         }
     }
 }
+
