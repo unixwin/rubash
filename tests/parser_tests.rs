@@ -1450,6 +1450,46 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_records_parameter_pattern_operand() {
+        let glob_tokens = tokenize("[[ path == ${prefix:-src}/${file:-*.rs} ]]");
+        let glob_ast = parse(&glob_tokens);
+        let regex_tokens = tokenize("[[ value =~ ${re:-^a+$} ]]");
+        let regex_ast = parse(&regex_tokens);
+
+        let glob = glob_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap()
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+        let regex = regex_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap()
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(glob.kind, ConditionalPatternKind::Glob);
+        assert_eq!(glob.parameter_expansions.len(), 2);
+        assert_eq!(glob.parameter_expansions[0].text, "${prefix:-src}");
+        assert_eq!(glob.parameter_expansions[0].name, "prefix");
+        assert_eq!(glob.parameter_expansions[0].operator.as_deref(), Some(":-"));
+        assert_eq!(glob.parameter_expansions[0].word.as_deref(), Some("src"));
+        assert_eq!(glob.parameter_expansions[1].text, "${file:-*.rs}");
+        assert_eq!(glob.parameter_expansions[1].name, "file");
+
+        assert_eq!(regex.kind, ConditionalPatternKind::Regex);
+        assert_eq!(regex.parameter_expansions.len(), 1);
+        assert_eq!(regex.parameter_expansions[0].text, "${re:-^a+$}");
+        assert_eq!(regex.parameter_expansions[0].name, "re");
+        assert_eq!(regex.parameter_expansions[0].word.as_deref(), Some("^a+$"));
+    }
+
+    #[test]
     fn test_conditional_command_records_readonly_unary_expression() {
         let input = "[[ -R UID ]]";
         let tokens = tokenize(input);

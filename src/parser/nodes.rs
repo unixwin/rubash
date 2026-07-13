@@ -172,6 +172,7 @@ pub struct ConditionalPatternOperand {
     pub operators: Vec<String>,
     pub extglob_patterns: Vec<ExtglobPattern>,
     pub brace_expansions: Vec<BraceExpansion>,
+    pub parameter_expansions: Vec<ParameterExpansion>,
     pub has_glob: bool,
     pub has_extglob: bool,
 }
@@ -193,11 +194,13 @@ impl ConditionalPatternOperand {
         } else {
             Vec::new()
         };
+        let parameter_expansions = super::parameter_expansions_in_word(&text);
         Self {
             has_glob: case_pattern_has_glob(&operators),
             has_extglob: case_pattern_has_extglob(&operators),
             extglob_patterns,
             brace_expansions,
+            parameter_expansions,
             text,
             kind,
             operators,
