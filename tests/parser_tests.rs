@@ -2975,13 +2975,13 @@ mod tilde_expansion_tests {
 
     #[test]
     fn test_tilde_expansion_records_structured_ast_for_words() {
-        let input = "echo ~ ~/src ~+ ~- ~user/bin literal~";
+        let input = "echo ~ ~/src ~+ ~- ~+1/stack ~user/bin literal~";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
 
         let expansions = ast.commands[0].tilde_expansions.as_slice();
-        assert_eq!(expansions.len(), 5);
+        assert_eq!(expansions.len(), 6);
         assert_eq!(expansions[0].text, "~");
         assert_eq!(expansions[0].open_delimiter, "~");
         assert_eq!(expansions[0].close_delimiter, "");
@@ -2999,21 +2999,25 @@ mod tilde_expansion_tests {
         assert_eq!(expansions[2].word_index, Some(3));
         assert_eq!(expansions[3].prefix, "~-");
         assert_eq!(expansions[3].word_index, Some(4));
-        assert_eq!(expansions[4].text, "~user/bin");
-        assert_eq!(expansions[4].prefix, "~user");
-        assert_eq!(expansions[4].suffix, "/bin");
+        assert_eq!(expansions[4].text, "~+1/stack");
+        assert_eq!(expansions[4].prefix, "~+1");
+        assert_eq!(expansions[4].suffix, "/stack");
         assert_eq!(expansions[4].word_index, Some(5));
+        assert_eq!(expansions[5].text, "~user/bin");
+        assert_eq!(expansions[5].prefix, "~user");
+        assert_eq!(expansions[5].suffix, "/bin");
+        assert_eq!(expansions[5].word_index, Some(6));
     }
 
     #[test]
     fn test_assignment_tilde_expansion_records_colon_segments() {
-        let input = "PATH=~/bin:~+/sbin echo target=~-/tmp";
+        let input = "PATH=~/bin:~+/sbin:~+1/lib echo target=~-/tmp";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
 
         let expansions = ast.commands[0].tilde_expansions.as_slice();
-        assert_eq!(expansions.len(), 3);
+        assert_eq!(expansions.len(), 4);
         assert_eq!(expansions[0].assignment_name.as_deref(), Some("PATH"));
         assert_eq!(expansions[0].text, "~/bin");
         assert_eq!(expansions[0].open_delimiter, "~");
@@ -3028,11 +3032,17 @@ mod tilde_expansion_tests {
         assert_eq!(expansions[1].suffix, "/sbin");
         assert_eq!(expansions[1].word_index, None);
         assert!(expansions[1].after_colon);
-        assert_eq!(expansions[2].assignment_name.as_deref(), Some("target"));
-        assert_eq!(expansions[2].text, "~-/tmp");
-        assert_eq!(expansions[2].prefix, "~-");
-        assert_eq!(expansions[2].suffix, "/tmp");
-        assert_eq!(expansions[2].word_index, Some(1));
+        assert_eq!(expansions[2].assignment_name.as_deref(), Some("PATH"));
+        assert_eq!(expansions[2].text, "~+1/lib");
+        assert_eq!(expansions[2].prefix, "~+1");
+        assert_eq!(expansions[2].suffix, "/lib");
+        assert_eq!(expansions[2].word_index, None);
+        assert!(expansions[2].after_colon);
+        assert_eq!(expansions[3].assignment_name.as_deref(), Some("target"));
+        assert_eq!(expansions[3].text, "~-/tmp");
+        assert_eq!(expansions[3].prefix, "~-");
+        assert_eq!(expansions[3].suffix, "/tmp");
+        assert_eq!(expansions[3].word_index, Some(1));
     }
 
     #[test]

@@ -67,7 +67,12 @@ fn tilde_expansion_at(segment: &str, after_colon: bool) -> Option<TildeExpansion
     let rest = segment.strip_prefix('~')?;
     let prefix_len = rest.find('/').map_or(segment.len(), |slash| slash + 1);
     let prefix = &segment[..prefix_len];
-    if prefix == "~+" || prefix == "~-" || prefix == "~" || valid_tilde_login(prefix) {
+    if prefix == "~+"
+        || prefix == "~-"
+        || prefix == "~"
+        || valid_tilde_dirstack(prefix)
+        || valid_tilde_login(prefix)
+    {
         return Some(TildeExpansion {
             text: segment.to_string(),
             open_delimiter: "~".to_string(),
@@ -80,6 +85,13 @@ fn tilde_expansion_at(segment: &str, after_colon: bool) -> Option<TildeExpansion
         });
     }
     None
+}
+
+fn valid_tilde_dirstack(prefix: &str) -> bool {
+    prefix
+        .strip_prefix("~+")
+        .or_else(|| prefix.strip_prefix("~-"))
+        .is_some_and(|digits| !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn valid_tilde_login(prefix: &str) -> bool {
