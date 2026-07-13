@@ -142,6 +142,35 @@ pub(super) fn is_boundary_keyword(tokens: &[Token], index: usize, value: &str) -
     command_boundary_keyword_allowed(tokens, index) && is_keyword(tokens, index, value)
 }
 
+pub(super) fn matching_brace_group_end(tokens: &[Token], start: usize) -> Option<usize> {
+    if !is_keyword(tokens, start, "{") {
+        return None;
+    }
+
+    let mut depth = 1usize;
+    let mut stack = Vec::new();
+    let mut index = start + 1;
+    while index < tokens.len() {
+        update_compound_boundary_stack(tokens, index, &mut stack);
+        if !stack.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if is_boundary_keyword(tokens, index, "{") {
+            depth += 1;
+        } else if is_boundary_keyword(tokens, index, "}") {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+
+    None
+}
+
 pub(super) fn command_is_empty(cmd: &CommandNode) -> bool {
     cmd.words.is_empty()
         && cmd.assignments.is_empty()

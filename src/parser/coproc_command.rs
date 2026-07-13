@@ -287,22 +287,7 @@ fn parse_split_brace_body(tokens: &[Token], start: usize) -> Option<(Vec<Command
         return None;
     }
 
-    let mut depth = 1usize;
-    let mut i = start + 1;
-    while i < tokens.len() {
-        if is_boundary_keyword(tokens, i, "{") {
-            depth += 1;
-        } else if is_boundary_keyword(tokens, i, "}") {
-            depth -= 1;
-            if depth == 0 {
-                break;
-            }
-        }
-        i += 1;
-    }
-    if i >= tokens.len() {
-        return None;
-    }
+    let i = matching_brace_group_end(tokens, start)?;
 
     Some((parse(&tokens[start + 1..i]).commands, i))
 }

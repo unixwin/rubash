@@ -153,9 +153,20 @@ impl<'a> Lexer<'a> {
     }
     pub(super) fn skip_brace(&mut self) {
         let mut depth = 1usize;
+        let mut case_depth = 0usize;
+        let mut word = String::new();
+        let mut word_boundary = true;
+        let mut current_word_boundary = true;
         let mut comment_start = true;
         let mut saw_top_level_whitespace = false;
         while let Some(c) = self.advance() {
+            update_brace_group_case_depth(
+                c,
+                &mut word,
+                &mut case_depth,
+                &mut word_boundary,
+                &mut current_word_boundary,
+            );
             if c == '\n' {
                 if depth == 1 {
                     saw_top_level_whitespace = true;
@@ -177,11 +188,11 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             match c {
-                '{' => {
+                '{' if case_depth == 0 => {
                     comment_start = false;
                     depth += 1;
                 }
-                '}' => {
+                '}' if case_depth == 0 => {
                     comment_start = false;
                     depth -= 1;
                     if depth == 0 {
@@ -265,6 +276,63 @@ fn brace_close_followed_by_reserved_word(rest: &str) -> bool {
             })
         })
     })
+}
+
+fn update_brace_group_case_depth(
+    ch: char,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+) {
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
+        word.push(ch);
+        return;
+    }
+
+    if word.is_empty() {
+        if brace_group_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
+    }
+
+    let reserved_word_allows_next =
+        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth);
+    word.clear();
+    *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
+}
+
+fn update_brace_group_reserved_word_depth(
+    word: &str,
+    word_boundary: bool,
+    case_depth: &mut usize,
+) -> bool {
+    if !word_boundary {
+        return false;
+    }
+
+    match word {
+        "case" => {
+            *case_depth += 1;
+            false
+        }
+        "esac" => {
+            *case_depth = case_depth.saturating_sub(1);
+            false
+        }
+        "then" | "do" | "else" | "elif" => true,
+        _ => false,
+    }
+}
+
+fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
+    matches!(ch, ';' | '&' | '|' | '(' | '{' | '\n')
 }
 
 fn update_command_substitution_case_depth(

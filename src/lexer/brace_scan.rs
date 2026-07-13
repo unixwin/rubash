@@ -32,6 +32,10 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    let mut case_depth = 0usize;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
 
     while index < chars.len() {
         let ch = chars[index];
@@ -63,15 +67,79 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
             index = skip_braced_parameter_in_chars(&chars, index + 2);
             continue;
         }
+        update_brace_group_case_depth(
+            ch,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+        );
         match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
+            '{' if case_depth == 0 => depth += 1,
+            '}' if case_depth == 0 => depth = depth.saturating_sub(1),
             _ => {}
         }
         index += 1;
     }
 
     depth
+}
+
+fn update_brace_group_case_depth(
+    ch: char,
+    word: &mut String,
+    case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+) {
+    if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
+        word.push(ch);
+        return;
+    }
+
+    if word.is_empty() {
+        if brace_group_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
+    }
+
+    let reserved_word_allows_next =
+        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth);
+    word.clear();
+    *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
+}
+
+fn update_brace_group_reserved_word_depth(
+    word: &str,
+    word_boundary: bool,
+    case_depth: &mut usize,
+) -> bool {
+    if !word_boundary {
+        return false;
+    }
+
+    match word {
+        "case" => {
+            *case_depth += 1;
+            false
+        }
+        "esac" => {
+            *case_depth = case_depth.saturating_sub(1);
+            false
+        }
+        "then" | "do" | "else" | "elif" => true,
+        _ => false,
+    }
+}
+
+fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
+    matches!(ch, ';' | '&' | '|' | '(' | '{' | '\n')
 }
 
 pub(super) fn skip_braced_parameter_in_chars(chars: &[char], mut index: usize) -> usize {

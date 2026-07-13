@@ -38,6 +38,22 @@ fn test_unnamed_coproc_parses_split_brace_group_body() {
 }
 
 #[test]
+fn test_coproc_brace_body_keeps_case_pattern_named_like_close_brace() {
+    let input = "coproc { case brace in }) echo close ;; esac; echo after; }";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let body = coproc.body.as_ref().unwrap();
+
+    assert_eq!(
+        body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+        ["}"]
+    );
+    assert_eq!(body[1].words, ["echo", "after"]);
+}
+
+#[test]
 fn test_coproc_simple_command_does_not_treat_first_word_as_name() {
     let input = "coproc MYC cat";
     let tokens = tokenize(input);

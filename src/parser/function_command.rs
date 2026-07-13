@@ -124,6 +124,7 @@ pub(super) fn parse_function_command(
     if tokens.get(i)?.value != "{" {
         return None;
     }
+    let open_brace = i;
     i += 1;
     while tokens
         .get(i)
@@ -133,21 +134,7 @@ pub(super) fn parse_function_command(
     }
 
     let body_start = i;
-    let mut depth = 1usize;
-    while i < tokens.len() {
-        if is_boundary_keyword(tokens, i, "{") {
-            depth += 1;
-        } else if is_boundary_keyword(tokens, i, "}") {
-            depth -= 1;
-            if depth == 0 {
-                break;
-            }
-        }
-        i += 1;
-    }
-    if i >= tokens.len() {
-        return None;
-    }
+    let i = matching_brace_group_end(tokens, open_brace)?;
 
     let body = parse(&tokens[body_start..i]).commands;
     let mut command = CommandNode::new();

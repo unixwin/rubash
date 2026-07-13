@@ -487,6 +487,58 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_brace_bodies_keep_case_patterns_named_like_close_brace() {
+        let brace_tokens = tokenize("{ case brace in }) echo close ;; esac; echo after; }");
+        let brace_ast = parse(&brace_tokens);
+        let for_tokens =
+            tokenize("for x in brace; { case brace in }) echo for ;; esac; echo after; }");
+        let for_ast = parse(&for_tokens);
+        let arithmetic_for_tokens = tokenize(
+            "for ((i=0; i<1; i++)); { case brace in }) echo arithmetic ;; esac; echo after; }",
+        );
+        let arithmetic_for_ast = parse(&arithmetic_for_tokens);
+        let select_tokens =
+            tokenize("select x in brace; { case brace in }) echo select ;; esac; echo after; }");
+        let select_ast = parse(&select_tokens);
+
+        let brace_group = brace_ast.commands[0].brace_group.as_ref().unwrap();
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let arithmetic_for_command = arithmetic_for_ast.commands[0].for_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(
+            brace_group.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["}"]
+        );
+        assert_eq!(brace_group.body[1].words, ["echo", "after"]);
+        assert_eq!(
+            for_command.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["}"]
+        );
+        assert_eq!(for_command.body[1].words, ["echo", "after"]);
+        assert_eq!(
+            arithmetic_for_command.body[0]
+                .case_command
+                .as_ref()
+                .unwrap()
+                .clauses[0]
+                .patterns,
+            ["}"]
+        );
+        assert_eq!(arithmetic_for_command.body[1].words, ["echo", "after"]);
+        assert_eq!(
+            select_command.body[0]
+                .case_command
+                .as_ref()
+                .unwrap()
+                .clauses[0]
+                .patterns,
+            ["}"]
+        );
+        assert_eq!(select_command.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_select_body_kind_records_do_done_and_brace_group() {
         let do_done_tokens = tokenize("select x in a; do echo $x; done");
         let do_done_ast = parse(&do_done_tokens);
@@ -742,6 +794,36 @@ mod function_tests {
 
         assert_eq!(function.body.len(), 2);
         assert_eq!(function.body[0].words, ["echo", "}", "arg"]);
+        assert_eq!(function.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
+    fn test_function_brace_body_keeps_case_pattern_named_like_close_brace() {
+        let input = "function greet { case brace in }) echo close ;; esac; echo after; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(
+            function.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["}"]
+        );
+        assert_eq!(function.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
+    fn test_multiline_function_brace_body_keeps_case_pattern_named_like_close_brace() {
+        let input = "greet()\n{\ncase brace in }) echo close ;; esac\necho after\n}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+
+        assert_eq!(
+            function.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["}"]
+        );
         assert_eq!(function.body[1].words, ["echo", "after"]);
     }
 
