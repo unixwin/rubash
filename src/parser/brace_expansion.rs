@@ -30,7 +30,7 @@ pub(super) fn record_brace_expansions_for_assignment(
     command.brace_expansions.extend(expansions);
 }
 
-fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {
+pub(super) fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut expansions = Vec::new();
     let mut index = 0;

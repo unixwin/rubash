@@ -1544,6 +1544,26 @@ mod case_tests {
         assert_eq!(clause.pattern_separators, ["|"]);
         assert_eq!(clause.pattern_nodes[0].text, "$(printf x)");
         assert_eq!(clause.pattern_nodes[1].text, "{a,b}");
+        assert!(clause.pattern_nodes[0].brace_expansions.is_empty());
+        assert_eq!(clause.pattern_nodes[1].brace_expansions.len(), 1);
+        assert_eq!(clause.pattern_nodes[1].brace_expansions[0].text, "{a,b}");
+        assert_eq!(clause.pattern_nodes[1].brace_expansions[0].operators, [","]);
+    }
+
+    #[test]
+    fn test_case_pattern_records_nested_brace_expansion_nodes() {
+        let input = "case $word in {a,{b,c}}) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let pattern = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(pattern.text, "{a,{b,c}}");
+        assert_eq!(pattern.brace_expansions.len(), 2);
+        assert_eq!(pattern.brace_expansions[0].text, "{a,{b,c}}");
+        assert_eq!(pattern.brace_expansions[0].body, "a,{b,c}");
+        assert_eq!(pattern.brace_expansions[1].text, "{b,c}");
+        assert_eq!(pattern.brace_expansions[1].body, "b,c");
     }
 
     #[test]
