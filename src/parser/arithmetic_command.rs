@@ -109,7 +109,7 @@ pub(super) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> 
     const OPERATORS: &[&str] = &[
         "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&", "||", "==",
         "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/", "*", "+", "-",
-        "!", "~", "?", ":",
+        "!", "~", "?", ":", ",",
     ];
 
     let mut operators = Vec::new();

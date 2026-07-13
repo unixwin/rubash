@@ -1715,6 +1715,24 @@ mod arithmetic_command_tests {
     }
 
     #[test]
+    fn test_arithmetic_command_records_comma_operator() {
+        let input = "(( i = 0, j = i + 1 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
+
+        assert_eq!(arithmetic.expression, "i = 0, j = i + 1");
+        assert_eq!(arithmetic.variables, ["i", "j"]);
+        assert!(arithmetic.has_assignment);
+        let operators = arithmetic
+            .operators
+            .iter()
+            .map(|operator| operator.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(operators, ["=", ",", "=", "+"]);
+    }
+
+    #[test]
     fn test_arithmetic_and_or_list_skips_connector_newline() {
         let input =
             "if (( integerPart2 == 0 )) &&\n  (( fractionalPart2 == 0 ))\nthen echo bad; fi";
@@ -2339,6 +2357,24 @@ mod arithmetic_expansion_tests {
         assert!(expansions[1].has_comparison);
         assert!(expansions[1].has_logical);
         assert!(!expansions[1].has_update);
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_records_comma_operator() {
+        let input = "echo $(( i = 0, j = i + 1 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let expansion = &ast.commands[0].arithmetic_expansions[0];
+
+        assert_eq!(expansion.expression, " i = 0, j = i + 1 ");
+        assert_eq!(expansion.variables, ["i", "j"]);
+        assert!(expansion.has_assignment);
+        let operators = expansion
+            .operators
+            .iter()
+            .map(|operator| operator.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(operators, ["=", ",", "=", "+"]);
     }
 
     #[test]
