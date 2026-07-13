@@ -614,11 +614,7 @@ pub(super) fn parse_time_prefixed_shell_command(
     tokens: &[Token],
     start: usize,
 ) -> Option<(CommandNode, usize)> {
-    if let Some(parsed) = parse_time_prefixed_compound_command(tokens, start) {
-        return Some(parsed);
-    }
-
-    if !is_keyword(tokens, start, "time") {
+    if !time_prefixed_shell_command_allows_simple_pipeline(tokens, start) {
         return None;
     }
 
@@ -638,4 +634,62 @@ pub(super) fn parse_time_prefixed_shell_command(
     }
 
     Some((commands.remove(0), end))
+}
+
+pub(super) fn time_prefixed_shell_command_allows_simple_pipeline(
+    tokens: &[Token],
+    start: usize,
+) -> bool {
+    if !is_keyword(tokens, start, "time") {
+        return false;
+    }
+
+    let mut index = start + 1;
+    while tokens
+        .get(index)
+        .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
+    {
+        index += 1;
+    }
+
+    let Some(token) = tokens.get(index) else {
+        return true;
+    };
+    if matches!(
+        token.kind,
+        TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
+    ) {
+        return true;
+    }
+
+    !time_prefixed_shell_command_starts_with_compound(tokens, index)
+}
+
+fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usize) -> bool {
+    if tokens.get(index).is_some_and(|token| {
+        matches!(
+            token.value.as_str(),
+            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "function"
+        ) || token.value.starts_with("((")
+    }) {
+        return true;
+    }
+
+    if is_keyword(tokens, index, "{") || is_keyword(tokens, index, "(") {
+        return true;
+    }
+
+    if tokens.get(index).is_some_and(|token| {
+        token.kind == TokenKind::Keyword
+            && token.value.starts_with('{')
+            && token.value.ends_with('}')
+    }) {
+        return true;
+    }
+
+    tokens.get(index).is_some_and(|token| {
+        token.kind == TokenKind::Word
+            && tokens.get(index + 1).is_some_and(|next| next.value == "(")
+            && tokens.get(index + 2).is_some_and(|next| next.value == ")")
+    })
 }

@@ -1,4 +1,6 @@
-use super::parse_loop::parse_time_prefixed_shell_command;
+use super::parse_loop::{
+    parse_time_prefixed_shell_command, time_prefixed_shell_command_allows_simple_pipeline,
+};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -192,8 +194,9 @@ fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
     tokens.get(index).is_some_and(|token| {
         matches!(
             token.value.as_str(),
-            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[[" | "time"
+            "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
         ) || token.value.starts_with("((")
+            || time_prefixed_shell_command_allows_simple_pipeline(tokens, index)
     })
 }
 
