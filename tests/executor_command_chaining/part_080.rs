@@ -424,6 +424,30 @@ fn test_external_command_writes_dynamic_output_fd() {
 }
 
 #[test]
+fn test_exec_dynamic_read_write_fd_reads_and_writes() {
+    let data_path = "target/rubash-dynamic-read-write-fd.txt";
+    let output_path = "target/rubash-dynamic-read-write-fd-output.txt";
+    fs::write(data_path, "alpha\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "exec {{fd}}<>{data_path}; read -u $fd first; echo beta >&$fd; \
+         exec {{fd}}>&-; echo $first > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    assert_eq!(fs::read_to_string(data_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(data_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_input_fd_close_makes_read_fail_without_hanging() {
     let output_path = "target/rubash-input-fd-close-output.txt";
     let _ = fs::remove_file(output_path);

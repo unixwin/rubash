@@ -227,6 +227,9 @@ impl Executor {
                 .insert(fd_stdin_offset_key(fd), "0".to_string());
             self.env_vars
                 .insert(fd_dynamic_input_key(fd), "1".to_string());
+            if redirect.operator == "<>" {
+                self.env_vars.insert(fd_output_key(fd), target);
+            }
             return Ok(Some(0));
         }
 
