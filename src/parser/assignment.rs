@@ -47,6 +47,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("+=".to_string()),
             append: true,
             element_index,
+            brace_expansions: brace_expansions_in_word(value),
         };
     }
 
@@ -57,6 +58,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("=".to_string()),
             append: false,
             element_index,
+            brace_expansions: brace_expansions_in_word(value),
         };
     }
 
@@ -66,6 +68,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         operator: None,
         append: false,
         element_index,
+        brace_expansions: brace_expansions_in_word(word),
     }
 }
 

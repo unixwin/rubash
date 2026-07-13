@@ -2328,6 +2328,10 @@ mod assignment_tests {
         assert_eq!(compound[0].value, "(pre{a,b})");
         assert_eq!(compound[0].elements.len(), 1);
         assert_eq!(compound[0].elements[0].value, "pre{a,b}");
+        assert_eq!(compound[0].elements[0].brace_expansions.len(), 1);
+        assert_eq!(compound[0].elements[0].brace_expansions[0].text, "{a,b}");
+        assert_eq!(compound[0].elements[0].brace_expansions[0].body, "a,b");
+        assert_eq!(compound[0].elements[0].brace_expansions[0].operators, [","]);
     }
 
     #[test]
