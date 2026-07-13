@@ -474,6 +474,19 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_arithmetic_for_brace_body_keeps_brace_arguments() {
+        let tokens = tokenize("for ((i=0; i<1; i++)); { echo } arg; echo after; }");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+
+        assert!(for_command.arithmetic.is_some());
+        assert_eq!(for_command.body_kind, CommandBodyKind::BraceGroup);
+        assert_eq!(for_command.body.len(), 2);
+        assert_eq!(for_command.body[0].words, ["echo", "}", "arg"]);
+        assert_eq!(for_command.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_select_body_kind_records_do_done_and_brace_group() {
         let do_done_tokens = tokenize("select x in a; do echo $x; done");
         let do_done_ast = parse(&do_done_tokens);
