@@ -1336,6 +1336,26 @@ mod conditional_tests {
                 .operators,
             ["@(", "|"]
         );
+        assert_eq!(
+            extglob
+                .expression
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .extglob_patterns
+                .len(),
+            1
+        );
+        assert_eq!(
+            extglob
+                .expression
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .extglob_patterns[0]
+                .alternatives,
+            ["foo", "bar"]
+        );
         assert!(
             extglob
                 .expression
@@ -1365,6 +1385,13 @@ mod conditional_tests {
             .unwrap()
             .operators
             .is_empty());
+        assert!(regex
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap()
+            .extglob_patterns
+            .is_empty());
         assert_eq!(capture.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(capture.expression.operator.as_deref(), Some("=~"));
         assert_eq!(capture.expression.operands, ["2:bad", "^([0-9]+):(.*)"]);
@@ -1372,6 +1399,28 @@ mod conditional_tests {
             capture.expression.pattern_operand.as_ref().unwrap().kind,
             ConditionalPatternKind::Regex
         );
+    }
+
+    #[test]
+    fn test_conditional_command_records_nested_extglob_pattern_operand() {
+        let input = "[[ name == @(src|+(test|bench)) ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+        let pattern = conditional.expression.pattern_operand.as_ref().unwrap();
+
+        assert_eq!(pattern.kind, ConditionalPatternKind::Glob);
+        assert_eq!(pattern.text, "@(src|+(test|bench))");
+        assert_eq!(pattern.operators, ["@(", "|", "+(", "|"]);
+        assert_eq!(pattern.extglob_patterns.len(), 2);
+        assert_eq!(pattern.extglob_patterns[0].text, "@(src|+(test|bench))");
+        assert_eq!(
+            pattern.extglob_patterns[0].alternatives,
+            ["src", "+(test|bench)"]
+        );
+        assert_eq!(pattern.extglob_patterns[1].text, "+(test|bench)");
+        assert_eq!(pattern.extglob_patterns[1].alternatives, ["test", "bench"]);
+        assert!(pattern.has_extglob);
     }
 
     #[test]

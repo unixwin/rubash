@@ -170,6 +170,7 @@ pub struct ConditionalPatternOperand {
     pub text: String,
     pub kind: ConditionalPatternKind,
     pub operators: Vec<String>,
+    pub extglob_patterns: Vec<ExtglobPattern>,
     pub has_glob: bool,
     pub has_extglob: bool,
 }
@@ -181,9 +182,15 @@ impl ConditionalPatternOperand {
         } else {
             Vec::new()
         };
+        let extglob_patterns = if kind == ConditionalPatternKind::Glob {
+            super::extglob_patterns_in_word(&text)
+        } else {
+            Vec::new()
+        };
         Self {
             has_glob: case_pattern_has_glob(&operators),
             has_extglob: case_pattern_has_extglob(&operators),
+            extglob_patterns,
             text,
             kind,
             operators,
