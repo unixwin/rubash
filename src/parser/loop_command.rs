@@ -40,7 +40,10 @@ fn find_loop_do(tokens: &[Token], start: usize) -> Option<usize> {
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if stack.is_empty() && is_keyword(tokens, index, "do") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "do")
+        {
             return Some(index);
         }
         update_compound_boundary_stack(tokens, index, &mut stack);
@@ -53,10 +56,16 @@ fn parse_loop_body(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, 
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if stack.is_empty() && is_keyword(tokens, index, "done") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "done")
+        {
             break;
         }
-        if stack.is_empty() && is_keyword(tokens, index, "do") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "do")
+        {
             return None;
         }
         update_compound_boundary_stack(tokens, index, &mut stack);

@@ -79,7 +79,7 @@ pub(super) fn update_compound_boundary_stack(
     }
 
     if stack.last().is_some_and(|expected| *expected == "esac")
-        || !compound_opener_allowed(tokens, index)
+        || !command_boundary_keyword_allowed(tokens, index)
     {
         return;
     }
@@ -96,10 +96,18 @@ pub(super) fn update_compound_boundary_stack(
     }
 }
 
-fn compound_opener_allowed(tokens: &[Token], index: usize) -> bool {
+pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -> bool {
     let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
         return true;
     };
+
+    if previous.kind == TokenKind::Keyword
+        && previous.value.starts_with('{')
+        && previous.value.ends_with('}')
+        && previous.value.len() >= 2
+    {
+        return true;
+    }
 
     matches!(
         previous.kind,
@@ -111,7 +119,7 @@ fn compound_opener_allowed(tokens: &[Token], index: usize) -> bool {
             | TokenKind::Background
     ) || matches!(
         previous.value.as_str(),
-        "then" | "do" | "else" | "elif" | ";;" | ";&" | ";;&"
+        "then" | "do" | "else" | "elif" | "}" | ";;" | ";&" | ";;&"
     )
 }
 

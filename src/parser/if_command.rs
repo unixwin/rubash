@@ -74,7 +74,10 @@ fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if stack.is_empty() && is_keyword(tokens, index, "then") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "then")
+        {
             return Some(index);
         }
         update_compound_boundary_stack(tokens, index, &mut stack);
@@ -87,13 +90,20 @@ fn parse_if_section(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>,
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
-        if stack.is_empty() && matches!(tokens[index].value.as_str(), "fi" | "done" | "esac") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && matches!(tokens[index].value.as_str(), "fi" | "done" | "esac")
+        {
             break;
         }
-        if stack.is_empty() && is_keyword(tokens, index, "then") {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
+            && is_keyword(tokens, index, "then")
+        {
             return None;
         }
         if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, index)
             && (is_keyword(tokens, index, "elif") || is_keyword(tokens, index, "else"))
         {
             break;

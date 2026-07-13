@@ -76,7 +76,10 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             let body_start = i;
             let mut stack = Vec::new();
             while i < tokens.len() {
-                if stack.is_empty() && is_keyword(tokens, i, "done") {
+                if stack.is_empty()
+                    && command_boundary_keyword_allowed(tokens, i)
+                    && is_keyword(tokens, i, "done")
+                {
                     break;
                 }
                 update_compound_boundary_stack(tokens, i, &mut stack);

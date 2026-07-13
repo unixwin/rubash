@@ -530,6 +530,47 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_compound_scanners_keep_reserved_word_arguments() {
+        let if_tokens = tokenize("if echo then; then echo else; else echo fi; fi");
+        let if_ast = parse(&if_tokens);
+        let while_tokens = tokenize("while echo do; do echo done; break; done");
+        let while_ast = parse(&while_tokens);
+        let for_tokens = tokenize("for x in one; do echo done; done");
+        let for_ast = parse(&for_tokens);
+        let select_tokens = tokenize("select x in one; do echo done; done");
+        let select_ast = parse(&select_tokens);
+
+        let if_command = if_ast.commands[0].if_command.as_ref().unwrap();
+        let while_command = while_ast.commands[0].loop_command.as_ref().unwrap();
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(if_command.condition[0].words, ["echo", "then"]);
+        assert_eq!(if_command.then_body[0].words, ["echo", "else"]);
+        assert_eq!(
+            if_command.else_body.as_ref().unwrap()[0].words,
+            ["echo", "fi"]
+        );
+        assert_eq!(while_command.condition[0].words, ["echo", "do"]);
+        assert_eq!(while_command.body[0].words, ["echo", "done"]);
+        assert_eq!(for_command.body[0].words, ["echo", "done"]);
+        assert_eq!(select_command.body[0].words, ["echo", "done"]);
+    }
+
+    #[test]
+    fn test_for_do_done_body_accepts_brace_group_before_done() {
+        let tokens = tokenize("for x in one; do { echo $x; } done");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+
+        assert!(for_command
+            .body
+            .iter()
+            .any(|command| command.brace_group.is_some()));
+        assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
+    }
+
+    #[test]
     fn test_loop_body_delimiters_record_do_done() {
         let while_tokens = tokenize("while false; do echo bad; done");
         let while_ast = parse(&while_tokens);
