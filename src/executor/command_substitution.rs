@@ -30,7 +30,8 @@ impl Executor {
             return String::new();
         }
         if let Some(path) = source.strip_prefix('<') {
-            let path = self.expand_word(path.trim());
+            let expanded = self.expand_word(path.trim());
+            let path = strip_matching_quotes(&expanded);
             if let Some(path) = self.command_substitution_read_path(&path) {
                 return fs::read_to_string(path)
                     .map(|value| {
