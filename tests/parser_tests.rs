@@ -2361,6 +2361,39 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_pathname_pattern_elements() {
+        let input = "arr=(*.rs [src]=src/[ab]? **/*.txt)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].elements.len(), 3);
+
+        let first = &compound[0].elements[0];
+        assert_eq!(first.value, "*.rs");
+        assert_eq!(first.pathname_patterns.len(), 1);
+        assert_eq!(first.pathname_patterns[0].text, "*.rs");
+        assert_eq!(first.pathname_patterns[0].operators, ["*"]);
+        assert!(first.pathname_patterns[0].has_star);
+
+        let second = &compound[0].elements[1];
+        assert_eq!(second.subscript.as_deref(), Some("src"));
+        assert_eq!(second.value, "src/[ab]?");
+        assert_eq!(second.pathname_patterns.len(), 1);
+        assert_eq!(second.pathname_patterns[0].operators, ["[ab]", "?"]);
+        assert!(second.pathname_patterns[0].has_bracket);
+        assert!(second.pathname_patterns[0].has_question);
+
+        let globstar = &compound[0].elements[2];
+        assert_eq!(globstar.value, "**/*.txt");
+        assert_eq!(globstar.pathname_patterns.len(), 1);
+        assert_eq!(globstar.pathname_patterns[0].operators, ["**", "*"]);
+        assert!(globstar.pathname_patterns[0].globstar);
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_process_substitution_elements() {
         let input = "arr=(<(:) >(:) [two]=<(:))";
         let tokens = tokenize(input);

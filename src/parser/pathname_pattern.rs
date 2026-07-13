@@ -15,7 +15,7 @@ pub(super) fn record_pathname_patterns_for_word(
     command.pathname_patterns.extend(patterns);
 }
 
-fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePattern> {
+pub(super) fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePattern> {
     if word.contains('=') {
         return Vec::new();
     }

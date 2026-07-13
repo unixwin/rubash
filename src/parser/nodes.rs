@@ -307,6 +307,7 @@ pub struct CompoundAssignmentElement {
     pub parameter_expansions: Vec<ParameterExpansion>,
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
+    pub pathname_patterns: Vec<PathnamePattern>,
 }
 
 /// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.
