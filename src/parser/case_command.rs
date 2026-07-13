@@ -263,47 +263,15 @@ pub(super) fn collect_extglob_pattern_from_bang(tokens: &[Token], i: &mut usize)
 }
 
 pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
-    let mut nested_case_depth = 0usize;
-    let mut nested_compound_depth = 0usize;
-
+    let mut stack = Vec::new();
     while index < tokens.len() {
-        if is_keyword(tokens, index, "case") {
-            nested_case_depth += 1;
-            index += 1;
-            continue;
-        }
-
-        if is_keyword(tokens, index, "esac") {
-            if nested_case_depth == 0 {
-                break;
-            }
-            nested_case_depth -= 1;
-            index += 1;
-            continue;
-        }
-
-        if is_keyword(tokens, index, "if")
-            || is_keyword(tokens, index, "for")
-            || is_keyword(tokens, index, "select")
-            || is_keyword(tokens, index, "while")
-            || is_keyword(tokens, index, "until")
-        {
-            nested_compound_depth += 1;
-            index += 1;
-            continue;
-        }
-
-        if is_keyword(tokens, index, "fi") || is_keyword(tokens, index, "done") {
-            nested_compound_depth = nested_compound_depth.saturating_sub(1);
-            index += 1;
-            continue;
-        }
-
-        if nested_case_depth == 0 && nested_compound_depth == 0 && is_case_terminator(tokens, index)
+        if stack.is_empty()
+            && (is_keyword(tokens, index, "esac") || is_case_terminator(tokens, index))
         {
             break;
         }
 
+        update_compound_boundary_stack(tokens, index, &mut stack);
         index += 1;
     }
 

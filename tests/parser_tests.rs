@@ -1193,6 +1193,19 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_body_keeps_reserved_word_arguments() {
+        let input = "case x in x) echo if for done ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+        let clause = &case_command.clauses[0];
+
+        assert_eq!(clause.body.len(), 1);
+        assert_eq!(clause.body[0].words, ["echo", "if", "for", "done"]);
+        assert_eq!(clause.terminator_text.as_deref(), Some(";;"));
+    }
+
+    #[test]
     fn test_case_body_keeps_nested_select_command() {
         let input =
             "case $word in x) select choice in a; do echo $choice; break; done <<< 1 ;; esac";
