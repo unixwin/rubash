@@ -500,6 +500,24 @@ fn test_pipeline_feeds_while_command_stage() {
 }
 
 #[test]
+fn test_pipe_stderr_operator_feeds_next_stage() {
+    let output_path = "target/rubash-pipe-stderr-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '%(bad)s\\n' |& grep warning > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("invalid time format specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipeline_feeds_brace_group_stage() {
     let output_path = "target/rubash-pipeline-brace-stage-output.txt";
     let _ = fs::remove_file(output_path);

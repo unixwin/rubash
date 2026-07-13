@@ -3,6 +3,7 @@
 pub enum TokenKind {
     Word,
     Pipe,
+    PipeErr,
     Semicolon,
     RedirectOut,
     RedirectIn,

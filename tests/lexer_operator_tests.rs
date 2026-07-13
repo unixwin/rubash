@@ -10,6 +10,15 @@ fn test_pipe_operator() {
 }
 
 #[test]
+fn test_pipe_stderr_operator() {
+    let input = "ls |& grep foo";
+    let tokens = tokenize(input);
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[1].kind, TokenKind::PipeErr);
+    assert_eq!(tokens[1].value, "|&");
+}
+
+#[test]
 fn test_semicolon() {
     let input = "ls; cd /";
     let tokens = tokenize(input);

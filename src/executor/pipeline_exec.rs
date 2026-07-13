@@ -109,10 +109,16 @@ impl Executor {
                 .map(|prefix| &prefix.command)
                 .unwrap_or(command);
             self.set_current_command(stage);
-            let Some((next_input, next_status)) = self.execute_pipeline_stage(stage, &input)?
+            let Some((mut next_input, next_stderr, next_status)) =
+                self.execute_pipeline_stage(stage, &input)?
             else {
                 return Ok(None);
             };
+            if command.pipe == Some(2) {
+                next_input.push_str(&next_stderr);
+            } else if !next_stderr.is_empty() {
+                std::io::stderr().write_all(next_stderr.as_bytes())?;
+            }
             input = next_input;
             statuses.push(next_status);
         }
@@ -152,7 +158,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-    ) -> Result<Option<(String, i32)>, ExecuteError> {
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         if command_is_compound_pipeline_stage(command) {
             return self
                 .execute_compound_pipeline_stage(command, input)
@@ -166,8 +172,8 @@ impl Executor {
         };
 
         match name {
-            "true" | ":" => Ok(Some((String::new(), 0))),
-            "false" => Ok(Some((String::new(), 1))),
+            "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
+            "false" => Ok(Some((String::new(), String::new(), 1))),
             "echo" => {
                 let mut args: Vec<String> = command.words[1..]
                     .iter()
@@ -181,7 +187,7 @@ impl Executor {
                 if newline {
                     output.push('\n');
                 }
-                Ok(Some((output, 0)))
+                Ok(Some((output, String::new(), 0)))
             }
             "printf" => {
                 let args: Vec<String> = command.words[1..]
@@ -199,19 +205,20 @@ impl Executor {
                 )?;
                 Ok(Some((
                     String::from_utf8_lossy(&output).into_owned(),
+                    String::from_utf8_lossy(&stderr).into_owned(),
                     status,
                 )))
             }
             "cat" => {
                 if let Some(input) = self.stdin_string_for_command(command) {
-                    Ok(Some((input, 0)))
+                    Ok(Some((input, String::new(), 0)))
                 } else {
-                    Ok(Some((input.to_string(), 0)))
+                    Ok(Some((input.to_string(), String::new(), 0)))
                 }
             }
             "grep" => {
                 let Some(pattern) = command.words.get(1).map(|word| self.expand_word(word)) else {
-                    return Ok(Some((String::new(), 2)));
+                    return Ok(Some((String::new(), String::new(), 2)));
                 };
                 let mut matched = false;
                 let mut output = String::new();
@@ -225,7 +232,7 @@ impl Executor {
                         }
                     }
                 }
-                Ok(Some((output, i32::from(!matched))))
+                Ok(Some((output, String::new(), i32::from(!matched))))
             }
             "wc" => {
                 let option = command.words.get(1).map(String::as_str).unwrap_or("-l");
@@ -234,7 +241,7 @@ impl Executor {
                     "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
                     _ => return Ok(None),
                 };
-                Ok(Some((format!("{value}\n"), 0)))
+                Ok(Some((format!("{value}\n"), String::new(), 0)))
             }
             "tr" => {
                 let args = command.words[1..]
@@ -242,7 +249,7 @@ impl Executor {
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
                 if args.len() == 2 && matches!(args[0].as_str(), "\\n" | "\n") {
-                    Ok(Some((input.replace('\n', &args[1]), 0)))
+                    Ok(Some((input.replace('\n', &args[1]), String::new(), 0)))
                 } else {
                     self.execute_external_pipeline_stage(command, input)
                 }

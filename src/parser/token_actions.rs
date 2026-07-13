@@ -167,13 +167,17 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 }
             }
         }
-        TokenKind::Pipe => {
+        TokenKind::Pipe | TokenKind::PipeErr => {
             if command_is_open_conditional(&state.current_cmd) {
                 push_command_word(&mut state.current_cmd, token);
             } else {
                 // Save current command with pipe flag
                 state.current_cmd.subshell |= state.in_subshell;
-                state.current_cmd.pipe = Some(1);
+                state.current_cmd.pipe = Some(if token.kind == TokenKind::PipeErr {
+                    2
+                } else {
+                    1
+                });
                 state
                     .ast
                     .commands

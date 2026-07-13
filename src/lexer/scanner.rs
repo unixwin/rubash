@@ -82,6 +82,9 @@ impl<'a> Lexer<'a> {
                 if self.peek() == Some('|') {
                     self.advance();
                     Some(Token::new(TokenKind::Or, "||", start))
+                } else if self.peek() == Some('&') {
+                    self.advance();
+                    Some(Token::new(TokenKind::PipeErr, "|&", start))
                 } else {
                     Some(Token::new(TokenKind::Pipe, "|", start))
                 }

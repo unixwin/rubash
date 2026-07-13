@@ -5,7 +5,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-    ) -> Result<(String, i32), ExecuteError> {
+    ) -> Result<(String, String, i32), ExecuteError> {
         let old_stdin = self.env_vars.get(FUNCTION_STDIN).cloned();
         let old_stdin_offset = self.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
         self.env_vars
@@ -33,6 +33,7 @@ impl Executor {
 
         Ok((
             String::from_utf8_lossy(&output).into_owned(),
+            String::new(),
             self.last_exit_code(),
         ))
     }
@@ -41,9 +42,9 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-    ) -> Result<Option<(String, i32)>, ExecuteError> {
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
-            return Ok(Some((String::new(), 0)));
+            return Ok(Some((String::new(), String::new(), 0)));
         };
         let expanded_name = self.expand_word(name);
         let Some(function_name) = self.function_name_for_command_word(&expanded_name) else {
@@ -75,6 +76,7 @@ impl Executor {
         result?;
         Ok(Some((
             String::from_utf8_lossy(&output).into_owned(),
+            String::new(),
             self.last_exit_code(),
         )))
     }
@@ -83,9 +85,9 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
-    ) -> Result<Option<(String, i32)>, ExecuteError> {
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
-            return Ok(Some((String::new(), 0)));
+            return Ok(Some((String::new(), String::new(), 0)));
         };
         let Some(program) = find_user_command(&self.expand_word(name), &self.env_vars) else {
             return Ok(None);
@@ -123,10 +125,10 @@ impl Executor {
             stdin.write_all(input.as_bytes())?;
         }
         let output = child.wait_with_output()?;
-        std::io::stderr().write_all(&output.stderr)?;
 
         Ok(Some((
             String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
             output.status.code().unwrap_or(1),
         )))
     }

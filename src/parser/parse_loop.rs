@@ -157,8 +157,8 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         let mut operators = Vec::new();
         index += 1;
         while let Some(command) = commands.get(index) {
-            if stages.last().is_some_and(|stage| stage.pipe.is_some()) {
-                operators.push("|".to_string());
+            if let Some(pipe) = stages.last().and_then(|stage| stage.pipe) {
+                operators.push(if pipe == 2 { "|&" } else { "|" }.to_string());
             }
             stages.push(command.clone());
             index += 1;
