@@ -1165,6 +1165,24 @@ fn test_pipeline_feeds_brace_group_stage() {
 }
 
 #[test]
+fn test_pipe_stderr_operator_feeds_brace_group_stage_stderr() {
+    let output_path = "target/rubash-pipe-stderr-brace-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("{{ builtin nosuch; }} |& grep 'not a shell builtin' > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("builtin: nosuch: not a shell builtin"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_for_command_pipeline_stage_feeds_next_command() {
     let output_path = "target/rubash-pipeline-for-stage-output.txt";
     let _ = fs::remove_file(output_path);

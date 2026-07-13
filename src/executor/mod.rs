@@ -304,6 +304,7 @@ pub struct Executor {
     suppress_errexit: usize,
     last_command_substitution_status: Cell<Option<i32>>,
     stdout_capture: Option<Vec<u8>>,
+    stderr_capture: Option<Vec<u8>>,
 }
 
 #[cfg(test)]

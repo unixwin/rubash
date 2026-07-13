@@ -323,6 +323,19 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_brace_group_command_consumes_pipe_stderr_operator() {
+        let input = "{ echo hi; } |& grep hi";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|&"]);
+        assert_eq!(pipeline.stages[0].pipe, Some(2));
+        assert!(pipeline.stages[0].brace_group.is_some());
+        assert_eq!(pipeline.stages[1].words, ["grep", "hi"]);
+    }
+
+    #[test]
     fn test_time_prefix_parses_subshell_group() {
         let input = "time -p ( echo one; echo two )";
         let tokens = tokenize(input);
@@ -1105,6 +1118,26 @@ mod arithmetic_command_tests {
         );
         assert_eq!(list.connectors, [true]);
         assert_eq!(list.commands[1].words, ["echo", "ok"]);
+    }
+
+    #[test]
+    fn test_arithmetic_command_consumes_pipe_stderr_operator() {
+        let input = "(( n++ )) |& wc -l";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|&"]);
+        assert_eq!(pipeline.stages[0].pipe, Some(2));
+        assert_eq!(
+            pipeline.stages[0]
+                .arithmetic_command
+                .as_ref()
+                .unwrap()
+                .expression,
+            "n++"
+        );
+        assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
     }
 
     #[test]

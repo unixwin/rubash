@@ -191,6 +191,10 @@ pub(super) fn finish_arithmetic_command(
             command.pipe = Some(1);
             (command, index + 1)
         }
+        Some(TokenKind::PipeErr) => {
+            command.pipe = Some(2);
+            (command, index + 1)
+        }
         Some(TokenKind::And) => {
             command.and_or = Some(true);
             (command, index + 1)
@@ -217,6 +221,10 @@ pub(super) fn finish_compound_command(
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::Pipe) => {
             command.pipe = Some(1);
+            (command, index + 1)
+        }
+        Some(TokenKind::PipeErr) => {
+            command.pipe = Some(2);
             (command, index + 1)
         }
         Some(TokenKind::And) => {

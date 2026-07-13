@@ -140,6 +140,11 @@ impl Executor {
             return Ok(());
         }
 
+        if let Some(capture) = &mut self.stderr_capture {
+            capture.write_all(output)?;
+            return Ok(());
+        }
+
         std::io::stderr().lock().write_all(output)?;
         Ok(())
     }

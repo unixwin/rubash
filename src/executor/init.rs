@@ -102,6 +102,7 @@ impl Executor {
             suppress_errexit: 0,
             last_command_substitution_status: Cell::new(None),
             stdout_capture: None,
+            stderr_capture: None,
         }
     }
 }
