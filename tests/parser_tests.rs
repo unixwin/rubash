@@ -1845,6 +1845,28 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_empty_indexed_elements() {
+        let input = "arr=([empty]= [more]+=)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].name, "arr");
+        assert_eq!(compound[0].value, "([empty]= [more]+=)");
+        assert_eq!(compound[0].elements.len(), 2);
+        assert_eq!(compound[0].elements[0].subscript.as_deref(), Some("empty"));
+        assert_eq!(compound[0].elements[0].value, "");
+        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
+        assert!(!compound[0].elements[0].append);
+        assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("more"));
+        assert_eq!(compound[0].elements[1].value, "");
+        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
+        assert!(compound[0].elements[1].append);
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_reserved_word_elements() {
         let input = "arr=(if done [case]=esac [then]+=fi)";
         let tokens = tokenize(input);

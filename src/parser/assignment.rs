@@ -209,6 +209,11 @@ pub(super) fn collect_compound_assignment(
     while i < tokens.len() && !is_keyword(tokens, i, ")") {
         if let Some((left, rhs)) = compound_subscript_assignment(&tokens[i].value) {
             if rhs.is_empty() {
+                if compound_subscript_value_is_empty(tokens, i) {
+                    values.push(left);
+                    i += 1;
+                    continue;
+                }
                 if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i + 1)
                 {
                     values.push(format!("{}{}", left, quote_compound_assignment_word(&word)));
@@ -273,6 +278,16 @@ pub(super) fn collect_compound_assignment(
     }
 
     Some((format!("({})", values.join(" ")), i))
+}
+
+fn compound_subscript_value_is_empty(tokens: &[Token], index: usize) -> bool {
+    if is_keyword(tokens, index + 1, ")") {
+        return true;
+    }
+
+    tokens
+        .get(index + 1)
+        .is_some_and(|token| compound_subscript_assignment(&token.value).is_some())
 }
 
 pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str)> {
