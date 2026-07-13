@@ -80,3 +80,23 @@ fn test_alias_introduced_arithmetic_for_accepts_empty_update() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n2\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_compact_arithmetic_for_accepts_empty_test() {
+    let output_path = "target/rubash-alias-compact-arithmetic-for-empty-test-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias f=for; \
+         f ((i=0;;i++)); do echo $i; if (( i == 2 )); then break; fi; done > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n2\n");
+    let _ = fs::remove_file(output_path);
+}

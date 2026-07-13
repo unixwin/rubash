@@ -58,10 +58,10 @@ impl Executor {
             return None;
         }
 
-        let mut parts = vec![alias_arithmetic_part(
+        let mut parts = split_compact_alias_arithmetic_empty_test(alias_arithmetic_part(
             ast.commands.get(command_index)?,
             &words[1..],
-        )];
+        ));
         let mut index = command_index + 1;
         while parts.len() < 3 {
             let command = ast.commands.get(index)?;
@@ -141,6 +141,26 @@ fn alias_arithmetic_part(command: &CommandNode, words: &[String]) -> String {
     append_alias_arithmetic_redirect(&mut text, command.redirect_out.as_ref(), ">");
     append_alias_arithmetic_redirect(&mut text, command.append.as_ref(), ">>");
     text
+}
+
+fn split_compact_alias_arithmetic_empty_test(text: String) -> Vec<String> {
+    let Some((init, update)) = text.split_once(";;") else {
+        return vec![text];
+    };
+    vec![
+        trim_alias_arithmetic_delimiters(init),
+        String::new(),
+        trim_alias_arithmetic_delimiters(update),
+    ]
+}
+
+fn trim_alias_arithmetic_delimiters(text: &str) -> String {
+    let text = text.trim();
+    let text = text.strip_prefix("((").unwrap_or(text).trim_start();
+    text.strip_suffix("))")
+        .unwrap_or(text)
+        .trim_end()
+        .to_string()
 }
 
 fn append_alias_arithmetic_redirect(text: &mut String, redirect: Option<&Redirect>, op: &str) {
