@@ -154,7 +154,9 @@ impl Executor {
         input: &str,
     ) -> Result<Option<(String, i32)>, ExecuteError> {
         let Some(name) = command.words.first().map(String::as_str) else {
-            return Ok(Some((String::new(), 0)));
+            return self
+                .execute_compound_pipeline_stage(command, input)
+                .map(Some);
         };
 
         match name {
