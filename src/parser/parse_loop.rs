@@ -363,10 +363,6 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
             _ => break,
         }
     }
-    if index >= command.words.len() {
-        return None;
-    }
-
     let keyword = command.words[0].clone();
     let old_word_len = command.words.len();
     command.words = command.words[index..].to_vec();
