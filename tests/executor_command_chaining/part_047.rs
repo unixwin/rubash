@@ -60,6 +60,23 @@ fn test_cat_reads_process_substitution_argument() {
 }
 
 #[test]
+fn test_process_substitution_preserves_quoted_printf_escapes() {
+    let output_path = "target/rubash-process-subst-printf-quoted-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat <(printf \"x\\n\") > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "x\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_cat_reads_process_substitution_stdin_redirect() {
     let output_path = "target/rubash-cat-process-subst-stdin-output.txt";
     let _ = fs::remove_file(output_path);

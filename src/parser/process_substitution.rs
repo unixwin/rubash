@@ -114,7 +114,7 @@ fn collect_process_substitution_target_with_prefix(
 
     let source = tokens[source_start..index]
         .iter()
-        .map(|token| token.value.as_str())
+        .map(|token| token.raw.as_str())
         .collect::<Vec<_>>()
         .join(" ");
     let operator = if output { ">" } else { "<" };

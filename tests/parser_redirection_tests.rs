@@ -142,6 +142,20 @@ fn test_input_process_substitution_word_records_structured_ast() {
 }
 
 #[test]
+fn test_process_substitution_source_preserves_quotes() {
+    let input = "cat <(printf \"x\\n\")";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["cat", "<(printf \"x\\n\")"]);
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, "<(printf \"x\\n\")");
+    assert_eq!(process[0].source, "printf \"x\\n\"");
+    assert_eq!(process[0].commands[0].words, ["printf", "x\\n"]);
+}
+
+#[test]
 fn test_process_substitution_records_nested_body_ast() {
     let input = "cat < <(echo $(date); printf done)";
     let tokens = tokenize(input);
