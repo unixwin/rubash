@@ -280,6 +280,24 @@ fn test_select_combined_process_substitution_captures_body() {
 }
 
 #[test]
+fn test_time_brace_group_combined_process_substitution_captures_body() {
+    let output_path = "target/rubash-time-brace-combined-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time {{ echo out; read -u x value; }} &> >(cat > {output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("out\n"));
+    assert!(output.contains("read: x: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_stderr_fd_copy_after_stdout_redirect_captures_brace_group() {
     let output_path = "target/rubash-fd-copy-after-stdout-output.txt";
     let _ = fs::remove_file(output_path);
