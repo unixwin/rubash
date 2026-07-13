@@ -1490,6 +1490,46 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_records_arithmetic_pattern_operand() {
+        let glob_tokens = tokenize("[[ file == item-$((i+=1))-$[j*2] ]]");
+        let glob_ast = parse(&glob_tokens);
+        let regex_tokens = tokenize("[[ value =~ ^$((start+1))$ ]]");
+        let regex_ast = parse(&regex_tokens);
+
+        let glob = glob_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap()
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+        let regex = regex_ast.commands[0]
+            .conditional_command
+            .as_ref()
+            .unwrap()
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(glob.kind, ConditionalPatternKind::Glob);
+        assert_eq!(glob.arithmetic_expansions.len(), 2);
+        assert_eq!(glob.arithmetic_expansions[0].text, "$((i+=1))");
+        assert_eq!(glob.arithmetic_expansions[0].expression, "i+=1");
+        assert!(glob.arithmetic_expansions[0].has_assignment);
+        assert_eq!(glob.arithmetic_expansions[0].variables, ["i"]);
+        assert_eq!(glob.arithmetic_expansions[1].open_delimiter, "$[");
+        assert_eq!(glob.arithmetic_expansions[1].expression, "j*2");
+        assert_eq!(glob.arithmetic_expansions[1].operators[0].text, "*");
+
+        assert_eq!(regex.kind, ConditionalPatternKind::Regex);
+        assert_eq!(regex.arithmetic_expansions.len(), 1);
+        assert_eq!(regex.arithmetic_expansions[0].text, "$((start+1))");
+        assert_eq!(regex.arithmetic_expansions[0].variables, ["start"]);
+    }
+
+    #[test]
     fn test_conditional_command_records_readonly_unary_expression() {
         let input = "[[ -R UID ]]";
         let tokens = tokenize(input);
