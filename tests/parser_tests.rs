@@ -924,6 +924,25 @@ mod case_tests {
         assert_eq!(second.operators, ["**", "*"]);
         assert!(second.has_glob);
     }
+
+    #[test]
+    fn test_case_body_keeps_nested_select_command() {
+        let input =
+            "case $word in x) select choice in a; do echo $choice; break; done <<< 1 ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.clauses.len(), 1);
+        assert!(case_command.clauses[0]
+            .body
+            .iter()
+            .any(|command| command.select_command.is_some()));
+        assert_eq!(
+            case_command.clauses[0].terminator_text.as_deref(),
+            Some(";;")
+        );
+    }
 }
 
 mod arithmetic_command_tests {

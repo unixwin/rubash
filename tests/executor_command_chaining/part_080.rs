@@ -694,6 +694,27 @@ fn test_function_body_can_be_case_command() {
 }
 
 #[test]
+fn test_case_body_can_contain_select_command() {
+    let output_path = "target/rubash-case-nested-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "case x in x) select choice in inner; do echo $choice > {output_path}; break; done <<< 1 ;; esac"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let body = &ast.commands[0].case_command.as_ref().unwrap().clauses[0].body;
+    assert!(body.iter().any(|command| command.select_command.is_some()));
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "inner\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_if_command_sequence() {
     let output_path = "target/rubash-function-if-body-output.txt";
     let _ = fs::remove_file(output_path);

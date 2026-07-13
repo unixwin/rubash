@@ -270,6 +270,7 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> usize {
 
         if is_keyword(tokens, index, "if")
             || is_keyword(tokens, index, "for")
+            || is_keyword(tokens, index, "select")
             || is_keyword(tokens, index, "while")
             || is_keyword(tokens, index, "until")
         {
