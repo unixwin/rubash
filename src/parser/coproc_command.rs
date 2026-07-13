@@ -76,45 +76,6 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             return Some((command, next_i));
         }
 
-        // Subshell body: ( ... )
-        if is_keyword(tokens, i, "(") {
-            i += 1; // consume `(`
-            let body_start = i;
-            let mut depth = 1usize;
-            while i < tokens.len() {
-                if is_keyword(tokens, i, "(") {
-                    depth += 1;
-                } else if is_keyword(tokens, i, ")") {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                i += 1;
-            }
-            if i < tokens.len() {
-                let body = parse(&tokens[body_start..i]).commands;
-                let mut command = CommandNode::new();
-                command.line = tokens.get(start).map(|t| t.position);
-                command.coproc_command = Some(coproc_command(
-                    name,
-                    Vec::new(),
-                    CoprocBodyKind::Subshell,
-                    Some(("(".to_string(), tokens[i].value.clone())),
-                    Some(body),
-                ));
-                let mut next_i = i + 1;
-                collect_trailing_redirections(tokens, &mut next_i, &mut command);
-                while tokens
-                    .get(next_i)
-                    .is_some_and(|t| t.kind == TokenKind::Semicolon)
-                {
-                    next_i += 1;
-                }
-                return Some((command, next_i));
-            }
-        }
-
         if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
@@ -155,6 +116,45 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 next_i += 1;
             }
             return Some((command, next_i));
+        }
+
+        // Subshell body: ( ... )
+        if is_keyword(tokens, i, "(") {
+            i += 1; // consume `(`
+            let body_start = i;
+            let mut depth = 1usize;
+            while i < tokens.len() {
+                if is_keyword(tokens, i, "(") {
+                    depth += 1;
+                } else if is_keyword(tokens, i, ")") {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                i += 1;
+            }
+            if i < tokens.len() {
+                let body = parse(&tokens[body_start..i]).commands;
+                let mut command = CommandNode::new();
+                command.line = tokens.get(start).map(|t| t.position);
+                command.coproc_command = Some(coproc_command(
+                    name,
+                    Vec::new(),
+                    CoprocBodyKind::Subshell,
+                    Some(("(".to_string(), tokens[i].value.clone())),
+                    Some(body),
+                ));
+                let mut next_i = i + 1;
+                collect_trailing_redirections(tokens, &mut next_i, &mut command);
+                while tokens
+                    .get(next_i)
+                    .is_some_and(|t| t.kind == TokenKind::Semicolon)
+                {
+                    next_i += 1;
+                }
+                return Some((command, next_i));
+            }
         }
     }
 
@@ -279,12 +279,15 @@ fn matching_coproc_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
 }
 
 fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+    if let Some(parsed) = parse_arithmetic_command(tokens, start) {
+        return Some(parsed);
+    }
+
     match tokens.get(start)?.value.as_str() {
         "for" => parse_for_command(tokens, start),
         "case" => parse_case_command(tokens, start),
         "select" => parse_select_command(tokens, start),
         "coproc" => parse_coproc_command(tokens, start),
-        _ if tokens[start].value.starts_with("((") => parse_arithmetic_command(tokens, start),
         _ => None,
     }
 }

@@ -504,3 +504,34 @@ fn test_named_coproc_executes_for_body() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
+
+#[test]
+fn test_named_coproc_executes_arithmetic_body_without_stderr() {
+    let status_path = "target/rubash-coproc-arithmetic-status.txt";
+    let error_path = "target/rubash-coproc-arithmetic-error.txt";
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(error_path);
+    let input =
+        format!("coproc MYC (( 1 )) 2> {error_path}; echo pid:${{MYC_PID:+set}} > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut error = String::new();
+    for _ in 0..20 {
+        error = fs::read_to_string(error_path).unwrap_or_default();
+        if error.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(error, "");
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(error_path);
+}

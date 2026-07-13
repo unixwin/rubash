@@ -394,13 +394,10 @@ fn parse_time_prefixed_compound_command(
         })
     {
         parse_brace_group_command(tokens, i)?
-    } else if is_keyword(tokens, i, "(") && !is_keyword(tokens, i + 1, "(") {
+    } else if let Some(parsed) = parse_arithmetic_command(tokens, i) {
+        parsed
+    } else if is_keyword(tokens, i, "(") {
         parse_subshell_command(tokens, i)?
-    } else if tokens
-        .get(i)
-        .is_some_and(|token| token.value.starts_with("(("))
-    {
-        parse_arithmetic_command(tokens, i)?
     } else {
         return None;
     };

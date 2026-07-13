@@ -140,6 +140,20 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_parses_arithmetic_command() {
+        let input = "time -p (( 1 + 1 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p"]);
+        assert!(time_command.posix_format);
+        let arithmetic = time_command.command.arithmetic_command.as_ref().unwrap();
+        assert_eq!(arithmetic.expression, "1 + 1");
+    }
+
+    #[test]
     fn test_time_prefix_parses_if_command_sequence() {
         let input = "time -p if true; then echo yes; fi";
         let tokens = tokenize(input);
