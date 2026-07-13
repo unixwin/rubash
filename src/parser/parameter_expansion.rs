@@ -235,8 +235,8 @@ fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<Str
     }
 
     for operator in [
-        ":-", ":=", ":?", ":+", "##", "%%", "//", "^^", ",,", "~~", "-", "=", "?", "+", "#", "%",
-        "/", "^", ",", "~", "@",
+        ":-", ":=", ":?", ":+", "##", "%%", "//", "^^", ",,", "~~", ":", "-", "=", "?", "+", "#",
+        "%", "/", "^", ",", "~", "@",
     ] {
         if let Some(index) = top_level_operator(parameter, operator) {
             return (

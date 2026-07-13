@@ -2471,6 +2471,29 @@ mod parameter_expansion_tests {
     }
 
     #[test]
+    fn test_parameter_expansion_records_substring_operator() {
+        let input = "echo ${name:1} ${name:1:3} ${array[@]: -2:1} ${value:-fallback}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 4);
+        assert_eq!(expansions[0].name, "name");
+        assert_eq!(expansions[0].operator.as_deref(), Some(":"));
+        assert_eq!(expansions[0].word.as_deref(), Some("1"));
+        assert_eq!(expansions[1].name, "name");
+        assert_eq!(expansions[1].operator.as_deref(), Some(":"));
+        assert_eq!(expansions[1].word.as_deref(), Some("1:3"));
+        assert_eq!(expansions[2].name, "array[@]");
+        assert_eq!(expansions[2].operator.as_deref(), Some(":"));
+        assert_eq!(expansions[2].word.as_deref(), Some(" -2:1"));
+        assert_eq!(expansions[3].name, "value");
+        assert_eq!(expansions[3].operator.as_deref(), Some(":-"));
+        assert_eq!(expansions[3].word.as_deref(), Some("fallback"));
+    }
+
+    #[test]
     fn test_parameter_expansion_does_not_treat_array_at_as_transform_operator() {
         let input = "echo ${array[@]} ${array[*]@Q}";
         let tokens = tokenize(input);
