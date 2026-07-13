@@ -1733,6 +1733,20 @@ mod arithmetic_command_tests {
     }
 
     #[test]
+    fn test_arithmetic_command_records_exponent_assignment_operator() {
+        let input = "(( n **= 3 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
+
+        assert_eq!(arithmetic.expression, "n **= 3");
+        assert_eq!(arithmetic.variables, ["n"]);
+        assert!(arithmetic.has_assignment);
+        assert_eq!(arithmetic.operators.len(), 1);
+        assert_eq!(arithmetic.operators[0].text, "**=");
+    }
+
+    #[test]
     fn test_arithmetic_and_or_list_skips_connector_newline() {
         let input =
             "if (( integerPart2 == 0 )) &&\n  (( fractionalPart2 == 0 ))\nthen echo bad; fi";
@@ -2375,6 +2389,20 @@ mod arithmetic_expansion_tests {
             .map(|operator| operator.text.as_str())
             .collect::<Vec<_>>();
         assert_eq!(operators, ["=", ",", "=", "+"]);
+    }
+
+    #[test]
+    fn test_arithmetic_expansion_records_exponent_assignment_operator() {
+        let input = "echo $(( n **= 3 ))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let expansion = &ast.commands[0].arithmetic_expansions[0];
+
+        assert_eq!(expansion.expression, " n **= 3 ");
+        assert_eq!(expansion.variables, ["n"]);
+        assert!(expansion.has_assignment);
+        assert_eq!(expansion.operators.len(), 1);
+        assert_eq!(expansion.operators[0].text, "**=");
     }
 
     #[test]

@@ -107,9 +107,9 @@ fn arithmetic_command(expression: String) -> ArithmeticCommand {
 
 pub(super) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
     const OPERATORS: &[&str] = &[
-        "<<=", ">>=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&", "||", "==",
-        "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/", "*", "+", "-",
-        "!", "~", "?", ":", ",",
+        "<<=", ">>=", "**=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&",
+        "||", "==", "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/",
+        "*", "+", "-", "!", "~", "?", ":", ",",
     ];
 
     let mut operators = Vec::new();
@@ -172,7 +172,7 @@ fn is_arithmetic_identifier_continue(ch: char) -> bool {
 pub(super) fn is_arithmetic_assignment_operator(operator: &str) -> bool {
     matches!(
         operator,
-        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>="
+        "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "**="
     )
 }
 
