@@ -69,44 +69,121 @@ fn split_compound_element_operator<'a>(
     word: &'a str,
     operator: &str,
 ) -> Option<(&'a str, &'a str)> {
-    let body = word.strip_prefix('[')?;
-    let pos = body.find(operator)?;
-    Some((&body[..pos], &body[pos + operator.len()..]))
+    if !word.starts_with('[') {
+        return None;
+    }
+
+    let assignment = operator.strip_prefix(']')?;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (index, ch) in word.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ']' if !single && !double => {
+                let value_start = index + ch.len_utf8();
+                let value = &word[value_start..];
+                return value
+                    .strip_prefix(assignment)
+                    .map(|value| (&word[1..index], value));
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn split_compound_assignment_words(inner: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
-    let mut chars = inner.chars();
+    let chars = inner.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
     let mut double = false;
+    let mut single = false;
     let mut escaped = false;
-    while let Some(ch) = chars.next() {
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut paren_depth = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
         if escaped {
             current.push(ch);
             escaped = false;
+            index += 1;
             continue;
         }
 
-        if ch == '\\' {
+        if ch == '\\' && !single {
             current.push(ch);
             escaped = true;
+            index += 1;
             continue;
         }
 
-        if ch == '"' {
-            current.push(ch);
-            double = !double;
-            continue;
+        if ch == '$' && !single {
+            if matches!(chars.get(index + 1), Some('(')) {
+                current.push(ch);
+                current.push('(');
+                paren_depth += 1;
+                index += 2;
+                continue;
+            }
+            if matches!(chars.get(index + 1), Some('{')) {
+                current.push(ch);
+                current.push('{');
+                brace_depth += 1;
+                index += 2;
+                continue;
+            }
+            if matches!(chars.get(index + 1), Some('[')) {
+                current.push(ch);
+                current.push('[');
+                bracket_depth += 1;
+                index += 2;
+                continue;
+            }
         }
 
-        if ch.is_ascii_whitespace() && !double {
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double && brace_depth == 0 && paren_depth == 0 => bracket_depth += 1,
+            ']' if !single && bracket_depth > 0 => bracket_depth -= 1,
+            '{' if !single && brace_depth > 0 => brace_depth += 1,
+            '}' if !single && brace_depth > 0 => brace_depth -= 1,
+            '(' if !single && paren_depth > 0 => paren_depth += 1,
+            ')' if !single && paren_depth > 0 => paren_depth -= 1,
+            _ => {}
+        }
+
+        if ch.is_ascii_whitespace()
+            && !single
+            && !double
+            && brace_depth == 0
+            && bracket_depth == 0
+            && paren_depth == 0
+        {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
+            index += 1;
             continue;
         }
 
         current.push(ch);
+        index += 1;
     }
 
     if !current.is_empty() {
