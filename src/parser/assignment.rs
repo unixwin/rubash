@@ -252,10 +252,19 @@ pub(super) fn collect_compound_assignment(
                 tokens.get(j).map(|token| token.value.as_str()),
                 Some("=" | "+=")
             ) {
+                if compound_split_subscript_value_is_empty(tokens, j) {
+                    values.push(format!(
+                        "[{}]{}",
+                        quote_compound_assignment_subscript(&subscript),
+                        tokens[j].value,
+                    ));
+                    i = j + 1;
+                    continue;
+                }
                 if let Some((rhs, next_i)) = collect_compound_or_keyword_word_value(tokens, j + 1) {
                     values.push(format!(
                         "[{}]{}{}",
-                        quote_compound_assignment_word(&subscript),
+                        quote_compound_assignment_subscript(&subscript),
                         tokens[j].value,
                         quote_compound_assignment_word(&rhs)
                     ));
@@ -288,6 +297,16 @@ fn compound_subscript_value_is_empty(tokens: &[Token], index: usize) -> bool {
     tokens
         .get(index + 1)
         .is_some_and(|token| compound_subscript_assignment_token(token).is_some())
+}
+
+fn compound_split_subscript_value_is_empty(tokens: &[Token], operator_index: usize) -> bool {
+    if is_keyword(tokens, operator_index + 1, ")") {
+        return true;
+    }
+
+    tokens.get(operator_index + 1).is_some_and(|token| {
+        token.value == "[" || compound_subscript_assignment_token(token).is_some()
+    })
 }
 
 pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str)> {
