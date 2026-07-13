@@ -172,7 +172,11 @@ pub(super) fn collect_compound_assignment(
 
         if matches!(
             tokens[i].kind,
-            TokenKind::Word | TokenKind::Variable | TokenKind::Assignment | TokenKind::CommandSubst
+            TokenKind::Word
+                | TokenKind::Variable
+                | TokenKind::Assignment
+                | TokenKind::CommandSubst
+                | TokenKind::BraceExpand
         ) {
             values.push(quote_compound_assignment_word(&tokens[i].value));
         }
