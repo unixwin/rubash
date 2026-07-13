@@ -320,7 +320,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
         TokenKind::HereString => {
             note_command_line(&mut state.current_cmd, token);
-            if *i + 1 < tokens.len()
+            if let Some((process_substitution, next_i)) =
+                process_substitution_word_target(tokens, *i + 1)
+            {
+                assign_here_string_process_substitution(
+                    &mut state.current_cmd,
+                    &token.value,
+                    process_substitution,
+                );
+                *i = next_i;
+            } else if *i + 1 < tokens.len()
                 && matches!(
                     tokens[*i + 1].kind,
                     TokenKind::Word

@@ -95,6 +95,20 @@ pub(super) fn collect_trailing_redirections(
             }
         }
 
+        if token.kind == TokenKind::HereString {
+            if let Some((process_substitution, next_i)) =
+                process_substitution_word_target(tokens, *index + 1)
+            {
+                assign_here_string_process_substitution(
+                    command,
+                    &token.value,
+                    process_substitution,
+                );
+                *index = next_i + 1;
+                continue;
+            }
+        }
+
         let Some(target) = tokens.get(*index + 1).filter(|next| {
             matches!(
                 next.kind,
@@ -179,6 +193,18 @@ pub(super) fn assign_here_string_redirect(command: &mut CommandNode, operator: &
     } else {
         command.here_string = Some(target.to_string());
     }
+}
+
+pub(super) fn assign_here_string_process_substitution(
+    command: &mut CommandNode,
+    operator: &str,
+    mut process_substitution: ProcessSubstitution,
+) {
+    let fd = redirect_operator_fd(operator);
+    process_substitution.redirect_fd = fd;
+    let target = process_substitution.target.clone();
+    command.process_substitutions.push(process_substitution);
+    assign_here_string_redirect(command, operator, &target);
 }
 
 pub(super) fn take_adjacent_redirect_fd_prefix(

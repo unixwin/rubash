@@ -436,6 +436,56 @@ fn test_here_string_redirect() {
 }
 
 #[test]
+fn test_here_string_process_substitution_word() {
+    let input = "read x <<< <(printf data)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["read", "x"]);
+    assert_eq!(command.here_string.as_deref(), Some("<(printf data)"));
+    assert_eq!(command.process_substitutions.len(), 1);
+    assert_eq!(command.process_substitutions[0].target, "<(printf data)");
+    assert_eq!(command.process_substitutions[0].source, "printf data");
+    assert!(!command.process_substitutions[0].output);
+    assert_eq!(command.process_substitutions[0].word_index, None);
+    assert_eq!(command.process_substitutions[0].redirect_fd, None);
+}
+
+#[test]
+fn test_fd_here_string_process_substitution_word() {
+    let input = "read -u 3 x 3<<< <(printf data)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert!(command.here_string.is_none());
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    assert_eq!(command.heredoc_redirects[0].fd, Some(3));
+    assert_eq!(
+        command.heredoc_redirects[0].body.as_deref(),
+        Some("\x1d<(printf data)")
+    );
+    assert_eq!(command.process_substitutions.len(), 1);
+    assert_eq!(command.process_substitutions[0].target, "<(printf data)");
+    assert_eq!(command.process_substitutions[0].redirect_fd, Some(3));
+}
+
+#[test]
+fn test_trailing_here_string_process_substitution_word() {
+    let input = "{ read x; } <<< <(printf data)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert!(command.brace_group.is_some());
+    assert_eq!(command.here_string.as_deref(), Some("<(printf data)"));
+    assert_eq!(command.process_substitutions.len(), 1);
+    assert_eq!(command.process_substitutions[0].target, "<(printf data)");
+    assert_eq!(command.process_substitutions[0].source, "printf data");
+}
+
+#[test]
 fn test_heredoc_redirect_records_operator_metadata() {
     let input = "cat <<EOF\nalpha\nEOF";
     let tokens = tokenize(input);
