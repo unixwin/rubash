@@ -550,6 +550,61 @@ fn test_combined_stdout_stderr_append_redirect() {
 }
 
 #[test]
+fn test_combined_output_process_substitution_redirect() {
+    let tokens = tokenize("echo both &> >(cat > out.txt)");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(
+        command.redirect_out.as_ref().unwrap().target,
+        ">(cat > out.txt)"
+    );
+    assert_eq!(
+        command.redirect_out.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        ">(cat > out.txt)"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
+    );
+    let process = command.process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+}
+
+#[test]
+fn test_combined_append_process_substitution_redirect() {
+    let tokens = tokenize("echo both &>> >(cat > out.txt)");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.append.as_ref().unwrap().target, ">(cat > out.txt)");
+    assert_eq!(
+        command.append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        ">(cat > out.txt)"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
+    );
+    let process = command.process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+}
+
+#[test]
 fn test_stderr_fd_copy_inherits_previous_stdout_redirect() {
     let tokens = tokenize("echo both > out.txt 2>&1");
     let ast = parse(&tokens);

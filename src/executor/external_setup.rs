@@ -24,6 +24,25 @@ fn exec_keeps_output_process_substitution(words: &[String], redirect: &Redirect)
         || matches!(words, [command, fd] if command == "exec" && dynamic_fd_word(fd).is_some())
 }
 
+fn shared_combined_output_process_substitution(
+    first: Option<&Redirect>,
+    second: Option<&Redirect>,
+) -> Option<String> {
+    let first = first?;
+    let second = second?;
+    if first.target != second.target
+        || !matches!(first.operator.as_str(), "&>" | "&>>")
+        || first.operator != second.operator
+    {
+        return None;
+    }
+    first
+        .target
+        .strip_prefix(">(")
+        .and_then(|target| target.strip_suffix(')'))
+        .map(str::to_string)
+}
+
 fn dynamic_fd_word(word: &str) -> Option<&str> {
     let name = word.strip_prefix('{')?.strip_suffix('}')?;
     (!name.is_empty()
@@ -145,6 +164,38 @@ impl Executor {
             }
         }
         let exec_words = rewritten.words.clone();
+        if let Some(source) = shared_combined_output_process_substitution(
+            rewritten.redirect_out.as_ref(),
+            rewritten.redirect_err_append.as_ref(),
+        ) {
+            let path = self.empty_process_substitution_temp()?;
+            let display_path = shell_display_path(&path.to_string_lossy());
+            if let Some(redirect) = &mut rewritten.redirect_out {
+                redirect.target = display_path.clone();
+            }
+            if let Some(redirect) = &mut rewritten.redirect_err_append {
+                redirect.target = display_path;
+            }
+            files
+                .outputs
+                .push(OutputProcessSubstitution { path, source });
+        }
+        if let Some(source) = shared_combined_output_process_substitution(
+            rewritten.append.as_ref(),
+            rewritten.redirect_err_append.as_ref(),
+        ) {
+            let path = self.empty_process_substitution_temp()?;
+            let display_path = shell_display_path(&path.to_string_lossy());
+            if let Some(redirect) = &mut rewritten.append {
+                redirect.target = display_path.clone();
+            }
+            if let Some(redirect) = &mut rewritten.redirect_err_append {
+                redirect.target = display_path;
+            }
+            files
+                .outputs
+                .push(OutputProcessSubstitution { path, source });
+        }
         if let Some(redirect) = &mut rewritten.redirect_out {
             if !exec_keeps_output_process_substitution(&exec_words, redirect) {
                 if let Some(source) = redirect

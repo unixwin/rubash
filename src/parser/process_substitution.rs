@@ -62,6 +62,26 @@ pub(super) fn output_process_substitution_redirect_target(
     collect_output_process_substitution_target(tokens, redirect_index + 3)
 }
 
+pub(super) fn combined_process_substitution_redirect_target(
+    tokens: &[Token],
+    redirect_index: usize,
+) -> Option<(ProcessSubstitution, usize)> {
+    let redirect = tokens.get(redirect_index)?;
+    if !matches!(redirect.kind, TokenKind::RedirectOut | TokenKind::Append)
+        || !matches!(redirect.value.as_str(), "&>" | "&>>")
+        || !tokens
+            .get(redirect_index + 1)
+            .is_some_and(|token| token.kind == TokenKind::RedirectOut && token.value == ">")
+        || !tokens
+            .get(redirect_index + 2)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "(")
+    {
+        return None;
+    }
+
+    collect_output_process_substitution_target(tokens, redirect_index + 3)
+}
+
 pub(super) fn append_process_substitution_redirect_target(
     tokens: &[Token],
     redirect_index: usize,

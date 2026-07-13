@@ -6,6 +6,15 @@ pub(super) fn assign_redirect_out_target(
     index: usize,
     command: &mut CommandNode,
 ) -> Option<usize> {
+    if let Some((process_substitution, next_i)) =
+        combined_process_substitution_redirect_target(tokens, index)
+    {
+        let target = process_substitution.target.clone();
+        command.process_substitutions.push(process_substitution);
+        assign_output_redirect(command, &tokens[index].value, &target, None);
+        return Some(next_i);
+    }
+
     if let Some((mut process_substitution, next_i)) =
         output_process_substitution_redirect_target(tokens, index)
     {
@@ -57,6 +66,15 @@ pub(super) fn assign_append_target(
     index: usize,
     command: &mut CommandNode,
 ) -> Option<usize> {
+    if let Some((process_substitution, next_i)) =
+        combined_process_substitution_redirect_target(tokens, index)
+    {
+        let target = process_substitution.target.clone();
+        command.process_substitutions.push(process_substitution);
+        assign_append_redirect(command, &tokens[index].value, &target, None);
+        return Some(next_i);
+    }
+
     if let Some((mut process_substitution, next_i)) =
         append_process_substitution_redirect_target(tokens, index)
     {

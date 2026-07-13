@@ -32,6 +32,16 @@ pub(super) fn collect_trailing_redirections(
         }
 
         if token.kind == TokenKind::RedirectOut {
+            if let Some((process_substitution, next_i)) =
+                combined_process_substitution_redirect_target(tokens, *index)
+            {
+                let target = process_substitution.target.clone();
+                command.process_substitutions.push(process_substitution);
+                assign_output_redirect(command, &token.value, &target, None);
+                *index = next_i + 1;
+                continue;
+            }
+
             if let Some((mut process_substitution, next_i)) =
                 output_process_substitution_redirect_target(tokens, *index)
             {
@@ -41,6 +51,18 @@ pub(super) fn collect_trailing_redirections(
                 let target = process_substitution.target.clone();
                 command.process_substitutions.push(process_substitution);
                 command.redirect_out = Some(redirect_node(&token.value, fd, &target, false, false));
+                *index = next_i + 1;
+                continue;
+            }
+        }
+
+        if token.kind == TokenKind::Append {
+            if let Some((process_substitution, next_i)) =
+                combined_process_substitution_redirect_target(tokens, *index)
+            {
+                let target = process_substitution.target.clone();
+                command.process_substitutions.push(process_substitution);
+                assign_append_redirect(command, &token.value, &target, None);
                 *index = next_i + 1;
                 continue;
             }

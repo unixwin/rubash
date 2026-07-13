@@ -41,6 +41,78 @@ fn test_combined_stdout_stderr_append_captures_brace_group() {
 }
 
 #[test]
+fn test_combined_output_process_substitution_captures_stdout_and_stderr() {
+    let output_path = target_test_path("rubash-combined-process-substitution-output.txt");
+    let helper_path = target_test_path(if cfg!(windows) {
+        "rubash-combined-process-substitution.cmd"
+    } else {
+        "rubash-combined-process-substitution.sh"
+    });
+    let shell_output_path = shell_test_path(&output_path);
+    let shell_helper_path = shell_test_path(&helper_path);
+    let _ = fs::remove_file(&output_path);
+    if cfg!(windows) {
+        write_executable(&helper_path, "@echo out\r\n@echo err 1>&2\r\n").unwrap();
+    } else {
+        write_executable(
+            &helper_path,
+            "#!/bin/sh\nprintf 'out\\n'\nprintf 'err\\n' >&2\n",
+        )
+        .unwrap();
+    }
+    let input = format!("{shell_helper_path} &> >(cat > {shell_output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(&output_path).unwrap();
+    assert!(output.contains("out"));
+    assert!(output.contains("err"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(helper_path);
+}
+
+#[test]
+fn test_combined_append_process_substitution_captures_stdout_and_stderr() {
+    let output_path = target_test_path("rubash-combined-append-process-substitution-output.txt");
+    let helper_path = target_test_path(if cfg!(windows) {
+        "rubash-combined-append-process-substitution.cmd"
+    } else {
+        "rubash-combined-append-process-substitution.sh"
+    });
+    let shell_output_path = shell_test_path(&output_path);
+    let shell_helper_path = shell_test_path(&helper_path);
+    let _ = fs::remove_file(&output_path);
+    if cfg!(windows) {
+        write_executable(&helper_path, "@echo out\r\n@echo err 1>&2\r\n").unwrap();
+    } else {
+        write_executable(
+            &helper_path,
+            "#!/bin/sh\nprintf 'out\\n'\nprintf 'err\\n' >&2\n",
+        )
+        .unwrap();
+    }
+    let input = format!("{shell_helper_path} &>> >(cat > {shell_output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(&output_path).unwrap();
+    assert!(output.contains("out"));
+    assert!(output.contains("err"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(helper_path);
+}
+
+#[test]
 fn test_stderr_fd_copy_after_stdout_redirect_captures_brace_group() {
     let output_path = "target/rubash-fd-copy-after-stdout-output.txt";
     let _ = fs::remove_file(output_path);
