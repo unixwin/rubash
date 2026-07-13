@@ -715,6 +715,25 @@ fn test_case_body_can_contain_select_command() {
 }
 
 #[test]
+fn test_subshell_command_keeps_case_pattern_parentheses() {
+    let output_path = "target/rubash-subshell-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "( case beta in alpha) printf alpha ;; beta) printf beta ;; esac ) > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_if_command_sequence() {
     let output_path = "target/rubash-function-if-body-output.txt";
     let _ = fs::remove_file(output_path);

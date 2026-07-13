@@ -357,6 +357,20 @@ mod pipeline_tests {
         assert_eq!(list.connectors, [true]);
         assert_eq!(list.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_subshell_command_keeps_case_pattern_parentheses() {
+        let input = "( case beta in alpha) printf alpha ;; beta) printf beta ;; esac )";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let subshell = ast.commands[0].subshell_command.as_ref().unwrap();
+
+        assert_eq!(subshell.open_delimiter, "(");
+        assert_eq!(subshell.close_delimiter, ")");
+        assert_eq!(subshell.body.len(), 1);
+        assert!(subshell.body[0].case_command.is_some());
+    }
 }
 
 mod semicolon_tests {
