@@ -89,6 +89,46 @@ fn test_prefixed_output_process_substitution_redirect() {
 }
 
 #[test]
+fn test_append_process_substitution_redirect() {
+    let input = "echo hello >> >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["echo", "hello"]);
+    let redirect = ast.commands[0].append.as_ref().unwrap();
+    assert_eq!(redirect.fd, None);
+    assert_eq!(redirect.operator, ">>");
+    assert_eq!(redirect.target, ">(cat > out.txt)");
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
+fn test_prefixed_append_process_substitution_redirect() {
+    let input = "exec 3>> >(cat > out.txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["exec"]);
+    let redirect = ast.commands[0].append.as_ref().unwrap();
+    assert_eq!(redirect.fd, Some(3));
+    assert_eq!(redirect.operator, "3>>");
+    assert_eq!(redirect.target, ">(cat > out.txt)");
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, Some(3));
+}
+
+#[test]
 fn test_stderr_process_substitution_redirect() {
     let input = "printf err >&2 2> >(cat > err.txt)";
     let tokens = tokenize(input);

@@ -161,6 +161,22 @@ impl Executor {
                 }
             }
         }
+        if let Some(redirect) = &mut rewritten.append {
+            if !exec_keeps_output_process_substitution(&exec_words, redirect) {
+                if let Some(source) = redirect
+                    .target
+                    .strip_prefix(">(")
+                    .and_then(|target| target.strip_suffix(')'))
+                {
+                    let source = source.to_string();
+                    let path = self.empty_process_substitution_temp()?;
+                    redirect.target = shell_display_path(&path.to_string_lossy());
+                    files
+                        .outputs
+                        .push(OutputProcessSubstitution { path, source });
+                }
+            }
+        }
         if let Some(redirect) = &mut rewritten.redirect_err {
             if !exec_keeps_output_process_substitution(&exec_words, redirect) {
                 if let Some(source) = redirect
