@@ -831,6 +831,36 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_records_file_ownership_unary_expressions() {
+        let input = "[[ -G file || -N file ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Logical
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("||"));
+        assert_eq!(
+            conditional.expression.children[0].kind,
+            ConditionalExpressionKind::Unary
+        );
+        assert_eq!(
+            conditional.expression.children[0].operator.as_deref(),
+            Some("-G")
+        );
+        assert_eq!(
+            conditional.expression.children[1].kind,
+            ConditionalExpressionKind::Unary
+        );
+        assert_eq!(
+            conditional.expression.children[1].operator.as_deref(),
+            Some("-N")
+        );
+    }
+
+    #[test]
     fn test_conditional_command_consumes_trailing_redirects() {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);
