@@ -991,6 +991,23 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_keeps_process_substitution_operand() {
+        let input = "[[ -e <(:) ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(conditional.args, ["-e", "<(:)", "]]"]);
+        assert_eq!(ast.commands[0].words, ["[[", "-e", "<(:)", "]]"]);
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Unary
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("-e"));
+        assert_eq!(conditional.expression.operands, ["<(:)"]);
+    }
+
+    #[test]
     fn test_conditional_command_consumes_trailing_redirects() {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);

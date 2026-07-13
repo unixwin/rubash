@@ -10,10 +10,7 @@ pub(super) fn parse_conditional_command(
     }
 
     let end = matching_conditional_end(tokens, start)?;
-    let args = tokens[start + 1..=end]
-        .iter()
-        .map(|token| token.value.clone())
-        .collect::<Vec<_>>();
+    let args = collect_conditional_args(tokens, start + 1, end);
     let expression_args = args
         .strip_suffix(&["]]".to_string()])
         .unwrap_or(args.as_slice());
@@ -31,6 +28,26 @@ pub(super) fn parse_conditional_command(
     }));
 
     Some(finish_compound_command(command, tokens, end + 1))
+}
+
+fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> Vec<String> {
+    let mut args = Vec::new();
+    while index <= end {
+        if index == end {
+            args.push(tokens[index].value.clone());
+            break;
+        }
+
+        if let Some((word, next_i)) = collect_compound_word_value(tokens, index) {
+            args.push(word);
+            index = next_i;
+            continue;
+        }
+
+        args.push(tokens[index].value.clone());
+        index += 1;
+    }
+    args
 }
 
 fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
