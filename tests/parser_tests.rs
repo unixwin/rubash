@@ -2335,6 +2335,32 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_extglob_elements() {
+        let input = "arr=(@(foo|bar) [name]=+(test|bench))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].elements.len(), 2);
+
+        let first = &compound[0].elements[0];
+        assert_eq!(first.value, "@(foo|bar)");
+        assert_eq!(first.extglob_patterns.len(), 1);
+        assert_eq!(first.extglob_patterns[0].text, "@(foo|bar)");
+        assert_eq!(first.extglob_patterns[0].operator, '@');
+        assert_eq!(first.extglob_patterns[0].alternatives, ["foo", "bar"]);
+
+        let second = &compound[0].elements[1];
+        assert_eq!(second.subscript.as_deref(), Some("name"));
+        assert_eq!(second.value, "+(test|bench)");
+        assert_eq!(second.extglob_patterns.len(), 1);
+        assert_eq!(second.extglob_patterns[0].operator, '+');
+        assert_eq!(second.extglob_patterns[0].alternatives, ["test", "bench"]);
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_process_substitution_elements() {
         let input = "arr=(<(:) >(:) [two]=<(:))";
         let tokens = tokenize(input);
