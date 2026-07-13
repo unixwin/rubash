@@ -1254,6 +1254,21 @@ mod conditional_tests {
             "a*"
         );
         assert_eq!(
+            conditional.expression.children[0]
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .operators,
+            ["*"]
+        );
+        assert!(
+            conditional.expression.children[0]
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .has_glob
+        );
+        assert_eq!(
             conditional.expression.children[1].kind,
             ConditionalExpressionKind::Unary
         );
@@ -1312,6 +1327,23 @@ mod conditional_tests {
         assert_eq!(extglob.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(extglob.expression.operator.as_deref(), Some("=="));
         assert_eq!(extglob.expression.operands, ["foo", "@(foo|bar)"]);
+        assert_eq!(
+            extglob
+                .expression
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .operators,
+            ["@(", "|"]
+        );
+        assert!(
+            extglob
+                .expression
+                .pattern_operand
+                .as_ref()
+                .unwrap()
+                .has_extglob
+        );
         assert_eq!(regex.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(regex.expression.operator.as_deref(), Some("=~"));
         assert_eq!(
@@ -1326,6 +1358,13 @@ mod conditional_tests {
             regex.expression.pattern_operand.as_ref().unwrap().text,
             "shellmath_(add|subtract|multiply)$"
         );
+        assert!(regex
+            .expression
+            .pattern_operand
+            .as_ref()
+            .unwrap()
+            .operators
+            .is_empty());
         assert_eq!(capture.expression.kind, ConditionalExpressionKind::Binary);
         assert_eq!(capture.expression.operator.as_deref(), Some("=~"));
         assert_eq!(capture.expression.operands, ["2:bad", "^([0-9]+):(.*)"]);

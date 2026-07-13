@@ -169,6 +169,26 @@ pub struct ConditionalExpression {
 pub struct ConditionalPatternOperand {
     pub text: String,
     pub kind: ConditionalPatternKind,
+    pub operators: Vec<String>,
+    pub has_glob: bool,
+    pub has_extglob: bool,
+}
+
+impl ConditionalPatternOperand {
+    pub fn new(text: String, kind: ConditionalPatternKind) -> Self {
+        let operators = if kind == ConditionalPatternKind::Glob {
+            case_pattern_operators(&text)
+        } else {
+            Vec::new()
+        };
+        Self {
+            has_glob: case_pattern_has_glob(&operators),
+            has_extglob: case_pattern_has_extglob(&operators),
+            text,
+            kind,
+            operators,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

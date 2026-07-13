@@ -167,10 +167,7 @@ fn conditional_pattern_operand(
         "=~" => ConditionalPatternKind::Regex,
         _ => return None,
     };
-    Some(ConditionalPatternOperand {
-        text: rhs.clone(),
-        kind,
-    })
+    Some(ConditionalPatternOperand::new(rhs.clone(), kind))
 }
 
 fn top_level_operator(args: &[String], operator: &str) -> Option<usize> {
