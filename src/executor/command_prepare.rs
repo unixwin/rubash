@@ -130,6 +130,13 @@ impl Executor {
     }
 
     fn expand_command_word(&mut self, cmd: &CommandNode, index: usize, word: &str) -> Vec<String> {
+        if cmd
+            .process_substitutions
+            .iter()
+            .any(|process| process.word_index == Some(index) && process.target == word)
+        {
+            return vec![word.to_string()];
+        }
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
