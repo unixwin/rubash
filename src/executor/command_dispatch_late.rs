@@ -158,6 +158,7 @@ impl Executor {
                 Ok(())
             }
             "((" => {
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = self.execute_arithmetic_command(cmd);
                 Ok(())
             }

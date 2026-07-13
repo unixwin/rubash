@@ -113,6 +113,33 @@ fn test_arithmetic_command_status_uses_expression_value() {
 }
 
 #[test]
+fn test_arithmetic_command_redirect_creates_output_file() {
+    let output_path = "target/rubash-arithmetic-command-redirect-output.txt";
+    let status_path = "target/rubash-arithmetic-command-redirect-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "(( 1 )) > {output_path}; echo true:$? > {status_path}; \
+         (( 0 )) >> {output_path}; echo false:$? >> {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    assert_eq!(
+        fs::read_to_string(status_path).unwrap(),
+        "true:0\nfalse:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_and_brace_group_short_circuits_and_returns() {
     let output_path = "target/rubash-and-brace-group-output.txt";
     let _ = fs::remove_file(output_path);

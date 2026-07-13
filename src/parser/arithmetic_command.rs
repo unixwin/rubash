@@ -183,8 +183,9 @@ pub(super) fn is_arithmetic_comparison_operator(operator: &str) -> bool {
 pub(super) fn finish_arithmetic_command(
     mut command: CommandNode,
     tokens: &[Token],
-    index: usize,
+    mut index: usize,
 ) -> (CommandNode, usize) {
+    collect_trailing_redirections(tokens, &mut index, &mut command);
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::And) => {
             command.and_or = Some(true);

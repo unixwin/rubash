@@ -853,6 +853,31 @@ mod arithmetic_command_tests {
     }
 
     #[test]
+    fn test_arithmetic_command_consumes_trailing_redirect() {
+        let input = "(( n++ )) > out && echo ok";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let list = ast.commands[0].and_or_list.as_ref().unwrap();
+        let arithmetic_command = &list.commands[0];
+
+        assert_eq!(
+            arithmetic_command
+                .arithmetic_command
+                .as_ref()
+                .unwrap()
+                .expression,
+            "n++"
+        );
+        assert_eq!(
+            arithmetic_command.redirect_out.as_ref().unwrap().target,
+            "out"
+        );
+        assert_eq!(list.connectors, [true]);
+        assert_eq!(list.commands[1].words, ["echo", "ok"]);
+    }
+
+    #[test]
     fn test_arithmetic_command_records_operator_metadata() {
         let input = "(( (a += 1) > b && ! done ))";
         let tokens = tokenize(input);
