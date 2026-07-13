@@ -96,11 +96,15 @@ pub(in crate::executor) fn function_definition_command_is_printable(command: &Co
         || command.background_command.is_some()
         || command.inverted_command.is_some()
         || command.arithmetic_command.is_some()
+        || command.for_command.is_some()
         || command.if_command.is_some()
         || command.loop_command.is_some()
         || command.conditional_command.is_some()
         || command.subshell_command.is_some()
+        || command.case_command.is_some()
+        || command.select_command.is_some()
         || command.brace_group.is_some()
+        || command.coproc_command.is_some()
 }
 
 fn command_or_compound_has_heredoc(command: &CommandNode) -> bool {
@@ -190,6 +194,25 @@ pub(in crate::executor) fn function_definition_command_opens_nested_body(
         command.words.first().map(String::as_str),
         Some("then" | "do" | "else" | "elif")
     )
+}
+
+pub(in crate::executor) fn function_definition_command_uses_source_text(
+    command: &CommandNode,
+) -> bool {
+    command.words.is_empty()
+        || command.pipeline_command.is_some()
+        || command.and_or_list.is_some()
+        || command.time_command.is_some()
+        || command.background_command.is_some()
+        || command.inverted_command.is_some()
+        || command.arithmetic_command.is_some()
+        || command.for_command.is_some()
+        || command.conditional_command.is_some()
+        || command.subshell_command.is_some()
+        || command.case_command.is_some()
+        || command.select_command.is_some()
+        || command.brace_group.is_some()
+        || command.coproc_command.is_some()
 }
 
 pub(in crate::executor) fn write_function_definition_heredoc_body<W>(
@@ -323,19 +346,24 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
 }
 
 fn for_command_source_text(for_command: &ForCommand) -> String {
-    let body = bash_command_sequence_text(&for_command.body);
+    let body = command_body_source_text(
+        for_command.body_kind,
+        for_command.body_open_delimiter.as_deref(),
+        for_command.body_close_delimiter.as_deref(),
+        &for_command.body,
+    );
     if let Some(arithmetic) = &for_command.arithmetic {
         return format!(
-            "for (( {}; {}; {} )); do {}; done",
+            "for (( {}; {}; {} )); {}",
             arithmetic.init, arithmetic.test, arithmetic.update, body
         );
     }
 
     if for_command.default_positional {
-        format!("for {}; do {}; done", for_command.variable, body)
+        format!("for {}; {}", for_command.variable, body)
     } else {
         format!(
-            "for {} in {}; do {}; done",
+            "for {} in {}; {}",
             for_command.variable,
             for_command.words.join(" "),
             body
@@ -417,10 +445,12 @@ fn if_command_source_text(if_command: &IfCommand) -> String {
 
 fn loop_command_source_text(loop_command: &LoopCommand) -> String {
     format!(
-        "{} {}; do {}; done",
+        "{} {}; {} {}; {}",
         if loop_command.until { "until" } else { "while" },
         bash_command_sequence_text(&loop_command.condition),
-        bash_command_sequence_text(&loop_command.body)
+        loop_command.body_open_delimiter,
+        bash_command_sequence_text(&loop_command.body),
+        loop_command.body_close_delimiter
     )
 }
 
@@ -433,16 +463,44 @@ fn subshell_command_source_text(subshell_command: &SubshellCommand) -> String {
 }
 
 fn select_command_source_text(select_command: &SelectCommand) -> String {
-    let body = bash_command_sequence_text(&select_command.body);
+    let body = command_body_source_text(
+        select_command.body_kind,
+        select_command.body_open_delimiter.as_deref(),
+        select_command.body_close_delimiter.as_deref(),
+        &select_command.body,
+    );
     if select_command.default_positional {
-        format!("select {}; do {}; done", select_command.variable, body)
+        format!("select {}; {}", select_command.variable, body)
     } else {
         format!(
-            "select {} in {}; do {}; done",
+            "select {} in {}; {}",
             select_command.variable,
             select_command.words.join(" "),
             body
         )
+    }
+}
+
+fn command_body_source_text(
+    body_kind: CommandBodyKind,
+    open_delimiter: Option<&str>,
+    close_delimiter: Option<&str>,
+    body: &[CommandNode],
+) -> String {
+    let body = bash_command_sequence_text(body);
+    match body_kind {
+        CommandBodyKind::DoDone => format!(
+            "{} {}; {}",
+            open_delimiter.unwrap_or("do"),
+            body,
+            close_delimiter.unwrap_or("done")
+        ),
+        CommandBodyKind::BraceGroup => format!(
+            "{} {}; {}",
+            open_delimiter.unwrap_or("{"),
+            body,
+            close_delimiter.unwrap_or("}")
+        ),
     }
 }
 

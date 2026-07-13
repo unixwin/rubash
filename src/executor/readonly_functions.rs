@@ -210,7 +210,15 @@ impl Executor {
                 writeln!(stdout, "{indent}{line}")?;
                 write_function_definition_heredoc_body(command, stdout)?;
             } else {
-                writeln!(stdout, "{indent}{}{terminator}", command.words.join(" "))?;
+                let line = if function_definition_command_uses_source_text(command) {
+                    bash_command_source_text(command)
+                } else {
+                    command.words.join(" ")
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                writeln!(stdout, "{indent}{line}{terminator}")?;
             }
             if function_definition_command_opens_nested_body(command) {
                 indent_level += 1;
@@ -356,7 +364,15 @@ impl Executor {
             writeln!(stdout, "{indent}{line}")?;
             write_function_definition_heredoc_body(command, stdout)
         } else {
-            writeln!(stdout, "{indent}{};", command.words.join(" "))
+            let line = if function_definition_command_uses_source_text(command) {
+                bash_command_source_text(command)
+            } else {
+                command.words.join(" ")
+            };
+            if line.trim().is_empty() {
+                return Ok(());
+            }
+            writeln!(stdout, "{indent}{line};")
         }
     }
 
