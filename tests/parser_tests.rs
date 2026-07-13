@@ -2435,6 +2435,66 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_records_subscript_expansions() {
+        let input = "arr=([${key:-fallback}]=value [$((i+1))]+=next [pre{a,b}]=brace plain)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].elements.len(), 4);
+
+        let parameter = &compound[0].elements[0];
+        assert_eq!(parameter.subscript.as_deref(), Some("${key:-fallback}"));
+        assert_eq!(parameter.subscript_parameter_expansions.len(), 1);
+        assert_eq!(
+            parameter.subscript_parameter_expansions[0].text,
+            "${key:-fallback}"
+        );
+        assert_eq!(parameter.subscript_parameter_expansions[0].name, "key");
+        assert_eq!(
+            parameter.subscript_parameter_expansions[0]
+                .operator
+                .as_deref(),
+            Some(":-")
+        );
+        assert_eq!(
+            parameter.subscript_parameter_expansions[0].word.as_deref(),
+            Some("fallback")
+        );
+
+        let arithmetic = &compound[0].elements[1];
+        assert_eq!(arithmetic.subscript.as_deref(), Some("$((i+1))"));
+        assert!(arithmetic.append);
+        assert_eq!(arithmetic.subscript_arithmetic_expansions.len(), 1);
+        assert_eq!(
+            arithmetic.subscript_arithmetic_expansions[0].text,
+            "$((i+1))"
+        );
+        assert_eq!(
+            arithmetic.subscript_arithmetic_expansions[0].expression,
+            "i+1"
+        );
+        assert_eq!(
+            arithmetic.subscript_arithmetic_expansions[0].variables,
+            ["i"]
+        );
+
+        let brace = &compound[0].elements[2];
+        assert_eq!(brace.subscript.as_deref(), Some("pre{a,b}"));
+        assert_eq!(brace.subscript_brace_expansions.len(), 1);
+        assert_eq!(brace.subscript_brace_expansions[0].text, "{a,b}");
+        assert_eq!(brace.subscript_brace_expansions[0].body, "a,b");
+
+        let plain = &compound[0].elements[3];
+        assert_eq!(plain.value, "plain");
+        assert!(plain.subscript_parameter_expansions.is_empty());
+        assert!(plain.subscript_arithmetic_expansions.is_empty());
+        assert!(plain.subscript_brace_expansions.is_empty());
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_process_substitution_elements() {
         let input = "arr=(<(:) >(:) [two]=<(:))";
         let tokens = tokenize(input);
