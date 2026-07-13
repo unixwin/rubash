@@ -105,6 +105,71 @@ fn test_exec_stdin_redirect_persists_for_following_reads() {
 }
 
 #[test]
+fn test_exec_stdout_redirect_is_inherited_by_external_commands() {
+    let output_path = target_test_path("rubash-exec-external-stdout-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+    let _ = fs::remove_file(&output_path);
+    let input = format!("exec > {shell_output_path}; {rubash} -c 'echo external-out'");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "external-out\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_stderr_redirect_is_inherited_by_external_commands() {
+    let error_path = target_test_path("rubash-exec-external-stderr-output.txt");
+    let shell_error_path = shell_test_path(&error_path);
+    let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+    let _ = fs::remove_file(&error_path);
+    let input =
+        format!("exec 2> {shell_error_path}; {rubash} -c 'builtin no_such_rubash_external_err'");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 1);
+    let error = fs::read_to_string(&error_path).unwrap();
+    assert!(error.contains("builtin: no_such_rubash_external_err: not a shell builtin"));
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
+fn test_exec_stdin_redirect_is_inherited_by_external_commands() {
+    let input_path = target_test_path("rubash-exec-external-stdin-input.txt");
+    let output_path = target_test_path("rubash-exec-external-stdin-output.txt");
+    let shell_input_path = shell_test_path(&input_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let rubash = shell_test_path(std::path::Path::new(env!("CARGO_BIN_EXE_rubash")));
+    let _ = fs::remove_file(&input_path);
+    let _ = fs::remove_file(&output_path);
+    fs::write(&input_path, "external-in\n").unwrap();
+    let input =
+        format!("exec < {shell_input_path}; {rubash} -c 'read x; echo $x' > {shell_output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "external-in\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_exec_child_environment_contains_only_exported_variables() {
     let output_path = target_test_path("rubash-exec-child-env-output.txt");
     let _ = fs::remove_file(&output_path);

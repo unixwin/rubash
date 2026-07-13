@@ -58,9 +58,11 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
     ) -> Result<(), ExecuteError> {
+        let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
             self.apply_external_stdout_target(process, &target, redirect.clobber)?;
+            redirected = true;
         }
 
         if let Some(ref redirect) = cmd.append {
@@ -78,6 +80,21 @@ impl Executor {
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stdout(Stdio::from(file));
+            }
+            redirected = true;
+        }
+
+        if !redirected {
+            if let Some(target) = self.env_vars.get(&fd_output_key(1)) {
+                if is_null_device(target) {
+                    process.stdout(Stdio::null());
+                } else {
+                    let file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(target, &self.env_vars))?;
+                    process.stdout(Stdio::from(file));
+                }
             }
         }
 
@@ -108,6 +125,7 @@ impl Executor {
         cmd: &CommandNode,
         process: &mut Command,
     ) -> Result<(), ExecuteError> {
+        let mut redirected = false;
         if let Some(ref redirect) = cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
@@ -120,6 +138,7 @@ impl Executor {
                 let file = self.create_redirect_output(&target, redirect.clobber)?;
                 process.stderr(Stdio::from(file));
             }
+            redirected = true;
         }
 
         if let Some(ref redirect) = cmd.redirect_err_append {
@@ -137,6 +156,21 @@ impl Executor {
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stderr(Stdio::from(file));
+            }
+            redirected = true;
+        }
+
+        if !redirected {
+            if let Some(target) = self.env_vars.get(&fd_output_key(2)) {
+                if is_null_device(target) {
+                    process.stderr(Stdio::null());
+                } else {
+                    let file = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(target, &self.env_vars))?;
+                    process.stderr(Stdio::from(file));
+                }
             }
         }
 

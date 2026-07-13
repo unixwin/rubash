@@ -50,7 +50,9 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let (cmd, process_substitutions) = self.command_with_process_substitution_files(cmd)?;
+        let (mut cmd, mut process_substitutions) =
+            self.command_with_process_substitution_files(cmd)?;
+        self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
         self.finish_process_substitutions(process_substitutions)?;
         result
@@ -127,6 +129,35 @@ impl Executor {
             }
         }
         Ok((rewritten, files))
+    }
+
+    fn apply_default_external_stdin_file(
+        &mut self,
+        rewritten: &mut CommandNode,
+        files: &mut ProcessSubstitutionFiles,
+    ) -> Result<(), ExecuteError> {
+        if rewritten.redirect_in.is_some()
+            || rewritten.heredoc.is_some()
+            || rewritten.here_string.is_some()
+            || !self.env_vars.contains_key(&fd_stdin_key(0))
+        {
+            return Ok(());
+        }
+
+        let input = self.virtual_fd_stdin_remaining(0).unwrap_or_default();
+        let path = self.write_process_substitution_temp(&input)?;
+        self.env_vars
+            .insert(fd_stdin_offset_key(0), self.virtual_fd_stdin_len(0));
+        rewritten.redirect_in = Some(Redirect {
+            fd: Some(0),
+            operator: "<".to_string(),
+            kind: crate::parser::RedirectKind::Input,
+            target: shell_display_path(&path.to_string_lossy()),
+            append: false,
+            clobber: false,
+        });
+        files.inputs.push(path);
+        Ok(())
     }
 
     pub(in crate::executor) fn finish_process_substitutions(
