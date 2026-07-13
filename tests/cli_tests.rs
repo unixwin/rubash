@@ -178,6 +178,32 @@ fn c_command_external_uses_persistent_fd_copied_from_stdin() {
 }
 
 #[test]
+fn c_command_mapfile_uses_persistent_fd_copied_from_stdin() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(
+            "exec 3<&0; mapfile -u 3 -t arr; printf '%s:%s:%s\\n' \"${#arr[@]}\" \"${arr[0]}\" \"${arr[1]}\"",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"alpha\nbeta\n")
+        .unwrap();
+    let output = child.wait_with_output().expect("wait rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2:alpha:beta\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_file_uses_script_name_and_positional_arguments() {
     let script_path = Path::new("target").join("rubash-cli-script-args.sh");
     fs::create_dir_all("target").unwrap();

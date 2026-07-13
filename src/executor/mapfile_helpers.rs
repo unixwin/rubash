@@ -211,6 +211,9 @@ impl Executor {
         let input_key = fd_stdin_key(fd);
         let offset_key = fd_stdin_offset_key(fd);
         let input = self.env_vars.get(&input_key)?.clone();
+        if input == FD_PROCESS_STDIN_TARGET {
+            return self.read_inherited_process_stdin_to_string();
+        }
         let offset = self
             .env_vars
             .get(&offset_key)

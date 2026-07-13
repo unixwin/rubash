@@ -282,4 +282,18 @@ impl Executor {
             exact_char_limit,
         ))
     }
+
+    pub(in crate::executor) fn read_inherited_process_stdin_to_string(&self) -> Option<String> {
+        if self.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
+            return None;
+        }
+
+        let mut stdin = io::stdin().lock();
+        let mut output = String::new();
+        stdin.read_to_string(&mut output).ok()?;
+        if output.is_empty() {
+            return None;
+        }
+        Some(output)
+    }
 }
