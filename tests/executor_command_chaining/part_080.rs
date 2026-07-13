@@ -373,6 +373,33 @@ fn test_exec_dynamic_input_fd_reads_through_named_fd() {
 }
 
 #[test]
+fn test_external_command_reads_dynamic_input_fd() {
+    let input_path = "target/rubash-external-dynamic-input-fd.txt";
+    let output_path = "target/rubash-external-dynamic-input-fd-output.txt";
+    let status_path = "target/rubash-external-dynamic-input-fd-status.txt";
+    fs::write(input_path, "alpha\nbeta\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "exec {{fd}}<{input_path}; cat <&$fd > {output_path}; \
+         read -u $fd after; echo \"$?:$after\" > {status_path}; exec {{fd}}<&-"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1:\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_input_fd_close_makes_read_fail_without_hanging() {
     let output_path = "target/rubash-input-fd-close-output.txt";
     let _ = fs::remove_file(output_path);

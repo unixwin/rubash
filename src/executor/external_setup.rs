@@ -97,6 +97,20 @@ impl Executor {
                     files.inputs.push(path);
                 }
             }
+            if redirect.fd.unwrap_or(0) == 0 {
+                let target = self.expand_word(&redirect.target);
+                if let Some(fd) = redirect_target_fd(&target) {
+                    if self.env_vars.contains_key(&fd_dynamic_input_key(fd)) {
+                        if let Some(input) = self.virtual_fd_stdin_remaining(fd) {
+                            let path = self.write_process_substitution_temp(&input)?;
+                            self.env_vars
+                                .insert(fd_stdin_offset_key(fd), self.virtual_fd_stdin_len(fd));
+                            redirect.target = shell_display_path(&path.to_string_lossy());
+                            files.inputs.push(path);
+                        }
+                    }
+                }
+            }
         }
         if let Some(redirect) = &mut rewritten.redirect_out {
             if let Some(source) = redirect
@@ -198,5 +212,22 @@ impl Executor {
         let path = self.process_substitution_temp_path()?;
         fs::write(&path, output)?;
         Ok(path)
+    }
+
+    fn virtual_fd_stdin_remaining(&self, fd: u32) -> Option<String> {
+        let input = self.env_vars.get(&fd_stdin_key(fd))?;
+        let offset = self
+            .env_vars
+            .get(&fd_stdin_offset_key(fd))
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        Some(input.get(offset..).unwrap_or_default().to_string())
+    }
+
+    fn virtual_fd_stdin_len(&self, fd: u32) -> String {
+        self.env_vars
+            .get(&fd_stdin_key(fd))
+            .map(|input| input.len().to_string())
+            .unwrap_or_else(|| "0".to_string())
     }
 }

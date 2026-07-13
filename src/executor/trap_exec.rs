@@ -225,6 +225,8 @@ impl Executor {
             self.env_vars.insert(fd_stdin_key(fd), input);
             self.env_vars
                 .insert(fd_stdin_offset_key(fd), "0".to_string());
+            self.env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
             return Ok(Some(0));
         }
 
@@ -275,6 +277,7 @@ impl Executor {
             self.env_vars.remove(&fd_output_key(fd));
             self.env_vars.remove(&fd_stdin_key(fd));
             self.env_vars.remove(&fd_stdin_offset_key(fd));
+            self.env_vars.remove(&fd_dynamic_input_key(fd));
         }
         self.env_vars.remove(name);
     }
