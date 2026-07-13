@@ -44,7 +44,11 @@ pub(super) fn output_process_substitution_redirect_target(
     redirect_index: usize,
 ) -> Option<(ProcessSubstitution, usize)> {
     if tokens.get(redirect_index)?.kind != TokenKind::RedirectOut
-        || tokens.get(redirect_index)?.value != ">"
+        || !tokens
+            .get(redirect_index)?
+            .value
+            .strip_suffix('>')
+            .is_some_and(|prefix| prefix.chars().all(|ch| ch.is_ascii_digit()))
         || !tokens
             .get(redirect_index + 1)
             .is_some_and(|token| token.kind == TokenKind::RedirectOut && token.value == ">")

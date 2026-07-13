@@ -262,6 +262,10 @@ pub(in crate::executor) fn fd_output_key(fd: u32) -> String {
     format!("{FD_OUTPUT_PREFIX}{fd}")
 }
 
+pub(in crate::executor) fn fd_output_process_substitution_key(fd: u32) -> String {
+    format!("{FD_OUTPUT_PROCESS_SUBSTITUTION_PREFIX}{fd}")
+}
+
 pub(in crate::executor) fn fd_closed_key(fd: u32) -> String {
     format!("{FD_CLOSED_PREFIX}{fd}")
 }

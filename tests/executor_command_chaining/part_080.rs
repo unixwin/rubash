@@ -13,7 +13,6 @@ fn test_combined_stdout_stderr_redirect_captures_brace_group() {
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
-
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 127);
     let output = fs::read_to_string(output_path).unwrap();
@@ -32,7 +31,6 @@ fn test_combined_stdout_stderr_append_captures_brace_group() {
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
-
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 127);
     let output = fs::read_to_string(output_path).unwrap();
@@ -585,6 +583,44 @@ fn test_exec_dynamic_fd_process_substitution_persists_for_external_command() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "exec {{fd}}< <(printf 'alpha\\nbeta\\n'); cat <&$fd > {output_path}; exec {{fd}}<&-"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_fd_output_process_substitution_runs_on_close() {
+    let output_path = "target/rubash-exec-fd-output-process-substitution.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "exec 3> >(cat > {output_path}); printf '%s\\n' alpha >&3; printf '%s\\n' beta >&3; exec 3>&-"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_dynamic_fd_output_process_substitution_runs_on_close() {
+    let output_path = "target/rubash-dynamic-fd-output-process-substitution.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "exec {{fd}}> >(cat > {output_path}); printf '%s\\n' alpha >&$fd; printf '%s\\n' beta >&$fd; exec {{fd}}>&-"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

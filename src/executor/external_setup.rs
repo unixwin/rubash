@@ -12,6 +12,27 @@ struct OutputProcessSubstitution {
     source: String,
 }
 
+fn exec_keeps_output_process_substitution(words: &[String], redirect: &Redirect) -> bool {
+    if !redirect
+        .target
+        .strip_prefix(">(")
+        .is_some_and(|target| target.ends_with(')'))
+    {
+        return false;
+    }
+    matches!(words, [command] if command == "exec")
+        || matches!(words, [command, fd] if command == "exec" && dynamic_fd_word(fd).is_some())
+}
+
+fn dynamic_fd_word(word: &str) -> Option<&str> {
+    let name = word.strip_prefix('{')?.strip_suffix('}')?;
+    (!name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric()))
+    .then_some(name)
+}
+
 impl Executor {
     pub(in crate::executor) fn apply_external_stdin_redirect(
         &self,
@@ -123,46 +144,53 @@ impl Executor {
                 }
             }
         }
+        let exec_words = rewritten.words.clone();
         if let Some(redirect) = &mut rewritten.redirect_out {
-            if let Some(source) = redirect
-                .target
-                .strip_prefix(">(")
-                .and_then(|target| target.strip_suffix(')'))
-            {
-                let source = source.to_string();
-                let path = self.empty_process_substitution_temp()?;
-                redirect.target = shell_display_path(&path.to_string_lossy());
-                files
-                    .outputs
-                    .push(OutputProcessSubstitution { path, source });
+            if !exec_keeps_output_process_substitution(&exec_words, redirect) {
+                if let Some(source) = redirect
+                    .target
+                    .strip_prefix(">(")
+                    .and_then(|target| target.strip_suffix(')'))
+                {
+                    let source = source.to_string();
+                    let path = self.empty_process_substitution_temp()?;
+                    redirect.target = shell_display_path(&path.to_string_lossy());
+                    files
+                        .outputs
+                        .push(OutputProcessSubstitution { path, source });
+                }
             }
         }
         if let Some(redirect) = &mut rewritten.redirect_err {
-            if let Some(source) = redirect
-                .target
-                .strip_prefix(">(")
-                .and_then(|target| target.strip_suffix(')'))
-            {
-                let source = source.to_string();
-                let path = self.empty_process_substitution_temp()?;
-                redirect.target = shell_display_path(&path.to_string_lossy());
-                files
-                    .outputs
-                    .push(OutputProcessSubstitution { path, source });
+            if !exec_keeps_output_process_substitution(&exec_words, redirect) {
+                if let Some(source) = redirect
+                    .target
+                    .strip_prefix(">(")
+                    .and_then(|target| target.strip_suffix(')'))
+                {
+                    let source = source.to_string();
+                    let path = self.empty_process_substitution_temp()?;
+                    redirect.target = shell_display_path(&path.to_string_lossy());
+                    files
+                        .outputs
+                        .push(OutputProcessSubstitution { path, source });
+                }
             }
         }
         if let Some(redirect) = &mut rewritten.redirect_err_append {
-            if let Some(source) = redirect
-                .target
-                .strip_prefix(">(")
-                .and_then(|target| target.strip_suffix(')'))
-            {
-                let source = source.to_string();
-                let path = self.empty_process_substitution_temp()?;
-                redirect.target = shell_display_path(&path.to_string_lossy());
-                files
-                    .outputs
-                    .push(OutputProcessSubstitution { path, source });
+            if !exec_keeps_output_process_substitution(&exec_words, redirect) {
+                if let Some(source) = redirect
+                    .target
+                    .strip_prefix(">(")
+                    .and_then(|target| target.strip_suffix(')'))
+                {
+                    let source = source.to_string();
+                    let path = self.empty_process_substitution_temp()?;
+                    redirect.target = shell_display_path(&path.to_string_lossy());
+                    files
+                        .outputs
+                        .push(OutputProcessSubstitution { path, source });
+                }
             }
         }
         Ok((rewritten, files))
@@ -246,7 +274,9 @@ impl Executor {
         result
     }
 
-    fn empty_process_substitution_temp(&self) -> Result<PathBuf, ExecuteError> {
+    pub(in crate::executor) fn empty_process_substitution_temp(
+        &self,
+    ) -> Result<PathBuf, ExecuteError> {
         let path = self.process_substitution_temp_path()?;
         File::create(&path)?;
         Ok(path)
