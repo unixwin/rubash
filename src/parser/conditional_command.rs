@@ -51,7 +51,7 @@ fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> V
 }
 
 fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
-    (start + 1..tokens.len()).find(|&index| tokens[index].value == "]]")
+    (start + 1..tokens.len()).find(|&index| tokens[index].raw == "]]")
 }
 
 fn conditional_expression(args: &[String]) -> ConditionalExpression {

@@ -1128,6 +1128,23 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_keeps_quoted_closing_delimiter_word() {
+        let input = "[[ value == \"]]\" ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(conditional.args, ["value", "==", "]]", "]]"]);
+        assert_eq!(conditional.close_delimiter, "]]");
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Binary
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("=="));
+        assert_eq!(conditional.expression.operands, ["value", "]]"]);
+    }
+
+    #[test]
     fn test_conditional_command_consumes_trailing_redirects() {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);
