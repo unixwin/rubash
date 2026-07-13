@@ -68,6 +68,30 @@ fn test_conditional_string_equality_uses_negated_extglob_patterns() {
 }
 
 #[test]
+fn test_conditional_string_equality_uses_extglob_without_shopt() {
+    let output_path = "target/rubash-conditional-extglob-without-shopt-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ alpha == @(alpha|beta) ]]; echo match:$? > {output_path}; \
+         [[ gamma == @(alpha|beta) ]]; echo miss:$? >> {output_path}; \
+         [[ gamma != @(alpha|beta) ]]; echo not_match:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "match:0\nmiss:1\nnot_match:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_regex_match_sets_bash_rematch() {
     let output_path = "target/rubash-conditional-regex-output.txt";
     let _ = fs::remove_file(output_path);

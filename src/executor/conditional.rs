@@ -128,7 +128,8 @@ impl Executor {
     pub(super) fn conditional_string_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
-        let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob");
+        let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
+            || contains_extglob_pattern(&right);
         match op {
             "=" | "==" if extglob => extglob_case_pattern_matches(&right, &left),
             "=" | "==" => conditional_pattern_or_string_matches(&left, &right),
@@ -251,4 +252,14 @@ impl Executor {
             _ => false,
         }
     }
+}
+
+fn contains_extglob_pattern(pattern: &str) -> bool {
+    let mut chars = pattern.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if matches!(ch, '@' | '*' | '+' | '?' | '!') && chars.peek() == Some(&'(') {
+            return true;
+        }
+    }
+    false
 }
