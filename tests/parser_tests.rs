@@ -1740,6 +1740,20 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_case_argument() {
+        let input = "echo $(echo case; echo ok)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].source, "echo case; echo ok");
+        assert_eq!(substitutions[0].commands.len(), 2);
+        assert_eq!(substitutions[0].commands[0].words, ["echo", "case"]);
+        assert_eq!(substitutions[0].commands[1].words, ["echo", "ok"]);
+    }
+
+    #[test]
     fn test_assignment_word_command_substitution_records_word_index() {
         let input = "echo value=`printf hi`";
         let tokens = tokenize(input);

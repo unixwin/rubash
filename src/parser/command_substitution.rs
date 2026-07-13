@@ -70,6 +70,8 @@ fn dollar_command_substitution(
     let mut escaped = false;
     let mut case_depth = 0usize;
     let mut word = String::new();
+    let mut word_boundary = true;
+    let mut current_word_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
@@ -82,7 +84,15 @@ fn dollar_command_substitution(
             index += 1;
             continue;
         }
-        update_command_substitution_case_depth(ch, single, double, &mut word, &mut case_depth);
+        update_command_substitution_case_depth(
+            ch,
+            single,
+            double,
+            &mut word,
+            &mut case_depth,
+            &mut word_boundary,
+            &mut current_word_boundary,
+        );
         match ch {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
@@ -108,23 +118,64 @@ fn update_command_substitution_case_depth(
     double: bool,
     word: &mut String,
     case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
 ) {
     if single || double {
         word.clear();
+        *word_boundary = false;
         return;
     }
 
     if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
         word.push(ch);
         return;
     }
 
-    match word.as_str() {
-        "case" => *case_depth += 1,
-        "esac" => *case_depth = case_depth.saturating_sub(1),
-        _ => {}
+    if word.is_empty() {
+        if command_substitution_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
     }
+
+    let reserved_word_allows_next =
+        update_command_substitution_reserved_word_depth(word, *current_word_boundary, case_depth);
     word.clear();
+    *word_boundary =
+        reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
+}
+
+fn update_command_substitution_reserved_word_depth(
+    word: &str,
+    word_boundary: bool,
+    case_depth: &mut usize,
+) -> bool {
+    if !word_boundary {
+        return false;
+    }
+
+    match word {
+        "case" => {
+            *case_depth += 1;
+            false
+        }
+        "esac" => {
+            *case_depth = case_depth.saturating_sub(1);
+            false
+        }
+        "then" | "do" | "else" | "elif" => true,
+        _ => false,
+    }
+}
+
+fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
+    matches!(ch, ';' | '&' | '|' | '(' | '\n')
 }
 
 fn backtick_command_substitution(
