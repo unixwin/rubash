@@ -191,6 +191,24 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_arithmetic_for_command_pipeline_stage() {
+        let input = "for (( i = 0; i < 2; i++ )); do echo $i; done | wc -l";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].pipe, Some(1));
+        assert!(pipeline.stages[0]
+            .for_command
+            .as_ref()
+            .and_then(|for_command| for_command.arithmetic.as_ref())
+            .is_some());
+        assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    }
+
+    #[test]
     fn test_and_or_list_command_preserves_mixed_connectors() {
         let input = "false || echo fallback && echo done";
         let tokens = tokenize(input);

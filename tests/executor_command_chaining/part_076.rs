@@ -169,6 +169,24 @@ fn test_arithmetic_for_command_accepts_brace_group_body() {
 }
 
 #[test]
+fn test_arithmetic_for_command_pipes_body_stdout() {
+    let output_path = "target/rubash-arithmetic-for-pipe-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("for (( i = 0; i < 2; i++ )); do echo $i; done | wc -l > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].pipeline_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_for_command_input_redirect_feeds_body_reads() {
     let input_path = "target/rubash-for-command-input.txt";
     let output_path = "target/rubash-for-command-input-output.txt";
