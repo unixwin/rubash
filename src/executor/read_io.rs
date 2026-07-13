@@ -82,6 +82,10 @@ impl Executor {
             ));
         }
 
+        if let Some(line) = self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit) {
+            return Some(line);
+        }
+
         // If FUNCTION_STDIN is set (from heredoc or redirect), only read from it.
         // Do NOT fall through to process stdin - that would block on the terminal.
         if self.env_vars.contains_key(FUNCTION_STDIN) {

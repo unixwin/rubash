@@ -249,6 +249,32 @@ impl Executor {
             return Ok(Some(0));
         }
 
+        if let Some(redirect) = &cmd.redirect_in {
+            if redirect.fd.unwrap_or(0) != 0 {
+                return Ok(None);
+            }
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                self.env_vars.remove(&fd_stdin_key(0));
+                self.env_vars.remove(&fd_stdin_offset_key(0));
+                return Ok(Some(0));
+            }
+
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            if redirect.append {
+                let _ = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+            }
+            let input = fs::read_to_string(path)?;
+            self.env_vars.insert(fd_stdin_key(0), input);
+            self.env_vars
+                .insert(fd_stdin_offset_key(0), "0".to_string());
+            return Ok(Some(0));
+        }
+
         Ok(None)
     }
 
