@@ -63,16 +63,33 @@ impl Executor {
         for_command: &ForCommand,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut for_command = for_command.clone();
         let mut body = Ast {
             commands: for_command.body,
         };
-        self.apply_command_output_redirects(cmd, &mut body)?;
+        let result = self.apply_command_output_redirects(&redirect_cmd, &mut body);
+        let status = self.exit_code;
+        if let Err(error) = result {
+            let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+            self.exit_code = status;
+            finish_result?;
+            return Err(error);
+        }
         for_command.body = body.commands;
 
-        self.with_command_input_redirects(cmd, |executor| {
+        let result = self.with_command_input_redirects(cmd, |executor| {
             executor.execute_for_command(&for_command)
-        })
+        });
+        let status = self.exit_code;
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        self.exit_code = status;
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     pub(in crate::executor) fn loop_redirect_input(&mut self, cmd: &CommandNode) -> Option<String> {

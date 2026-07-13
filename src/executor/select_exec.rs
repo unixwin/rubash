@@ -11,11 +11,21 @@ impl Executor {
         cmd: &CommandNode,
         select_command: &SelectCommand,
     ) -> Result<(), ExecuteError> {
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut select_command = select_command.clone();
         let mut body = Ast {
             commands: select_command.body,
         };
-        self.apply_command_output_redirects(cmd, &mut body)?;
+        let result = self.apply_command_output_redirects(&redirect_cmd, &mut body);
+        let status = self.exit_code;
+        if let Err(error) = result {
+            let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+            self.exit_code = status;
+            finish_result?;
+            return Err(error);
+        }
         select_command.body = body.commands;
 
         let values: Vec<String> = if select_command.default_positional {
@@ -30,12 +40,20 @@ impl Executor {
 
         if values.is_empty() {
             self.exit_code = 0;
+            self.finish_compound_output_process_substitutions(group_outputs)?;
             return Ok(());
         }
 
-        self.with_command_input_redirects(cmd, |executor| {
+        let result = self.with_command_input_redirects(cmd, |executor| {
             executor.execute_select_loop(&select_command, &values)
-        })
+        });
+        let status = self.exit_code;
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        self.exit_code = status;
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     fn execute_select_loop(

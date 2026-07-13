@@ -641,11 +641,28 @@ impl Executor {
         cmd: &CommandNode,
         case_command: &CaseCommand,
     ) -> Result<(), ExecuteError> {
+        let mut redirect_cmd = cmd.clone();
+        let group_outputs =
+            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
         let mut case_command = case_command.clone();
-        self.apply_case_command_redirects(cmd, &mut case_command)?;
-        self.with_command_input_redirects(cmd, |executor| {
+        let result = self.apply_case_command_redirects(&redirect_cmd, &mut case_command);
+        let status = self.exit_code;
+        if let Err(error) = result {
+            let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+            self.exit_code = status;
+            finish_result?;
+            return Err(error);
+        }
+        let result = self.with_command_input_redirects(cmd, |executor| {
             executor.execute_case_command(&case_command)
-        })
+        });
+        let status = self.exit_code;
+        let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        self.exit_code = status;
+        result?;
+        finish_result?;
+        self.exit_code = status;
+        Ok(())
     }
 
     fn apply_case_command_redirects(

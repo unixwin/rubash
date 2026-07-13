@@ -222,6 +222,64 @@ fn test_while_combined_append_process_substitution_captures_body() {
 }
 
 #[test]
+fn test_for_combined_process_substitution_captures_body() {
+    let output_path = "target/rubash-for-combined-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("for item in one; do echo out; read -u x value; done &> >(cat > {output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("out\n"));
+    assert!(output.contains("read: x: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_case_combined_append_process_substitution_captures_clause_body() {
+    let output_path = "target/rubash-case-combined-append-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("case one in one) echo out; read -u x value ;; esac &>> >(cat > {output_path})");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("out\n"));
+    assert!(output.contains("read: x: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_select_combined_process_substitution_captures_body() {
+    let output_path = "target/rubash-select-combined-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "select item in one; do echo out; read -u x value; break; done &> >(cat > {output_path}) <<< 1"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("out\n"));
+    assert!(output.contains("read: x: invalid file descriptor specification"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_stderr_fd_copy_after_stdout_redirect_captures_brace_group() {
     let output_path = "target/rubash-fd-copy-after-stdout-output.txt";
     let _ = fs::remove_file(output_path);
