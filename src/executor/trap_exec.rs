@@ -205,47 +205,59 @@ impl Executor {
     ) -> Result<Option<i32>, ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_word(&redirect.target);
+            let fd = redirect.fd.unwrap_or(1);
             if is_closed_redirect_target(&target) {
-                self.env_vars.remove(&fd_output_key(1));
+                self.env_vars.remove(&fd_output_key(fd));
+                return Ok(Some(0));
+            }
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                self.copy_persistent_output_fd(fd, source_fd);
                 return Ok(Some(0));
             }
             self.create_redirect_output(&target, redirect.clobber)?;
-            self.env_vars.insert(fd_output_key(1), target);
+            self.env_vars.insert(fd_output_key(fd), target);
             return Ok(Some(0));
         }
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
+            let fd = redirect.fd.unwrap_or(1);
             OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
-            self.env_vars.insert(fd_output_key(1), target);
+            self.env_vars.insert(fd_output_key(fd), target);
             return Ok(Some(0));
         }
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_word(&redirect.target);
+            let fd = redirect.fd.unwrap_or(2);
             if is_closed_redirect_target(&target) {
-                self.env_vars.remove(&fd_output_key(2));
+                self.env_vars.remove(&fd_output_key(fd));
+                return Ok(Some(0));
+            }
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                self.copy_persistent_output_fd(fd, source_fd);
                 return Ok(Some(0));
             }
             if !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
-            self.env_vars.insert(fd_output_key(2), target);
+            self.env_vars.insert(fd_output_key(fd), target);
             return Ok(Some(0));
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_word(&redirect.target);
+            let fd = redirect.fd.unwrap_or(2);
             if !is_null_device(&target) {
                 OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(shell_path_to_windows(&target, &self.env_vars))?;
             }
-            self.env_vars.insert(fd_output_key(2), target);
+            self.env_vars.insert(fd_output_key(fd), target);
             return Ok(Some(0));
         }
 
@@ -276,6 +288,14 @@ impl Executor {
         }
 
         Ok(None)
+    }
+
+    fn copy_persistent_output_fd(&mut self, target_fd: u32, source_fd: u32) {
+        if let Some(target) = self.env_vars.get(&fd_output_key(source_fd)).cloned() {
+            self.env_vars.insert(fd_output_key(target_fd), target);
+        } else {
+            self.env_vars.remove(&fd_output_key(target_fd));
+        }
     }
 
     fn execute_dynamic_fd_exec_redirect(

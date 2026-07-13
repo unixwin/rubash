@@ -81,6 +81,43 @@ fn test_exec_stderr_redirect_persists_for_following_commands() {
 }
 
 #[test]
+fn test_exec_stderr_can_copy_persistent_stdout_redirect() {
+    let output_path = target_test_path("rubash-exec-copy-stdout-to-stderr-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!("exec > {shell_output_path}; exec 2>&1; builtin no_such_rubash_fd_copy");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 1);
+    let output = fs::read_to_string(&output_path).unwrap();
+    assert!(output.contains("builtin: no_such_rubash_fd_copy: not a shell builtin"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_stdout_can_copy_persistent_stderr_redirect() {
+    let error_path = target_test_path("rubash-exec-copy-stderr-to-stdout-output.txt");
+    let shell_error_path = shell_test_path(&error_path);
+    let _ = fs::remove_file(&error_path);
+    let input = format!("exec 2> {shell_error_path}; exec >&2; echo copied-stdout");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&error_path).unwrap(), "copied-stdout\n");
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_exec_stdin_redirect_persists_for_following_reads() {
     let input_path = target_test_path("rubash-exec-persistent-stdin-input.txt");
     let output_path = target_test_path("rubash-exec-persistent-stdin-output.txt");
