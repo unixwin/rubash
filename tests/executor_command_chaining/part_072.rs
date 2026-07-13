@@ -160,6 +160,33 @@ fn test_conditional_parentheses_group_logical_expressions() {
 }
 
 #[test]
+fn test_conditional_command_redirect_creates_output_file() {
+    let output_path = "target/rubash-conditional-redirect-output.txt";
+    let status_path = "target/rubash-conditional-redirect-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "[[ value == value ]] > {output_path}; echo true:$? > {status_path}; \
+         [[ value == other ]] >> {output_path}; echo false:$? >> {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    assert_eq!(
+        fs::read_to_string(status_path).unwrap(),
+        "true:0\nfalse:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_conditional_file_unary_checks_paths() {
     let output_path = "target/rubash-conditional-file-unary-output.txt";
     let file_path = "target/rubash-conditional-file-unary.txt";

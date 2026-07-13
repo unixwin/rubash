@@ -154,6 +154,7 @@ impl Executor {
                 }
             }
             "[[" => {
+                self.apply_no_output_builtin_redirects(cmd)?;
                 self.exit_code = self.execute_conditional(&cmd.words[1..]);
                 Ok(())
             }
