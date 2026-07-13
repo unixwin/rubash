@@ -2551,6 +2551,29 @@ mod parameter_expansion_tests {
     }
 
     #[test]
+    fn test_parameter_expansion_records_name_prefix_match_suffix() {
+        let input = "echo ${!prefix*} ${!prefix@} ${!array[@]}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 3);
+        assert_eq!(expansions[0].name, "prefix");
+        assert_eq!(expansions[0].operator.as_deref(), Some("!"));
+        assert!(expansions[0].operator_prefix);
+        assert_eq!(expansions[0].word.as_deref(), Some("*"));
+        assert_eq!(expansions[1].name, "prefix");
+        assert_eq!(expansions[1].operator.as_deref(), Some("!"));
+        assert!(expansions[1].operator_prefix);
+        assert_eq!(expansions[1].word.as_deref(), Some("@"));
+        assert_eq!(expansions[2].name, "array[@]");
+        assert_eq!(expansions[2].operator.as_deref(), Some("!"));
+        assert!(expansions[2].operator_prefix);
+        assert_eq!(expansions[2].word, None);
+    }
+
+    #[test]
     fn test_parameter_expansion_keeps_braced_special_parameters_as_names() {
         let input = "echo ${#} ${!} ${?} ${-} ${#array[@]} ${!name}";
         let tokens = tokenize(input);

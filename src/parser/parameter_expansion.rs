@@ -231,6 +231,14 @@ fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<Str
     }
 
     if let Some(name) = parameter.strip_prefix('!').filter(|name| !name.is_empty()) {
+        if let Some((prefix, suffix)) = parameter_name_prefix_match(name) {
+            return (
+                prefix.to_string(),
+                Some("!".to_string()),
+                true,
+                Some(suffix.to_string()),
+            );
+        }
         return (name.to_string(), Some("!".to_string()), true, None);
     }
 
@@ -249,6 +257,17 @@ fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<Str
     }
 
     (parameter.to_string(), None, false, None)
+}
+
+fn parameter_name_prefix_match(name: &str) -> Option<(&str, &str)> {
+    if name.len() <= 1 || name.ends_with(']') {
+        return None;
+    }
+
+    name.strip_suffix('*')
+        .map(|prefix| (prefix, "*"))
+        .or_else(|| name.strip_suffix('@').map(|prefix| (prefix, "@")))
+        .filter(|(prefix, _)| !prefix.is_empty())
 }
 
 fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
