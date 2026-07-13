@@ -346,8 +346,12 @@ impl Executor {
             }
 
             let fd = self.allocate_dynamic_fd();
-            self.create_redirect_output(&target, redirect.clobber)?;
             self.env_vars.insert(name.to_string(), fd.to_string());
+            if let Some(source_fd) = redirect_target_fd(&target) {
+                self.copy_persistent_output_fd(fd, source_fd);
+                return Ok(Some(0));
+            }
+            self.create_redirect_output(&target, redirect.clobber)?;
             self.env_vars.insert(fd_output_key(fd), target);
             return Ok(Some(0));
         }

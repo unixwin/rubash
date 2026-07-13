@@ -343,6 +343,23 @@ fn test_exec_dynamic_output_fd_writes_through_named_fd() {
 }
 
 #[test]
+fn test_exec_dynamic_output_fd_copies_persistent_stdout_redirect() {
+    let output_path = "target/rubash-dynamic-output-fd-copy-stdout.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("exec > {output_path}; exec {{fd}}>&1; echo copied >&$fd; exec {{fd}}>&-");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "copied\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_exec_dynamic_input_fd_reads_through_named_fd() {
     let input_path = "target/rubash-dynamic-input-fd.txt";
     let output_path = "target/rubash-dynamic-input-fd-output.txt";
