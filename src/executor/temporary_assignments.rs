@@ -120,6 +120,7 @@ impl Executor {
                     &value,
                     is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                     self.env_vars.get("IFS").map(String::as_str),
+                    &self.env_vars,
                 )
             } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
                 let current = self.eval_integer_assignment_value(&current);
@@ -150,6 +151,7 @@ impl Executor {
                 &value,
                 is_marked_var(&self.env_vars, INTEGER_VARS, base_name),
                 self.env_vars.get("IFS").map(String::as_str),
+                &self.env_vars,
             )
         } else if is_marked_var(&self.env_vars, INTEGER_VARS, base_name) {
             self.eval_integer_assignment_value(&value).to_string()

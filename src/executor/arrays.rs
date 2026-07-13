@@ -15,7 +15,7 @@ pub(super) use storage::{
     quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 
@@ -85,6 +85,7 @@ pub(super) fn append_array_value(
     value: &str,
     integer: bool,
     ifs: Option<&str>,
+    env_vars: &HashMap<String, String>,
 ) -> String {
     let mut entries = indexed_array_entries(current);
     let mut next_index = entries
@@ -103,7 +104,7 @@ pub(super) fn append_array_value(
         }
 
         if let Some((left, rhs)) = token.split_once("+=") {
-            if let Some(index) = array_assignment_index(left, &entries) {
+            if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
                 let rhs = unquote_storage_value(rhs);
                 entries.insert(
@@ -119,7 +120,7 @@ pub(super) fn append_array_value(
         }
 
         if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(index) = array_assignment_index(left, &entries) {
+            if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 entries.insert(index, unquote_storage_value(rhs));
                 next_index = index + 1;
                 continue;
@@ -170,12 +171,10 @@ pub(super) fn append_array_value(
 pub(super) fn array_assignment_index(
     left: &str,
     entries: &BTreeMap<usize, String>,
+    env_vars: &HashMap<String, String>,
 ) -> Option<usize> {
-    let index = left
-        .strip_prefix('[')?
-        .strip_suffix(']')?
-        .parse::<i128>()
-        .ok()?;
+    let expression = left.strip_prefix('[')?.strip_suffix(']')?;
+    let index = eval_conditional_arith_value(expression, env_vars)?;
     if index >= 0 {
         return usize::try_from(index).ok();
     }
