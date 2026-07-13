@@ -1594,6 +1594,29 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_records_arithmetic_expansion_nodes() {
+        let input = "case $word in $((i+=1))|$[j*2]) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let first = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(first.text, "$((i+=1))");
+        assert_eq!(first.arithmetic_expansions.len(), 1);
+        assert_eq!(first.arithmetic_expansions[0].text, "$((i+=1))");
+        assert_eq!(first.arithmetic_expansions[0].expression, "i+=1");
+        assert!(first.arithmetic_expansions[0].has_assignment);
+        assert_eq!(first.arithmetic_expansions[0].variables, ["i"]);
+
+        let second = &case_command.clauses[0].pattern_nodes[1];
+        assert_eq!(second.text, "$[j*2]");
+        assert_eq!(second.arithmetic_expansions.len(), 1);
+        assert_eq!(second.arithmetic_expansions[0].open_delimiter, "$[");
+        assert_eq!(second.arithmetic_expansions[0].expression, "j*2");
+        assert_eq!(second.arithmetic_expansions[0].operators[0].text, "*");
+    }
+
+    #[test]
     fn test_case_pattern_keeps_reserved_word_text() {
         let input = "case done in done|fi|esac) echo hit ;; esac";
         let tokens = tokenize(input);

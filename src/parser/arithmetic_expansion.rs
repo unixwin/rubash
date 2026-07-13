@@ -33,7 +33,7 @@ pub(super) fn record_arithmetic_expansions_for_assignment(
     command.arithmetic_expansions.extend(expansions);
 }
 
-fn arithmetic_expansions_in_word(word: &str) -> Vec<ArithmeticExpansion> {
+pub(super) fn arithmetic_expansions_in_word(word: &str) -> Vec<ArithmeticExpansion> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut expansions = Vec::new();
     let mut index = 0;
