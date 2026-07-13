@@ -37,6 +37,7 @@ pub fn parse(tokens: &[Token]) -> Ast {
     }
 
     state.ast.commands = fold_pipeline_commands(state.ast.commands);
+    state.ast.commands = fold_time_pipeline_commands(state.ast.commands);
     state.ast.commands = fold_inverted_commands(state.ast.commands);
     state.ast.commands = fold_and_or_list_commands(state.ast.commands);
     state.ast.commands = fold_background_commands(state.ast.commands);
@@ -199,6 +200,86 @@ fn looks_like_case_pattern_alternate(stages: &[CommandNode]) -> bool {
         return false;
     }
     first.words.len() >= 4 && stages.len() >= 2
+}
+
+fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
+    commands
+        .into_iter()
+        .map(|mut command| {
+            let Some(pipeline) = command.pipeline_command.as_mut() else {
+                return command;
+            };
+            let Some(prefix) = time_prefix_from_pipeline(pipeline) else {
+                return command;
+            };
+
+            let line = command.line;
+            let and_or = command.and_or.take();
+            let background = command.background;
+            command.background = false;
+            command.and_or = None;
+            let mut timed = CommandNode::new();
+            timed.line = line;
+            timed.and_or = and_or;
+            timed.background = background;
+            timed.time_command = Some(TimeCommand {
+                keyword: prefix.keyword,
+                prefix_words: prefix.prefix_words,
+                command: Box::new(command),
+                posix_format: prefix.posix_format,
+                inverted: prefix.inverted,
+            });
+            timed
+        })
+        .collect()
+}
+
+struct TimePipelinePrefix {
+    keyword: String,
+    prefix_words: Vec<String>,
+    posix_format: bool,
+    inverted: bool,
+}
+
+fn time_prefix_from_pipeline(pipeline: &mut PipelineCommand) -> Option<TimePipelinePrefix> {
+    let first = pipeline.stages.first_mut()?;
+    if first.words.first().map(String::as_str) != Some("time") {
+        return None;
+    }
+
+    let mut index = 1;
+    let mut posix_format = false;
+    let mut inverted = false;
+    let mut prefix_words = Vec::new();
+    while let Some(word) = first.words.get(index).map(String::as_str) {
+        match word {
+            "-p" | "--" | "!" => {
+                prefix_words.push(word.to_string());
+                if word == "-p" {
+                    posix_format = true;
+                } else if word == "!" {
+                    inverted = !inverted;
+                }
+                index += 1;
+            }
+            _ => break,
+        }
+    }
+    if index >= first.words.len() {
+        return None;
+    }
+
+    let keyword = first.words[0].clone();
+    first.words = first.words[index..].to_vec();
+    if first.word_kinds.len() == first.words.len() + index {
+        first.word_kinds = first.word_kinds[index..].to_vec();
+    }
+    Some(TimePipelinePrefix {
+        keyword,
+        prefix_words,
+        posix_format,
+        inverted,
+    })
 }
 
 fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) -> Option<usize> {

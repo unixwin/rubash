@@ -75,6 +75,24 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_wraps_pipeline_command() {
+        let input = "time -p ! echo alpha | wc -l";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p", "!"]);
+        assert!(time_command.posix_format);
+        assert!(time_command.inverted);
+        let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].words, ["echo", "alpha"]);
+        assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    }
+
+    #[test]
     fn test_multiple_pipeline() {
         let input = "ls | grep foo | sort";
         let tokens = tokenize(input);

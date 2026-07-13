@@ -30,7 +30,9 @@ impl Executor {
         &mut self,
         time_command: &TimeCommand,
     ) -> Result<(), ExecuteError> {
-        if time_command.command.brace_group.is_some() {
+        if let Some(pipeline_command) = &time_command.command.pipeline_command {
+            self.execute_pipeline_command(pipeline_command)?;
+        } else if time_command.command.brace_group.is_some() {
             self.execute_brace_group_pipeline(&time_command.command)?;
         } else {
             self.execute_command(&time_command.command)?;
