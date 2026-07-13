@@ -1671,6 +1671,25 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_keeps_reserved_word_elements() {
+        let input = "arr=(if done [case]=esac [then]+=fi)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].value, "(if done [case]=esac [then]+=fi)");
+        assert_eq!(compound[0].elements.len(), 4);
+        assert_eq!(compound[0].elements[0].value, "if");
+        assert_eq!(compound[0].elements[1].value, "done");
+        assert_eq!(compound[0].elements[2].subscript.as_deref(), Some("case"));
+        assert_eq!(compound[0].elements[2].value, "esac");
+        assert_eq!(compound[0].elements[3].subscript.as_deref(), Some("then"));
+        assert_eq!(compound[0].elements[3].value, "fi");
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_brace_expansion_element() {
         let input = "arr=(pre{a,b})";
         let tokens = tokenize(input);
