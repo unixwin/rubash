@@ -2163,9 +2163,11 @@ mod assignment_tests {
         assert_eq!(compound[0].elements[0].subscript, None);
         assert_eq!(compound[0].elements[0].value, "one");
         assert_eq!(compound[0].elements[0].operator, None);
+        assert_eq!(compound[0].elements[0].element_index, 0);
         assert_eq!(compound[0].elements[1].subscript, None);
         assert_eq!(compound[0].elements[1].value, "\"two words\"");
         assert_eq!(compound[0].elements[1].operator, None);
+        assert_eq!(compound[0].elements[1].element_index, 1);
     }
 
     #[test]
@@ -2206,13 +2208,16 @@ mod assignment_tests {
         assert_eq!(compound[0].elements[0].value, "two");
         assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
         assert!(!compound[0].elements[0].append);
+        assert_eq!(compound[0].elements[0].element_index, 0);
         assert_eq!(compound[0].elements[1].subscript.as_deref(), Some("name"));
         assert_eq!(compound[0].elements[1].value, "more");
         assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
         assert!(compound[0].elements[1].append);
+        assert_eq!(compound[0].elements[1].element_index, 1);
         assert_eq!(compound[0].elements[2].subscript, None);
         assert_eq!(compound[0].elements[2].value, "plain");
         assert_eq!(compound[0].elements[2].operator, None);
+        assert_eq!(compound[0].elements[2].element_index, 2);
     }
 
     #[test]

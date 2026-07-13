@@ -34,17 +34,19 @@ fn compound_assignment_elements(value: &str) -> Vec<CompoundAssignmentElement> {
 
     split_compound_assignment_words(inner)
         .into_iter()
-        .map(|word| compound_assignment_element(&word))
+        .enumerate()
+        .map(|(element_index, word)| compound_assignment_element(&word, element_index))
         .collect()
 }
 
-fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
+fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssignmentElement {
     if let Some((subscript, value)) = split_compound_element_operator(word, "]+=") {
         return CompoundAssignmentElement {
             subscript: Some(subscript.to_string()),
             value: value.to_string(),
             operator: Some("+=".to_string()),
             append: true,
+            element_index,
         };
     }
 
@@ -54,6 +56,7 @@ fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
             value: value.to_string(),
             operator: Some("=".to_string()),
             append: false,
+            element_index,
         };
     }
 
@@ -62,6 +65,7 @@ fn compound_assignment_element(word: &str) -> CompoundAssignmentElement {
         value: word.to_string(),
         operator: None,
         append: false,
+        element_index,
     }
 }
 

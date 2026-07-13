@@ -302,6 +302,7 @@ pub struct CompoundAssignmentElement {
     pub value: String,
     pub operator: Option<String>,
     pub append: bool,
+    pub element_index: usize,
 }
 
 /// Represents a parsed `name[subscript]=value` or `name[subscript]+=value` word.
