@@ -111,7 +111,18 @@ pub(in crate::executor) fn case_bracket_expression_matches(
         }
 
         let current = pattern[index];
-        if index + 2 < pattern.len() && pattern[index + 1] == '-' && pattern[index + 2] != ']' {
+        if let Some((class_matched, next_index)) =
+            bracket_posix_class_matches(pattern, index, candidate)
+        {
+            if class_matched {
+                matched = true;
+            }
+            saw_member = true;
+            index = next_index;
+        } else if index + 2 < pattern.len()
+            && pattern[index + 1] == '-'
+            && pattern[index + 2] != ']'
+        {
             let end = pattern[index + 2];
             if current <= candidate && candidate <= end {
                 matched = true;
@@ -128,5 +139,45 @@ pub(in crate::executor) fn case_bracket_expression_matches(
     }
 
     None
+}
+
+fn bracket_posix_class_matches(
+    pattern: &[char],
+    start: usize,
+    candidate: char,
+) -> Option<(bool, usize)> {
+    if pattern.get(start) != Some(&'[') || pattern.get(start + 1) != Some(&':') {
+        return None;
+    }
+
+    let mut end = start + 2;
+    while end + 1 < pattern.len() {
+        if pattern[end] == ':' && pattern[end + 1] == ']' {
+            let class: String = pattern[start + 2..end].iter().collect();
+            return Some((posix_class_matches(&class, candidate), end + 2));
+        }
+        end += 1;
+    }
+    None
+}
+
+fn posix_class_matches(class: &str, candidate: char) -> bool {
+    match class {
+        "alnum" => candidate.is_ascii_alphanumeric(),
+        "alpha" => candidate.is_ascii_alphabetic(),
+        "ascii" => candidate.is_ascii(),
+        "blank" => matches!(candidate, ' ' | '\t'),
+        "cntrl" => candidate.is_ascii_control(),
+        "digit" => candidate.is_ascii_digit(),
+        "graph" => candidate.is_ascii_graphic(),
+        "lower" => candidate.is_ascii_lowercase(),
+        "print" => candidate.is_ascii_graphic() || candidate == ' ',
+        "punct" => candidate.is_ascii_punctuation(),
+        "space" => candidate.is_ascii_whitespace(),
+        "upper" => candidate.is_ascii_uppercase(),
+        "word" => candidate.is_ascii_alphanumeric() || candidate == '_',
+        "xdigit" => candidate.is_ascii_hexdigit(),
+        _ => false,
+    }
 }
 use super::extglob::extglob_matches_at;

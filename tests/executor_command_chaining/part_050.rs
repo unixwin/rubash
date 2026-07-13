@@ -220,6 +220,37 @@ fn test_case_bracket_range_pattern_matches() {
 }
 
 #[test]
+fn test_posix_character_class_patterns_match() {
+    let dir_path = "target/rubash-posix-class-patterns";
+    let output_path = "target/rubash-posix-class-patterns-output.txt";
+    let _ = fs::remove_dir_all(dir_path);
+    let _ = fs::remove_file(output_path);
+    fs::create_dir_all(dir_path).unwrap();
+    fs::write(format!("{dir_path}/5.txt"), "digit").unwrap();
+    fs::write(format!("{dir_path}/a.txt"), "alpha").unwrap();
+    let input = format!(
+        "case 5 in [[:digit:]]) echo case:yes > {output_path} ;; *) echo case:no > {output_path} ;; esac; \
+         [[ A == [[:upper:]] ]]; echo upper:$? >> {output_path}; \
+         [[ _ == [[:word:]] ]]; echo word:$? >> {output_path}; \
+         printf '%s\\n' {dir_path}/[[:digit:]].txt >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "case:yes\nupper:0\nword:0\ntarget/rubash-posix-class-patterns/5.txt\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
 fn test_case_backslash_patterns_preserve_literal_backslash() {
     let output_path = "target/rubash-case-backslash-output.txt";
     let _ = fs::remove_file(output_path);
