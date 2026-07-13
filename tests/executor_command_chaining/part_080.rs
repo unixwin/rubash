@@ -579,6 +579,40 @@ fn test_external_command_reads_fd_here_string() {
 }
 
 #[test]
+fn test_exec_fd_here_string_persists_for_external_command() {
+    let output_path = "target/rubash-exec-fd-here-string-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("exec 3<<<alpha; cat <&3 > {output_path}; exec 3<&-");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_exec_fd_heredoc_persists_for_external_command() {
+    let output_path = "target/rubash-exec-fd-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("exec 3<<EOF\nalpha\nbeta\nEOF\ncat <&3 > {output_path}; exec 3<&-");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\nbeta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipeline_feeds_while_command_stage() {
     let output_path = "target/rubash-pipeline-while-stage-output.txt";
     let _ = fs::remove_file(output_path);

@@ -312,7 +312,38 @@ impl Executor {
             return Ok(Some(0));
         }
 
+        if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
+            self.env_vars.remove(&fd_closed_key(fd));
+            self.env_vars.insert(fd_stdin_key(fd), input);
+            self.env_vars
+                .insert(fd_stdin_offset_key(fd), "0".to_string());
+            if fd != 0 {
+                self.env_vars
+                    .insert(fd_dynamic_input_key(fd), "1".to_string());
+            }
+            return Ok(Some(0));
+        }
+
         Ok(None)
+    }
+
+    fn exec_heredoc_fd_input(&self, cmd: &CommandNode) -> Option<(u32, String)> {
+        let redirect = cmd
+            .heredoc_redirects
+            .iter()
+            .rev()
+            .find(|redirect| redirect.fd.is_some() && redirect.body.is_some())?;
+        let fd = redirect.fd?;
+        let body = redirect.body.as_deref()?;
+        let input = if let Some(word) = body.strip_prefix('\x1d') {
+            let mut input =
+                decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
+            input.push('\n');
+            input
+        } else {
+            strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
+        };
+        Some((fd, input))
     }
 
     fn copy_persistent_output_fd(&mut self, target_fd: u32, source_fd: u32) {
