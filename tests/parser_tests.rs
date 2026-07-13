@@ -1082,6 +1082,18 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_word_keeps_process_substitution() {
+        let input = "case <(:) in /dev/*) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.word, "<(:)");
+        assert_eq!(case_command.in_keyword, "in");
+        assert_eq!(case_command.clauses.len(), 1);
+    }
+
+    #[test]
     fn test_case_pattern_records_glob_operators() {
         let input = "case $word in src/[ab]??.rs) echo hit ;; **/*.sh) echo shell ;; esac";
         let tokens = tokenize(input);
