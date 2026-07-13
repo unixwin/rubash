@@ -97,10 +97,21 @@ fn collect_process_substitution_target_with_prefix(
     let mut index = source_start;
     let source_start = index;
     let mut depth = 1usize;
+    let mut case_depth = 0usize;
     while index < tokens.len() {
-        if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "(" {
+        if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "case" {
+            case_depth += 1;
+        } else if tokens[index].kind == TokenKind::Keyword && tokens[index].value == "esac" {
+            case_depth = case_depth.saturating_sub(1);
+        } else if case_depth == 0
+            && tokens[index].kind == TokenKind::Keyword
+            && tokens[index].value == "("
+        {
             depth += 1;
-        } else if tokens[index].kind == TokenKind::Keyword && tokens[index].value == ")" {
+        } else if case_depth == 0
+            && tokens[index].kind == TokenKind::Keyword
+            && tokens[index].value == ")"
+        {
             depth -= 1;
             if depth == 0 {
                 break;

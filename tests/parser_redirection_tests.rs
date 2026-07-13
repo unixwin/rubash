@@ -174,6 +174,22 @@ fn test_process_substitution_records_nested_body_ast() {
 }
 
 #[test]
+fn test_process_substitution_keeps_case_pattern_parentheses() {
+    let input = "cat <(case beta in alpha) printf alpha ;; beta) printf beta ;; esac)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(
+        process[0].source,
+        "case beta in alpha ) printf alpha ;; beta ) printf beta ;; esac"
+    );
+    assert_eq!(process[0].commands.len(), 1);
+    assert!(process[0].commands[0].case_command.is_some());
+}
+
+#[test]
 fn test_input_redirect() {
     let input = "cat < input.txt";
     let tokens = tokenize(input);

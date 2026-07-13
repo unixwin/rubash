@@ -221,6 +221,25 @@ fn test_for_loop_body_reads_process_substitution_redirect() {
 }
 
 #[test]
+fn test_process_substitution_keeps_case_pattern_parentheses() {
+    let output_path = "target/rubash-process-subst-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "cat <(case beta in alpha) printf alpha ;; beta) printf beta ;; esac) > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_without_name_assigns_reply() {
     let output_path = "target/rubash-read-reply-output.txt";
     let _ = fs::remove_file(output_path);
