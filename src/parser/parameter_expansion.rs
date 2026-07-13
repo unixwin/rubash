@@ -30,7 +30,7 @@ pub(super) fn record_parameter_expansions_for_assignment(
     command.parameter_expansions.extend(expansions);
 }
 
-fn parameter_expansions_in_word(word: &str) -> Vec<ParameterExpansion> {
+pub(super) fn parameter_expansions_in_word(word: &str) -> Vec<ParameterExpansion> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut expansions = Vec::new();
     let mut index = 0;

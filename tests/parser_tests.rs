@@ -1567,6 +1567,33 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_records_parameter_expansion_nodes() {
+        let input = "case $word in ${prefix:-src}/*|${outer:-${inner}}) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let first = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(first.text, "${prefix:-src}/*");
+        assert_eq!(first.parameter_expansions.len(), 1);
+        assert_eq!(first.parameter_expansions[0].text, "${prefix:-src}");
+        assert_eq!(first.parameter_expansions[0].name, "prefix");
+        assert_eq!(
+            first.parameter_expansions[0].operator.as_deref(),
+            Some(":-")
+        );
+        assert_eq!(first.parameter_expansions[0].word.as_deref(), Some("src"));
+
+        let second = &case_command.clauses[0].pattern_nodes[1];
+        assert_eq!(second.text, "${outer:-${inner}}");
+        assert_eq!(second.parameter_expansions.len(), 2);
+        assert_eq!(second.parameter_expansions[0].text, "${outer:-${inner}}");
+        assert_eq!(second.parameter_expansions[0].name, "outer");
+        assert_eq!(second.parameter_expansions[1].text, "${inner}");
+        assert_eq!(second.parameter_expansions[1].name, "inner");
+    }
+
+    #[test]
     fn test_case_pattern_keeps_reserved_word_text() {
         let input = "case done in done|fi|esac) echo hit ;; esac";
         let tokens = tokenize(input);
