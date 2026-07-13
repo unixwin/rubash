@@ -258,9 +258,12 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
 
     match tokens.get(start)?.value.as_str() {
         "for" => parse_for_command(tokens, start),
+        "if" => parse_if_command(tokens, start),
+        "while" | "until" => parse_loop_command(tokens, start),
         "case" => parse_case_command(tokens, start),
         "select" => parse_select_command(tokens, start),
         "coproc" => parse_coproc_command(tokens, start),
+        "[[" => parse_conditional_command(tokens, start),
         _ => None,
     }
 }

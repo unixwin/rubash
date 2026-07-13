@@ -1047,13 +1047,30 @@ mod function_tests {
     }
 
     #[test]
-    fn test_function_body_can_be_if_command_sequence() {
+    fn test_function_body_can_be_select_command() {
+        let input = "foo() select choice in alpha beta; do echo $choice; break; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        let select_command = function.body[0].select_command.as_ref().unwrap();
+
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(select_command.variable, "choice");
+        assert_eq!(select_command.words, ["alpha", "beta"]);
+        assert_eq!(select_command.body[0].words, ["echo", "$choice"]);
+    }
+
+    #[test]
+    fn test_function_body_can_be_if_command() {
         let input = "foo() if true; then echo yes; else echo no; fi";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         let if_command = function.body[0].if_command.as_ref().unwrap();
         assert_eq!(if_command.condition[0].words, ["true"]);
         assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
@@ -1064,7 +1081,7 @@ mod function_tests {
     }
 
     #[test]
-    fn test_function_body_can_be_while_command_sequence() {
+    fn test_function_body_can_be_while_command() {
         let input = "foo() while false; do echo bad; done";
         let tokens = tokenize(input);
         let ast = parse(&tokens);
@@ -1072,7 +1089,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
         let loop_command = function.body[0].loop_command.as_ref().unwrap();
-        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(function.body_open_delimiter, None);
         assert_eq!(function.body_close_delimiter, None);
         assert!(!loop_command.until);
@@ -1085,6 +1102,23 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_body_can_be_until_command() {
+        let input = "foo() until true; do echo never; done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        let loop_command = function.body[0].loop_command.as_ref().unwrap();
+
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(loop_command.kind, LoopKind::Until);
+        assert!(loop_command.until);
+        assert_eq!(loop_command.keyword, "until");
+        assert_eq!(loop_command.condition[0].words, ["true"]);
+        assert_eq!(loop_command.body[0].words, ["echo", "never"]);
+    }
+
+    #[test]
     fn test_function_body_can_be_conditional_command() {
         let input = "foo() [[ $1 == a* && $2 -gt 1 ]]";
         let tokens = tokenize(input);
@@ -1093,7 +1127,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo");
         let conditional = function.body[0].conditional_command.as_ref().unwrap();
-        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(
             conditional.args,
             ["$1", "==", "a*", "&&", "$2", "-gt", "1", "]]"]
@@ -1112,7 +1146,7 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         let conditional = function.body[0].conditional_command.as_ref().unwrap();
 
-        assert_eq!(function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(conditional.args, ["value", "==", "]]", "]]"]);
         assert_eq!(conditional.expression.operands, ["value", "]]"]);
     }
@@ -1129,10 +1163,10 @@ mod function_tests {
         let loop_function = loop_ast.commands[0].function_command.as_ref().unwrap();
         let loop_command = loop_function.body[0].loop_command.as_ref().unwrap();
 
-        assert_eq!(if_function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(if_function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(if_command.condition[0].words, ["echo", "then"]);
         assert_eq!(if_command.then_body[0].words, ["echo", "fi"]);
-        assert_eq!(loop_function.body_kind, FunctionBodyKind::CommandSequence);
+        assert_eq!(loop_function.body_kind, FunctionBodyKind::CompoundCommand);
         assert_eq!(loop_command.condition[0].words, ["echo", "do"]);
         assert_eq!(loop_command.body[0].words, ["echo", "done"]);
     }
