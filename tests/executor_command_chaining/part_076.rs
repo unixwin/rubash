@@ -44,6 +44,29 @@ fn test_for_command_expands_brace_range_words() {
 }
 
 #[test]
+fn test_for_command_expands_stepped_and_padded_brace_ranges() {
+    let output_path = "target/rubash-for-stepped-brace-range-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "for item in {{01..03}} {{5..1..2}} {{a..e..2}}; do echo $item >> {output_path}; done"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].for_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "01\n02\n03\n5\n3\n1\na\nc\ne\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_for_command_expands_brace_list_words() {
     let output_path = "target/rubash-for-brace-list-output.txt";
     let _ = fs::remove_file(output_path);

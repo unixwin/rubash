@@ -151,20 +151,27 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
 }
 
 fn expand_range(s: &str) -> Option<Vec<String>> {
-    let (left, right) = s.split_once("..")?;
+    let parts = s.split("..").collect::<Vec<_>>();
+    let ([left, right] | [left, right, _]) = parts.as_slice() else {
+        return None;
+    };
     if left.is_empty() || right.is_empty() {
         return None;
     }
+    let step = match parts.as_slice() {
+        [_, _] => 1,
+        [_, _, step] => step.parse::<i64>().ok()?.abs().max(1),
+        _ => return None,
+    };
+
     // Numeric range
     if let (Ok(start), Ok(end)) = (left.parse::<i64>(), right.parse::<i64>()) {
-        let step = if start <= end { 1 } else { -1 };
+        let width = numeric_range_width(left, right);
+        let step = if start <= end { step } else { -step };
         let mut result = Vec::new();
         let mut current = start;
-        loop {
-            result.push(current.to_string());
-            if current == end {
-                break;
-            }
+        while (step > 0 && current <= end) || (step < 0 && current >= end) {
+            result.push(format_numeric_range_value(current, width));
             current += step;
         }
         return Some(result);
@@ -177,19 +184,37 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
         && start.is_ascii_alphabetic()
         && end.is_ascii_alphabetic()
     {
-        let step: i16 = if start <= end { 1 } else { -1 };
+        let step = i16::try_from(step).ok()?;
+        let step: i16 = if start <= end { step } else { -step };
         let mut result = Vec::new();
         let mut current = start as i16;
-        loop {
+        while (step > 0 && current <= end as i16) || (step < 0 && current >= end as i16) {
             result.push((current as u8 as char).to_string());
-            if current == end as i16 {
-                break;
-            }
             current += step;
         }
         return Some(result);
     }
     None
+}
+
+fn numeric_range_width(left: &str, right: &str) -> Option<usize> {
+    let left_digits = left.trim_start_matches('-');
+    let right_digits = right.trim_start_matches('-');
+    let padded = [left_digits, right_digits]
+        .iter()
+        .any(|value| value.len() > 1 && value.starts_with('0'));
+    padded.then(|| left_digits.len().max(right_digits.len()))
+}
+
+fn format_numeric_range_value(value: i64, width: Option<usize>) -> String {
+    let Some(width) = width else {
+        return value.to_string();
+    };
+    if value < 0 {
+        format!("-{:0width$}", value.unsigned_abs(), width = width)
+    } else {
+        format!("{value:0width$}")
+    }
 }
 
 #[cfg(test)]
@@ -212,8 +237,22 @@ mod tests {
     }
 
     #[test]
+    fn test_range_numeric_step_and_padding() {
+        assert_eq!(expand_braces("{1..5..2}"), vec!["1", "3", "5"]);
+        assert_eq!(expand_braces("{1..6..4}"), vec!["1", "5"]);
+        assert_eq!(expand_braces("{5..1..2}"), vec!["5", "3", "1"]);
+        assert_eq!(expand_braces("{01..03}"), vec!["01", "02", "03"]);
+    }
+
+    #[test]
     fn test_range_alpha() {
         assert_eq!(expand_braces("{a..c}"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_range_alpha_step() {
+        assert_eq!(expand_braces("{a..e..2}"), vec!["a", "c", "e"]);
+        assert_eq!(expand_braces("{e..a..2}"), vec!["e", "c", "a"]);
     }
 
     #[test]
