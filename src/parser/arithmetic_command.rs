@@ -187,6 +187,10 @@ pub(super) fn finish_arithmetic_command(
 ) -> (CommandNode, usize) {
     collect_trailing_redirections(tokens, &mut index, &mut command);
     match tokens.get(index).map(|token| &token.kind) {
+        Some(TokenKind::Pipe) => {
+            command.pipe = Some(1);
+            (command, index + 1)
+        }
         Some(TokenKind::And) => {
             command.and_or = Some(true);
             (command, index + 1)
@@ -211,6 +215,10 @@ pub(super) fn finish_compound_command(
 ) -> (CommandNode, usize) {
     collect_trailing_redirections(tokens, &mut index, &mut command);
     match tokens.get(index).map(|token| &token.kind) {
+        Some(TokenKind::Pipe) => {
+            command.pipe = Some(1);
+            (command, index + 1)
+        }
         Some(TokenKind::And) => {
             command.and_or = Some(true);
             (command, index + 1)

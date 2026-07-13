@@ -138,9 +138,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         clauses,
         end_keyword: tokens[i].value.clone(),
     }));
-    let mut next_i = i + 1;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
-    Some((command, next_i))
+    Some(finish_compound_command(command, tokens, i + 1))
 }
 
 pub(super) fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {

@@ -153,6 +153,12 @@ impl Executor {
         command: &CommandNode,
         input: &str,
     ) -> Result<Option<(String, i32)>, ExecuteError> {
+        if command_is_compound_pipeline_stage(command) {
+            return self
+                .execute_compound_pipeline_stage(command, input)
+                .map(Some);
+        }
+
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
                 .execute_compound_pipeline_stage(command, input)
@@ -250,6 +256,20 @@ impl Executor {
             }
         }
     }
+}
+
+fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
+    command.for_command.is_some()
+        || command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.select_command.is_some()
+        || command.case_command.is_some()
+        || command.coproc_command.is_some()
+        || command.subshell_command.is_some()
+        || command.brace_group.is_some()
+        || command.time_command.is_some()
+        || command.inverted_command.is_some()
+        || command.background_command.is_some()
 }
 
 struct TimePipelinePrefix {

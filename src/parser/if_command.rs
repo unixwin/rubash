@@ -60,9 +60,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         end_keyword: tokens[index].value.clone(),
     });
 
-    let mut next_i = index + 1;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
-    Some((command, next_i))
+    Some(finish_compound_command(command, tokens, index + 1))
 }
 
 fn condition_terminator_before(tokens: &[Token], then_index: usize) -> Option<String> {

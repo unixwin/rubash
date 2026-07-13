@@ -87,6 +87,20 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_compound_command_pipeline_stage() {
+        let input = "for value in a b; do echo $value; done | wc -l";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.operators, ["|"]);
+        assert!(pipeline.stages[0].pipe.is_some());
+        assert!(pipeline.stages[0].for_command.is_some());
+        assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    }
+
+    #[test]
     fn test_and_or_list_command_preserves_mixed_connectors() {
         let input = "false || echo fallback && echo done";
         let tokens = tokenize(input);

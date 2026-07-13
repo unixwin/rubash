@@ -33,9 +33,7 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
         until,
     });
 
-    let mut next_i = done_index + 1;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
-    Some((command, next_i))
+    Some(finish_compound_command(command, tokens, done_index + 1))
 }
 
 fn find_loop_do(tokens: &[Token], start: usize) -> Option<usize> {

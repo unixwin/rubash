@@ -395,6 +395,40 @@ fn test_pipeline_feeds_brace_group_stage() {
 }
 
 #[test]
+fn test_for_command_pipeline_stage_feeds_next_command() {
+    let output_path = "target/rubash-pipeline-for-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("for value in a b; do echo $value; done | wc -l > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_if_command_pipeline_stage_feeds_next_command() {
+    let output_path = "target/rubash-pipeline-if-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("if true; then echo yes; fi | grep yes > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_inverted_compound_commands_flip_status() {
     let output_path = "target/rubash-inverted-compound-status.txt";
     let _ = fs::remove_file(output_path);

@@ -131,9 +131,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         end_keyword,
         body,
     });
-    let mut next_i = body_end;
-    collect_trailing_redirections(tokens, &mut next_i, &mut command);
-    Some((command, next_i))
+    Some(finish_compound_command(command, tokens, body_end))
 }
 
 pub(super) fn command_body_delimiters(
