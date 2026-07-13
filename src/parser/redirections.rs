@@ -153,6 +153,13 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::HereDoc => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
+                command.redirects.push(redirect_node(
+                    &token.value,
+                    fd,
+                    &target.value,
+                    false,
+                    false,
+                ));
                 command
                     .heredoc_redirects
                     .push(heredoc_redirect(&token.value, target, fd));
@@ -292,6 +299,9 @@ pub(super) fn redirect_kind(operator: &str, target: &str) -> RedirectKind {
     }
     if operator.ends_with("<<<") {
         return RedirectKind::HereString;
+    }
+    if operator.ends_with("<<-") || operator.ends_with("<<") {
+        return RedirectKind::HereDoc;
     }
     if operator.ends_with(">>") {
         return RedirectKind::Append;

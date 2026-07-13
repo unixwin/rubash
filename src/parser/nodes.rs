@@ -25,6 +25,7 @@ pub enum RedirectKind {
     CombinedOutput,
     CombinedAppend,
     HereString,
+    HereDoc,
     Unknown,
 }
 
@@ -597,7 +598,7 @@ pub struct CommandNode {
     pub pathname_patterns: Vec<PathnamePattern>,
     /// Structured quoted segments parsed from raw shell words.
     pub word_quotes: Vec<WordQuote>,
-    /// Non-heredoc redirections in parse order.
+    /// Redirections in parse order.
     pub redirects: Vec<Redirect>,
     /// Input redirect
     pub redirect_in: Option<Redirect>,

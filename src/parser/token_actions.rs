@@ -306,6 +306,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter_token = &tokens[*i + 1];
                 let delimiter = delimiter_token.value.clone();
+                state.current_cmd.redirects.push(redirect_node(
+                    &token.value,
+                    fd,
+                    &delimiter,
+                    false,
+                    false,
+                ));
                 state.current_cmd.heredoc_redirects.push(heredoc_redirect(
                     &token.value,
                     delimiter_token,

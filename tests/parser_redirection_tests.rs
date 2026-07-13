@@ -658,6 +658,31 @@ fn test_heredoc_redirect_records_operator_metadata() {
 }
 
 #[test]
+fn test_heredoc_redirect_is_in_parse_order_list() {
+    let input = "cat > out <<EOF 2>> err\nalpha\nEOF";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+    let redirects = command.redirects.as_slice();
+
+    assert_eq!(redirects.len(), 3);
+    assert_eq!(redirects[0].operator, ">");
+    assert_eq!(redirects[0].kind, RedirectKind::Output);
+    assert_eq!(redirects[0].target, "out");
+    assert_eq!(redirects[1].operator, "<<");
+    assert_eq!(redirects[1].kind, RedirectKind::HereDoc);
+    assert_eq!(redirects[1].target, "EOF");
+    assert_eq!(redirects[2].operator, "2>>");
+    assert_eq!(redirects[2].kind, RedirectKind::Append);
+    assert_eq!(redirects[2].target, "err");
+    assert_eq!(command.heredoc_redirects.len(), 1);
+    assert_eq!(
+        command.heredoc_redirects[0].body.as_deref(),
+        Some("alpha\n")
+    );
+}
+
+#[test]
 fn test_heredoc_redirect_records_quoted_strip_tabs_metadata() {
     let input = "cat <<-'EOF'\n\talpha\n\tEOF";
     let tokens = tokenize(input);
