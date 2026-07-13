@@ -1999,6 +1999,24 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_empty_command_substitution_records_null_body() {
+        let input = "echo before$()after";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "$()");
+        assert_eq!(substitutions[0].open_delimiter, "$(");
+        assert_eq!(substitutions[0].operator, "$");
+        assert_eq!(substitutions[0].close_delimiter, ")");
+        assert_eq!(substitutions[0].source, "");
+        assert!(substitutions[0].commands.is_empty());
+        assert_eq!(substitutions[0].word_index, Some(1));
+        assert_eq!(substitutions[0].assignment_name, None);
+    }
+
+    #[test]
     fn test_command_substitution_keeps_case_pattern_parentheses() {
         let input = "echo $(case beta in alpha) printf alpha ;; beta) printf beta ;; esac)";
         let tokens = tokenize(input);

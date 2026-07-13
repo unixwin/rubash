@@ -317,6 +317,35 @@ fn test_process_substitution_records_nested_body_ast() {
 }
 
 #[test]
+fn test_empty_process_substitutions_record_null_body() {
+    let input = "cat <() >()";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 2);
+    assert_eq!(process[0].target, "<()");
+    assert_eq!(process[0].open_delimiter, "<(");
+    assert_eq!(process[0].operator, "<");
+    assert_eq!(process[0].close_delimiter, ")");
+    assert_eq!(process[0].source, "");
+    assert!(process[0].commands.is_empty());
+    assert!(!process[0].output);
+    assert_eq!(process[0].word_index, Some(1));
+    assert_eq!(process[0].redirect_fd, None);
+
+    assert_eq!(process[1].target, ">()");
+    assert_eq!(process[1].open_delimiter, ">(");
+    assert_eq!(process[1].operator, ">");
+    assert_eq!(process[1].close_delimiter, ")");
+    assert_eq!(process[1].source, "");
+    assert!(process[1].commands.is_empty());
+    assert!(process[1].output);
+    assert_eq!(process[1].word_index, Some(2));
+    assert_eq!(process[1].redirect_fd, None);
+}
+
+#[test]
 fn test_process_substitution_keeps_case_pattern_parentheses() {
     let input = "cat <(case beta in alpha) printf alpha ;; beta) printf beta ;; esac)";
     let tokens = tokenize(input);
