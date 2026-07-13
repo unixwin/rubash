@@ -1087,6 +1087,20 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_keeps_command_substitution_and_brace_expansion() {
+        let input = "case $word in $(printf x)|{a,b}) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let clause = &case_command.clauses[0];
+        assert_eq!(clause.patterns, ["$(printf x)", "{a,b}"]);
+        assert_eq!(clause.pattern_separators, ["|"]);
+        assert_eq!(clause.pattern_nodes[0].text, "$(printf x)");
+        assert_eq!(clause.pattern_nodes[1].text, "{a,b}");
+    }
+
+    #[test]
     fn test_case_body_keeps_nested_select_command() {
         let input =
             "case $word in x) select choice in a; do echo $choice; break; done <<< 1 ;; esac";

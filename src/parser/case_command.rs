@@ -45,7 +45,10 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                 break;
             }
             match tokens[i].kind {
-                TokenKind::Word | TokenKind::Assignment => {
+                TokenKind::Word
+                | TokenKind::Assignment
+                | TokenKind::CommandSubst
+                | TokenKind::BraceExpand => {
                     let text = &tokens[i].value;
                     // Check if this word ends with an extglob operator before (
                     if i + 1 < tokens.len()
