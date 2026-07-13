@@ -1444,10 +1444,16 @@ mod case_tests {
         assert!(!patterns[0].has_extglob);
         assert_eq!(patterns[1].text, "@(foo|bar)");
         assert_eq!(patterns[1].operators, ["@(", "|"]);
+        assert_eq!(patterns[1].extglob_patterns.len(), 1);
+        assert_eq!(patterns[1].extglob_patterns[0].text, "@(foo|bar)");
+        assert_eq!(patterns[1].extglob_patterns[0].alternatives, ["foo", "bar"]);
         assert!(patterns[1].has_extglob);
         assert!(!patterns[1].negated_extglob);
         assert_eq!(patterns[2].text, "!(tmp)");
         assert_eq!(patterns[2].operators, ["!("]);
+        assert_eq!(patterns[2].extglob_patterns.len(), 1);
+        assert_eq!(patterns[2].extglob_patterns[0].operator, '!');
+        assert_eq!(patterns[2].extglob_patterns[0].pattern, "tmp");
         assert!(patterns[2].has_extglob);
         assert!(patterns[2].negated_extglob);
 
@@ -1506,6 +1512,24 @@ mod case_tests {
         assert_eq!(second.text, "**/*.sh");
         assert_eq!(second.operators, ["**", "*"]);
         assert!(second.has_glob);
+    }
+
+    #[test]
+    fn test_case_pattern_records_nested_extglob_nodes() {
+        let input = "case $word in @(a|+(b|c))) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let pattern = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(pattern.text, "@(a|+(b|c))");
+        assert_eq!(pattern.operators, ["@(", "|", "+(", "|"]);
+        assert_eq!(pattern.extglob_patterns.len(), 2);
+        assert_eq!(pattern.extglob_patterns[0].text, "@(a|+(b|c))");
+        assert_eq!(pattern.extglob_patterns[0].alternatives, ["a", "+(b|c)"]);
+        assert_eq!(pattern.extglob_patterns[1].text, "+(b|c)");
+        assert_eq!(pattern.extglob_patterns[1].alternatives, ["b", "c"]);
+        assert!(pattern.has_extglob);
     }
 
     #[test]

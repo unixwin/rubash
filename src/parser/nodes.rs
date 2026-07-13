@@ -422,6 +422,7 @@ pub struct CaseClause {
 pub struct CasePattern {
     pub text: String,
     pub operators: Vec<String>,
+    pub extglob_patterns: Vec<ExtglobPattern>,
     pub clause_index: usize,
     pub pattern_index: usize,
     pub has_glob: bool,
@@ -436,6 +437,7 @@ impl CasePattern {
             has_extglob: case_pattern_has_extglob(&text),
             negated_extglob: text.contains("!("),
             operators: case_pattern_operators(&text),
+            extglob_patterns: super::extglob_patterns_in_word(&text),
             text,
             clause_index,
             pattern_index,

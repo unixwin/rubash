@@ -2,9 +2,9 @@ use super::*;
 use crate::lexer::{Token, TokenKind};
 
 pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
-    // TODO(parse.y/execute_cmd.c): GNU Bash supports extglob patterns, nested
-    // compound lists, and redirections on the compound command. This covers the
-    // common `case word in pattern) list terminator` shape.
+    // TODO(parse.y/execute_cmd.c): GNU Bash supports nested compound lists and
+    // redirections on the compound command. This covers the common
+    // `case word in pattern) list terminator` shape.
     let (word, mut i) = collect_case_word(tokens, start + 1)?;
     while i < tokens.len() && !is_keyword(tokens, i, "in") {
         i += 1;

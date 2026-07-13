@@ -30,7 +30,7 @@ pub(super) fn record_extglob_patterns_for_assignment(
     command.extglob_patterns.extend(patterns);
 }
 
-fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
+pub(super) fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut patterns = Vec::new();
     let mut index = 0;
