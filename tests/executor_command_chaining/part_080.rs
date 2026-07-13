@@ -343,6 +343,36 @@ fn test_exec_dynamic_output_fd_writes_through_named_fd() {
 }
 
 #[test]
+fn test_exec_dynamic_input_fd_reads_through_named_fd() {
+    let input_path = "target/rubash-dynamic-input-fd.txt";
+    let output_path = "target/rubash-dynamic-input-fd-output.txt";
+    let error_path = "target/rubash-dynamic-input-fd-error.txt";
+    fs::write(input_path, "alpha\nbeta\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "exec {{fd}}<{input_path}; read -u $fd first; read -u $fd second; \
+         exec {{fd}}<&-; read -u $fd closed 2> {error_path}; \
+         echo \"$first/$second/$closed:$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha/beta/:1\n");
+    assert!(fs::read_to_string(error_path)
+        .unwrap()
+        .contains("invalid file descriptor specification"));
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_input_fd_close_makes_read_fail_without_hanging() {
     let output_path = "target/rubash-input-fd-close-output.txt";
     let _ = fs::remove_file(output_path);

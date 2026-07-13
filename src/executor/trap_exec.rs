@@ -204,21 +204,38 @@ impl Executor {
             return Ok(None);
         }
 
-        if let Some(redirect) = &cmd.redirect_out {
+        if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_word(&redirect.target);
             if is_closed_redirect_target(&target) {
-                if let Some(fd) = self
-                    .env_vars
-                    .get(name)
-                    .and_then(|value| value.parse::<u32>().ok())
-                {
-                    self.env_vars.remove(&fd_output_key(fd));
-                }
-                self.env_vars.remove(name);
+                self.close_dynamic_fd(name);
                 return Ok(Some(0));
             }
 
-            let fd = self.allocate_dynamic_output_fd();
+            let path = shell_path_to_windows(&target, &self.env_vars);
+            if redirect.append {
+                let _ = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
+            }
+            let input = fs::read_to_string(path)?;
+            let fd = self.allocate_dynamic_fd();
+            self.env_vars.insert(name.to_string(), fd.to_string());
+            self.env_vars.insert(fd_stdin_key(fd), input);
+            self.env_vars
+                .insert(fd_stdin_offset_key(fd), "0".to_string());
+            return Ok(Some(0));
+        }
+
+        if let Some(redirect) = &cmd.redirect_out {
+            let target = self.expand_word(&redirect.target);
+            if is_closed_redirect_target(&target) {
+                self.close_dynamic_fd(name);
+                return Ok(Some(0));
+            }
+
+            let fd = self.allocate_dynamic_fd();
             self.create_redirect_output(&target, redirect.clobber)?;
             self.env_vars.insert(name.to_string(), fd.to_string());
             self.env_vars.insert(fd_output_key(fd), target);
@@ -227,7 +244,7 @@ impl Executor {
 
         if let Some(redirect) = &cmd.append {
             let target = self.expand_word(&redirect.target);
-            let fd = self.allocate_dynamic_output_fd();
+            let fd = self.allocate_dynamic_fd();
             OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -240,10 +257,26 @@ impl Executor {
         Ok(None)
     }
 
-    fn allocate_dynamic_output_fd(&self) -> u32 {
+    fn allocate_dynamic_fd(&self) -> u32 {
         (10..1024)
-            .find(|fd| !self.env_vars.contains_key(&fd_output_key(*fd)))
+            .find(|fd| {
+                !self.env_vars.contains_key(&fd_output_key(*fd))
+                    && !self.env_vars.contains_key(&fd_stdin_key(*fd))
+            })
             .unwrap_or(10)
+    }
+
+    fn close_dynamic_fd(&mut self, name: &str) {
+        if let Some(fd) = self
+            .env_vars
+            .get(name)
+            .and_then(|value| value.parse::<u32>().ok())
+        {
+            self.env_vars.remove(&fd_output_key(fd));
+            self.env_vars.remove(&fd_stdin_key(fd));
+            self.env_vars.remove(&fd_stdin_offset_key(fd));
+        }
+        self.env_vars.remove(name);
     }
 
     pub(in crate::executor) fn execute_exec_command(
@@ -267,7 +300,7 @@ fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
             .get(1)
             .and_then(|word| dynamic_fd_var_name(word))
             .is_some()
-        && (cmd.redirect_out.is_some() || cmd.append.is_some())
+        && (cmd.redirect_in.is_some() || cmd.redirect_out.is_some() || cmd.append.is_some())
 }
 
 fn dynamic_fd_var_name(word: &str) -> Option<&str> {
