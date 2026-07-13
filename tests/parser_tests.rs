@@ -1867,6 +1867,32 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_ignores_quoted_subscript_operators() {
+        let input = "arr=([\"a]=b\"]=value [\"c]+=d\"]+=more)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let compound = ast.commands[0].compound_assignments.as_slice();
+        assert_eq!(compound.len(), 1);
+        assert_eq!(compound[0].elements.len(), 2);
+        assert_eq!(
+            compound[0].elements[0].subscript.as_deref(),
+            Some("\"a]=b\"")
+        );
+        assert_eq!(compound[0].elements[0].value, "value");
+        assert_eq!(compound[0].elements[0].operator.as_deref(), Some("="));
+        assert!(!compound[0].elements[0].append);
+        assert_eq!(
+            compound[0].elements[1].subscript.as_deref(),
+            Some("\"c]+=d\"")
+        );
+        assert_eq!(compound[0].elements[1].value, "more");
+        assert_eq!(compound[0].elements[1].operator.as_deref(), Some("+="));
+        assert!(compound[0].elements[1].append);
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_reserved_word_elements() {
         let input = "arr=(if done [case]=esac [then]+=fi)";
         let tokens = tokenize(input);

@@ -207,7 +207,7 @@ pub(super) fn collect_compound_assignment(
     let mut i = start + 2;
     let mut values = Vec::new();
     while i < tokens.len() && !is_keyword(tokens, i, ")") {
-        if let Some((left, rhs)) = compound_subscript_assignment(&tokens[i].value) {
+        if let Some((left, rhs)) = compound_subscript_assignment_token(&tokens[i]) {
             if rhs.is_empty() {
                 if compound_subscript_value_is_empty(tokens, i) {
                     values.push(left);
@@ -221,7 +221,7 @@ pub(super) fn collect_compound_assignment(
                     continue;
                 }
             }
-            values.push(format!("{}{}", left, quote_compound_assignment_word(rhs)));
+            values.push(format!("{}{}", left, quote_compound_assignment_word(&rhs)));
             i += 1;
             continue;
         }
@@ -287,7 +287,7 @@ fn compound_subscript_value_is_empty(tokens: &[Token], index: usize) -> bool {
 
     tokens
         .get(index + 1)
-        .is_some_and(|token| compound_subscript_assignment(&token.value).is_some())
+        .is_some_and(|token| compound_subscript_assignment_token(token).is_some())
 }
 
 pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str)> {
@@ -296,7 +296,7 @@ pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str
     }
 
     for operator in ["]+=", "]="] {
-        let Some(pos) = value.find(operator) else {
+        let Some(pos) = find_compound_subscript_operator(value, operator) else {
             continue;
         };
         let split = pos + operator.len();
@@ -305,7 +305,7 @@ pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str
         return Some((
             format!(
                 "[{}]{}",
-                quote_compound_assignment_word(subscript),
+                quote_compound_assignment_subscript(subscript),
                 assignment
             ),
             &value[split..],
@@ -313,6 +313,138 @@ pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str
     }
 
     None
+}
+
+fn compound_subscript_assignment_token(token: &Token) -> Option<(String, String)> {
+    if token.raw == token.value {
+        let (left, rhs) = compound_subscript_assignment(&token.value)?;
+        return Some((left, rhs.to_string()));
+    }
+
+    compound_subscript_assignment_from_raw(&token.raw)
+}
+
+fn compound_subscript_assignment_from_raw(raw: &str) -> Option<(String, String)> {
+    if !raw.starts_with('[') {
+        return None;
+    }
+
+    for operator in ["]+=", "]="] {
+        let Some(pos) = find_compound_subscript_operator(raw, operator) else {
+            continue;
+        };
+        let split = pos + operator.len();
+        let subscript = remove_compound_assignment_quotes(&raw[1..pos]);
+        let rhs = remove_compound_assignment_quotes(&raw[split..]);
+        let assignment = if operator == "]=" { "=" } else { "+=" };
+        return Some((
+            format!(
+                "[{}]{}",
+                quote_compound_assignment_subscript(&subscript),
+                assignment
+            ),
+            rhs,
+        ));
+    }
+
+    None
+}
+
+fn find_compound_subscript_operator(value: &str, operator: &str) -> Option<usize> {
+    let assignment = operator.strip_prefix(']')?;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ']' if !single && !double => {
+                let value_start = index + ch.len_utf8();
+                if value[value_start..].starts_with(assignment) {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn remove_compound_assignment_quotes(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                for quoted in chars.by_ref() {
+                    if quoted == '\'' {
+                        break;
+                    }
+                    out.push(quoted);
+                }
+            }
+            '"' => {
+                while let Some(quoted) = chars.next() {
+                    match quoted {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) =
+                                chars.peek().copied()
+                            {
+                                chars.next();
+                                if escaped != '\n' {
+                                    out.push(escaped);
+                                }
+                            } else {
+                                out.push('\\');
+                            }
+                        }
+                        _ => out.push(quoted),
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    out
+}
+
+fn quote_compound_assignment_subscript(value: &str) -> String {
+    if value.contains(']') {
+        return quote_compound_assignment_word_forced(value);
+    }
+
+    quote_compound_assignment_word(value)
+}
+
+fn quote_compound_assignment_word_forced(value: &str) -> String {
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        if matches!(ch, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
 }
 
 pub(super) fn quote_compound_assignment_word(value: &str) -> String {
@@ -324,13 +456,5 @@ pub(super) fn quote_compound_assignment_word(value: &str) -> String {
         return value.to_string();
     }
 
-    let mut quoted = String::from("\"");
-    for ch in value.chars() {
-        if matches!(ch, '"' | '\\') {
-            quoted.push('\\');
-        }
-        quoted.push(ch);
-    }
-    quoted.push('"');
-    quoted
+    quote_compound_assignment_word_forced(value)
 }
