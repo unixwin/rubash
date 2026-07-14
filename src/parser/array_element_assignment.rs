@@ -1,20 +1,22 @@
 use super::{
-    arithmetic_expansions_in_word, brace_expansions_in_word, parameter_expansions_in_word,
-    ArrayElementAssignment, CommandNode,
+    arithmetic_expansions_in_word, brace_expansions_in_word, extglob_patterns_in_word,
+    parameter_expansions_in_word, pathname_patterns_in_word, tilde_expansions_in_word,
+    word_quotes_in_raw, ArrayElementAssignment, CommandNode,
 };
 
 pub(super) fn record_array_element_assignment_for_word(
     command: &mut CommandNode,
     word_index: usize,
     word: &str,
+    raw: &str,
 ) {
-    if let Some(mut assignment) = array_element_assignment_from_word(word) {
+    if let Some(mut assignment) = array_element_assignment_from_word(word, raw) {
         assignment.word_index = Some(word_index);
         command.array_element_assignments.push(assignment);
     }
 }
 
-fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignment> {
+fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElementAssignment> {
     let open = word.find('[')?;
     let name = &word[..open];
     if !is_shell_name(name) {
@@ -33,6 +35,7 @@ fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignme
 
     let subscript = &word[open + 1..close];
     let value = &word[value_start..];
+    let raw_value = array_element_raw_value(raw).unwrap_or(value);
     Some(ArrayElementAssignment {
         name: name.to_string(),
         subscript: subscript.to_string(),
@@ -46,7 +49,22 @@ fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignme
         brace_expansions: brace_expansions_in_word(value),
         parameter_expansions: parameter_expansions_in_word(value),
         arithmetic_expansions: arithmetic_expansions_in_word(value),
+        extglob_patterns: extglob_patterns_in_word(value),
+        pathname_patterns: pathname_patterns_in_word(value, raw_value),
+        tilde_expansions: tilde_expansions_in_word(value),
+        word_quotes: word_quotes_in_raw(raw_value),
     })
+}
+
+fn array_element_raw_value(raw: &str) -> Option<&str> {
+    let open = raw.find('[')?;
+    let close = matching_subscript_end(raw, open)?;
+    let operator_start = close + 1;
+    if raw[operator_start..].starts_with("+=") {
+        Some(&raw[operator_start + 2..])
+    } else {
+        raw[operator_start..].strip_prefix('=')
+    }
 }
 
 fn matching_subscript_end(word: &str, open: usize) -> Option<usize> {

@@ -16,7 +16,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     record_tilde_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_pathname_patterns_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
     record_word_quotes_for_word(cmd, cmd.words.len(), &token.raw);
-    record_array_element_assignment_for_word(cmd, cmd.words.len(), &token.value);
+    record_array_element_assignment_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }

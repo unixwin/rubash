@@ -2664,6 +2664,48 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_array_element_assignment_records_pattern_and_quote_metadata() {
+        let input = "echo home[0]=~+/bin glob[1]=src/[ab]? ext[2]=@(src|tests) quoted[3]=\"*.rs\"";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let elements = ast.commands[0].array_element_assignments.as_slice();
+        assert_eq!(elements.len(), 4);
+
+        let home = &elements[0];
+        assert_eq!(home.name, "home");
+        assert_eq!(home.value, "~+/bin");
+        assert_eq!(home.tilde_expansions.len(), 1);
+        assert_eq!(home.tilde_expansions[0].prefix, "~+");
+        assert_eq!(home.tilde_expansions[0].suffix, "/bin");
+
+        let glob = &elements[1];
+        assert_eq!(glob.name, "glob");
+        assert_eq!(glob.value, "src/[ab]?");
+        assert_eq!(glob.pathname_patterns.len(), 1);
+        assert_eq!(glob.pathname_patterns[0].operators, ["[ab]", "?"]);
+        assert!(glob.pathname_patterns[0].has_bracket);
+        assert!(glob.pathname_patterns[0].has_question);
+
+        let extglob = &elements[2];
+        assert_eq!(extglob.name, "ext");
+        assert_eq!(extglob.value, "@(src|tests)");
+        assert_eq!(extglob.extglob_patterns.len(), 1);
+        assert_eq!(extglob.extglob_patterns[0].operator, '@');
+        assert_eq!(extglob.extglob_patterns[0].alternatives, ["src", "tests"]);
+
+        let quoted = &elements[3];
+        assert_eq!(quoted.name, "quoted");
+        assert_eq!(quoted.value, "*.rs");
+        assert!(quoted.pathname_patterns.is_empty());
+        assert_eq!(quoted.word_quotes.len(), 1);
+        assert_eq!(quoted.word_quotes[0].text, "\"*.rs\"");
+        assert_eq!(quoted.word_quotes[0].body, "*.rs");
+        assert_eq!(quoted.word_quotes[0].kind, QuoteKind::Double);
+    }
+
+    #[test]
     fn test_builtin_array_element_assignment_argument_records_word_index() {
         let input = "declare BASH_ARGV[1]=foo";
         let tokens = tokenize(input);

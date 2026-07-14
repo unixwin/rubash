@@ -330,6 +330,10 @@ pub struct ArrayElementAssignment {
     pub brace_expansions: Vec<BraceExpansion>,
     pub parameter_expansions: Vec<ParameterExpansion>,
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
+    pub extglob_patterns: Vec<ExtglobPattern>,
+    pub pathname_patterns: Vec<PathnamePattern>,
+    pub tilde_expansions: Vec<TildeExpansion>,
+    pub word_quotes: Vec<WordQuote>,
 }
 
 /// Represents a parsed `<(...)` or `>(...)` process substitution.
