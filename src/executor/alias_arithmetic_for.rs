@@ -123,6 +123,7 @@ fn alias_arithmetic_for_command(
         variable: String::new(),
         in_keyword: None,
         words: Vec::new(),
+        word_metadata: Vec::new(),
         default_positional: false,
         list_terminator: None,
         arithmetic: Some(arithmetic),

@@ -129,6 +129,7 @@ pub(super) fn parse_arithmetic_for_command(
         variable: String::new(),
         in_keyword: None,
         words: Vec::new(),
+        word_metadata: Vec::new(),
         default_positional: false,
         list_terminator,
         arithmetic: Some(ArithmeticForCommand {

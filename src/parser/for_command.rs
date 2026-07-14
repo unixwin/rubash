@@ -20,6 +20,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
 
     let mut i = start + 2;
     let mut words = Vec::new();
+    let mut word_metadata = Vec::new();
     let mut in_keyword = None;
     let mut list_terminator = None;
     let default_positional = if is_keyword(tokens, i, "in") {
@@ -49,6 +50,12 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
                 return None;
             }
             if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
+                let raw = if next_i == i + 1 {
+                    tokens[i].raw.as_str()
+                } else {
+                    word.as_str()
+                };
+                word_metadata.push(build_word_metadata(words.len(), &word, raw));
                 words.push(word);
                 i = next_i;
                 continue;
@@ -114,6 +121,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         variable,
         in_keyword,
         words,
+        word_metadata,
         default_positional,
         list_terminator,
         arithmetic: None,

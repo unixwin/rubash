@@ -50,6 +50,7 @@ pub struct ForCommand {
     pub variable: String,
     pub in_keyword: Option<String>,
     pub words: Vec<String>,
+    pub word_metadata: Vec<WordMetadata>,
     pub default_positional: bool,
     pub list_terminator: Option<String>,
     pub arithmetic: Option<ArithmeticForCommand>,
@@ -472,6 +473,21 @@ pub struct WordQuote {
     pub assignment_name: Option<String>,
 }
 
+/// Structured metadata for words stored outside a simple command word list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WordMetadata {
+    pub word_index: usize,
+    pub value: String,
+    pub raw: String,
+    pub brace_expansions: Vec<BraceExpansion>,
+    pub parameter_expansions: Vec<ParameterExpansion>,
+    pub arithmetic_expansions: Vec<ArithmeticExpansion>,
+    pub extglob_patterns: Vec<ExtglobPattern>,
+    pub tilde_expansions: Vec<TildeExpansion>,
+    pub pathname_patterns: Vec<PathnamePattern>,
+    pub word_quotes: Vec<WordQuote>,
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
@@ -660,6 +676,7 @@ pub struct SelectCommand {
     pub variable: String,
     pub in_keyword: Option<String>,
     pub words: Vec<String>,
+    pub word_metadata: Vec<WordMetadata>,
     pub default_positional: bool,
     pub list_terminator: Option<String>,
     pub body_kind: CommandBodyKind,

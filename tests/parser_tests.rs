@@ -625,6 +625,72 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_words_record_metadata() {
+        let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
+        let for_ast = parse(&for_tokens);
+        let select_tokens = tokenize("select x in $((i+1)) @(yes|no) ~+/bin; do echo $x; done");
+        let select_ast = parse(&select_tokens);
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        assert_eq!(
+            for_command.words,
+            ["${one:-1}", "pre{a,b}", "src/[ab]?", "*.rs"]
+        );
+        assert_eq!(for_command.word_metadata.len(), 4);
+        assert_eq!(for_command.word_metadata[0].word_index, 0);
+        assert_eq!(
+            for_command.word_metadata[0].parameter_expansions[0].text,
+            "${one:-1}"
+        );
+        assert_eq!(
+            for_command.word_metadata[0].parameter_expansions[0].name,
+            "one"
+        );
+        assert_eq!(
+            for_command.word_metadata[1].brace_expansions[0].text,
+            "{a,b}"
+        );
+        assert_eq!(
+            for_command.word_metadata[2].pathname_patterns[0].operators,
+            ["[ab]", "?"]
+        );
+        assert!(for_command.word_metadata[3].pathname_patterns.is_empty());
+        assert_eq!(for_command.word_metadata[3].word_quotes[0].text, "\"*.rs\"");
+        assert_eq!(
+            for_command.word_metadata[3].word_quotes[0].kind,
+            QuoteKind::Double
+        );
+
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+        assert_eq!(select_command.words, ["$((i+1))", "@(yes|no)", "~+/bin"]);
+        assert_eq!(select_command.word_metadata.len(), 3);
+        assert_eq!(
+            select_command.word_metadata[0].arithmetic_expansions[0].expression,
+            "i+1"
+        );
+        assert_eq!(
+            select_command.word_metadata[0].arithmetic_expansions[0].variables,
+            ["i"]
+        );
+        assert_eq!(
+            select_command.word_metadata[1].extglob_patterns[0].operator,
+            '@'
+        );
+        assert_eq!(
+            select_command.word_metadata[1].extglob_patterns[0].alternatives,
+            ["yes", "no"]
+        );
+        assert_eq!(
+            select_command.word_metadata[2].tilde_expansions[0].prefix,
+            "~+"
+        );
+        assert_eq!(
+            select_command.word_metadata[2].tilde_expansions[0].suffix,
+            "/bin"
+        );
+    }
+
+    #[test]
     fn test_loop_bodies_keep_case_patterns_named_like_delimiters() {
         let for_tokens = tokenize("for x in one; do case done in done) echo for ;; esac; done");
         let for_ast = parse(&for_tokens);
