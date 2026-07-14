@@ -128,11 +128,12 @@ pub(super) fn collect_trailing_redirections(
             TokenKind::RedirectIn => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                let redirect = redirect_node_with_fd_var(
+                let redirect = redirect_node_with_fd_var_raw(
                     &token.value,
                     fd,
                     redirect_fd_var_prefix(tokens, *index),
                     &input_redirect_target(&token.value, &target.value),
+                    &input_redirect_target(&token.value, &target.raw),
                     false,
                     false,
                 );
@@ -143,31 +144,34 @@ pub(super) fn collect_trailing_redirections(
                 if token.value.ends_with("<>") {
                     let fd = redirect_operator_fd(&token.value)
                         .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                    let redirect = redirect_node_with_fd_var(
+                    let redirect = redirect_node_with_fd_var_raw(
                         &token.value,
                         fd,
                         redirect_fd_var_prefix(tokens, *index),
                         &target.value,
+                        &target.raw,
                         true,
                         false,
                     );
                     command.redirects.push(redirect.clone());
                     command.redirect_in = Some(redirect);
                 } else {
-                    assign_output_redirect(
+                    assign_output_redirect_raw(
                         command,
                         &token.value,
                         &target.value,
+                        &target.raw,
                         None,
                         redirect_fd_var_prefix(tokens, *index),
                     );
                 }
             }
             TokenKind::Append => {
-                assign_append_redirect(
+                assign_append_redirect_raw(
                     command,
                     &token.value,
                     &target.value,
+                    &target.raw,
                     None,
                     redirect_fd_var_prefix(tokens, *index),
                 );
@@ -179,21 +183,23 @@ pub(super) fn collect_trailing_redirections(
                 assign_redirect_err_append_target(tokens, *index, command);
             }
             TokenKind::HereString => {
-                assign_here_string_redirect(
+                assign_here_string_redirect_raw(
                     command,
                     &token.value,
                     &target.value,
+                    &target.raw,
                     redirect_fd_var_prefix(tokens, *index),
                 );
             }
             TokenKind::HereDoc => {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_adjacent_redirect_fd_prefix(command, tokens, *index));
-                command.redirects.push(redirect_node_with_fd_var(
+                command.redirects.push(redirect_node_with_fd_var_raw(
                     &token.value,
                     fd,
                     redirect_fd_var_prefix(tokens, *index),
                     &target.value,
+                    &target.raw,
                     false,
                     false,
                 ));
@@ -226,12 +232,23 @@ pub(super) fn assign_here_string_redirect(
     target: &str,
     fd_var: Option<String>,
 ) {
+    assign_here_string_redirect_raw(command, operator, target, target, fd_var);
+}
+
+pub(super) fn assign_here_string_redirect_raw(
+    command: &mut CommandNode,
+    operator: &str,
+    target: &str,
+    raw_target: &str,
+    fd_var: Option<String>,
+) {
     let fd = redirect_operator_fd(operator);
-    command.redirects.push(redirect_node_with_fd_var(
+    command.redirects.push(redirect_node_with_fd_var_raw(
         operator,
         fd,
         fd_var.clone(),
         target,
+        raw_target,
         false,
         false,
     ));
@@ -337,13 +354,24 @@ pub(super) fn redirect_node(
     append: bool,
     clobber: bool,
 ) -> Redirect {
+    redirect_node_with_raw(operator, fd, target, target, append, clobber)
+}
+
+pub(super) fn redirect_node_with_raw(
+    operator: &str,
+    fd: Option<u32>,
+    target: &str,
+    raw_target: &str,
+    append: bool,
+    clobber: bool,
+) -> Redirect {
     Redirect {
         fd,
         fd_var: None,
         operator: operator.to_string(),
         kind: redirect_kind(operator, target),
         target: target.to_string(),
-        target_metadata: Box::new(build_word_metadata(0, target, target)),
+        target_metadata: Box::new(build_word_metadata(0, target, raw_target)),
         append,
         clobber,
     }
@@ -358,6 +386,20 @@ pub(super) fn redirect_node_with_fd_var(
     clobber: bool,
 ) -> Redirect {
     let mut redirect = redirect_node(operator, fd, target, append, clobber);
+    redirect.fd_var = fd_var;
+    redirect
+}
+
+pub(super) fn redirect_node_with_fd_var_raw(
+    operator: &str,
+    fd: Option<u32>,
+    fd_var: Option<String>,
+    target: &str,
+    raw_target: &str,
+    append: bool,
+    clobber: bool,
+) -> Redirect {
+    let mut redirect = redirect_node_with_raw(operator, fd, target, raw_target, append, clobber);
     redirect.fd_var = fd_var;
     redirect
 }

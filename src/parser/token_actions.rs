@@ -228,11 +228,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.word_kinds.push(TokenKind::Word);
                     *i = next_i;
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
-                    let redirect = redirect_node_with_fd_var(
+                    let redirect = redirect_node_with_fd_var_raw(
                         &token.value,
                         fd,
                         fd_var,
                         &input_redirect_target(&token.value, &tokens[*i + 1].value),
+                        &input_redirect_target(&token.value, &tokens[*i + 1].raw),
                         false,
                         false,
                     );
@@ -309,14 +310,18 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter_token = &tokens[*i + 1];
                 let delimiter = delimiter_token.value.clone();
-                state.current_cmd.redirects.push(redirect_node_with_fd_var(
-                    &token.value,
-                    fd,
-                    redirect_fd_var_prefix(tokens, *i),
-                    &delimiter,
-                    false,
-                    false,
-                ));
+                state
+                    .current_cmd
+                    .redirects
+                    .push(redirect_node_with_fd_var_raw(
+                        &token.value,
+                        fd,
+                        redirect_fd_var_prefix(tokens, *i),
+                        &delimiter,
+                        &delimiter_token.raw,
+                        false,
+                        false,
+                    ));
                 state.current_cmd.heredoc_redirects.push(heredoc_redirect(
                     &token.value,
                     delimiter_token,
@@ -350,10 +355,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         | TokenKind::Assignment
                 )
             {
-                assign_here_string_redirect(
+                assign_here_string_redirect_raw(
                     &mut state.current_cmd,
                     &token.value,
                     &tokens[*i + 1].value,
+                    &tokens[*i + 1].raw,
                     redirect_fd_var_prefix(tokens, *i),
                 );
                 *i += 1;

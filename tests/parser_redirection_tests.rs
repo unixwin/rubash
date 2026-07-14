@@ -73,6 +73,23 @@ fn test_redirect_target_records_word_metadata() {
 }
 
 #[test]
+fn test_quoted_redirect_target_records_raw_metadata() {
+    let input = "echo hello > \"*.rs\"";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
+    let metadata = &redirect.target_metadata;
+
+    assert_eq!(redirect.target, "*.rs");
+    assert_eq!(metadata.value, "*.rs");
+    assert_eq!(metadata.raw, "\"*.rs\"");
+    assert!(metadata.pathname_patterns.is_empty());
+    assert_eq!(metadata.word_quotes.len(), 1);
+    assert_eq!(metadata.word_quotes[0].text, "\"*.rs\"");
+    assert_eq!(metadata.word_quotes[0].kind, QuoteKind::Double);
+}
+
+#[test]
 fn test_redirection_list_records_parse_order() {
     let input = "echo hello > first 2>&1 >> second < input";
     let tokens = tokenize(input);
