@@ -355,6 +355,21 @@ pub struct ProcessSubstitution {
     pub redirect_fd: Option<u32>,
 }
 
+impl PartialEq for ProcessSubstitution {
+    fn eq(&self, other: &Self) -> bool {
+        self.target == other.target
+            && self.open_delimiter == other.open_delimiter
+            && self.operator == other.operator
+            && self.source == other.source
+            && self.close_delimiter == other.close_delimiter
+            && self.output == other.output
+            && self.word_index == other.word_index
+            && self.redirect_fd == other.redirect_fd
+    }
+}
+
+impl Eq for ProcessSubstitution {}
+
 /// Represents a parsed `$()` or backtick command substitution inside a word.
 #[derive(Debug, Clone)]
 pub struct CommandSubstitutionNode {
@@ -502,6 +517,7 @@ pub struct WordMetadata {
     pub raw: String,
     pub brace_expansions: Vec<BraceExpansion>,
     pub command_substitutions: Vec<CommandSubstitutionNode>,
+    pub process_substitutions: Vec<ProcessSubstitution>,
     pub parameter_expansions: Vec<ParameterExpansion>,
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
@@ -519,11 +535,19 @@ impl WordMetadata {
                 substitution
             })
             .collect();
+        let process_substitutions = super::process_substitutions_in_word(&value)
+            .into_iter()
+            .map(|mut substitution| {
+                substitution.word_index = Some(word_index);
+                substitution
+            })
+            .collect();
 
         Self {
             word_index,
             brace_expansions: super::brace_expansions_in_word(&value),
             command_substitutions,
+            process_substitutions,
             parameter_expansions: super::parameter_expansions_in_word(&value),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
             extglob_patterns: super::extglob_patterns_in_word(&value),

@@ -47,6 +47,25 @@ pub(super) fn any_process_substitution_word_target(
         .or_else(|| output_process_substitution_word_target(tokens, redirect_index))
 }
 
+pub(super) fn process_substitutions_in_word(word: &str) -> Vec<ProcessSubstitution> {
+    let tokens = crate::lexer::tokenize(word);
+    let mut substitutions = Vec::new();
+    let mut index = 0usize;
+
+    while index < tokens.len() {
+        if let Some((substitution, next_index)) =
+            any_process_substitution_word_target(&tokens, index)
+        {
+            substitutions.push(substitution);
+            index = next_index + 1;
+        } else {
+            index += 1;
+        }
+    }
+
+    substitutions
+}
+
 pub(super) fn output_process_substitution_redirect_target(
     tokens: &[Token],
     redirect_index: usize,

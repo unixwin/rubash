@@ -615,6 +615,44 @@ mod command_body_kind_tests {
 
         assert_eq!(for_command.words, ["<(printf a)", ">(cat)"]);
         assert_eq!(select_command.words, ["<(printf a)", ">(cat)"]);
+        assert_eq!(for_command.word_metadata.len(), 2);
+        assert_eq!(for_command.word_metadata[0].process_substitutions.len(), 1);
+        assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0].target,
+            "<(printf a)"
+        );
+        assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0].source,
+            "printf a"
+        );
+        assert!(!for_command.word_metadata[0].process_substitutions[0].output);
+        assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0].word_index,
+            Some(0)
+        );
+        assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0].commands[0].words,
+            ["printf", "a"]
+        );
+        assert_eq!(for_command.word_metadata[1].process_substitutions.len(), 1);
+        assert_eq!(
+            for_command.word_metadata[1].process_substitutions[0].target,
+            ">(cat)"
+        );
+        assert!(for_command.word_metadata[1].process_substitutions[0].output);
+        assert_eq!(
+            for_command.word_metadata[1].process_substitutions[0].word_index,
+            Some(1)
+        );
+        assert_eq!(select_command.word_metadata.len(), 2);
+        assert_eq!(
+            select_command.word_metadata[0].process_substitutions[0].target,
+            "<(printf a)"
+        );
+        assert_eq!(
+            select_command.word_metadata[1].process_substitutions[0].target,
+            ">(cat)"
+        );
     }
 
     #[test]
