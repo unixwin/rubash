@@ -1,4 +1,6 @@
-use crate::parser::{ArithmeticForCommand, CommandBodyKind, CommandNode, ForCommand};
+use crate::parser::{
+    ArithmeticExpressionMetadata, ArithmeticForCommand, CommandBodyKind, CommandNode, ForCommand,
+};
 
 pub(super) fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
     let command = command?;
@@ -65,6 +67,9 @@ fn inline_arithmetic_for_command(
     let mut for_node = command.clone();
     for_node.words.clear();
     for_node.word_kinds.clear();
+    let init = command.words[1].clone();
+    let update = command.words[3].clone();
+
     for_node.for_command = Some(ForCommand {
         keyword: "for".to_string(),
         variable: String::new(),
@@ -75,10 +80,13 @@ fn inline_arithmetic_for_command(
         list_terminator: None,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
-            init: command.words[1].clone(),
+            init: init.clone(),
+            init_metadata: ArithmeticExpressionMetadata::new(init),
             separators: vec![";".to_string(), ";".to_string()],
             test: String::new(),
-            update: command.words[3].clone(),
+            test_metadata: ArithmeticExpressionMetadata::new(String::new()),
+            update: update.clone(),
+            update_metadata: ArithmeticExpressionMetadata::new(update),
             close_delimiter: "))".to_string(),
         }),
         body_kind: CommandBodyKind::DoDone,

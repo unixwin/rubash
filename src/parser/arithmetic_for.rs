@@ -122,6 +122,10 @@ pub(super) fn parse_arithmetic_for_command(
         };
     let (body_open_delimiter, body_close_delimiter) =
         command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
+    let init = parts[0].join(" ");
+    let test = parts[1].join(" ");
+    let update = parts[2].join(" ");
+
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
@@ -134,10 +138,13 @@ pub(super) fn parse_arithmetic_for_command(
         list_terminator,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
-            init: parts[0].join(" "),
+            init: init.clone(),
+            init_metadata: ArithmeticExpressionMetadata::new(init),
             separators: vec![";".to_string(), ";".to_string()],
-            test: parts[1].join(" "),
-            update: parts[2].join(" "),
+            test: test.clone(),
+            test_metadata: ArithmeticExpressionMetadata::new(test),
+            update: update.clone(),
+            update_metadata: ArithmeticExpressionMetadata::new(update),
             close_delimiter: "))".to_string(),
         }),
         body_kind,

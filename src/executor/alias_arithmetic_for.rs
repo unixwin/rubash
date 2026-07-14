@@ -100,13 +100,20 @@ impl Executor {
             index += 1;
         }
 
+        let init = parts[0].clone();
+        let test = parts[1].clone();
+        let update = parts[2].clone();
+
         Some((
             ArithmeticForCommand {
                 open_delimiter: "((".to_string(),
-                init: parts[0].clone(),
+                init: init.clone(),
+                init_metadata: ArithmeticExpressionMetadata::new(init),
                 separators: vec![";".to_string(), ";".to_string()],
-                test: parts[1].clone(),
-                update: parts[2].clone(),
+                test: test.clone(),
+                test_metadata: ArithmeticExpressionMetadata::new(test),
+                update: update.clone(),
+                update_metadata: ArithmeticExpressionMetadata::new(update),
                 close_delimiter: "))".to_string(),
             },
             index,

@@ -200,9 +200,22 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(for_command.list_terminator.as_deref(), Some(";"));
     assert_eq!(arithmetic.open_delimiter, "((");
     assert_eq!(arithmetic.init, "i = 0");
+    assert_eq!(arithmetic.init_metadata.expression, "i = 0");
+    assert_eq!(arithmetic.init_metadata.variables, ["i"]);
+    assert_eq!(arithmetic.init_metadata.operators[0].text, "=");
+    assert!(arithmetic.init_metadata.has_assignment);
+    assert!(!arithmetic.init_metadata.has_comparison);
     assert_eq!(arithmetic.separators, [";", ";"]);
     assert_eq!(arithmetic.test, "i < 3");
+    assert_eq!(arithmetic.test_metadata.expression, "i < 3");
+    assert_eq!(arithmetic.test_metadata.variables, ["i"]);
+    assert_eq!(arithmetic.test_metadata.operators[0].text, "<");
+    assert!(arithmetic.test_metadata.has_comparison);
     assert_eq!(arithmetic.update, "i++");
+    assert_eq!(arithmetic.update_metadata.expression, "i++");
+    assert_eq!(arithmetic.update_metadata.variables, ["i"]);
+    assert_eq!(arithmetic.update_metadata.operators[0].text, "++");
+    assert!(arithmetic.update_metadata.has_update);
     assert_eq!(arithmetic.close_delimiter, "))");
     assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
     assert_eq!(for_command.body_open_delimiter.as_deref(), Some("do"));
@@ -218,8 +231,13 @@ fn test_parse_compact_arithmetic_for_empty_test() {
     let arithmetic = for_command.arithmetic.as_ref().unwrap();
 
     assert_eq!(arithmetic.init, "i=0");
+    assert_eq!(arithmetic.init_metadata.expression, "i=0");
+    assert!(arithmetic.init_metadata.has_assignment);
     assert_eq!(arithmetic.test, "");
+    assert!(arithmetic.test_metadata.operators.is_empty());
+    assert!(arithmetic.test_metadata.variables.is_empty());
     assert_eq!(arithmetic.update, "i++");
+    assert!(arithmetic.update_metadata.has_update);
     assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
     assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
     assert_eq!(for_command.body[0].words, ["echo", "$i"]);

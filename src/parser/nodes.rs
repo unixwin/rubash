@@ -64,17 +64,6 @@ pub struct ForCommand {
     pub body: Vec<CommandNode>,
 }
 
-/// Represents a narrow `for (( init; test; update ))` compound command.
-#[derive(Debug, Clone)]
-pub struct ArithmeticForCommand {
-    pub open_delimiter: String,
-    pub init: String,
-    pub separators: Vec<String>,
-    pub test: String,
-    pub update: String,
-    pub close_delimiter: String,
-}
-
 /// Represents a `(( expression ))` arithmetic command.
 #[derive(Debug, Clone)]
 pub struct ArithmeticCommand {
@@ -87,6 +76,55 @@ pub struct ArithmeticCommand {
     pub has_comparison: bool,
     pub has_logical: bool,
     pub has_update: bool,
+}
+
+/// Structured metadata for an arithmetic expression position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArithmeticExpressionMetadata {
+    pub expression: String,
+    pub operators: Vec<ArithmeticOperator>,
+    pub variables: Vec<String>,
+    pub has_assignment: bool,
+    pub has_comparison: bool,
+    pub has_logical: bool,
+    pub has_update: bool,
+}
+
+impl ArithmeticExpressionMetadata {
+    pub fn new(expression: String) -> Self {
+        let operators = super::arithmetic_operators(&expression);
+        Self {
+            variables: super::arithmetic_variables(&expression),
+            has_assignment: operators
+                .iter()
+                .any(|operator| super::is_arithmetic_assignment_operator(&operator.text)),
+            has_comparison: operators
+                .iter()
+                .any(|operator| super::is_arithmetic_comparison_operator(&operator.text)),
+            has_logical: operators
+                .iter()
+                .any(|operator| matches!(operator.text.as_str(), "&&" | "||" | "!")),
+            has_update: operators
+                .iter()
+                .any(|operator| matches!(operator.text.as_str(), "++" | "--")),
+            operators,
+            expression,
+        }
+    }
+}
+
+/// Represents a narrow `for (( init; test; update ))` compound command.
+#[derive(Debug, Clone)]
+pub struct ArithmeticForCommand {
+    pub open_delimiter: String,
+    pub init: String,
+    pub init_metadata: ArithmeticExpressionMetadata,
+    pub separators: Vec<String>,
+    pub test: String,
+    pub test_metadata: ArithmeticExpressionMetadata,
+    pub update: String,
+    pub update_metadata: ArithmeticExpressionMetadata,
+    pub close_delimiter: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

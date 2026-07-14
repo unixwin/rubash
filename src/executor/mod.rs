@@ -144,10 +144,10 @@ use crate::builtins::alias::Alias;
 use crate::expand::tilde::tilde as tilde_expand;
 use crate::lexer::TokenKind;
 use crate::parser::{
-    AndOrListCommand, ArithmeticCommand, ArithmeticForCommand, Ast, BackgroundCommand, CaseClause,
-    CaseCommand, CaseTerminator, CommandBodyKind, CommandNode, ConditionalCommand, ForCommand,
-    FunctionBodyKind, FunctionCommand, IfCommand, InvertedCommand, LoopCommand, PipelineCommand,
-    Redirect, SelectCommand, SubshellCommand, TimeCommand,
+    AndOrListCommand, ArithmeticCommand, ArithmeticExpressionMetadata, ArithmeticForCommand, Ast,
+    BackgroundCommand, CaseClause, CaseCommand, CaseTerminator, CommandBodyKind, CommandNode,
+    ConditionalCommand, ForCommand, FunctionBodyKind, FunctionCommand, IfCommand, InvertedCommand,
+    LoopCommand, PipelineCommand, Redirect, SelectCommand, SubshellCommand, TimeCommand,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};
