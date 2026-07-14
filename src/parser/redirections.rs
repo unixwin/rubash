@@ -241,6 +241,7 @@ pub(super) fn assign_here_string_redirect(
             fd_var: fd_var.clone(),
             operator: operator.to_string(),
             delimiter: "<<<".to_string(),
+            delimiter_metadata: Box::new(build_word_metadata(0, "<<<", "<<<")),
             strip_tabs: false,
             quoted_delimiter: false,
             here_string: true,
@@ -474,6 +475,7 @@ pub(super) fn heredoc_redirect(
         fd_var,
         operator: operator.to_string(),
         delimiter: delimiter.value.clone(),
+        delimiter_metadata: Box::new(build_word_metadata(0, &delimiter.value, &delimiter.raw)),
         strip_tabs: operator.ends_with("<<-"),
         quoted_delimiter: delimiter
             .raw

@@ -1,5 +1,5 @@
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, RedirectKind};
+use rubash::parser::{parse, QuoteKind, RedirectKind};
 
 #[test]
 fn test_output_redirect() {
@@ -735,6 +735,14 @@ fn test_heredoc_redirect_records_quoted_strip_tabs_metadata() {
     let redirect = &command.heredoc_redirects[0];
     assert_eq!(redirect.operator, "<<-");
     assert_eq!(redirect.delimiter, "EOF");
+    assert_eq!(redirect.delimiter_metadata.word_index, 0);
+    assert_eq!(redirect.delimiter_metadata.value, "EOF");
+    assert_eq!(redirect.delimiter_metadata.raw, "'EOF'");
+    assert_eq!(redirect.delimiter_metadata.word_quotes.len(), 1);
+    assert_eq!(
+        redirect.delimiter_metadata.word_quotes[0].kind,
+        QuoteKind::Single
+    );
     assert!(redirect.strip_tabs);
     assert!(redirect.quoted_delimiter);
     assert_eq!(redirect.body.as_deref(), Some("\x1ealpha\n"));
