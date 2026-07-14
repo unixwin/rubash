@@ -2611,6 +2611,59 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_array_element_assignment_records_expansions() {
+        let input = "echo arr[${key:-fallback}]=$value arr[$((i+1))]+=pre{a,b} nums[0]=$((n+1))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let elements = ast.commands[0].array_element_assignments.as_slice();
+        assert_eq!(elements.len(), 3);
+
+        let parameter = &elements[0];
+        assert_eq!(parameter.name, "arr");
+        assert_eq!(parameter.subscript, "${key:-fallback}");
+        assert_eq!(parameter.value, "$value");
+        assert_eq!(parameter.word_index, Some(1));
+        assert_eq!(parameter.subscript_parameter_expansions.len(), 1);
+        assert_eq!(
+            parameter.subscript_parameter_expansions[0].text,
+            "${key:-fallback}"
+        );
+        assert_eq!(parameter.subscript_parameter_expansions[0].name, "key");
+        assert_eq!(parameter.parameter_expansions.len(), 1);
+        assert_eq!(parameter.parameter_expansions[0].text, "$value");
+        assert_eq!(parameter.parameter_expansions[0].name, "value");
+
+        let arithmetic = &elements[1];
+        assert_eq!(arithmetic.subscript, "$((i+1))");
+        assert!(arithmetic.append);
+        assert_eq!(arithmetic.subscript_arithmetic_expansions.len(), 1);
+        assert_eq!(
+            arithmetic.subscript_arithmetic_expansions[0].expression,
+            "i+1"
+        );
+        assert_eq!(
+            arithmetic.subscript_arithmetic_expansions[0].variables,
+            ["i"]
+        );
+        assert_eq!(arithmetic.brace_expansions.len(), 1);
+        assert_eq!(arithmetic.brace_expansions[0].text, "{a,b}");
+        assert_eq!(arithmetic.brace_expansions[0].body, "a,b");
+
+        let value_arithmetic = &elements[2];
+        assert_eq!(value_arithmetic.name, "nums");
+        assert_eq!(value_arithmetic.subscript, "0");
+        assert_eq!(value_arithmetic.value, "$((n+1))");
+        assert_eq!(value_arithmetic.arithmetic_expansions.len(), 1);
+        assert_eq!(value_arithmetic.arithmetic_expansions[0].expression, "n+1");
+        assert_eq!(value_arithmetic.arithmetic_expansions[0].variables, ["n"]);
+        assert!(value_arithmetic.subscript_parameter_expansions.is_empty());
+        assert!(value_arithmetic.subscript_arithmetic_expansions.is_empty());
+        assert!(value_arithmetic.subscript_brace_expansions.is_empty());
+    }
+
+    #[test]
     fn test_builtin_array_element_assignment_argument_records_word_index() {
         let input = "declare BASH_ARGV[1]=foo";
         let tokens = tokenize(input);

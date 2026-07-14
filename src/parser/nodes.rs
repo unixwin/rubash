@@ -324,6 +324,12 @@ pub struct ArrayElementAssignment {
     pub operator: String,
     pub append: bool,
     pub word_index: Option<usize>,
+    pub subscript_brace_expansions: Vec<BraceExpansion>,
+    pub subscript_parameter_expansions: Vec<ParameterExpansion>,
+    pub subscript_arithmetic_expansions: Vec<ArithmeticExpansion>,
+    pub brace_expansions: Vec<BraceExpansion>,
+    pub parameter_expansions: Vec<ParameterExpansion>,
+    pub arithmetic_expansions: Vec<ArithmeticExpansion>,
 }
 
 /// Represents a parsed `<(...)` or `>(...)` process substitution.

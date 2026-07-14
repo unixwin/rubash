@@ -1,4 +1,7 @@
-use super::{ArrayElementAssignment, CommandNode};
+use super::{
+    arithmetic_expansions_in_word, brace_expansions_in_word, parameter_expansions_in_word,
+    ArrayElementAssignment, CommandNode,
+};
 
 pub(super) fn record_array_element_assignment_for_word(
     command: &mut CommandNode,
@@ -28,13 +31,21 @@ fn array_element_assignment_from_word(word: &str) -> Option<ArrayElementAssignme
         return None;
     };
 
+    let subscript = &word[open + 1..close];
+    let value = &word[value_start..];
     Some(ArrayElementAssignment {
         name: name.to_string(),
-        subscript: word[open + 1..close].to_string(),
-        value: word[value_start..].to_string(),
+        subscript: subscript.to_string(),
+        value: value.to_string(),
         operator: operator.to_string(),
         append,
         word_index: None,
+        subscript_brace_expansions: brace_expansions_in_word(subscript),
+        subscript_parameter_expansions: parameter_expansions_in_word(subscript),
+        subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
+        brace_expansions: brace_expansions_in_word(value),
+        parameter_expansions: parameter_expansions_in_word(value),
+        arithmetic_expansions: arithmetic_expansions_in_word(value),
     })
 }
 
