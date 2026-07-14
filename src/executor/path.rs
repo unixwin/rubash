@@ -167,12 +167,22 @@ fn split_path(path: &str) -> Vec<String> {
             .filter(|entry| !entry.is_empty())
             .map(str::to_string)
             .collect()
+    } else if cfg!(windows) && starts_with_windows_drive(path) {
+        vec![path.to_string()]
     } else {
         path.split(':')
             .filter(|entry| !entry.is_empty())
             .map(str::to_string)
             .collect()
     }
+}
+
+fn starts_with_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 fn has_path_separator(name: &str) -> bool {
@@ -335,10 +345,7 @@ mod tests {
         // This lookup attempts to find "cmd" using only the all-caps PATH key,
         // which is what Executor::new() will hold after the init.rs fix runs.
         let mut env_vars = HashMap::new();
-        env_vars.insert(
-            "PATH".to_string(),
-            target_dir.to_string_lossy().to_string(),
-        );
+        env_vars.insert("PATH".to_string(), target_dir.to_string_lossy().to_string());
         assert_eq!(
             find_user_command("cmd", &env_vars).map(|p| p.to_string_lossy().to_string()),
             Some(marker.to_string_lossy().to_string()),
@@ -361,10 +368,7 @@ mod tests {
         std::fs::write(&marker, "").unwrap();
 
         let mut env_vars = HashMap::new();
-        env_vars.insert(
-            "Path".to_string(),
-            target_dir.to_string_lossy().to_string(),
-        );
+        env_vars.insert("Path".to_string(), target_dir.to_string_lossy().to_string());
 
         // find_user_command has no normalization itself; the init.rs workaround
         // upstream performs the casing mirror. Without that workaround, this
@@ -378,4 +382,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&target_dir);
     }
 }
-
