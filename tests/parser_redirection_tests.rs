@@ -51,6 +51,28 @@ fn test_redirect_target_can_be_brace_expansion_word() {
 }
 
 #[test]
+fn test_redirect_target_records_word_metadata() {
+    let input = "echo hello > $dir/{out,err}.@(log|txt)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+    let redirect = command.redirect_out.as_ref().unwrap();
+    let metadata = &redirect.target_metadata;
+
+    assert_eq!(redirect.target, "$dir/{out,err}.@(log|txt)");
+    assert_eq!(metadata.word_index, 0);
+    assert_eq!(metadata.value, "$dir/{out,err}.@(log|txt)");
+    assert_eq!(metadata.raw, "$dir/{out,err}.@(log|txt)");
+    assert_eq!(metadata.parameter_expansions.len(), 1);
+    assert_eq!(metadata.parameter_expansions[0].text, "$dir");
+    assert_eq!(metadata.brace_expansions.len(), 1);
+    assert_eq!(metadata.brace_expansions[0].body, "out,err");
+    assert_eq!(metadata.extglob_patterns.len(), 1);
+    assert_eq!(metadata.extglob_patterns[0].text, "@(log|txt)");
+    assert_eq!(metadata.extglob_patterns[0].alternatives, ["log", "txt"]);
+}
+
+#[test]
 fn test_redirection_list_records_parse_order() {
     let input = "echo hello > first 2>&1 >> second < input";
     let tokens = tokenize(input);

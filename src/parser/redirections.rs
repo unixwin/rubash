@@ -342,6 +342,7 @@ pub(super) fn redirect_node(
         operator: operator.to_string(),
         kind: redirect_kind(operator, target),
         target: target.to_string(),
+        target_metadata: Box::new(build_word_metadata(0, target, target)),
         append,
         clobber,
     }

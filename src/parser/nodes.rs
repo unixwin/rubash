@@ -8,6 +8,7 @@ pub struct Redirect {
     pub operator: String,
     pub kind: RedirectKind,
     pub target: String,
+    pub target_metadata: Box<WordMetadata>,
     pub append: bool,
     pub clobber: bool,
 }

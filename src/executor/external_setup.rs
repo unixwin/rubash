@@ -280,12 +280,18 @@ impl Executor {
         let path = self.write_process_substitution_temp(&input)?;
         self.env_vars
             .insert(fd_stdin_offset_key(0), self.virtual_fd_stdin_len(0));
+        let target = shell_display_path(&path.to_string_lossy());
         rewritten.redirect_in = Some(Redirect {
             fd: Some(0),
             fd_var: None,
             operator: "<".to_string(),
             kind: crate::parser::RedirectKind::Input,
-            target: shell_display_path(&path.to_string_lossy()),
+            target_metadata: Box::new(crate::parser::WordMetadata::new(
+                0,
+                target.clone(),
+                target.clone(),
+            )),
+            target,
             append: false,
             clobber: false,
         });
