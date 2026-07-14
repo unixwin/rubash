@@ -488,11 +488,29 @@ pub struct WordMetadata {
     pub word_quotes: Vec<WordQuote>,
 }
 
+impl WordMetadata {
+    pub fn new(word_index: usize, value: String, raw: String) -> Self {
+        Self {
+            word_index,
+            brace_expansions: super::brace_expansions_in_word(&value),
+            parameter_expansions: super::parameter_expansions_in_word(&value),
+            arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
+            extglob_patterns: super::extglob_patterns_in_word(&value),
+            tilde_expansions: super::tilde_expansions_in_word(&value),
+            pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
+            word_quotes: super::word_quotes_in_raw(&raw),
+            value,
+            raw,
+        }
+    }
+}
+
 /// Represents a narrow `case` compound command.
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
     pub keyword: String,
     pub word: String,
+    pub word_metadata: WordMetadata,
     pub in_keyword: String,
     pub clauses: Vec<CaseClause>,
     pub end_keyword: String,

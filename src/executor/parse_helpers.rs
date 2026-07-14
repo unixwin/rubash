@@ -119,6 +119,7 @@ pub(in crate::executor) fn case_command_from_words(words: &[String]) -> Option<C
 
     Some(CaseCommand {
         keyword: "case".to_string(),
+        word_metadata: crate::parser::WordMetadata::new(0, word.clone(), word.clone()),
         word,
         in_keyword: "in".to_string(),
         clauses,

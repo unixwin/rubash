@@ -22,18 +22,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
 }
 
 pub(super) fn build_word_metadata(word_index: usize, value: &str, raw: &str) -> WordMetadata {
-    WordMetadata {
-        word_index,
-        value: value.to_string(),
-        raw: raw.to_string(),
-        brace_expansions: brace_expansions_in_word(value),
-        parameter_expansions: parameter_expansions_in_word(value),
-        arithmetic_expansions: arithmetic_expansions_in_word(value),
-        extglob_patterns: extglob_patterns_in_word(value),
-        tilde_expansions: tilde_expansions_in_word(value),
-        pathname_patterns: pathname_patterns_in_word(value, raw),
-        word_quotes: word_quotes_in_raw(raw),
-    }
+    WordMetadata::new(word_index, value.to_string(), raw.to_string())
 }
 
 pub(super) fn collect_compound_word_value(

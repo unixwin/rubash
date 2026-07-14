@@ -5,7 +5,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     // TODO(parse.y/execute_cmd.c): GNU Bash supports nested compound lists and
     // redirections on the compound command. This covers the common
     // `case word in pattern) list terminator` shape.
-    let (word, mut i) = collect_case_word(tokens, start + 1)?;
+    let (word, raw_word, mut i) = collect_case_word(tokens, start + 1)?;
     while i < tokens.len() && !is_keyword(tokens, i, "in") {
         i += 1;
     }
@@ -152,6 +152,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(Box::new(CaseCommand {
         keyword: tokens[start].value.clone(),
+        word_metadata: build_word_metadata(0, &word, &raw_word),
         word,
         in_keyword,
         clauses,
@@ -160,13 +161,20 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     Some(finish_compound_command(command, tokens, i + 1))
 }
 
-fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, usize)> {
-    collect_compound_word_value(tokens, index).or_else(|| {
-        tokens
-            .get(index)
-            .filter(|token| token.kind == TokenKind::Keyword)
-            .map(|token| (token.value.clone(), index + 1))
-    })
+fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, usize)> {
+    if let Some((word, next_i)) = collect_compound_word_value(tokens, index) {
+        let raw = if next_i == index + 1 {
+            tokens[index].raw.clone()
+        } else {
+            word.clone()
+        };
+        return Some((word, raw, next_i));
+    }
+
+    tokens
+        .get(index)
+        .filter(|token| token.kind == TokenKind::Keyword)
+        .map(|token| (token.value.clone(), token.raw.clone(), index + 1))
 }
 
 pub(super) fn mark_case_pattern_literal_backslashes(pattern: &str) -> String {

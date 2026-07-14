@@ -1700,6 +1700,17 @@ mod case_tests {
 
         assert_eq!(case_command.keyword, "case");
         assert_eq!(case_command.word, "$word");
+        assert_eq!(case_command.word_metadata.value, "$word");
+        assert_eq!(case_command.word_metadata.word_index, 0);
+        assert_eq!(case_command.word_metadata.parameter_expansions.len(), 1);
+        assert_eq!(
+            case_command.word_metadata.parameter_expansions[0].text,
+            "$word"
+        );
+        assert_eq!(
+            case_command.word_metadata.parameter_expansions[0].name,
+            "word"
+        );
         assert_eq!(case_command.in_keyword, "in");
         assert_eq!(case_command.end_keyword, "esac");
         assert_eq!(case_command.clauses.len(), 2);
@@ -1781,6 +1792,26 @@ mod case_tests {
         assert_eq!(case_command.word, "<(:)");
         assert_eq!(case_command.in_keyword, "in");
         assert_eq!(case_command.clauses.len(), 1);
+    }
+
+    #[test]
+    fn test_case_word_records_quote_metadata() {
+        let input = "case \"*.rs\" in *.rs) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.word, "*.rs");
+        assert_eq!(case_command.word_metadata.value, "*.rs");
+        assert_eq!(case_command.word_metadata.raw, "\"*.rs\"");
+        assert!(case_command.word_metadata.pathname_patterns.is_empty());
+        assert_eq!(case_command.word_metadata.word_quotes.len(), 1);
+        assert_eq!(case_command.word_metadata.word_quotes[0].text, "\"*.rs\"");
+        assert_eq!(case_command.word_metadata.word_quotes[0].body, "*.rs");
+        assert_eq!(
+            case_command.word_metadata.word_quotes[0].kind,
+            QuoteKind::Double
+        );
     }
 
     #[test]

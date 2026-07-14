@@ -121,6 +121,7 @@ impl Executor {
         Some((
             CaseCommand {
                 keyword: "case".to_string(),
+                word_metadata: crate::parser::WordMetadata::new(0, word.clone(), word.clone()),
                 word,
                 in_keyword: "in".to_string(),
                 clauses,
