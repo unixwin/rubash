@@ -233,6 +233,7 @@ fn fold_time_pipeline_stage_command(mut command: CommandNode) -> CommandNode {
     timed.time_command = Some(TimeCommand {
         keyword: prefix.keyword,
         prefix_words: prefix.prefix_words,
+        prefix_word_metadata: prefix.prefix_word_metadata,
         command: Box::new(command),
         posix_format: prefix.posix_format,
         inverted: prefix.inverted,
@@ -266,6 +267,7 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             timed.time_command = Some(TimeCommand {
                 keyword: prefix.keyword,
                 prefix_words: prefix.prefix_words,
+                prefix_word_metadata: prefix.prefix_word_metadata,
                 command: Box::new(command),
                 posix_format: prefix.posix_format,
                 inverted: prefix.inverted,
@@ -278,6 +280,7 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
 struct TimePipelinePrefix {
     keyword: String,
     prefix_words: Vec<String>,
+    prefix_word_metadata: Vec<WordMetadata>,
     posix_format: bool,
     inverted: bool,
 }
@@ -312,6 +315,7 @@ fn fold_time_simple_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             timed.time_command = Some(TimeCommand {
                 keyword: prefix.keyword,
                 prefix_words: prefix.prefix_words,
+                prefix_word_metadata: prefix.prefix_word_metadata,
                 command: Box::new(command),
                 posix_format: prefix.posix_format,
                 inverted: prefix.inverted,
@@ -349,9 +353,11 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
     let mut posix_format = false;
     let mut inverted = false;
     let mut prefix_words = Vec::new();
+    let mut prefix_word_metadata = Vec::new();
     while let Some(word) = command.words.get(index).map(String::as_str) {
         match word {
             "-p" | "--" | "!" => {
+                prefix_word_metadata.push(build_word_metadata(prefix_words.len(), word, word));
                 prefix_words.push(word.to_string());
                 if word == "-p" {
                     posix_format = true;
@@ -372,6 +378,7 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
     Some(TimePipelinePrefix {
         keyword,
         prefix_words,
+        prefix_word_metadata,
         posix_format,
         inverted,
     })
@@ -544,11 +551,17 @@ fn parse_time_prefixed_compound_command(
     let mut posix_format = false;
     let mut inverted = false;
     let mut prefix_words = Vec::new();
+    let mut prefix_word_metadata = Vec::new();
     let mut i = start + 1;
     while tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
     {
+        prefix_word_metadata.push(build_word_metadata(
+            prefix_words.len(),
+            &tokens[i].value,
+            &tokens[i].raw,
+        ));
         prefix_words.push(tokens[i].value.clone());
         match tokens[i].value.as_str() {
             "-p" => posix_format = true,
@@ -603,6 +616,7 @@ fn parse_time_prefixed_compound_command(
     timed.time_command = Some(TimeCommand {
         keyword: tokens[start].value.clone(),
         prefix_words,
+        prefix_word_metadata,
         command: Box::new(command),
         posix_format,
         inverted,

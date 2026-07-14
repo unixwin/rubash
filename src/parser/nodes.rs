@@ -267,6 +267,7 @@ pub struct AndOrListCommand {
 pub struct TimeCommand {
     pub keyword: String,
     pub prefix_words: Vec<String>,
+    pub prefix_word_metadata: Vec<WordMetadata>,
     pub command: Box<CommandNode>,
     pub posix_format: bool,
     pub inverted: bool,

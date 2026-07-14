@@ -83,6 +83,13 @@ mod pipeline_tests {
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert_eq!(time_command.keyword, "time");
         assert_eq!(time_command.prefix_words, ["-p", "!"]);
+        assert_eq!(time_command.prefix_word_metadata.len(), 2);
+        assert_eq!(time_command.prefix_word_metadata[0].word_index, 0);
+        assert_eq!(time_command.prefix_word_metadata[0].value, "-p");
+        assert_eq!(time_command.prefix_word_metadata[0].raw, "-p");
+        assert_eq!(time_command.prefix_word_metadata[1].word_index, 1);
+        assert_eq!(time_command.prefix_word_metadata[1].value, "!");
+        assert_eq!(time_command.prefix_word_metadata[1].raw, "!");
         assert!(time_command.posix_format);
         assert!(time_command.inverted);
         let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
@@ -256,6 +263,10 @@ mod pipeline_tests {
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert_eq!(time_command.keyword, "time");
         assert_eq!(time_command.prefix_words, ["-p"]);
+        assert_eq!(time_command.prefix_word_metadata.len(), 1);
+        assert_eq!(time_command.prefix_word_metadata[0].word_index, 0);
+        assert_eq!(time_command.prefix_word_metadata[0].value, "-p");
+        assert_eq!(time_command.prefix_word_metadata[0].raw, "-p");
         assert!(time_command.posix_format);
         assert!(!time_command.inverted);
         let for_command = time_command.command.for_command.as_ref().unwrap();
