@@ -16,7 +16,9 @@ pub(super) fn parse_function_command(
     } else {
         (start, start + 1)
     };
-    let name = tokens.get(name_index)?.value.clone();
+    let name_token = tokens.get(name_index)?;
+    let name = name_token.value.clone();
+    let name_raw = name_token.raw.clone();
     if !(is_function_name(&name) || (keyword_form && is_function_keyword_name(&name))) {
         return None;
     }
@@ -56,7 +58,8 @@ pub(super) fn parse_function_command(
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
-            name,
+            name.clone(),
+            name_raw.clone(),
             body,
             keyword_form,
             has_parentheses,
@@ -73,7 +76,8 @@ pub(super) fn parse_function_command(
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
-            name,
+            name.clone(),
+            name_raw.clone(),
             vec![body_command],
             keyword_form,
             has_parentheses,
@@ -92,7 +96,8 @@ pub(super) fn parse_function_command(
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
-            name,
+            name.clone(),
+            name_raw.clone(),
             body,
             keyword_form,
             has_parentheses,
@@ -110,7 +115,8 @@ pub(super) fn parse_function_command(
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
-            name,
+            name.clone(),
+            name_raw.clone(),
             body,
             keyword_form,
             has_parentheses,
@@ -141,6 +147,7 @@ pub(super) fn parse_function_command(
     command.line = tokens.get(start).map(|token| token.position);
     command.function_command = Some(function_command(
         name,
+        name_raw,
         body,
         keyword_form,
         has_parentheses,
@@ -168,6 +175,7 @@ fn finish_function_command(
 
 fn function_command(
     name: String,
+    name_raw: String,
     body: Vec<CommandNode>,
     keyword: bool,
     has_parentheses: bool,
@@ -182,6 +190,7 @@ fn function_command(
     };
 
     Box::new(FunctionCommand {
+        name_metadata: build_word_metadata(0, &name, &name_raw),
         name,
         body,
         keyword,

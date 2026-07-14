@@ -802,6 +802,7 @@ pub struct SelectCommand {
 #[derive(Debug, Clone)]
 pub struct FunctionCommand {
     pub name: String,
+    pub name_metadata: WordMetadata,
     pub body: Vec<CommandNode>,
     pub keyword: bool,
     pub keyword_text: Option<String>,

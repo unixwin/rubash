@@ -936,6 +936,10 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "greet");
+        assert_eq!(function.name_metadata.word_index, 0);
+        assert_eq!(function.name_metadata.value, "greet");
+        assert_eq!(function.name_metadata.raw, "greet");
+        assert!(function.name_metadata.word_quotes.is_empty());
         assert!(function.keyword);
         assert_eq!(function.keyword_text.as_deref(), Some("function"));
         assert!(!function.has_parentheses);
@@ -1019,6 +1023,9 @@ mod function_tests {
         assert_eq!(ast.commands.len(), 1);
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.name, "foo-a");
+        assert_eq!(function.name_metadata.value, "foo-a");
+        assert_eq!(function.name_metadata.raw, "foo-a");
+        assert!(function.name_metadata.pathname_patterns.is_empty());
         assert!(!function.keyword);
         assert_eq!(function.keyword_text, None);
         assert!(function.has_parentheses);
