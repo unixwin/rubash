@@ -42,6 +42,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
+                Vec::new(),
                 CoprocBodyKind::BraceGroup,
                 Some(("{".to_string(), "}".to_string())),
                 Some(body),
@@ -56,6 +57,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
+                Vec::new(),
                 CoprocBodyKind::BraceGroup,
                 Some((tokens[i].value.clone(), tokens[close_i].value.clone())),
                 Some(body),
@@ -69,6 +71,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.coproc_command = Some(coproc_command(
                 name,
                 Vec::new(),
+                Vec::new(),
                 CoprocBodyKind::CompoundCommand,
                 None,
                 Some(vec![body_command]),
@@ -81,6 +84,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             command.line = tokens.get(start).map(|t| t.position);
             command.coproc_command = Some(coproc_command(
                 name,
+                Vec::new(),
                 Vec::new(),
                 CoprocBodyKind::CommandSequence,
                 None,
@@ -118,6 +122,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 command.coproc_command = Some(coproc_command(
                     name,
                     Vec::new(),
+                    Vec::new(),
                     CoprocBodyKind::Subshell,
                     Some(("(".to_string(), tokens[i].value.clone())),
                     Some(body),
@@ -129,8 +134,15 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     // Simple command: collect remaining tokens as words
     let mut words = Vec::new();
+    let mut word_metadata = Vec::new();
     while i < tokens.len() {
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
+            let raw = if next_i == i + 1 {
+                tokens[i].raw.as_str()
+            } else {
+                word.as_str()
+            };
+            word_metadata.push(build_word_metadata(words.len(), &word, raw));
             words.push(word);
             i = next_i;
         } else {
@@ -147,6 +159,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     command.coproc_command = Some(coproc_command(
         name,
         words,
+        word_metadata,
         CoprocBodyKind::SimpleCommand,
         None,
         None,
@@ -172,6 +185,7 @@ fn finish_coproc_command(
 fn coproc_command(
     name: Option<String>,
     words: Vec<String>,
+    word_metadata: Vec<WordMetadata>,
     body_kind: CoprocBodyKind,
     body_delimiters: Option<(String, String)>,
     body: Option<Vec<CommandNode>>,
@@ -183,6 +197,7 @@ fn coproc_command(
         keyword: "coproc".to_string(),
         name,
         words,
+        word_metadata,
         body_kind,
         body_open_delimiter,
         body_close_delimiter,

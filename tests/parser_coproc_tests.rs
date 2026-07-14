@@ -1,5 +1,5 @@
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, CoprocBodyKind};
+use rubash::parser::{parse, CoprocBodyKind, QuoteKind};
 
 #[test]
 fn test_named_coproc_parses_split_brace_group_body() {
@@ -81,6 +81,36 @@ fn test_coproc_simple_command_keeps_process_substitution_words() {
     assert_eq!(coproc.name, None);
     assert_eq!(coproc.words, ["cat", "<(:)", ">(:)"]);
     assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
+}
+
+#[test]
+fn test_coproc_simple_command_records_word_metadata() {
+    let input = "coproc echo $value \"*.rs\" pre{a,b}";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.words, ["echo", "$value", "*.rs", "pre{a,b}"]);
+    assert_eq!(coproc.word_metadata.len(), 4);
+    assert_eq!(coproc.word_metadata[1].value, "$value");
+    assert_eq!(coproc.word_metadata[1].parameter_expansions.len(), 1);
+    assert_eq!(
+        coproc.word_metadata[1].parameter_expansions[0].name,
+        "value"
+    );
+
+    assert_eq!(coproc.word_metadata[2].raw, "\"*.rs\"");
+    assert!(coproc.word_metadata[2].pathname_patterns.is_empty());
+    assert_eq!(coproc.word_metadata[2].word_quotes.len(), 1);
+    assert_eq!(
+        coproc.word_metadata[2].word_quotes[0].kind,
+        QuoteKind::Double
+    );
+
+    assert_eq!(coproc.word_metadata[3].brace_expansions.len(), 1);
+    assert_eq!(coproc.word_metadata[3].brace_expansions[0].text, "{a,b}");
+    assert_eq!(coproc.word_metadata[3].brace_expansions[0].body, "a,b");
 }
 
 #[test]

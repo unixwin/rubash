@@ -739,6 +739,7 @@ pub struct CoprocCommand {
     pub name: Option<String>,
     /// The command words (for simple commands)
     pub words: Vec<String>,
+    pub word_metadata: Vec<WordMetadata>,
     pub body_kind: CoprocBodyKind,
     pub body_open_delimiter: Option<String>,
     pub body_close_delimiter: Option<String>,
