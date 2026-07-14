@@ -30,7 +30,7 @@ pub(super) fn record_command_substitutions_for_assignment(
     command.command_substitutions.extend(substitutions);
 }
 
-fn command_substitutions_in_word(word: &str) -> Vec<CommandSubstitutionNode> {
+pub(super) fn command_substitutions_in_word(word: &str) -> Vec<CommandSubstitutionNode> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut substitutions = Vec::new();
     let mut index = 0;

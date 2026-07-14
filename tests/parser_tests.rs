@@ -702,6 +702,31 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_word_metadata_records_command_substitution() {
+        let tokens = tokenize("for x in $(printf a) `printf b`; do :; done");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+
+        assert_eq!(for_command.words, ["$(printf a)", "`printf b`"]);
+        assert_eq!(for_command.word_metadata.len(), 2);
+        assert_eq!(for_command.word_metadata[0].command_substitutions.len(), 1);
+        let dollar = &for_command.word_metadata[0].command_substitutions[0];
+        assert_eq!(dollar.text, "$(printf a)");
+        assert_eq!(dollar.source, "printf a");
+        assert!(!dollar.backtick);
+        assert_eq!(dollar.word_index, Some(0));
+        assert_eq!(dollar.commands[0].words, ["printf", "a"]);
+
+        assert_eq!(for_command.word_metadata[1].command_substitutions.len(), 1);
+        let backtick = &for_command.word_metadata[1].command_substitutions[0];
+        assert_eq!(backtick.text, "`printf b`");
+        assert_eq!(backtick.source, "printf b");
+        assert!(backtick.backtick);
+        assert_eq!(backtick.word_index, Some(1));
+        assert_eq!(backtick.commands[0].words, ["printf", "b"]);
+    }
+
+    #[test]
     fn test_loop_bodies_keep_case_patterns_named_like_delimiters() {
         let for_tokens = tokenize("for x in one; do case done in done) echo for ;; esac; done");
         let for_ast = parse(&for_tokens);

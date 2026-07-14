@@ -371,6 +371,23 @@ pub struct CommandSubstitutionNode {
     pub assignment_name: Option<String>,
 }
 
+impl PartialEq for CommandSubstitutionNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text
+            && self.open_delimiter == other.open_delimiter
+            && self.operator == other.operator
+            && self.source == other.source
+            && self.close_delimiter == other.close_delimiter
+            && self.backtick == other.backtick
+            && self.current_shell == other.current_shell
+            && self.pipe_output == other.pipe_output
+            && self.word_index == other.word_index
+            && self.assignment_name == other.assignment_name
+    }
+}
+
+impl Eq for CommandSubstitutionNode {}
+
 /// Represents a parsed `$(( expression ))` arithmetic expansion inside a word.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArithmeticExpansion {
@@ -484,6 +501,7 @@ pub struct WordMetadata {
     pub value: String,
     pub raw: String,
     pub brace_expansions: Vec<BraceExpansion>,
+    pub command_substitutions: Vec<CommandSubstitutionNode>,
     pub parameter_expansions: Vec<ParameterExpansion>,
     pub arithmetic_expansions: Vec<ArithmeticExpansion>,
     pub extglob_patterns: Vec<ExtglobPattern>,
@@ -494,9 +512,18 @@ pub struct WordMetadata {
 
 impl WordMetadata {
     pub fn new(word_index: usize, value: String, raw: String) -> Self {
+        let command_substitutions = super::command_substitutions_in_word(&value)
+            .into_iter()
+            .map(|mut substitution| {
+                substitution.word_index = Some(word_index);
+                substitution
+            })
+            .collect();
+
         Self {
             word_index,
             brace_expansions: super::brace_expansions_in_word(&value),
+            command_substitutions,
             parameter_expansions: super::parameter_expansions_in_word(&value),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
             extglob_patterns: super::extglob_patterns_in_word(&value),
