@@ -10,7 +10,16 @@ pub(super) fn parse_conditional_command(
     }
 
     let end = matching_conditional_end(tokens, start)?;
-    let args = collect_conditional_args(tokens, start + 1, end);
+    let arg_parts = collect_conditional_args(tokens, start + 1, end);
+    let args = arg_parts
+        .iter()
+        .map(|(arg, _)| arg.clone())
+        .collect::<Vec<_>>();
+    let arg_metadata = arg_parts
+        .iter()
+        .enumerate()
+        .map(|(index, (arg, raw))| build_word_metadata(index, arg, raw))
+        .collect::<Vec<_>>();
     let expression_args = args
         .strip_suffix(&["]]".to_string()])
         .unwrap_or(args.as_slice());
@@ -23,6 +32,7 @@ pub(super) fn parse_conditional_command(
     command.conditional_command = Some(Box::new(ConditionalCommand {
         open_delimiter: tokens[start].value.clone(),
         args,
+        arg_metadata,
         close_delimiter: tokens[end].value.clone(),
         expression,
     }));
@@ -30,21 +40,30 @@ pub(super) fn parse_conditional_command(
     Some(finish_compound_command(command, tokens, end + 1))
 }
 
-fn collect_conditional_args(tokens: &[Token], mut index: usize, end: usize) -> Vec<String> {
+fn collect_conditional_args(
+    tokens: &[Token],
+    mut index: usize,
+    end: usize,
+) -> Vec<(String, String)> {
     let mut args = Vec::new();
     while index <= end {
         if index == end {
-            args.push(tokens[index].value.clone());
+            args.push((tokens[index].value.clone(), tokens[index].raw.clone()));
             break;
         }
 
         if let Some((word, next_i)) = collect_compound_word_value(tokens, index) {
-            args.push(word);
+            let raw = if next_i == index + 1 {
+                tokens[index].raw.clone()
+            } else {
+                word.clone()
+            };
+            args.push((word, raw));
             index = next_i;
             continue;
         }
 
-        args.push(tokens[index].value.clone());
+        args.push((tokens[index].value.clone(), tokens[index].raw.clone()));
         index += 1;
     }
     args

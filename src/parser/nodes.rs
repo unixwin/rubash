@@ -148,6 +148,7 @@ pub enum LoopKind {
 pub struct ConditionalCommand {
     pub open_delimiter: String,
     pub args: Vec<String>,
+    pub arg_metadata: Vec<WordMetadata>,
     pub close_delimiter: String,
     pub expression: ConditionalExpression,
 }

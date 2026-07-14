@@ -1675,6 +1675,56 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_records_arg_metadata() {
+        let input = "[[ $value == \"*.rs\" && $((count+1)) -gt 2 ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        assert_eq!(
+            conditional.args,
+            [
+                "$value",
+                "==",
+                "*.rs",
+                "&&",
+                "$((count+1))",
+                "-gt",
+                "2",
+                "]]"
+            ]
+        );
+        assert_eq!(conditional.arg_metadata.len(), conditional.args.len());
+        assert_eq!(conditional.arg_metadata[0].word_index, 0);
+        assert_eq!(conditional.arg_metadata[0].value, "$value");
+        assert_eq!(conditional.arg_metadata[0].parameter_expansions.len(), 1);
+        assert_eq!(
+            conditional.arg_metadata[0].parameter_expansions[0].name,
+            "value"
+        );
+
+        assert_eq!(conditional.arg_metadata[2].value, "*.rs");
+        assert_eq!(conditional.arg_metadata[2].raw, "\"*.rs\"");
+        assert!(conditional.arg_metadata[2].pathname_patterns.is_empty());
+        assert_eq!(conditional.arg_metadata[2].word_quotes.len(), 1);
+        assert_eq!(
+            conditional.arg_metadata[2].word_quotes[0].kind,
+            QuoteKind::Double
+        );
+
+        assert_eq!(conditional.arg_metadata[4].arithmetic_expansions.len(), 1);
+        assert_eq!(
+            conditional.arg_metadata[4].arithmetic_expansions[0].expression,
+            "count+1"
+        );
+        assert_eq!(
+            conditional.arg_metadata[4].arithmetic_expansions[0].variables,
+            ["count"]
+        );
+        assert_eq!(conditional.arg_metadata[7].value, "]]");
+    }
+
+    #[test]
     fn test_conditional_command_consumes_trailing_redirects() {
         let input = "[[ -n $value ]] > out && echo ok";
         let tokens = tokenize(input);
