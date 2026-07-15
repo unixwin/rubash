@@ -1486,6 +1486,22 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_definition_keeps_trailing_heredoc_body() {
+        let input = "foo() { read line; echo $line; } <<EOF\nbody\nEOF\nfoo";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let command = &ast.commands[0];
+
+        assert!(command.function_command.is_some());
+        assert_eq!(command.heredoc_delimiter.as_deref(), Some("EOF"));
+        assert_eq!(command.heredoc.as_deref(), Some("body\n"));
+        assert_eq!(command.heredoc_redirects.len(), 1);
+        assert_eq!(command.heredoc_redirects[0].body.as_deref(), Some("body\n"));
+        assert_eq!(ast.commands[1].words, ["foo"]);
+    }
+
+    #[test]
     fn test_function_definition_consumes_and_or_connector() {
         let input = "foo() { echo hi; } && echo done";
         let tokens = tokenize(input);
