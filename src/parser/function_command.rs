@@ -26,6 +26,15 @@ pub(super) fn parse_function_command(
     let has_parentheses = tokens.get(i).is_some_and(|token| {
         token.value == "(" && tokens.get(i + 1).is_some_and(|next| next.value == ")")
     });
+    let keyword_metadata = keyword_form.then(|| build_token_metadata(&tokens[start]));
+    let (open_paren_metadata, close_paren_metadata) = if has_parentheses {
+        (
+            Some(build_token_metadata(tokens.get(i)?)),
+            Some(build_token_metadata(tokens.get(i + 1)?)),
+        )
+    } else {
+        (None, None)
+    };
     if has_parentheses {
         if tokens.get(i + 1)?.value != ")" {
             return None;
@@ -62,7 +71,10 @@ pub(super) fn parse_function_command(
             name_raw.clone(),
             body,
             keyword_form,
+            keyword_metadata.clone(),
             has_parentheses,
+            open_paren_metadata.clone(),
+            close_paren_metadata.clone(),
             FunctionBodyKind::BraceGroup,
             Some(i),
             Some(i),
@@ -80,7 +92,10 @@ pub(super) fn parse_function_command(
             name_raw.clone(),
             vec![body_command],
             keyword_form,
+            keyword_metadata.clone(),
             has_parentheses,
+            open_paren_metadata.clone(),
+            close_paren_metadata.clone(),
             FunctionBodyKind::CompoundCommand,
             Some(i),
             body_end.checked_sub(1),
@@ -100,7 +115,10 @@ pub(super) fn parse_function_command(
             name_raw.clone(),
             body,
             keyword_form,
+            keyword_metadata.clone(),
             has_parentheses,
+            open_paren_metadata.clone(),
+            close_paren_metadata.clone(),
             FunctionBodyKind::Subshell,
             Some(i),
             Some(close_i),
@@ -119,7 +137,10 @@ pub(super) fn parse_function_command(
             name_raw.clone(),
             body,
             keyword_form,
+            keyword_metadata.clone(),
             has_parentheses,
+            open_paren_metadata.clone(),
+            close_paren_metadata.clone(),
             FunctionBodyKind::CommandSequence,
             Some(i),
             body_end.checked_sub(1),
@@ -150,7 +171,10 @@ pub(super) fn parse_function_command(
         name_raw,
         body,
         keyword_form,
+        keyword_metadata,
         has_parentheses,
+        open_paren_metadata,
+        close_paren_metadata,
         FunctionBodyKind::BraceGroup,
         Some(body_start),
         i.checked_sub(1),
@@ -178,15 +202,35 @@ fn function_command(
     name_raw: String,
     body: Vec<CommandNode>,
     keyword: bool,
+    keyword_metadata: Option<Box<WordMetadata>>,
     has_parentheses: bool,
+    open_paren_metadata: Option<Box<WordMetadata>>,
+    close_paren_metadata: Option<Box<WordMetadata>>,
     body_kind: FunctionBodyKind,
     body_start: Option<usize>,
     body_end: Option<usize>,
 ) -> Box<FunctionCommand> {
-    let (body_open_delimiter, body_close_delimiter) = match body_kind {
-        FunctionBodyKind::BraceGroup => (Some("{".to_string()), Some("}".to_string())),
-        FunctionBodyKind::Subshell => (Some("(".to_string()), Some(")".to_string())),
-        FunctionBodyKind::CommandSequence | FunctionBodyKind::CompoundCommand => (None, None),
+    let (
+        body_open_delimiter,
+        body_open_delimiter_metadata,
+        body_close_delimiter,
+        body_close_delimiter_metadata,
+    ) = match body_kind {
+        FunctionBodyKind::BraceGroup => (
+            Some("{".to_string()),
+            Some(delimiter_metadata("{")),
+            Some("}".to_string()),
+            Some(delimiter_metadata("}")),
+        ),
+        FunctionBodyKind::Subshell => (
+            Some("(".to_string()),
+            Some(delimiter_metadata("(")),
+            Some(")".to_string()),
+            Some(delimiter_metadata(")")),
+        ),
+        FunctionBodyKind::CommandSequence | FunctionBodyKind::CompoundCommand => {
+            (None, None, None, None)
+        }
     };
 
     Box::new(FunctionCommand {
@@ -195,15 +239,28 @@ fn function_command(
         body,
         keyword,
         keyword_text: keyword.then(|| "function".to_string()),
+        keyword_metadata,
         has_parentheses,
         open_paren: has_parentheses.then(|| "(".to_string()),
+        open_paren_metadata,
         close_paren: has_parentheses.then(|| ")".to_string()),
+        close_paren_metadata,
         body_kind,
         body_open_delimiter,
+        body_open_delimiter_metadata,
         body_close_delimiter,
+        body_close_delimiter_metadata,
         body_start,
         body_end,
     })
+}
+
+fn build_token_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, delimiter, delimiter))
 }
 
 fn parse_function_command_sequence_body(

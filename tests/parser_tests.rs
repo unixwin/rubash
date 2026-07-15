@@ -1014,12 +1014,35 @@ mod function_tests {
         assert!(function.name_metadata.word_quotes.is_empty());
         assert!(function.keyword);
         assert_eq!(function.keyword_text.as_deref(), Some("function"));
+        assert_eq!(
+            function.keyword_metadata.as_ref().unwrap().value,
+            "function"
+        );
+        assert_eq!(function.keyword_metadata.as_ref().unwrap().raw, "function");
         assert!(!function.has_parentheses);
         assert_eq!(function.open_paren, None);
+        assert!(function.open_paren_metadata.is_none());
         assert_eq!(function.close_paren, None);
+        assert!(function.close_paren_metadata.is_none());
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(
+            function
+                .body_open_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            "{"
+        );
         assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
+        assert_eq!(
+            function
+                .body_close_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            "}"
+        );
         assert!(function.body_start.is_some());
         assert!(function.body_end.is_some());
         assert_eq!(function.body.len(), 1);
@@ -1078,9 +1101,15 @@ mod function_tests {
         assert_eq!(function.name, "greet");
         assert!(function.keyword);
         assert_eq!(function.keyword_text.as_deref(), Some("function"));
+        assert_eq!(
+            function.keyword_metadata.as_ref().unwrap().value,
+            "function"
+        );
         assert!(function.has_parentheses);
         assert_eq!(function.open_paren.as_deref(), Some("("));
+        assert_eq!(function.open_paren_metadata.as_ref().unwrap().value, "(");
         assert_eq!(function.close_paren.as_deref(), Some(")"));
+        assert_eq!(function.close_paren_metadata.as_ref().unwrap().value, ")");
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
         assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
@@ -1154,6 +1183,9 @@ mod function_tests {
         let function = ast.commands[0].function_command.as_ref().unwrap();
         assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
         assert_eq!(function.body_open_delimiter.as_deref(), Some("{"));
+        assert!(function.keyword_metadata.is_none());
+        assert_eq!(function.open_paren_metadata.as_ref().unwrap().value, "(");
+        assert_eq!(function.close_paren_metadata.as_ref().unwrap().value, ")");
         assert_eq!(function.body_close_delimiter.as_deref(), Some("}"));
         assert_eq!(ast.commands[0].redirect_out.as_ref().unwrap().target, "out");
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
@@ -1171,7 +1203,23 @@ mod function_tests {
         assert!(function.has_parentheses);
         assert_eq!(function.body_kind, FunctionBodyKind::Subshell);
         assert_eq!(function.body_open_delimiter.as_deref(), Some("("));
+        assert_eq!(
+            function
+                .body_open_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            "("
+        );
         assert_eq!(function.body_close_delimiter.as_deref(), Some(")"));
+        assert_eq!(
+            function
+                .body_close_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ")"
+        );
         assert!(function.body_start.is_some());
         assert!(function.body_end.is_some());
         assert_eq!(function.body[0].words, ["echo", "hi"]);
