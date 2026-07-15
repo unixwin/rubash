@@ -528,8 +528,10 @@ pub struct ArithmeticExpansion {
 pub struct ParameterExpansion {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub parameter: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub name: String,
     pub operator: Option<String>,
     pub operator_prefix: bool,

@@ -123,8 +123,10 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
                         ParameterExpansion {
                             text: chars[start..=index].iter().collect(),
                             open_delimiter: "${".to_string(),
+                            open_delimiter_metadata: delimiter_metadata("${"),
                             parameter,
                             close_delimiter: "}".to_string(),
+                            close_delimiter_metadata: delimiter_metadata("}"),
                             name,
                             operator,
                             operator_prefix,
@@ -215,9 +217,11 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
     ParameterExpansion {
         text: chars[start..end].iter().collect(),
         open_delimiter: "$".to_string(),
+        open_delimiter_metadata: delimiter_metadata("$"),
         name: parameter.clone(),
         parameter,
         close_delimiter: String::new(),
+        close_delimiter_metadata: delimiter_metadata(""),
         operator: None,
         operator_prefix: false,
         word: None,
@@ -225,6 +229,14 @@ fn simple_expansion(chars: &[char], start: usize, end: usize) -> ParameterExpans
         word_index: None,
         assignment_name: None,
     }
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }
 
 fn parameter_parts(parameter: &str) -> (String, Option<String>, bool, Option<String>) {
