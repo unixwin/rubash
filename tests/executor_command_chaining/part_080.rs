@@ -405,6 +405,40 @@ fn test_leading_combined_redirects_apply_to_simple_command() {
 }
 
 #[test]
+fn test_leading_process_substitution_redirects_apply_to_simple_command() {
+    let output_path = "target/rubash-leading-process-substitution-output.txt";
+    let combined_path = "target/rubash-leading-combined-process-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(combined_path);
+    let input = format!(
+        "> >(cat > {output_path}) echo out; \
+         &> >(cat > {combined_path}) sh -c 'echo both-out; printf both-err >&2'"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let mut output = String::new();
+    let mut combined = String::new();
+    for _ in 0..20 {
+        output = fs::read_to_string(output_path).unwrap_or_default();
+        combined = fs::read_to_string(combined_path).unwrap_or_default();
+        if output == "out\n" && combined == "both-out\nboth-err" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "out\n");
+    assert_eq!(combined, "both-out\nboth-err");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(combined_path);
+}
+
+#[test]
 fn test_stdout_fd_close_does_not_create_file() {
     let output_path = "target/rubash-stdout-fd-close-output.txt";
     let closed_path = "&-";

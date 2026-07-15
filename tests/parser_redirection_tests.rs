@@ -183,6 +183,26 @@ fn test_output_process_substitution_redirect() {
 }
 
 #[test]
+fn test_leading_output_process_substitution_redirect() {
+    let input = "> >(cat > out.txt) echo hello";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    assert_eq!(ast.commands[0].words, ["echo", "hello"]);
+    assert_eq!(
+        ast.commands[0].redirect_out.as_ref().unwrap().target,
+        ">(cat > out.txt)"
+    );
+    let process = ast.commands[0].process_substitutions.as_slice();
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].target, ">(cat > out.txt)");
+    assert_eq!(process[0].source, "cat > out.txt");
+    assert!(process[0].output);
+    assert_eq!(process[0].word_index, None);
+    assert_eq!(process[0].redirect_fd, None);
+}
+
+#[test]
 fn test_prefixed_output_process_substitution_redirect() {
     let input = "exec 3> >(cat > out.txt)";
     let tokens = tokenize(input);
