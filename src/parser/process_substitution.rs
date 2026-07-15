@@ -235,6 +235,7 @@ fn collect_process_substitution_target_with_prefix(
             open_delimiter_metadata: delimiter_metadata(&prefix),
             open_delimiter: prefix,
             operator: operator.to_string(),
+            operator_metadata: delimiter_metadata(operator),
             source,
             close_delimiter_metadata: delimiter_metadata(")"),
             close_delimiter: ")".to_string(),

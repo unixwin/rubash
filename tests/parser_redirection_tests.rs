@@ -151,6 +151,8 @@ fn test_output_process_substitution_redirect() {
     assert_eq!(process[0].target, ">(cat > out.txt)");
     assert_eq!(process[0].open_delimiter, ">(");
     assert_eq!(process[0].operator, ">");
+    assert_eq!(process[0].operator_metadata.value, ">");
+    assert_eq!(process[0].operator_metadata.raw, ">");
     assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "cat > out.txt");
     assert_eq!(process[0].commands.len(), 1);
@@ -345,6 +347,8 @@ fn test_input_process_substitution_redirect_records_structured_ast() {
     assert_eq!(process[0].target, "<(printf data)");
     assert_eq!(process[0].open_delimiter, "<(");
     assert_eq!(process[0].operator, "<");
+    assert_eq!(process[0].operator_metadata.value, "<");
+    assert_eq!(process[0].operator_metadata.raw, "<");
     assert_eq!(process[0].close_delimiter, ")");
     assert_eq!(process[0].source, "printf data");
     assert_eq!(process[0].commands.len(), 1);
