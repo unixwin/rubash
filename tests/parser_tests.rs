@@ -5230,6 +5230,28 @@ mod background_tests {
         assert_eq!(case_command.clauses[0].body[0].words, ["echo", "yes"]);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_loop_commands() {
+        let while_ast = parse(&tokenize(
+            "while true; do echo loop; break; done & echo done",
+        ));
+        let until_ast = parse(&tokenize("until true; do echo loop; done & echo done"));
+
+        let while_background = while_ast.commands[0].background_command.as_ref().unwrap();
+        let while_command = while_background.command.loop_command.as_ref().unwrap();
+        let until_background = until_ast.commands[0].background_command.as_ref().unwrap();
+        let until_command = until_background.command.loop_command.as_ref().unwrap();
+
+        assert_eq!(while_background.operator, "&");
+        assert_eq!(while_command.kind, LoopKind::While);
+        assert_eq!(while_command.body[0].words, ["echo", "loop"]);
+        assert_eq!(while_ast.commands[1].words, ["echo", "done"]);
+        assert_eq!(until_background.operator, "&");
+        assert_eq!(until_command.kind, LoopKind::Until);
+        assert_eq!(until_command.condition[0].words, ["true"]);
+        assert_eq!(until_ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
