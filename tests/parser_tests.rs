@@ -56,6 +56,10 @@ mod pipeline_tests {
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 2);
         assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.operator_metadata.len(), 1);
+        assert_eq!(pipeline.operator_metadata[0].word_index, 0);
+        assert_eq!(pipeline.operator_metadata[0].value, "|");
+        assert_eq!(pipeline.operator_metadata[0].raw, "|");
         assert_eq!(pipeline.stages[0].words, ["ls"]);
         assert!(pipeline.stages[0].pipe.is_some());
         assert_eq!(pipeline.stages[1].words, ["grep", "foo"]);
@@ -70,6 +74,8 @@ mod pipeline_tests {
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 2);
         assert_eq!(pipeline.operators, ["|&"]);
+        assert_eq!(pipeline.operator_metadata[0].value, "|&");
+        assert_eq!(pipeline.operator_metadata[0].raw, "|&");
         assert_eq!(pipeline.stages[0].pipe, Some(2));
         assert_eq!(pipeline.stages[1].words, ["grep", "err"]);
     }
@@ -195,6 +201,9 @@ mod pipeline_tests {
         let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
         assert_eq!(pipeline.stages.len(), 3);
         assert_eq!(pipeline.operators, ["|", "|"]);
+        assert_eq!(pipeline.operator_metadata.len(), 2);
+        assert_eq!(pipeline.operator_metadata[1].word_index, 1);
+        assert_eq!(pipeline.operator_metadata[1].value, "|");
         assert_eq!(pipeline.stages[2].words, ["sort"]);
     }
 
@@ -207,6 +216,8 @@ mod pipeline_tests {
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
         assert_eq!(list.connectors, [true]);
         assert_eq!(list.operators, ["&&"]);
+        assert_eq!(list.operator_metadata[0].value, "&&");
+        assert_eq!(list.operator_metadata[0].raw, "&&");
         assert!(list.commands[0].pipeline_command.is_some());
         assert_eq!(list.commands[1].words, ["echo", "ok"]);
     }
@@ -252,6 +263,11 @@ mod pipeline_tests {
         let list = ast.commands[0].and_or_list.as_ref().unwrap();
         assert_eq!(list.connectors, [false, true]);
         assert_eq!(list.operators, ["||", "&&"]);
+        assert_eq!(list.operator_metadata.len(), 2);
+        assert_eq!(list.operator_metadata[0].word_index, 0);
+        assert_eq!(list.operator_metadata[0].value, "||");
+        assert_eq!(list.operator_metadata[1].word_index, 1);
+        assert_eq!(list.operator_metadata[1].value, "&&");
         assert_eq!(list.commands[0].words, ["false"]);
         assert_eq!(list.commands[1].words, ["echo", "fallback"]);
         assert_eq!(list.commands[2].words, ["echo", "done"]);

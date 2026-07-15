@@ -316,6 +316,7 @@ pub struct BraceGroupCommand {
 pub struct PipelineCommand {
     pub stages: Vec<CommandNode>,
     pub operators: Vec<String>,
+    pub operator_metadata: Vec<WordMetadata>,
 }
 
 /// Represents commands connected by `&&` and `||`.
@@ -324,6 +325,7 @@ pub struct AndOrListCommand {
     pub commands: Vec<CommandNode>,
     pub connectors: Vec<bool>,
     pub operators: Vec<String>,
+    pub operator_metadata: Vec<WordMetadata>,
 }
 
 /// Represents `time [-p] [!] command`.

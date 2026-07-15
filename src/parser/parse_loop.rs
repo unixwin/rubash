@@ -143,6 +143,7 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         list.and_or_list = Some(AndOrListCommand {
             commands: list_commands,
             connectors,
+            operator_metadata: operators_metadata(&operators),
             operators,
         });
         folded.push(list);
@@ -195,10 +196,22 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         if let Some(first_stage) = stages.first_mut() {
             first_stage.inverted = false;
         }
-        pipeline.pipeline_command = Some(PipelineCommand { stages, operators });
+        pipeline.pipeline_command = Some(PipelineCommand {
+            stages,
+            operator_metadata: operators_metadata(&operators),
+            operators,
+        });
         folded.push(pipeline);
     }
     folded
+}
+
+fn operators_metadata(operators: &[String]) -> Vec<WordMetadata> {
+    operators
+        .iter()
+        .enumerate()
+        .map(|(index, operator)| build_word_metadata(index, operator, operator))
+        .collect()
 }
 
 fn looks_like_case_pattern_alternate(stages: &[CommandNode]) -> bool {
