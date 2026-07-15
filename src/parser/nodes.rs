@@ -342,6 +342,7 @@ pub struct TimeCommand {
 #[derive(Debug, Clone)]
 pub struct BackgroundCommand {
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub command: Box<CommandNode>,
 }
 
@@ -349,6 +350,7 @@ pub struct BackgroundCommand {
 #[derive(Debug, Clone)]
 pub struct InvertedCommand {
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub command: Box<CommandNode>,
 }
 

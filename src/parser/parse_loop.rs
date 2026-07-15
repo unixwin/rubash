@@ -64,6 +64,7 @@ fn fold_inverted_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             inverted.background = background_flag;
             inverted.inverted_command = Some(InvertedCommand {
                 operator: "!".to_string(),
+                operator_metadata: operator_metadata("!"),
                 command: Box::new(command),
             });
             inverted
@@ -85,11 +86,16 @@ fn fold_background_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             background.line = line;
             background.background_command = Some(BackgroundCommand {
                 operator: "&".to_string(),
+                operator_metadata: operator_metadata("&"),
                 command: Box::new(command),
             });
             background
         })
         .collect()
+}
+
+fn operator_metadata(operator: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, operator, operator))
 }
 
 fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
