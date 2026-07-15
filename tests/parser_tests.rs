@@ -349,6 +349,29 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_keeps_heredoc_body() {
+        let input = "time -p cat <<EOF\nalpha\nEOF";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p"]);
+        assert_eq!(time_command.command.words, ["cat"]);
+        assert_eq!(
+            time_command.command.heredoc_delimiter.as_deref(),
+            Some("EOF")
+        );
+        assert_eq!(time_command.command.heredoc.as_deref(), Some("alpha\n"));
+        assert_eq!(time_command.command.heredoc_redirects.len(), 1);
+        assert_eq!(
+            time_command.command.heredoc_redirects[0].body.as_deref(),
+            Some("alpha\n")
+        );
+    }
+
+    #[test]
     fn test_time_prefix_parses_if_command_sequence() {
         let input = "time -p if true; then echo yes; fi";
         let tokens = tokenize(input);

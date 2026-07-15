@@ -271,6 +271,29 @@ fn test_time_command_redirects_timed_command_stdout() {
 }
 
 #[test]
+fn test_time_command_heredoc_feeds_timed_command() {
+    let output_path = "target/rubash-time-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time -p cat <<EOF > {output_path}\nalpha\nEOF");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    assert_eq!(time_command.command.words, ["cat"]);
+    assert_eq!(
+        time_command.command.heredoc_delimiter.as_deref(),
+        Some("EOF")
+    );
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_command_inverts_timed_status_with_redirect() {
     let output_path = "target/rubash-time-command-invert-output.txt";
     let _ = fs::remove_file(output_path);
