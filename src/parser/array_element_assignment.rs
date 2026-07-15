@@ -1,7 +1,7 @@
 use super::{
-    arithmetic_expansions_in_word, brace_expansions_in_word, extglob_patterns_in_word,
-    parameter_expansions_in_word, pathname_patterns_in_word, tilde_expansions_in_word_with_raw,
-    word_quotes_in_raw, ArrayElementAssignment, CommandNode,
+    arithmetic_expansions_in_word, brace_expansions_in_word, brace_expansions_in_word_with_raw,
+    extglob_patterns_in_word_with_raw, parameter_expansions_in_word, pathname_patterns_in_word,
+    tilde_expansions_in_word_with_raw, word_quotes_in_raw, ArrayElementAssignment, CommandNode,
 };
 
 pub(super) fn record_array_element_assignment_for_word(
@@ -53,10 +53,10 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
         subscript_brace_expansions: brace_expansions_in_word(subscript),
         subscript_parameter_expansions: parameter_expansions_in_word(subscript),
         subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
-        brace_expansions: brace_expansions_in_word(value),
+        brace_expansions: brace_expansions_in_word_with_raw(value, raw_value),
         parameter_expansions: parameter_expansions_in_word(value),
         arithmetic_expansions: arithmetic_expansions_in_word(value),
-        extglob_patterns: extglob_patterns_in_word(value),
+        extglob_patterns: extglob_patterns_in_word_with_raw(value, raw_value),
         pathname_patterns: pathname_patterns_in_word(value, raw_value),
         tilde_expansions: tilde_expansions_in_word_with_raw(value, raw_value),
         word_quotes: word_quotes_in_raw(raw_value),
