@@ -768,7 +768,7 @@ impl CasePattern {
             operators,
             operator_metadata,
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&text, &raw_text),
-            brace_expansions: super::brace_expansions_in_word(&text),
+            brace_expansions: super::brace_expansions_in_word_with_raw(&text, &raw_text),
             parameter_expansions: super::parameter_expansions_in_word(&text),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&text),
             raw_text,

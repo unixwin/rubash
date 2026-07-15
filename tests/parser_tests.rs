@@ -2613,6 +2613,23 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_ignores_quoted_brace_expansion_text() {
+        let input = "case $word in \"{a,b}\"|{c,d}) echo hit ;; esac";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+        let first = &case_command.clauses[0].pattern_nodes[0];
+        assert_eq!(first.text, "{a,b}");
+        assert!(first.brace_expansions.is_empty());
+
+        let second = &case_command.clauses[0].pattern_nodes[1];
+        assert_eq!(second.text, "{c,d}");
+        assert_eq!(second.brace_expansions.len(), 1);
+        assert_eq!(second.brace_expansions[0].text, "{c,d}");
+    }
+
+    #[test]
     fn test_case_pattern_records_parameter_expansion_nodes() {
         let input = "case $word in ${prefix:-src}/*|${outer:-${inner}}) echo hit ;; esac";
         let tokens = tokenize(input);
