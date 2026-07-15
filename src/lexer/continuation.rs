@@ -26,64 +26,86 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
     // multi-line alias definition as one parser unit.
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     let mut comment_start = true;
     let mut in_comment = false;
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
 
-    for ch in input.chars() {
+    while index < chars.len() {
+        let ch = chars[index];
         if in_comment {
             if ch == '\n' {
                 in_comment = false;
                 comment_start = true;
             }
+            index += 1;
             continue;
         }
 
         if escaped {
             escaped = false;
             comment_start = false;
+            index += 1;
             continue;
         }
 
-        if ch == '\n' && !single && !double {
+        if ch == '\n' && !single && !double && !ansi_single {
             comment_start = true;
+            index += 1;
             continue;
         }
 
-        if ch == '#' && !single && !double && comment_start {
+        if ch == '#' && !single && !double && !ansi_single && comment_start {
             in_comment = true;
+            index += 1;
             continue;
         }
 
-        if ch.is_whitespace() && !single && !double {
+        if ch.is_whitespace() && !single && !double && !ansi_single {
             comment_start = true;
+            index += 1;
             continue;
         }
 
-        if ch == '\\' && !single {
+        if ch == '\\' && (!single || ansi_single) {
             escaped = true;
             comment_start = false;
+            index += 1;
+            continue;
+        }
+
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            comment_start = false;
+            index += 2;
             continue;
         }
 
         match ch {
-            '\'' if !double => {
+            '\'' if ansi_single => {
+                ansi_single = false;
+                comment_start = false;
+            }
+            '\'' if !double && !ansi_single => {
                 single = !single;
                 comment_start = false;
             }
-            '"' if !single => {
+            '"' if !single && !ansi_single => {
                 double = !double;
                 comment_start = false;
             }
             _ => {
-                if !single && !double {
+                if !single && !double && !ansi_single {
                     comment_start = false;
                 }
             }
         }
+        index += 1;
     }
 
-    single || double
+    single || double || ansi_single
 }
 
 pub(super) fn has_unclosed_command_substitution(input: &str) -> bool {
