@@ -997,6 +997,22 @@ mod command_body_kind_tests {
         assert_eq!(while_command.body_open_delimiter, "do");
         assert_eq!(while_command.body_close_delimiter, "done");
         assert_eq!(while_command.condition_terminator.as_deref(), Some(";"));
+        assert_eq!(
+            while_command
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ";"
+        );
+        assert_eq!(
+            while_command
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .raw,
+            ";"
+        );
         assert_eq!(while_command.condition[0].words, ["false"]);
         assert_eq!(while_command.body[0].words, ["echo", "bad"]);
         assert_eq!(until_command.kind, LoopKind::Until);
@@ -1005,6 +1021,15 @@ mod command_body_kind_tests {
         assert_eq!(until_command.keyword_metadata.raw, "until");
         assert_eq!(until_command.body_open_delimiter, "do");
         assert_eq!(until_command.body_close_delimiter, "done");
+        assert_eq!(until_command.condition_terminator.as_deref(), Some(";"));
+        assert_eq!(
+            until_command
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ";"
+        );
         assert_eq!(until_command.condition[0].words, ["true"]);
         assert_eq!(until_command.body[0].words, ["echo", "ok"]);
     }
@@ -1030,6 +1055,22 @@ mod if_tests {
         assert_eq!(if_command.end_keyword_metadata.value, "fi");
         assert_eq!(if_command.end_keyword_metadata.raw, "fi");
         assert_eq!(if_command.condition_terminator.as_deref(), Some(";"));
+        assert_eq!(
+            if_command
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ";"
+        );
+        assert_eq!(
+            if_command
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .raw,
+            ";"
+        );
         assert_eq!(if_command.condition[0].words, ["true"]);
         assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
         assert!(if_command.elif_branches.is_empty());
@@ -1063,6 +1104,14 @@ mod if_tests {
         assert_eq!(
             if_command.elif_branches[0].condition_terminator.as_deref(),
             Some(";")
+        );
+        assert_eq!(
+            if_command.elif_branches[0]
+                .condition_terminator_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ";"
         );
         assert_eq!(if_command.elif_branches[0].condition[0].words, ["true"]);
         assert_eq!(if_command.elif_branches[0].body[0].words, ["echo", "yes"]);

@@ -12,6 +12,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let then_keyword_metadata = build_keyword_metadata(&tokens[then_index]);
     let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
     let condition_terminator = condition_terminator_before(tokens, then_index);
+    let condition_terminator_metadata = condition_terminator_metadata_before(tokens, then_index);
     let mut index = then_index + 1;
 
     let (then_body, boundary) = parse_if_section(tokens, index)?;
@@ -26,12 +27,14 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         let elif_then_keyword_metadata = build_keyword_metadata(&tokens[elif_then]);
         let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
         let condition_terminator = condition_terminator_before(tokens, elif_then);
+        let condition_terminator_metadata = condition_terminator_metadata_before(tokens, elif_then);
         let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
         elif_branches.push(ElifBranch {
             keyword: elif_keyword,
             keyword_metadata: elif_keyword_metadata,
             condition,
             condition_terminator,
+            condition_terminator_metadata,
             then_keyword: elif_then_keyword,
             then_keyword_metadata: elif_then_keyword_metadata,
             body,
@@ -60,6 +63,7 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         keyword_metadata,
         condition,
         condition_terminator,
+        condition_terminator_metadata,
         then_keyword,
         then_keyword_metadata,
         then_body,
@@ -83,6 +87,16 @@ fn condition_terminator_before(tokens: &[Token], then_index: usize) -> Option<St
         .get(then_index.saturating_sub(1))
         .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
         .map(|token| token.value.clone())
+}
+
+fn condition_terminator_metadata_before(
+    tokens: &[Token],
+    then_index: usize,
+) -> Option<Box<WordMetadata>> {
+    tokens
+        .get(then_index.saturating_sub(1))
+        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+        .map(build_keyword_metadata)
 }
 
 fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {

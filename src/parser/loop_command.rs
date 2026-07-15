@@ -12,10 +12,8 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
 
     let do_index = find_loop_do(tokens, start + 1)?;
     let condition = parse_loop_body_commands(&tokens[start + 1..do_index]);
-    let condition_terminator = tokens
-        .get(do_index.saturating_sub(1))
-        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
-        .map(|token| token.value.clone());
+    let condition_terminator = condition_terminator_before(tokens, do_index);
+    let condition_terminator_metadata = condition_terminator_metadata_before(tokens, do_index);
     let (body, done_index) = parse_loop_body(tokens, do_index + 1)?;
 
     let mut command = CommandNode::new();
@@ -25,6 +23,7 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
         keyword_metadata: build_loop_keyword_metadata(&tokens[start]),
         condition,
         condition_terminator,
+        condition_terminator_metadata,
         do_keyword: tokens[do_index].value.clone(),
         do_keyword_metadata: build_loop_keyword_metadata(&tokens[do_index]),
         body_open_delimiter: tokens[do_index].value.clone(),
@@ -87,6 +86,23 @@ fn parse_loop_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
+}
+
+fn condition_terminator_before(tokens: &[Token], do_index: usize) -> Option<String> {
+    tokens
+        .get(do_index.saturating_sub(1))
+        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+        .map(|token| token.value.clone())
+}
+
+fn condition_terminator_metadata_before(
+    tokens: &[Token],
+    do_index: usize,
+) -> Option<Box<WordMetadata>> {
+    tokens
+        .get(do_index.saturating_sub(1))
+        .filter(|token| token.kind == crate::lexer::TokenKind::Semicolon)
+        .map(build_loop_keyword_metadata)
 }
 
 fn build_loop_keyword_metadata(token: &Token) -> Box<WordMetadata> {
