@@ -93,6 +93,7 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -101,9 +102,23 @@ fn braced_parameter_expansion(chars: &[char], start: usize) -> Option<(Parameter
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         if ch == '$' && chars.get(index + 1) == Some(&'{') && !single {
@@ -161,6 +176,7 @@ fn skip_braced_command_substitution(chars: &[char], start: usize) -> Option<usiz
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -169,9 +185,23 @@ fn skip_braced_command_substitution(chars: &[char], start: usize) -> Option<usiz
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         match ch {
@@ -293,13 +323,36 @@ fn top_level_operator(parameter: &str, operator: &str) -> Option<usize> {
     let mut bracket_depth = 0usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
+    let mut escaped = false;
     while index < chars.len() {
-        if chars[index] == '\\' && !single {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
             index += 2;
             continue;
         }
 
-        match chars[index] {
+        match ch {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
             '$' if !single && chars.get(index + 1) == Some(&'{') => {
@@ -347,6 +400,7 @@ fn skip_command_substitution(chars: &[char], start: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -355,9 +409,23 @@ fn skip_command_substitution(chars: &[char], start: usize) -> Option<usize> {
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         match ch {

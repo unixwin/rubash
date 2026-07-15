@@ -4223,6 +4223,22 @@ mod parameter_expansion_tests {
         assert_eq!(expansions[1].operator.as_deref(), Some("@"));
         assert_eq!(expansions[1].word.as_deref(), Some("Q"));
     }
+
+    #[test]
+    fn test_parameter_expansion_keeps_inner_ansi_c_escaped_quote() {
+        let input = "echo ${v:-$'foo\\'\nbar'}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].parameter_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "${v:-$'foo\\'\nbar'}");
+        assert_eq!(expansions[0].parameter, "v:-$'foo\\'\nbar'");
+        assert_eq!(expansions[0].name, "v");
+        assert_eq!(expansions[0].operator.as_deref(), Some(":-"));
+        assert_eq!(expansions[0].word.as_deref(), Some("$'foo\\'\nbar'"));
+    }
 }
 
 mod brace_expansion_tests {
