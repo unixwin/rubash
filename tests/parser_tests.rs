@@ -5079,6 +5079,21 @@ mod background_tests {
         assert_eq!(pipeline.stages.len(), 2);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_compound_command() {
+        let input = "if true; then echo yes; fi & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        let if_command = background.command.if_command.as_ref().unwrap();
+
+        assert_eq!(background.operator, "&");
+        assert_eq!(background.operator_metadata.value, "&");
+        assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {

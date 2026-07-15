@@ -261,6 +261,37 @@ fn test_last_background_pid_parameter_tracks_background_compound_command() {
 }
 
 #[test]
+fn test_background_if_command_executes_and_updates_bang_pid() {
+    let output_path = "target/rubash-background-if-command-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "if true; then echo if-body > {output_path}; fi & \
+         printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].background_command.is_some());
+    assert!(ast.commands[0]
+        .background_command
+        .as_ref()
+        .unwrap()
+        .command
+        .if_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        format!("if-body\nstatus:0 bang:{}\n", std::process::id())
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_bash_subshell_tracks_command_substitution_depth() {
     let output_path = "target/rubash-bash-subshell-output.txt";
     let _ = fs::remove_file(output_path);
