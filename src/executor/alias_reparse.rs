@@ -2,6 +2,35 @@ use super::alias_case::*;
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_alias_introduced_time(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("time") {
+            return Ok(None);
+        }
+
+        let mut source = alias_compound_source_words(&words);
+        append_source_redirects(&mut source, command);
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed
+            .commands
+            .first()
+            .is_some_and(|command| command.time_command.is_some())
+        {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(index + 1))
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_case(
         &mut self,
         ast: &Ast,
@@ -59,7 +88,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let mut source = alias_coproc_source_words(&words);
+        let mut source = alias_compound_source_words(&words);
         append_source_redirects(&mut source, command);
         let mut next_index = index + 1;
         if alias_coproc_needs_following_body(&words) {
@@ -283,12 +312,12 @@ fn alias_coproc_needs_following_body(words: &[String]) -> bool {
     matches!(words.len(), 1 | 2)
 }
 
-fn alias_coproc_source_words(words: &[String]) -> String {
+fn alias_compound_source_words(words: &[String]) -> String {
     words
         .iter()
         .enumerate()
         .map(|(index, word)| {
-            if index == 0 || alias_coproc_word_is_source_safe(word) {
+            if index == 0 || alias_compound_word_is_source_safe(word) {
                 word.clone()
             } else {
                 shell_single_quote_assignment_value(word)
@@ -298,7 +327,7 @@ fn alias_coproc_source_words(words: &[String]) -> String {
         .join(" ")
 }
 
-fn alias_coproc_word_is_source_safe(word: &str) -> bool {
+fn alias_compound_word_is_source_safe(word: &str) -> bool {
     if word.starts_with('{') && word.ends_with('}') {
         return true;
     }

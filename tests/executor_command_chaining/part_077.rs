@@ -774,3 +774,50 @@ fn test_time_inversion_prefix_executes_subshell_group() {
     assert_eq!(fs::read_to_string(output_path).unwrap(), "status:1\n");
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_alias_introduced_time_executes_brace_group() {
+    let output_path = "target/rubash-alias-time-brace-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p {{ echo alias-time > {output_path}; }}; echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "alias-time\nstatus:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_time_preserves_brace_group_redirects() {
+    let output_path = "target/rubash-alias-time-brace-redirect-output.txt";
+    let status_path = "target/rubash-alias-time-brace-redirect-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p {{ echo redirected; }} > {output_path}; echo status:$? > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "redirected\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
