@@ -36,7 +36,7 @@ fn matching_subshell_end(tokens: &[Token], start: usize) -> Option<usize> {
         let boundary = index == start + 1 || command_boundary_keyword_allowed(tokens, index);
         if boundary && is_keyword(tokens, index, "case") {
             case_depth += 1;
-        } else if boundary && is_keyword(tokens, index, "esac") {
+        } else if boundary && is_case_end_keyword(tokens, index) {
             case_depth = case_depth.saturating_sub(1);
         } else if case_depth == 0 && is_keyword(tokens, index, "(") {
             depth += 1;

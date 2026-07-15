@@ -413,6 +413,21 @@ fn test_process_substitution_records_nested_body_ast() {
 }
 
 #[test]
+fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
+    let input = "cat <(case esac in\nesac) printf matched ;; esac)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].commands.len(), 1);
+    let case_command = process[0].commands[0].case_command.as_ref().unwrap();
+    assert_eq!(case_command.word, "esac");
+    assert_eq!(case_command.clauses[0].patterns, ["esac"]);
+    assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+}
+
+#[test]
 fn test_empty_process_substitutions_record_null_body() {
     let input = "cat <() >()";
     let tokens = tokenize(input);

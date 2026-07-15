@@ -349,7 +349,7 @@ pub(super) fn parse_parenthesized_function_body(
         let boundary = i == start + 1 || command_boundary_keyword_allowed(tokens, i);
         if boundary && is_keyword(tokens, i, "case") {
             case_depth += 1;
-        } else if boundary && is_keyword(tokens, i, "esac") {
+        } else if boundary && is_case_end_keyword(tokens, i) {
             case_depth = case_depth.saturating_sub(1);
         } else if case_depth == 0 && is_keyword(tokens, i, "(") {
             depth += 1;

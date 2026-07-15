@@ -500,6 +500,20 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_subshell_command_keeps_case_pattern_starting_with_esac() {
+        let input = "( case esac in\nesac) printf matched ;; esac )";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let subshell = ast.commands[0].subshell_command.as_ref().unwrap();
+        let case_command = subshell.body[0].case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.word, "esac");
+        assert_eq!(case_command.clauses[0].patterns, ["esac"]);
+        assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+    }
+
+    #[test]
     fn test_subshell_command_keeps_case_argument() {
         let input = "( echo case; echo ok )";
         let tokens = tokenize(input);

@@ -81,17 +81,65 @@ pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
         .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == value)
 }
 
+pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
+    is_keyword(tokens, index, "esac") && !case_pattern_starts_with_esac(tokens, index)
+}
+
+fn case_pattern_starts_with_esac(tokens: &[Token], index: usize) -> bool {
+    if !matches!(
+        tokens.get(index + 1).map(|token| token.value.as_str()),
+        Some(")" | "|")
+    ) {
+        return false;
+    }
+
+    let mut close = index + 1;
+    while close < tokens.len() {
+        if is_keyword(tokens, close, ")") {
+            break;
+        }
+        if tokens[close].kind == TokenKind::Semicolon {
+            return false;
+        }
+        close += 1;
+    }
+    if !is_keyword(tokens, close, ")") {
+        return false;
+    }
+
+    let mut scan = close + 1;
+    while scan < tokens.len() {
+        if is_case_clause_terminator_token(&tokens[scan]) || is_keyword(tokens, scan, "esac") {
+            return true;
+        }
+        if is_keyword(tokens, scan, ")") && command_boundary_keyword_allowed(tokens, scan) {
+            return false;
+        }
+        scan += 1;
+    }
+
+    false
+}
+
+fn is_case_clause_terminator_token(token: &Token) -> bool {
+    token.kind == TokenKind::Word && matches!(token.raw.as_str(), ";;" | ";&" | ";;&")
+}
+
 pub(super) fn update_compound_boundary_stack(
     tokens: &[Token],
     index: usize,
     stack: &mut Vec<&'static str>,
 ) {
-    if stack
-        .last()
-        .is_some_and(|expected| is_keyword(tokens, index, expected))
-    {
-        stack.pop();
-        return;
+    if let Some(expected) = stack.last().copied() {
+        let expected_matches = if expected == "esac" {
+            is_case_end_keyword(tokens, index)
+        } else {
+            is_keyword(tokens, index, expected)
+        };
+        if expected_matches {
+            stack.pop();
+            return;
+        }
     }
 
     if stack.last().is_some_and(|expected| *expected == "esac")

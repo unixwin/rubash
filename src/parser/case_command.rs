@@ -185,14 +185,6 @@ fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
 }
 
-fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
-    is_keyword(tokens, index, "esac")
-        && !matches!(
-            tokens.get(index + 1).map(|token| token.value.as_str()),
-            Some(")" | "|")
-        )
-}
-
 fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, usize)> {
     if let Some((word, next_i)) = collect_compound_word_value(tokens, index) {
         let raw = if next_i == index + 1 {
