@@ -1525,6 +1525,30 @@ fn test_function_keyword_can_use_subshell_body_without_signature_parentheses() {
 }
 
 #[test]
+fn test_function_keyword_with_parentheses_can_use_subshell_body() {
+    let output_path = "target/rubash-function-keyword-paren-subshell-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("function f () ( echo hi ); f > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert!(
+        ast.commands[0]
+            .function_command
+            .as_ref()
+            .unwrap()
+            .has_parentheses
+    );
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "hi\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_subshell_body_keeps_case_pattern_parentheses() {
     let output_path = "target/rubash-function-subshell-case-output.txt";
     let _ = fs::remove_file(output_path);
