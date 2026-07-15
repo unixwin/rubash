@@ -5128,6 +5128,23 @@ mod background_tests {
         assert_eq!(function.body[0].words, ["echo", "hi"]);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_time_prefix() {
+        let input = "time -p true & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        let time_command = background.command.time_command.as_ref().unwrap();
+
+        assert_eq!(background.operator, "&");
+        assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.prefix_words, ["-p"]);
+        assert!(time_command.posix_format);
+        assert_eq!(time_command.command.words, ["true"]);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
