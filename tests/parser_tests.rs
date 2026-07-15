@@ -4253,7 +4253,11 @@ mod tilde_expansion_tests {
         assert_eq!(expansions.len(), 6);
         assert_eq!(expansions[0].text, "~");
         assert_eq!(expansions[0].open_delimiter, "~");
+        assert_eq!(expansions[0].open_delimiter_metadata.value, "~");
+        assert_eq!(expansions[0].open_delimiter_metadata.raw, "~");
         assert_eq!(expansions[0].close_delimiter, "");
+        assert_eq!(expansions[0].close_delimiter_metadata.value, "");
+        assert_eq!(expansions[0].close_delimiter_metadata.raw, "");
         assert_eq!(expansions[0].prefix, "~");
         assert_eq!(expansions[0].suffix, "");
         assert_eq!(expansions[0].word_index, Some(1));
@@ -4264,7 +4268,11 @@ mod tilde_expansion_tests {
         assert_eq!(expansions[1].word_index, Some(2));
         assert_eq!(expansions[2].prefix, "~+");
         assert_eq!(expansions[2].open_delimiter, "~");
+        assert_eq!(expansions[2].open_delimiter_metadata.value, "~");
+        assert_eq!(expansions[2].open_delimiter_metadata.raw, "~");
         assert_eq!(expansions[2].close_delimiter, "");
+        assert_eq!(expansions[2].close_delimiter_metadata.value, "");
+        assert_eq!(expansions[2].close_delimiter_metadata.raw, "");
         assert_eq!(expansions[2].word_index, Some(3));
         assert_eq!(expansions[3].prefix, "~-");
         assert_eq!(expansions[3].word_index, Some(4));

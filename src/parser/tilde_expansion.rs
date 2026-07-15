@@ -76,8 +76,10 @@ fn tilde_expansion_at(segment: &str, after_colon: bool) -> Option<TildeExpansion
         return Some(TildeExpansion {
             text: segment.to_string(),
             open_delimiter: "~".to_string(),
+            open_delimiter_metadata: delimiter_metadata("~"),
             prefix: prefix.to_string(),
             close_delimiter: String::new(),
+            close_delimiter_metadata: delimiter_metadata(""),
             suffix: segment[prefix_len..].to_string(),
             after_colon,
             word_index: None,
@@ -85,6 +87,14 @@ fn tilde_expansion_at(segment: &str, after_colon: bool) -> Option<TildeExpansion
         });
     }
     None
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::literal(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }
 
 fn valid_tilde_dirstack(prefix: &str) -> bool {

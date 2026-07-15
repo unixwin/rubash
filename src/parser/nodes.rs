@@ -578,8 +578,10 @@ pub struct ExtglobPattern {
 pub struct TildeExpansion {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub prefix: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub suffix: String,
     pub after_colon: bool,
     pub word_index: Option<usize>,
@@ -637,6 +639,23 @@ pub struct WordMetadata {
 }
 
 impl WordMetadata {
+    pub fn literal(word_index: usize, value: String, raw: String) -> Self {
+        Self {
+            word_index,
+            value,
+            raw,
+            brace_expansions: Vec::new(),
+            command_substitutions: Vec::new(),
+            process_substitutions: Vec::new(),
+            parameter_expansions: Vec::new(),
+            arithmetic_expansions: Vec::new(),
+            extglob_patterns: Vec::new(),
+            tilde_expansions: Vec::new(),
+            pathname_patterns: Vec::new(),
+            word_quotes: Vec::new(),
+        }
+    }
+
     pub fn new(word_index: usize, value: String, raw: String) -> Self {
         let command_substitutions = super::command_substitutions_in_word(&value)
             .into_iter()
