@@ -38,9 +38,16 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
     let raw_value = array_element_raw_value(raw).unwrap_or(value);
     Some(ArrayElementAssignment {
         name: name.to_string(),
+        name_metadata: Box::new(super::build_word_metadata(0, name, name)),
+        open_delimiter: "[".to_string(),
+        open_delimiter_metadata: Box::new(super::build_word_metadata(0, "[", "[")),
         subscript: subscript.to_string(),
+        subscript_metadata: Box::new(super::build_word_metadata(0, subscript, subscript)),
+        close_delimiter: "]".to_string(),
+        close_delimiter_metadata: Box::new(super::build_word_metadata(0, "]", "]")),
         value: value.to_string(),
         operator: operator.to_string(),
+        operator_metadata: Box::new(super::build_word_metadata(0, operator, operator)),
         append,
         word_index: None,
         subscript_brace_expansions: brace_expansions_in_word(subscript),

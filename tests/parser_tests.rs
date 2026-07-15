@@ -3171,15 +3171,25 @@ mod assignment_tests {
         let elements = ast.commands[0].array_element_assignments.as_slice();
         assert_eq!(elements.len(), 2);
         assert_eq!(elements[0].name, "arr");
+        assert_eq!(elements[0].name_metadata.value, "arr");
+        assert_eq!(elements[0].open_delimiter, "[");
+        assert_eq!(elements[0].open_delimiter_metadata.raw, "[");
         assert_eq!(elements[0].subscript, "0");
+        assert_eq!(elements[0].subscript_metadata.value, "0");
+        assert_eq!(elements[0].close_delimiter, "]");
+        assert_eq!(elements[0].close_delimiter_metadata.value, "]");
         assert_eq!(elements[0].value, "zero");
         assert_eq!(elements[0].operator, "=");
+        assert_eq!(elements[0].operator_metadata.value, "=");
         assert!(!elements[0].append);
         assert_eq!(elements[0].word_index, Some(0));
         assert_eq!(elements[1].name, "arr");
+        assert_eq!(elements[1].name_metadata.raw, "arr");
         assert_eq!(elements[1].subscript, "i+1");
+        assert_eq!(elements[1].subscript_metadata.value, "i+1");
         assert_eq!(elements[1].value, "more");
         assert_eq!(elements[1].operator, "+=");
+        assert_eq!(elements[1].operator_metadata.raw, "+=");
         assert!(elements[1].append);
         assert_eq!(elements[1].word_index, Some(1));
     }

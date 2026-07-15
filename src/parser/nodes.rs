@@ -410,9 +410,16 @@ pub struct CompoundAssignmentElement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayElementAssignment {
     pub name: String,
+    pub name_metadata: Box<WordMetadata>,
+    pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub subscript: String,
+    pub subscript_metadata: Box<WordMetadata>,
+    pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub value: String,
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub append: bool,
     pub word_index: Option<usize>,
     pub subscript_brace_expansions: Vec<BraceExpansion>,
