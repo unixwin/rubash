@@ -685,6 +685,10 @@ mod command_body_kind_tests {
             for_command.words,
             ["${one:-1}", "pre{a,b}", "src/[ab]?", "*.rs"]
         );
+        assert_eq!(for_command.variable, "x");
+        assert_eq!(for_command.variable_metadata.word_index, 0);
+        assert_eq!(for_command.variable_metadata.value, "x");
+        assert_eq!(for_command.variable_metadata.raw, "x");
         assert_eq!(for_command.word_metadata.len(), 4);
         assert_eq!(for_command.word_metadata[0].word_index, 0);
         assert_eq!(
@@ -712,6 +716,10 @@ mod command_body_kind_tests {
 
         let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
         assert_eq!(select_command.words, ["$((i+1))", "@(yes|no)", "~+/bin"]);
+        assert_eq!(select_command.variable, "x");
+        assert_eq!(select_command.variable_metadata.word_index, 0);
+        assert_eq!(select_command.variable_metadata.value, "x");
+        assert_eq!(select_command.variable_metadata.raw, "x");
         assert_eq!(select_command.word_metadata.len(), 3);
         assert_eq!(
             select_command.word_metadata[0].arithmetic_expansions[0].expression,

@@ -148,6 +148,7 @@ use crate::parser::{
     BackgroundCommand, CaseClause, CaseCommand, CaseTerminator, CommandBodyKind, CommandNode,
     ConditionalCommand, ForCommand, FunctionBodyKind, FunctionCommand, IfCommand, InvertedCommand,
     LoopCommand, PipelineCommand, Redirect, SelectCommand, SubshellCommand, TimeCommand,
+    WordMetadata,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap, HashSet};

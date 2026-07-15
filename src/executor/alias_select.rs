@@ -54,7 +54,12 @@ impl Executor {
         if let Some(brace_group) = do_command.brace_group.clone() {
             let select_command = SelectCommand {
                 keyword: "select".to_string(),
-                variable,
+                variable: variable.clone(),
+                variable_metadata: Box::new(WordMetadata::new(
+                    0,
+                    variable.clone(),
+                    variable.clone(),
+                )),
                 in_keyword: in_keyword.clone(),
                 words: select_words,
                 word_metadata: Vec::new(),
@@ -91,7 +96,8 @@ impl Executor {
 
         let select_command = SelectCommand {
             keyword: "select".to_string(),
-            variable,
+            variable: variable.clone(),
+            variable_metadata: Box::new(WordMetadata::new(0, variable.clone(), variable)),
             in_keyword,
             words: select_words,
             word_metadata: Vec::new(),

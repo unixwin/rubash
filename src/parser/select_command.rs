@@ -3,7 +3,8 @@ use crate::lexer::{Token, TokenKind};
 
 pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     // Parse `select name [in words ...]; do body; done`
-    let variable = tokens.get(start + 1)?.value.clone();
+    let variable_token = tokens.get(start + 1)?;
+    let variable = variable_token.value.clone();
     if !matches!(
         tokens.get(start + 1)?.kind,
         TokenKind::Word | TokenKind::Variable
@@ -115,7 +116,8 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     command.line = tokens.get(start).map(|token| token.position);
     command.select_command = Some(Box::new(SelectCommand {
         keyword: tokens[start].value.clone(),
-        variable,
+        variable: variable.clone(),
+        variable_metadata: Box::new(build_word_metadata(0, &variable, &variable_token.raw)),
         in_keyword,
         words,
         word_metadata,

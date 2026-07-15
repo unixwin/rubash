@@ -1,5 +1,6 @@
 use crate::parser::{
     ArithmeticExpressionMetadata, ArithmeticForCommand, CommandBodyKind, CommandNode, ForCommand,
+    WordMetadata,
 };
 
 pub(super) fn command_tail(command: Option<&CommandNode>) -> Option<CommandNode> {
@@ -73,6 +74,7 @@ fn inline_arithmetic_for_command(
     for_node.for_command = Some(ForCommand {
         keyword: "for".to_string(),
         variable: String::new(),
+        variable_metadata: Box::new(WordMetadata::new(0, String::new(), String::new())),
         in_keyword: None,
         words: Vec::new(),
         word_metadata: Vec::new(),

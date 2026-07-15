@@ -50,6 +50,7 @@ pub struct HereDocRedirect {
 pub struct ForCommand {
     pub keyword: String,
     pub variable: String,
+    pub variable_metadata: Box<WordMetadata>,
     pub in_keyword: Option<String>,
     pub words: Vec<String>,
     pub word_metadata: Vec<WordMetadata>,
@@ -785,6 +786,7 @@ pub enum CaseTerminator {
 pub struct SelectCommand {
     pub keyword: String,
     pub variable: String,
+    pub variable_metadata: Box<WordMetadata>,
     pub in_keyword: Option<String>,
     pub words: Vec<String>,
     pub word_metadata: Vec<WordMetadata>,

@@ -131,6 +131,7 @@ pub(super) fn parse_arithmetic_for_command(
     command.for_command = Some(ForCommand {
         keyword: tokens[start].value.clone(),
         variable: String::new(),
+        variable_metadata: Box::new(build_word_metadata(0, "", "")),
         in_keyword: None,
         words: Vec::new(),
         word_metadata: Vec::new(),

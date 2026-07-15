@@ -214,6 +214,11 @@ impl Executor {
             let for_command = ForCommand {
                 keyword: "for".to_string(),
                 variable: words[1].clone(),
+                variable_metadata: Box::new(WordMetadata::new(
+                    0,
+                    words[1].clone(),
+                    words[1].clone(),
+                )),
                 in_keyword: Some("in".to_string()),
                 words: words[3..].to_vec(),
                 word_metadata: Vec::new(),
@@ -252,6 +257,7 @@ impl Executor {
         let for_command = ForCommand {
             keyword: "for".to_string(),
             variable: words[1].clone(),
+            variable_metadata: Box::new(WordMetadata::new(0, words[1].clone(), words[1].clone())),
             in_keyword: Some("in".to_string()),
             words: words[3..].to_vec(),
             word_metadata: Vec::new(),

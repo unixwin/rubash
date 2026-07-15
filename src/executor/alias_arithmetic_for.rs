@@ -128,6 +128,7 @@ fn alias_arithmetic_for_command(
     ForCommand {
         keyword: "for".to_string(),
         variable: String::new(),
+        variable_metadata: Box::new(WordMetadata::new(0, String::new(), String::new())),
         in_keyword: None,
         words: Vec::new(),
         word_metadata: Vec::new(),
