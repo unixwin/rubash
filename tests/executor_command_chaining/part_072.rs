@@ -21,6 +21,28 @@ fn test_conditional_string_order_operators_are_not_redirects() {
 }
 
 #[test]
+fn test_conditional_command_pipeline_stage_executes_and_feeds_next_stage() {
+    let output_path = "target/rubash-conditional-command-pipeline-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=yes; [[ $value == yes ]] | cat > {output_path}; \
+         echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let pipeline = ast.commands[1].pipeline_command.as_ref().unwrap();
+    assert!(pipeline.stages[0].conditional_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_string_equality_uses_shell_patterns() {
     let output_path = "target/rubash-conditional-pattern-output.txt";
     let _ = fs::remove_file(output_path);
