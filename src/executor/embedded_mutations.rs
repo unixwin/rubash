@@ -24,6 +24,69 @@ impl Executor {
         let mut chars = word.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '$' && chars.peek().copied() == Some('{') {
+                chars.next();
+                let pipe_output = chars.peek().copied() == Some('|');
+                if pipe_output || chars.peek().is_some_and(|ch| ch.is_whitespace()) {
+                    if pipe_output {
+                        chars.next();
+                    }
+                    let mut depth = 1usize;
+                    let mut source = String::new();
+                    let mut single = false;
+                    let mut double = false;
+                    let mut escaped = false;
+                    let mut closed = false;
+                    for source_ch in chars.by_ref() {
+                        if escaped {
+                            source.push(source_ch);
+                            escaped = false;
+                            continue;
+                        }
+                        if source_ch == '\\' && !single {
+                            source.push(source_ch);
+                            escaped = true;
+                            continue;
+                        }
+                        match source_ch {
+                            '\'' if !double => {
+                                single = !single;
+                                source.push(source_ch);
+                            }
+                            '"' if !single => {
+                                double = !double;
+                                source.push(source_ch);
+                            }
+                            '{' if !single && !double => {
+                                depth += 1;
+                                source.push(source_ch);
+                            }
+                            '}' if !single && !double => {
+                                depth = depth.saturating_sub(1);
+                                if depth == 0 {
+                                    closed = true;
+                                    break;
+                                }
+                                source.push(source_ch);
+                            }
+                            _ => source.push(source_ch),
+                        }
+                    }
+                    if closed {
+                        output.push_str(&protect_command_substitution_output(
+                            &self.expand_current_shell_command_substitution(&source, pipe_output),
+                        ));
+                    } else {
+                        output.push_str(if pipe_output { "${|" } else { "${" });
+                        output.push_str(&source);
+                    }
+                    continue;
+                }
+
+                output.push_str("${");
+                continue;
+            }
+
             if ch == '$' && chars.peek().copied() == Some('(') {
                 chars.next();
                 if chars.peek().copied() == Some('(') {
@@ -122,6 +185,41 @@ impl Executor {
         }
 
         output
+    }
+
+    fn expand_current_shell_command_substitution(
+        &mut self,
+        source: &str,
+        pipe_output: bool,
+    ) -> String {
+        let tokens = crate::lexer::tokenize(source);
+        let ast = crate::parser::parse(&tokens);
+        let saved_exit_code = self.exit_code;
+
+        let (status, output) = if pipe_output {
+            let result = self.execute_ast(&ast);
+            let status = command_substitution_status(result, self.exit_code);
+            (status, String::new())
+        } else {
+            let saved_capture = self.stdout_capture.take();
+            self.stdout_capture = Some(Vec::new());
+            let result = self.execute_ast(&ast);
+            let status = command_substitution_status(result, self.exit_code);
+            let output = String::from_utf8_lossy(&self.stdout_capture.take().unwrap_or_default())
+                .trim_end_matches('\n')
+                .to_string();
+            self.stdout_capture = saved_capture;
+            (status, output)
+        };
+
+        self.exit_code = saved_exit_code;
+        self.last_command_substitution_status.set(Some(status));
+
+        if pipe_output {
+            self.env_vars.get("REPLY").cloned().unwrap_or_default()
+        } else {
+            output
+        }
     }
 
     pub(in crate::executor) fn expand_command_substitution_mut(&mut self, source: &str) -> String {
@@ -294,6 +392,15 @@ impl Executor {
 fn command_substitution_needs_ast_execution(ast: &Ast) -> bool {
     ast.commands.iter().any(command_has_ast_substitution_shape)
         || (ast.commands.len() > 1 && ast.commands.iter().all(command_is_ast_list_substitution))
+}
+
+fn command_substitution_status(result: Result<(), ExecuteError>, exit_code: i32) -> i32 {
+    match result {
+        Ok(()) => exit_code,
+        Err(ExecuteError::Return(status)) => status,
+        Err(ExecuteError::ExitCode(status)) => status,
+        Err(_) => 1,
+    }
 }
 
 fn command_has_ast_substitution_shape(command: &CommandNode) -> bool {

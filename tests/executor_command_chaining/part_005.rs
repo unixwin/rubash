@@ -130,6 +130,52 @@ fn test_bashpid_changes_in_command_substitution() {
 }
 
 #[test]
+fn test_current_shell_command_substitution_captures_stdout_and_keeps_side_effects() {
+    let output_path = "target/rubash-current-shell-command-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=old; text=${{ value=new; echo alpha; echo; }}; \
+         printf 'text=<%s> value=<%s> status:%s\\n' \"$text\" \"$value\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "text=<alpha> value=<new> status:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_current_shell_reply_command_substitution_uses_reply_without_capturing_stdout() {
+    let output_path = "target/rubash-current-shell-reply-command-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "unset REPLY; text=${{| REPLY=result; value=kept; }}; \
+         printf 'text=<%s> reply=<%s> value=<%s>\\n' \"$text\" \"$REPLY\" \"$value\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "text=<result> reply=<result> value=<kept>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_printf_command_substitution_strips_trailing_newlines() {
     let output_path = "target/rubash-printf-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
