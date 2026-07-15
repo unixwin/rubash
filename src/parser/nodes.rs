@@ -38,6 +38,7 @@ pub struct HereDocRedirect {
     pub fd: Option<u32>,
     pub fd_var: Option<String>,
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub delimiter: String,
     pub delimiter_metadata: Box<WordMetadata>,
     pub strip_tabs: bool,
