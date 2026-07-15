@@ -395,6 +395,7 @@ fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
         || command.subshell_command.is_some()
         || command.brace_group.is_some()
         || command.time_command.is_some()
+        || command.arithmetic_command.is_some()
         || command.inverted_command.is_some()
         || command.background_command.is_some()
 }
