@@ -312,23 +312,43 @@ fn test_named_coproc_time_pipeline_allows_compound_later_stages() {
 }
 
 #[test]
-fn test_coproc_time_compound_body_is_not_named_shell_command() {
+fn test_named_coproc_parses_time_prefixed_compound_body() {
     let cases = [
-        "coproc MYC time -p for x in a; do echo $x; done",
-        "coproc MYC time (( 1 ))",
-        "coproc MYC time { echo hi; }",
-        "coproc MYC time foo() { echo hi; }",
+        ("coproc MYC time -p for x in a; do echo $x; done", "for"),
+        ("coproc MYC time (( 1 ))", "arithmetic"),
+        ("coproc MYC time { echo hi; }", "brace"),
     ];
 
-    for input in cases {
+    for (input, body_kind) in cases {
         let tokens = tokenize(input);
         let ast = parse(&tokens);
         let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+        let time_command = coproc.body.as_ref().expect(input)[0]
+            .time_command
+            .as_ref()
+            .expect(input);
 
-        assert_eq!(coproc.name, None, "{input}");
-        assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand, "{input}");
-        assert!(coproc.body.is_none(), "{input}");
+        assert_eq!(coproc.name.as_deref(), Some("MYC"), "{input}");
+        assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand, "{input}");
+        match body_kind {
+            "for" => assert!(time_command.command.for_command.is_some(), "{input}"),
+            "arithmetic" => assert!(time_command.command.arithmetic_command.is_some(), "{input}"),
+            "brace" => assert!(time_command.command.brace_group.is_some(), "{input}"),
+            _ => unreachable!(),
+        }
     }
+}
+
+#[test]
+fn test_unsupported_coproc_time_function_body_is_not_named_shell_command() {
+    let input = "coproc MYC time foo() { echo hi; }";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+
+    assert_eq!(coproc.name, None);
+    assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
+    assert!(coproc.body.is_none());
 }
 
 #[test]

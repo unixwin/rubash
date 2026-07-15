@@ -1,5 +1,6 @@
 use super::parse_loop::{
-    parse_time_prefixed_shell_command, time_prefixed_shell_command_allows_simple_pipeline,
+    parse_time_prefixed_compound_command, parse_time_prefixed_shell_command,
+    time_prefixed_shell_command_allows_simple_pipeline,
 };
 use super::*;
 use crate::lexer::{Token, TokenKind};
@@ -232,7 +233,32 @@ fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
             "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
         ) || token.value.starts_with("((")
             || time_prefixed_shell_command_allows_simple_pipeline(tokens, index)
+            || time_prefixed_compound_command_start(tokens, index)
     })
+}
+
+fn time_prefixed_compound_command_start(tokens: &[Token], start: usize) -> bool {
+    if !is_keyword(tokens, start, "time") {
+        return false;
+    }
+
+    let mut index = start + 1;
+    while tokens
+        .get(index)
+        .is_some_and(|token| matches!(token.value.as_str(), "-p" | "--" | "!"))
+    {
+        index += 1;
+    }
+
+    tokens.get(index).is_some_and(|token| {
+        is_brace_group_token(token)
+            || matches!(
+                token.value.as_str(),
+                "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
+            )
+            || token.value.starts_with("((")
+    }) || is_keyword(tokens, index, "{")
+        || is_keyword(tokens, index, "(")
 }
 
 fn parse_coproc_command_sequence_body(
@@ -295,7 +321,8 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
     }
 
     match tokens.get(start)?.value.as_str() {
-        "time" => parse_time_prefixed_shell_command(tokens, start),
+        "time" => parse_time_prefixed_shell_command(tokens, start)
+            .or_else(|| parse_time_prefixed_compound_command(tokens, start)),
         "for" => parse_for_command(tokens, start),
         "if" => parse_if_command(tokens, start),
         "while" | "until" => parse_loop_command(tokens, start),

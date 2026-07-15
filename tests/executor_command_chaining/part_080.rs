@@ -1563,6 +1563,40 @@ fn test_named_coproc_executes_for_body() {
 }
 
 #[test]
+fn test_named_coproc_executes_time_prefixed_brace_body() {
+    let output_path = "target/rubash-coproc-time-brace-output.txt";
+    let status_path = "target/rubash-coproc-time-brace-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC time {{ echo timed > {output_path}; }}; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "timed\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "timed\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_subshell_keeps_case_pattern_parentheses() {
     let output_path = "target/rubash-coproc-subshell-case-output.txt";
     let status_path = "target/rubash-coproc-subshell-case-status.txt";
