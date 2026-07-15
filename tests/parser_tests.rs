@@ -3338,6 +3338,8 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].open_delimiter_metadata.value, "$(");
         assert_eq!(substitutions[0].open_delimiter_metadata.raw, "$(");
         assert_eq!(substitutions[0].operator, "$");
+        assert_eq!(substitutions[0].operator_metadata.value, "$");
+        assert_eq!(substitutions[0].operator_metadata.raw, "$");
         assert_eq!(substitutions[0].close_delimiter, ")");
         assert_eq!(substitutions[0].close_delimiter_metadata.value, ")");
         assert_eq!(substitutions[0].close_delimiter_metadata.raw, ")");
@@ -3358,6 +3360,8 @@ mod command_substitution_tests {
         assert_eq!(substitutions[2].open_delimiter, "`");
         assert_eq!(substitutions[2].open_delimiter_metadata.value, "`");
         assert_eq!(substitutions[2].operator, "`");
+        assert_eq!(substitutions[2].operator_metadata.value, "`");
+        assert_eq!(substitutions[2].operator_metadata.raw, "`");
         assert_eq!(substitutions[2].close_delimiter, "`");
         assert_eq!(substitutions[2].close_delimiter_metadata.value, "`");
         assert_eq!(substitutions[2].source, "whoami");
@@ -3468,6 +3472,8 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].text, "${ echo hi; }");
         assert_eq!(substitutions[0].open_delimiter, "${");
         assert_eq!(substitutions[0].operator, "${");
+        assert_eq!(substitutions[0].operator_metadata.value, "${");
+        assert_eq!(substitutions[0].operator_metadata.raw, "${");
         assert_eq!(substitutions[0].close_delimiter, "}");
         assert_eq!(substitutions[0].source, " echo hi; ");
         assert!(!substitutions[0].backtick);
@@ -3489,6 +3495,8 @@ mod command_substitution_tests {
         assert_eq!(substitutions[0].text, "${| REPLY=hi; }");
         assert_eq!(substitutions[0].open_delimiter, "${");
         assert_eq!(substitutions[0].operator, "${|");
+        assert_eq!(substitutions[0].operator_metadata.value, "${|");
+        assert_eq!(substitutions[0].operator_metadata.raw, "${|");
         assert_eq!(substitutions[0].close_delimiter, "}");
         assert_eq!(substitutions[0].source, " REPLY=hi; ");
         assert!(substitutions[0].current_shell);

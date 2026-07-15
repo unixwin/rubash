@@ -298,6 +298,7 @@ fn command_substitution_node(
         text,
         open_delimiter_metadata: delimiter_metadata(&open_delimiter),
         open_delimiter,
+        operator_metadata: delimiter_metadata(&operator),
         operator,
         source,
         close_delimiter_metadata: delimiter_metadata(&close_delimiter),

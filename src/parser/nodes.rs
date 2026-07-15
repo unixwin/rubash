@@ -474,6 +474,7 @@ pub struct CommandSubstitutionNode {
     pub open_delimiter: String,
     pub open_delimiter_metadata: Box<WordMetadata>,
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub source: String,
     pub close_delimiter: String,
     pub close_delimiter_metadata: Box<WordMetadata>,
@@ -490,6 +491,7 @@ impl PartialEq for CommandSubstitutionNode {
         self.text == other.text
             && self.open_delimiter == other.open_delimiter
             && self.operator == other.operator
+            && self.operator_metadata == other.operator_metadata
             && self.source == other.source
             && self.close_delimiter == other.close_delimiter
             && self.backtick == other.backtick
