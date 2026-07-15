@@ -12,7 +12,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         return None;
     }
 
-    let mut i = start + 2;
+    let mut i = skip_newline_list(tokens, start + 2);
     let mut words = Vec::new();
     let mut word_metadata = Vec::new();
     let mut in_keyword = None;
@@ -182,6 +182,16 @@ fn parse_select_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+fn skip_newline_list(tokens: &[Token], mut index: usize) -> usize {
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        index += 1;
+    }
+    index
 }
 
 fn select_brace_body_start(tokens: &[Token], index: usize) -> bool {

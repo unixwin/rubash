@@ -772,6 +772,30 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_allow_newline_before_in_keyword() {
+        let for_tokens = tokenize("for x\nin a b\ndo echo $x\ndone");
+        let for_ast = parse(&for_tokens);
+        let select_tokens = tokenize("select x\nin a b\ndo echo $x\ndone");
+        let select_ast = parse(&select_tokens);
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+
+        assert_eq!(for_command.variable, "x");
+        assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(for_command.words, ["a", "b"]);
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+        assert_eq!(select_command.variable, "x");
+        assert_eq!(select_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(select_command.words, ["a", "b"]);
+        assert_eq!(select_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(select_command.end_keyword.as_deref(), Some("done"));
+        assert_eq!(select_command.body[0].words, ["echo", "$x"]);
+    }
+
+    #[test]
     fn test_for_and_select_words_record_metadata() {
         let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
         let for_ast = parse(&for_tokens);
