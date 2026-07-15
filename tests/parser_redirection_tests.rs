@@ -18,6 +18,22 @@ fn test_output_redirect() {
 }
 
 #[test]
+fn test_leading_output_redirect_attaches_to_simple_command() {
+    let input = "> file.txt echo hello";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    assert_eq!(ast.commands.len(), 1);
+    let command = &ast.commands[0];
+    let redirect = command.redirect_out.as_ref().unwrap();
+
+    assert_eq!(command.words, ["echo", "hello"]);
+    assert_eq!(redirect.operator, ">");
+    assert_eq!(redirect.target, "file.txt");
+    assert_eq!(redirect.kind, RedirectKind::Output);
+    assert_eq!(command.redirects[0].target, "file.txt");
+}
+
+#[test]
 fn test_output_redirect_without_space_after_word() {
     let input = "echo hello>file.txt";
     let tokens = tokenize(input);
