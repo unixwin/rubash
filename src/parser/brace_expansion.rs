@@ -83,7 +83,7 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
     let mut depth = 1usize;
     let mut has_comma = false;
     let mut has_double_dot = false;
-    let mut operators = Vec::new();
+    let mut operators: Vec<String> = Vec::new();
     while index < chars.len() {
         match chars[index] {
             '{' => depth += 1,
@@ -101,6 +101,10 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
                             body: chars[start + 1..index].iter().collect(),
                             close_delimiter: "}".to_string(),
                             close_delimiter_metadata: delimiter_metadata("}"),
+                            operator_metadata: operators
+                                .iter()
+                                .map(|operator| operator_metadata(operator))
+                                .collect(),
                             operators,
                             range: has_double_dot && !has_comma,
                             word_index: None,
@@ -126,6 +130,10 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
         index += 1;
     }
     None
+}
+
+fn operator_metadata(operator: &str) -> crate::parser::WordMetadata {
+    crate::parser::WordMetadata::literal(0, operator.to_string(), operator.to_string())
 }
 
 fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {

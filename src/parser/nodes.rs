@@ -551,6 +551,7 @@ pub struct BraceExpansion {
     pub close_delimiter: String,
     pub close_delimiter_metadata: Box<WordMetadata>,
     pub operators: Vec<String>,
+    pub operator_metadata: Vec<WordMetadata>,
     pub range: bool,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,

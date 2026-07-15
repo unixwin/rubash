@@ -4040,6 +4040,8 @@ mod brace_expansion_tests {
         assert_eq!(expansions[0].close_delimiter_metadata.raw, "}");
         assert_eq!(expansions[0].body, "a,b");
         assert_eq!(expansions[0].operators, [","]);
+        assert_eq!(expansions[0].operator_metadata[0].value, ",");
+        assert_eq!(expansions[0].operator_metadata[0].raw, ",");
         assert!(!expansions[0].range);
         assert_eq!(expansions[0].word_index, Some(1));
         assert_eq!(expansions[0].assignment_name, None);
@@ -4052,6 +4054,8 @@ mod brace_expansion_tests {
         assert_eq!(expansions[1].close_delimiter_metadata.raw, "}");
         assert_eq!(expansions[1].body, "1..3");
         assert_eq!(expansions[1].operators, [".."]);
+        assert_eq!(expansions[1].operator_metadata[0].value, "..");
+        assert_eq!(expansions[1].operator_metadata[0].raw, "..");
         assert!(expansions[1].range);
         assert_eq!(expansions[1].word_index, Some(2));
     }
@@ -4067,6 +4071,8 @@ mod brace_expansion_tests {
         assert_eq!(expansions.len(), 1);
         assert_eq!(expansions[0].text, "{a,b,c}");
         assert_eq!(expansions[0].operators, [",", ","]);
+        assert_eq!(expansions[0].operator_metadata[0].value, ",");
+        assert_eq!(expansions[0].operator_metadata[1].value, ",");
         assert!(!expansions[0].range);
     }
 
