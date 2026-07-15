@@ -94,6 +94,10 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
             pattern,
             close_delimiter: ")".to_string(),
             close_delimiter_metadata: delimiter_metadata(")"),
+            alternative_operator_metadata: operators
+                .iter()
+                .map(|operator| operator_token_metadata(operator))
+                .collect(),
             operators,
             alternatives,
             word_index: None,
@@ -101,6 +105,10 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
         },
         close + 1,
     ))
+}
+
+fn operator_token_metadata(operator: &str) -> crate::parser::WordMetadata {
+    crate::parser::WordMetadata::literal(0, operator.to_string(), operator.to_string())
 }
 
 fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {

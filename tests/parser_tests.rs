@@ -4166,6 +4166,8 @@ mod extglob_pattern_tests {
         assert_eq!(patterns[0].operator_metadata.raw, "@");
         assert_eq!(patterns[0].pattern, "alpha|beta");
         assert_eq!(patterns[0].operators, ["|"]);
+        assert_eq!(patterns[0].alternative_operator_metadata[0].value, "|");
+        assert_eq!(patterns[0].alternative_operator_metadata[0].raw, "|");
         assert_eq!(patterns[0].alternatives, ["alpha", "beta"]);
         assert_eq!(patterns[0].word_index, Some(1));
         assert_eq!(patterns[1].text, "!(.tmp)");
@@ -4184,6 +4186,8 @@ mod extglob_pattern_tests {
         assert_eq!(patterns[2].text, "@(a|+(b|c))");
         assert_eq!(patterns[2].pattern, "a|+(b|c)");
         assert_eq!(patterns[2].operators, ["|"]);
+        assert_eq!(patterns[2].alternative_operator_metadata[0].value, "|");
+        assert_eq!(patterns[2].alternative_operator_metadata[0].raw, "|");
         assert_eq!(patterns[2].alternatives, ["a", "+(b|c)"]);
         assert_eq!(patterns[2].word_index, Some(3));
         assert_eq!(patterns[3].text, "+(b|c)");
@@ -4204,6 +4208,8 @@ mod extglob_pattern_tests {
         assert_eq!(patterns.len(), 2);
         assert_eq!(patterns[0].text, "@(a|b|c)");
         assert_eq!(patterns[0].operators, ["|", "|"]);
+        assert_eq!(patterns[0].alternative_operator_metadata[0].value, "|");
+        assert_eq!(patterns[0].alternative_operator_metadata[1].value, "|");
         assert_eq!(patterns[0].alternatives, ["a", "b", "c"]);
         assert_eq!(patterns[1].text, "@(a[|]b|c)");
         assert_eq!(patterns[1].operators, ["|"]);

@@ -569,6 +569,7 @@ pub struct ExtglobPattern {
     pub close_delimiter: String,
     pub close_delimiter_metadata: Box<WordMetadata>,
     pub operators: Vec<String>,
+    pub alternative_operator_metadata: Vec<WordMetadata>,
     pub alternatives: Vec<String>,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
