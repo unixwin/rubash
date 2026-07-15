@@ -29,6 +29,10 @@ impl<'a> Lexer<'a> {
                         break;
                     }
                 }
+                '$' if self.peek() == Some('\'') => {
+                    self.advance();
+                    self.skip_ansi_c_single();
+                }
                 '\'' => self.skip_single(),
                 '"' => self.skip_double(),
                 '<' if self.peek() == Some('<') && self.peek_after(1) == Some('<') => {

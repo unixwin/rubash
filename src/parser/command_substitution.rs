@@ -75,6 +75,7 @@ fn dollar_command_substitution(
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     let mut case_depth = 0usize;
     let mut word = String::new();
@@ -87,9 +88,23 @@ fn dollar_command_substitution(
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         update_command_substitution_case_depth(
@@ -144,6 +159,7 @@ fn braced_command_substitution(
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -152,9 +168,23 @@ fn braced_command_substitution(
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         match ch {

@@ -6,6 +6,9 @@ pub(super) fn remove_shell_quotes(raw: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match ch {
+            '$' if chars.peek() == Some(&'(') => {
+                copy_dollar_paren_substitution(&mut out, &mut chars);
+            }
             '$' if chars.peek() == Some(&'\'') => {
                 chars.next();
                 let mut quoted = String::new();
@@ -45,6 +48,10 @@ pub(super) fn remove_shell_quotes(raw: &str) -> String {
             }
             '"' => {
                 while let Some(quoted) = chars.next() {
+                    if quoted == '$' && chars.peek() == Some(&'(') {
+                        copy_dollar_paren_substitution(&mut out, &mut chars);
+                        continue;
+                    }
                     if quoted == '$' && chars.peek() == Some(&'{') {
                         copy_braced_parameter_after_dollar(&mut out, &mut chars);
                         continue;
@@ -119,6 +126,10 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
             }
             '"' => {
                 while let Some(quoted) = chars.next() {
+                    if quoted == '$' && chars.peek() == Some(&'(') {
+                        copy_dollar_paren_substitution(&mut out, &mut chars);
+                        continue;
+                    }
                     if quoted == '$' && chars.peek() == Some(&'{') {
                         copy_braced_parameter_after_dollar(&mut out, &mut chars);
                         continue;
@@ -173,6 +184,120 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
     }
 
     out
+}
+
+fn copy_dollar_paren_substitution(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    out.push('$');
+    if chars.next() != Some('(') {
+        return;
+    }
+    out.push('(');
+    copy_dollar_paren_body_raw(out, chars);
+}
+
+fn copy_single_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    for ch in chars.by_ref() {
+        out.push(ch);
+        if ch == '\'' {
+            break;
+        }
+    }
+}
+
+fn copy_ansi_c_single_quoted_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut escaped = false;
+    for ch in chars.by_ref() {
+        out.push(ch);
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' {
+            break;
+        }
+    }
+}
+
+fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        match ch {
+            '"' => break,
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                out.push('(');
+                copy_dollar_paren_body_raw(out, chars);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn copy_dollar_paren_body_raw(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) {
+    let mut depth = 1usize;
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        match ch {
+            '$' if chars.peek() == Some(&'\'') => {
+                chars.next();
+                out.push('\'');
+                copy_ansi_c_single_quoted_raw(out, chars);
+            }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                out.push('(');
+                depth += 1;
+            }
+            '\'' => copy_single_quoted_raw(out, chars),
+            '"' => copy_double_quoted_raw(out, chars),
+            '`' => copy_backtick_raw(out, chars),
+            '\\' => {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn copy_backtick_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while let Some(ch) = chars.next() {
+        out.push(ch);
+        if ch == '`' {
+            break;
+        }
+        if ch == '\\' {
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+            }
+        }
+    }
 }
 
 pub(super) fn copy_braced_parameter_after_dollar(

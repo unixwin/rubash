@@ -3590,6 +3590,20 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_inner_ansi_c_escaped_quote() {
+        let input = "echo \"$(printf $'foo\\'\nbar')\"";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(ast.commands[0].words, ["echo", "$(printf $'foo\\'\nbar')"]);
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].text, "$(printf $'foo\\'\nbar')");
+        assert_eq!(substitutions[0].source, "printf $'foo\\'\nbar'");
+        assert_eq!(substitutions[0].commands[0].words, ["printf", "foo'\nbar"]);
+    }
+
+    #[test]
     fn test_empty_command_substitution_records_null_body() {
         let input = "echo before$()after";
         let tokens = tokenize(input);
