@@ -1345,6 +1345,51 @@ fn test_inverted_compound_commands_flip_status() {
 }
 
 #[test]
+fn test_inverted_case_and_test_commands_flip_status() {
+    let output_path = "target/rubash-inverted-case-test-status.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "! case yes in yes) true ;; esac; echo case:$? > {output_path}; \
+         ! (( 0 )); echo arith:$? >> {output_path}; \
+         ! [[ no == yes ]]; echo cond:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .case_command
+        .is_some());
+    assert!(ast.commands[2]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .arithmetic_command
+        .is_some());
+    assert!(ast.commands[4]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .conditional_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "case:1\narith:0\ncond:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_inverted_function_definitions_still_define_functions() {
     let output_path = "target/rubash-inverted-function-definition-output.txt";
     let _ = fs::remove_file(output_path);

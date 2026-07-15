@@ -5387,6 +5387,47 @@ mod inverted_tests {
         assert_eq!(posix_function.name, "f");
         assert_eq!(posix_function.body[0].words, ["echo", "hi"]);
     }
+
+    #[test]
+    fn test_inverted_command_wraps_case_and_test_commands() {
+        let case_ast = parse(&tokenize("! case yes in yes) true ;; esac"));
+        let arithmetic_ast = parse(&tokenize("! (( count += 1 ))"));
+        let conditional_ast = parse(&tokenize("! [[ $value == yes ]]"));
+
+        let case_inverted = case_ast.commands[0].inverted_command.as_ref().unwrap();
+        let case_command = case_inverted.command.case_command.as_ref().unwrap();
+        let arithmetic_inverted = arithmetic_ast.commands[0]
+            .inverted_command
+            .as_ref()
+            .unwrap();
+        let arithmetic = arithmetic_inverted
+            .command
+            .arithmetic_command
+            .as_ref()
+            .unwrap();
+        let conditional_inverted = conditional_ast.commands[0]
+            .inverted_command
+            .as_ref()
+            .unwrap();
+        let conditional = conditional_inverted
+            .command
+            .conditional_command
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(case_inverted.operator, "!");
+        assert_eq!(case_command.word, "yes");
+        assert_eq!(case_command.clauses[0].patterns, ["yes"]);
+        assert_eq!(arithmetic_inverted.operator, "!");
+        assert_eq!(arithmetic.expression, "count += 1");
+        assert_eq!(conditional_inverted.operator, "!");
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Binary
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("=="));
+        assert_eq!(conditional.expression.operands, ["$value", "yes"]);
+    }
 }
 
 mod variable_tests {
