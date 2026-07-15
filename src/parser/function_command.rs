@@ -1,3 +1,4 @@
+use super::parse_loop::{parse_time_prefixed_compound_command, parse_time_prefixed_shell_command};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -323,6 +324,8 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
     }
 
     match tokens.get(start)?.value.as_str() {
+        "time" => parse_time_prefixed_shell_command(tokens, start)
+            .or_else(|| parse_time_prefixed_compound_command(tokens, start)),
         "for" => parse_for_command(tokens, start),
         "if" => parse_if_command(tokens, start),
         "while" | "until" => parse_loop_command(tokens, start),

@@ -1669,6 +1669,31 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_body_can_be_time_command() {
+        let simple_tokens = tokenize("foo() time -p echo hi");
+        let simple_ast = parse(&simple_tokens);
+        let simple_function = simple_ast.commands[0].function_command.as_ref().unwrap();
+        let simple_time = simple_function.body[0].time_command.as_ref().unwrap();
+
+        assert_eq!(simple_function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert!(simple_time.posix_format);
+        assert_eq!(simple_time.prefix_words, ["-p"]);
+        assert_eq!(simple_time.command.words, ["echo", "hi"]);
+
+        let brace_tokens = tokenize("bar() time { echo one; echo two; }");
+        let brace_ast = parse(&brace_tokens);
+        let brace_function = brace_ast.commands[0].function_command.as_ref().unwrap();
+        let brace_time = brace_function.body[0].time_command.as_ref().unwrap();
+
+        assert_eq!(brace_function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert!(brace_time.command.brace_group.is_some());
+        assert_eq!(
+            brace_time.command.brace_group.as_ref().unwrap().body[0].words,
+            ["echo", "one"]
+        );
+    }
+
+    #[test]
     fn test_function_conditional_body_keeps_quoted_closing_delimiter_word() {
         let input = "foo() [[ value == \"]]\" ]]";
         let tokens = tokenize(input);

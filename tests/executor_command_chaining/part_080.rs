@@ -1429,6 +1429,29 @@ fn test_function_body_can_be_coproc_command() {
 }
 
 #[test]
+fn test_function_body_can_be_time_command() {
+    let output_path = "target/rubash-function-time-body-output.txt";
+    let error_path = "target/rubash-function-time-body-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!("f() time echo timed > {output_path}; f 2> {error_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert!(ast.commands[0].function_command.as_ref().unwrap().body[0]
+        .time_command
+        .is_some());
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "timed\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_function_body_can_be_subshell_command() {
     let output_path = "target/rubash-function-subshell-body-output.txt";
     let _ = fs::remove_file(output_path);
