@@ -15,11 +15,17 @@ pub(super) fn compound_assignment_from_word(
     let operator = if append { "+=" } else { "=" }.to_string();
     let name = name.strip_suffix('+').unwrap_or(name).to_string();
     Some(CompoundAssignment {
-        name,
+        name: name.clone(),
+        name_metadata: Box::new(build_word_metadata(0, &name, &name)),
         elements: compound_assignment_elements(&value),
         value,
-        operator,
+        operator: operator.clone(),
+        operator_metadata: Box::new(build_word_metadata(0, &operator, &operator)),
         append,
+        open_delimiter: "(".to_string(),
+        open_delimiter_metadata: Box::new(build_word_metadata(0, "(", "(")),
+        close_delimiter: ")".to_string(),
+        close_delimiter_metadata: Box::new(build_word_metadata(0, ")", ")")),
         word_index,
     })
 }

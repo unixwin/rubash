@@ -373,9 +373,15 @@ pub struct InvertedCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompoundAssignment {
     pub name: String,
+    pub name_metadata: Box<WordMetadata>,
     pub value: String,
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub append: bool,
+    pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
+    pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub word_index: Option<usize>,
     pub elements: Vec<CompoundAssignmentElement>,
 }
