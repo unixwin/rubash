@@ -1299,6 +1299,28 @@ fn test_if_command_pipeline_stage_feeds_next_command() {
 }
 
 #[test]
+fn test_case_command_pipeline_stage_feeds_next_command() {
+    let output_path = "target/rubash-pipeline-case-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("case yes in yes) echo yes ;; *) echo no ;; esac | grep yes > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].pipeline_command.is_some());
+    assert!(ast.commands[0].pipeline_command.as_ref().unwrap().stages[0]
+        .case_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "yes\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_inverted_compound_commands_flip_status() {
     let output_path = "target/rubash-inverted-compound-status.txt";
     let _ = fs::remove_file(output_path);
