@@ -289,7 +289,9 @@ pub enum ConditionalExpressionKind {
 #[derive(Debug, Clone)]
 pub struct SubshellCommand {
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub body: Vec<CommandNode>,
 }
 
@@ -297,7 +299,9 @@ pub struct SubshellCommand {
 #[derive(Debug, Clone)]
 pub struct BraceGroupCommand {
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub body: Vec<CommandNode>,
 }
 
@@ -962,7 +966,7 @@ pub struct CommandNode {
     /// `[[ expression ]]`
     pub conditional_command: Option<Box<ConditionalCommand>>,
     /// `( compound_list )`
-    pub subshell_command: Option<SubshellCommand>,
+    pub subshell_command: Option<Box<SubshellCommand>>,
     /// `case word in pattern) ... ;; esac`
     pub case_command: Option<Box<CaseCommand>>,
     /// `select name [in words ...]; do ...; done`
@@ -970,7 +974,7 @@ pub struct CommandNode {
     /// `name() { compound_list; }`
     pub function_command: Option<Box<FunctionCommand>>,
     /// `{ compound_list; }`
-    pub brace_group: Option<BraceGroupCommand>,
+    pub brace_group: Option<Box<BraceGroupCommand>>,
     pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
