@@ -478,6 +478,21 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_inversion_prefix_parses_function_definition() {
+        let tokens = tokenize("time -p ! function greet { echo hi; }");
+        let ast = parse(&tokens);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        let function = time_command.command.function_command.as_ref().unwrap();
+
+        assert!(time_command.posix_format);
+        assert!(time_command.inverted);
+        assert_eq!(time_command.prefix_words, ["-p", "!"]);
+        assert!(function.keyword);
+        assert_eq!(function.name, "greet");
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
+    }
+
+    #[test]
     fn test_time_prefix_parses_subshell_group() {
         let input = "time -p ( echo one; echo two )";
         let tokens = tokenize(input);

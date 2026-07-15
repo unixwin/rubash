@@ -706,6 +706,33 @@ fn test_time_prefix_executes_function_definition() {
 }
 
 #[test]
+fn test_time_inversion_prefix_executes_function_definition() {
+    let output_path = "target/rubash-time-inverted-function-definition-output.txt";
+    let error_path = "target/rubash-time-inverted-function-definition-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "time -p ! function timed_func {{ echo timed > {output_path}; }} 2> {error_path}; timed_func"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+
+    assert!(time_command.posix_format);
+    assert!(time_command.inverted);
+    assert!(time_command.command.function_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "timed\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_time_inversion_prefix_executes_subshell_group() {
     let output_path = "target/rubash-time-inverted-subshell-group-output.txt";
     let _ = fs::remove_file(output_path);
