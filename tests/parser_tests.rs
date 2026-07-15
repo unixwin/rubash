@@ -5213,6 +5213,23 @@ mod background_tests {
         assert_eq!(time_command.command.words, ["true"]);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_case_command() {
+        let input = "case yes in yes) echo yes ;; *) echo no ;; esac & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        let case_command = background.command.case_command.as_ref().unwrap();
+
+        assert_eq!(background.operator, "&");
+        assert_eq!(case_command.word, "yes");
+        assert_eq!(case_command.clauses.len(), 2);
+        assert_eq!(case_command.clauses[0].patterns, ["yes"]);
+        assert_eq!(case_command.clauses[0].body[0].words, ["echo", "yes"]);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
