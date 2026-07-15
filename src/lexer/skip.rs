@@ -7,8 +7,20 @@ impl<'a> Lexer<'a> {
         let mut depth = 1;
         let mut case_depth = 0usize;
         let mut word = String::new();
+        let mut word_boundary = true;
+        let mut current_word_boundary = true;
         while let Some(c) = self.advance() {
-            update_command_substitution_case_depth(c, false, false, &mut word, &mut case_depth);
+            let rest = from_utf8(&self.input[self.position..]).unwrap_or("");
+            update_command_substitution_case_depth(
+                c,
+                false,
+                false,
+                &mut word,
+                &mut case_depth,
+                &mut word_boundary,
+                &mut current_word_boundary,
+                rest,
+            );
             match c {
                 '(' if case_depth == 0 => depth += 1,
                 ')' if case_depth == 0 => {
@@ -390,21 +402,97 @@ fn update_command_substitution_case_depth(
     double: bool,
     word: &mut String,
     case_depth: &mut usize,
+    word_boundary: &mut bool,
+    current_word_boundary: &mut bool,
+    rest: &str,
 ) {
     if single || double {
         word.clear();
+        *word_boundary = false;
         return;
     }
 
     if ch == '_' || ch.is_ascii_alphanumeric() {
+        if word.is_empty() {
+            *current_word_boundary = *word_boundary;
+        }
         word.push(ch);
         return;
     }
 
-    match word.as_str() {
-        "case" => *case_depth += 1,
-        "esac" => *case_depth = case_depth.saturating_sub(1),
-        _ => {}
+    if word.is_empty() {
+        if command_substitution_separator_allows_reserved_word(ch) {
+            *word_boundary = true;
+        } else if !ch.is_whitespace() {
+            *word_boundary = false;
+        }
+        return;
     }
+
+    let reserved_word_allows_next = match word.as_str() {
+        "case" if *current_word_boundary => {
+            *case_depth += 1;
+            false
+        }
+        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest) => {
+            *case_depth = case_depth.saturating_sub(1);
+            false
+        }
+        "then" | "do" | "else" | "elif" if *current_word_boundary => true,
+        _ => false,
+    };
     word.clear();
+    *word_boundary =
+        reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
+}
+
+fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
+    matches!(ch, ';' | '&' | '|' | '(' | '\n')
+}
+
+fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
+    if !matches!(delimiter, ')' | '|') {
+        return false;
+    }
+
+    let chars = std::iter::once(delimiter)
+        .chain(rest.chars())
+        .collect::<Vec<_>>();
+    let mut close = 0usize;
+    while close < chars.len() {
+        match chars[close] {
+            ')' => break,
+            ';' | '\n' => return false,
+            _ => close += 1,
+        }
+    }
+    if chars.get(close) != Some(&')') {
+        return false;
+    }
+
+    let mut scan = close + 1;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    while scan < chars.len() {
+        let ch = chars[scan];
+        if ch == ';' && chars.get(scan + 1) == Some(&';') {
+            return true;
+        }
+        if ch == ')' {
+            return false;
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            word.push(ch);
+            scan += 1;
+            continue;
+        }
+        if word == "esac" && word_boundary {
+            return true;
+        }
+        word.clear();
+        word_boundary = matches!(ch, ';' | '&' | '|' | '(' | '\n');
+        scan += 1;
+    }
+
+    word == "esac" && word_boundary
 }

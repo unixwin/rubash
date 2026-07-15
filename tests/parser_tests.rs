@@ -3547,6 +3547,24 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_case_pattern_starting_with_esac() {
+        let input = "echo $(case esac in\nesac) printf matched ;; esac)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(
+            substitutions[0].source,
+            "case esac in\nesac) printf matched ;; esac"
+        );
+        let case_command = substitutions[0].commands[0].case_command.as_ref().unwrap();
+        assert_eq!(case_command.word, "esac");
+        assert_eq!(case_command.clauses[0].patterns, ["esac"]);
+        assert_eq!(case_command.clauses[0].body[0].words, ["printf", "matched"]);
+    }
+
+    #[test]
     fn test_command_substitution_keeps_case_argument() {
         let input = "echo $(echo case; echo ok)";
         let tokens = tokenize(input);

@@ -93,6 +93,8 @@ fn dollar_command_substitution(
             continue;
         }
         update_command_substitution_case_depth(
+            &chars,
+            index,
             ch,
             single,
             double,
@@ -178,6 +180,8 @@ fn braced_command_substitution(
 }
 
 fn update_command_substitution_case_depth(
+    chars: &[char],
+    index: usize,
     ch: char,
     single: bool,
     double: bool,
@@ -209,14 +213,21 @@ fn update_command_substitution_case_depth(
         return;
     }
 
-    let reserved_word_allows_next =
-        update_command_substitution_reserved_word_depth(word, *current_word_boundary, case_depth);
+    let reserved_word_allows_next = update_command_substitution_reserved_word_depth(
+        chars,
+        index,
+        word,
+        *current_word_boundary,
+        case_depth,
+    );
     word.clear();
     *word_boundary =
         reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
 }
 
 fn update_command_substitution_reserved_word_depth(
+    chars: &[char],
+    index: usize,
     word: &str,
     word_boundary: bool,
     case_depth: &mut usize,
@@ -230,13 +241,58 @@ fn update_command_substitution_reserved_word_depth(
             *case_depth += 1;
             false
         }
-        "esac" => {
+        "esac" if !case_pattern_starts_with_esac_chars(chars, index) => {
             *case_depth = case_depth.saturating_sub(1);
             false
         }
+        "esac" => false,
         "then" | "do" | "else" | "elif" => true,
         _ => false,
     }
+}
+
+fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {
+    if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
+        return false;
+    }
+
+    let mut close = delimiter_index;
+    while close < chars.len() {
+        match chars[close] {
+            ')' => break,
+            ';' | '\n' => return false,
+            _ => close += 1,
+        }
+    }
+    if chars.get(close) != Some(&')') {
+        return false;
+    }
+
+    let mut scan = close + 1;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    while scan < chars.len() {
+        let ch = chars[scan];
+        if ch == ';' && chars.get(scan + 1) == Some(&';') {
+            return true;
+        }
+        if ch == ')' {
+            return false;
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            word.push(ch);
+            scan += 1;
+            continue;
+        }
+        if word == "esac" && word_boundary {
+            return true;
+        }
+        word.clear();
+        word_boundary = command_substitution_separator_allows_reserved_word(ch);
+        scan += 1;
+    }
+
+    word == "esac" && word_boundary
 }
 
 fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
