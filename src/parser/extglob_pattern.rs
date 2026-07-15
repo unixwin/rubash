@@ -88,15 +88,26 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
         ExtglobPattern {
             text: chars[start..=close].iter().collect(),
             open_delimiter: format!("{operator}("),
+            open_delimiter_metadata: delimiter_metadata(&format!("{operator}(")),
             operator,
+            operator_metadata: delimiter_metadata(&operator.to_string()),
             pattern,
             close_delimiter: ")".to_string(),
+            close_delimiter_metadata: delimiter_metadata(")"),
             operators,
             alternatives,
             word_index: None,
             assignment_name: None,
         },
         close + 1,
+    ))
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
     ))
 }
 

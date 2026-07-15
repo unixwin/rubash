@@ -561,9 +561,12 @@ pub struct BraceExpansion {
 pub struct ExtglobPattern {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub operator: char,
+    pub operator_metadata: Box<WordMetadata>,
     pub pattern: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub operators: Vec<String>,
     pub alternatives: Vec<String>,
     pub word_index: Option<usize>,
