@@ -97,8 +97,10 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
                         BraceExpansion {
                             text: chars[start..=index].iter().collect(),
                             open_delimiter: "{".to_string(),
+                            open_delimiter_metadata: delimiter_metadata("{"),
                             body: chars[start + 1..index].iter().collect(),
                             close_delimiter: "}".to_string(),
+                            close_delimiter_metadata: delimiter_metadata("}"),
                             operators,
                             range: has_double_dot && !has_comma,
                             word_index: None,
@@ -124,6 +126,14 @@ fn brace_expansion(chars: &[char], start: usize) -> Option<(BraceExpansion, usiz
         index += 1;
     }
     None
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }
 
 fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {

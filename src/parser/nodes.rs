@@ -546,8 +546,10 @@ pub struct ParameterExpansion {
 pub struct BraceExpansion {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub body: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub operators: Vec<String>,
     pub range: bool,
     pub word_index: Option<usize>,

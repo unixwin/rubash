@@ -4033,7 +4033,11 @@ mod brace_expansion_tests {
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "{a,b}");
         assert_eq!(expansions[0].open_delimiter, "{");
+        assert_eq!(expansions[0].open_delimiter_metadata.value, "{");
+        assert_eq!(expansions[0].open_delimiter_metadata.raw, "{");
         assert_eq!(expansions[0].close_delimiter, "}");
+        assert_eq!(expansions[0].close_delimiter_metadata.value, "}");
+        assert_eq!(expansions[0].close_delimiter_metadata.raw, "}");
         assert_eq!(expansions[0].body, "a,b");
         assert_eq!(expansions[0].operators, [","]);
         assert!(!expansions[0].range);
@@ -4041,7 +4045,11 @@ mod brace_expansion_tests {
         assert_eq!(expansions[0].assignment_name, None);
         assert_eq!(expansions[1].text, "{1..3}");
         assert_eq!(expansions[1].open_delimiter, "{");
+        assert_eq!(expansions[1].open_delimiter_metadata.value, "{");
+        assert_eq!(expansions[1].open_delimiter_metadata.raw, "{");
         assert_eq!(expansions[1].close_delimiter, "}");
+        assert_eq!(expansions[1].close_delimiter_metadata.value, "}");
+        assert_eq!(expansions[1].close_delimiter_metadata.raw, "}");
         assert_eq!(expansions[1].body, "1..3");
         assert_eq!(expansions[1].operators, [".."]);
         assert!(expansions[1].range);
