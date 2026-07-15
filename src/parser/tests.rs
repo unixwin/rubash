@@ -206,6 +206,11 @@ fn test_parse_arithmetic_for_command() {
     assert!(arithmetic.init_metadata.has_assignment);
     assert!(!arithmetic.init_metadata.has_comparison);
     assert_eq!(arithmetic.separators, [";", ";"]);
+    assert_eq!(arithmetic.separator_metadata.len(), 2);
+    assert_eq!(arithmetic.separator_metadata[0].value, ";");
+    assert_eq!(arithmetic.separator_metadata[0].word_index, 0);
+    assert_eq!(arithmetic.separator_metadata[1].value, ";");
+    assert_eq!(arithmetic.separator_metadata[1].word_index, 1);
     assert_eq!(arithmetic.test, "i < 3");
     assert_eq!(arithmetic.test_metadata.expression, "i < 3");
     assert_eq!(arithmetic.test_metadata.variables, ["i"]);
@@ -217,6 +222,10 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(arithmetic.update_metadata.operators[0].text, "++");
     assert!(arithmetic.update_metadata.has_update);
     assert_eq!(arithmetic.close_delimiter, "))");
+    assert_eq!(arithmetic.open_delimiter_metadata.value, "((");
+    assert_eq!(arithmetic.open_delimiter_metadata.raw, "((");
+    assert_eq!(arithmetic.close_delimiter_metadata.value, "))");
+    assert_eq!(arithmetic.close_delimiter_metadata.raw, "))");
     assert_eq!(for_command.body_kind, CommandBodyKind::DoDone);
     assert_eq!(for_command.body_open_delimiter.as_deref(), Some("do"));
     assert_eq!(for_command.body_close_delimiter.as_deref(), Some("done"));

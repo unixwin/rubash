@@ -160,14 +160,17 @@ pub(super) fn parse_arithmetic_for_command(
         list_terminator,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
+            open_delimiter_metadata: delimiter_metadata("(("),
             init: init.clone(),
             init_metadata: ArithmeticExpressionMetadata::new(init),
             separators: vec![";".to_string(), ";".to_string()],
+            separator_metadata: vec![separator_metadata(0, ";"), separator_metadata(1, ";")],
             test: test.clone(),
             test_metadata: ArithmeticExpressionMetadata::new(test),
             update: update.clone(),
             update_metadata: ArithmeticExpressionMetadata::new(update),
             close_delimiter: "))".to_string(),
+            close_delimiter_metadata: delimiter_metadata("))"),
         }),
         body_kind,
         body_open_delimiter,
@@ -179,6 +182,14 @@ pub(super) fn parse_arithmetic_for_command(
         body,
     });
     Some(finish_compound_command(command, tokens, body_end))
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, delimiter, delimiter))
+}
+
+fn separator_metadata(index: usize, separator: &str) -> WordMetadata {
+    build_word_metadata(index, separator, separator)
 }
 
 fn parse_arithmetic_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {

@@ -124,14 +124,17 @@ impl ArithmeticExpressionMetadata {
 #[derive(Debug, Clone)]
 pub struct ArithmeticForCommand {
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub init: String,
     pub init_metadata: ArithmeticExpressionMetadata,
     pub separators: Vec<String>,
+    pub separator_metadata: Vec<WordMetadata>,
     pub test: String,
     pub test_metadata: ArithmeticExpressionMetadata,
     pub update: String,
     pub update_metadata: ArithmeticExpressionMetadata,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

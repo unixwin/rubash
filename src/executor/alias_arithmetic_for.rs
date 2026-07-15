@@ -107,14 +107,20 @@ impl Executor {
         Some((
             ArithmeticForCommand {
                 open_delimiter: "((".to_string(),
+                open_delimiter_metadata: synthetic_keyword_metadata("(("),
                 init: init.clone(),
                 init_metadata: ArithmeticExpressionMetadata::new(init),
                 separators: vec![";".to_string(), ";".to_string()],
+                separator_metadata: vec![
+                    synthetic_word_metadata(0, ";"),
+                    synthetic_word_metadata(1, ";"),
+                ],
                 test: test.clone(),
                 test_metadata: ArithmeticExpressionMetadata::new(test),
                 update: update.clone(),
                 update_metadata: ArithmeticExpressionMetadata::new(update),
                 close_delimiter: "))".to_string(),
+                close_delimiter_metadata: synthetic_keyword_metadata("))"),
             },
             index,
         ))
@@ -149,11 +155,11 @@ fn alias_arithmetic_for_command(
 }
 
 fn synthetic_keyword_metadata(keyword: &str) -> Box<WordMetadata> {
-    Box::new(WordMetadata::new(
-        0,
-        keyword.to_string(),
-        keyword.to_string(),
-    ))
+    Box::new(synthetic_word_metadata(0, keyword))
+}
+
+fn synthetic_word_metadata(word_index: usize, value: &str) -> WordMetadata {
+    WordMetadata::new(word_index, value.to_string(), value.to_string())
 }
 
 fn alias_arithmetic_part(command: &CommandNode, words: &[String]) -> String {

@@ -84,14 +84,20 @@ fn inline_arithmetic_for_command(
         list_terminator: None,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
+            open_delimiter_metadata: synthetic_keyword_metadata("(("),
             init: init.clone(),
             init_metadata: ArithmeticExpressionMetadata::new(init),
             separators: vec![";".to_string(), ";".to_string()],
+            separator_metadata: vec![
+                synthetic_word_metadata(0, ";"),
+                synthetic_word_metadata(1, ";"),
+            ],
             test: String::new(),
             test_metadata: ArithmeticExpressionMetadata::new(String::new()),
             update: update.clone(),
             update_metadata: ArithmeticExpressionMetadata::new(update),
             close_delimiter: "))".to_string(),
+            close_delimiter_metadata: synthetic_keyword_metadata("))"),
         }),
         body_kind: CommandBodyKind::DoDone,
         body_open_delimiter: Some("do".to_string()),
@@ -119,9 +125,9 @@ fn find_matching_done(commands: &[CommandNode], start: usize) -> Option<usize> {
 }
 
 fn synthetic_keyword_metadata(keyword: &str) -> Box<WordMetadata> {
-    Box::new(WordMetadata::new(
-        0,
-        keyword.to_string(),
-        keyword.to_string(),
-    ))
+    Box::new(synthetic_word_metadata(0, keyword))
+}
+
+fn synthetic_word_metadata(word_index: usize, value: &str) -> WordMetadata {
+    WordMetadata::new(word_index, value.to_string(), value.to_string())
 }
