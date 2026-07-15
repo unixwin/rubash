@@ -68,6 +68,8 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
             continue;
         }
         update_brace_group_case_depth(
+            &chars,
+            index,
             ch,
             &mut word,
             &mut case_depth,
@@ -86,6 +88,8 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
 }
 
 fn update_brace_group_case_depth(
+    chars: &[char],
+    index: usize,
     ch: char,
     word: &mut String,
     case_depth: &mut usize,
@@ -109,13 +113,20 @@ fn update_brace_group_case_depth(
         return;
     }
 
-    let reserved_word_allows_next =
-        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth);
+    let reserved_word_allows_next = update_brace_group_reserved_word_depth(
+        chars,
+        index,
+        word,
+        *current_word_boundary,
+        case_depth,
+    );
     word.clear();
     *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
 }
 
 fn update_brace_group_reserved_word_depth(
+    chars: &[char],
+    index: usize,
     word: &str,
     word_boundary: bool,
     case_depth: &mut usize,
@@ -129,13 +140,55 @@ fn update_brace_group_reserved_word_depth(
             *case_depth += 1;
             false
         }
-        "esac" => {
+        "esac" if !case_pattern_starts_with_esac_chars(chars, index) => {
             *case_depth = case_depth.saturating_sub(1);
             false
         }
-        "then" | "do" | "else" | "elif" => true,
+        "esac" => false,
+        "then" | "do" | "else" | "elif" | "in" => true,
         _ => false,
     }
+}
+
+fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -> bool {
+    if !matches!(chars.get(delimiter_index), Some(')' | '|')) {
+        return false;
+    }
+
+    let mut close = delimiter_index;
+    while close < chars.len() {
+        match chars[close] {
+            ')' => break,
+            ';' | '\n' => return false,
+            _ => close += 1,
+        }
+    }
+    if chars.get(close) != Some(&')') {
+        return false;
+    }
+
+    let mut scan = close + 1;
+    let mut word = String::new();
+    let mut word_boundary = true;
+    while scan < chars.len() {
+        let ch = chars[scan];
+        if ch == ';' && chars.get(scan + 1) == Some(&';') {
+            return true;
+        }
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            word.push(ch);
+            scan += 1;
+            continue;
+        }
+        if word == "esac" && word_boundary {
+            return true;
+        }
+        word.clear();
+        word_boundary = brace_group_separator_allows_reserved_word(ch);
+        scan += 1;
+    }
+
+    word == "esac" && word_boundary
 }
 
 fn brace_group_separator_allows_reserved_word(ch: char) -> bool {

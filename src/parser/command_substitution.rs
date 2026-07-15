@@ -246,7 +246,7 @@ fn update_command_substitution_reserved_word_depth(
             false
         }
         "esac" => false,
-        "then" | "do" | "else" | "elif" => true,
+        "then" | "do" | "else" | "elif" | "in" => true,
         _ => false,
     }
 }

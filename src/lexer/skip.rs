@@ -221,12 +221,14 @@ impl<'a> Lexer<'a> {
         let mut comment_start = true;
         let mut saw_top_level_whitespace = false;
         while let Some(c) = self.advance() {
+            let rest = from_utf8(&self.input[self.position..]).unwrap_or("");
             update_brace_group_case_depth(
                 c,
                 &mut word,
                 &mut case_depth,
                 &mut word_boundary,
                 &mut current_word_boundary,
+                rest,
             );
             if c == '\n' {
                 if depth == 1 {
@@ -345,6 +347,7 @@ fn update_brace_group_case_depth(
     case_depth: &mut usize,
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
+    rest: &str,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
         if word.is_empty() {
@@ -364,7 +367,7 @@ fn update_brace_group_case_depth(
     }
 
     let reserved_word_allows_next =
-        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth);
+        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth, ch, rest);
     word.clear();
     *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
 }
@@ -373,6 +376,8 @@ fn update_brace_group_reserved_word_depth(
     word: &str,
     word_boundary: bool,
     case_depth: &mut usize,
+    delimiter: char,
+    rest: &str,
 ) -> bool {
     if !word_boundary {
         return false;
@@ -383,11 +388,12 @@ fn update_brace_group_reserved_word_depth(
             *case_depth += 1;
             false
         }
-        "esac" => {
+        "esac" if !case_pattern_starts_with_esac_rest(delimiter, rest) => {
             *case_depth = case_depth.saturating_sub(1);
             false
         }
-        "then" | "do" | "else" | "elif" => true,
+        "esac" => false,
+        "then" | "do" | "else" | "elif" | "in" => true,
         _ => false,
     }
 }
@@ -438,7 +444,7 @@ fn update_command_substitution_case_depth(
             *case_depth = case_depth.saturating_sub(1);
             false
         }
-        "then" | "do" | "else" | "elif" if *current_word_boundary => true,
+        "then" | "do" | "else" | "elif" | "in" if *current_word_boundary => true,
         _ => false,
     };
     word.clear();

@@ -651,6 +651,36 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_brace_bodies_keep_esac_pattern_and_close_brace_argument() {
+        let compact_tokens = tokenize("{ case esac in esac) echo } arg ;; esac; echo after; }");
+        let compact_ast = parse(&compact_tokens);
+        let multiline_tokens = tokenize("{\ncase esac in\nesac) echo } arg ;; esac\necho after\n}");
+        let multiline_ast = parse(&multiline_tokens);
+
+        let compact = compact_ast.commands[0].brace_group.as_ref().unwrap();
+        let multiline = multiline_ast.commands[0].brace_group.as_ref().unwrap();
+
+        assert_eq!(
+            compact.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["esac"]
+        );
+        assert_eq!(
+            compact.body[0].case_command.as_ref().unwrap().clauses[0].body[0].words,
+            ["echo", "}", "arg"]
+        );
+        assert_eq!(compact.body[1].words, ["echo", "after"]);
+        assert_eq!(
+            multiline.body[0].case_command.as_ref().unwrap().clauses[0].patterns,
+            ["esac"]
+        );
+        assert_eq!(
+            multiline.body[0].case_command.as_ref().unwrap().clauses[0].body[0].words,
+            ["echo", "}", "arg"]
+        );
+        assert_eq!(multiline.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_select_body_kind_records_do_done_and_brace_group() {
         let do_done_tokens = tokenize("select x in a; do echo $x; done");
         let do_done_ast = parse(&do_done_tokens);
