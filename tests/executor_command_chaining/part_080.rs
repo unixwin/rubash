@@ -2012,6 +2012,46 @@ fn test_named_coproc_executes_until_body() {
 }
 
 #[test]
+fn test_named_coproc_executes_select_body() {
+    let input_path = "target/rubash-coproc-select-body-input.txt";
+    let output_path = "target/rubash-coproc-select-body-output.txt";
+    let status_path = "target/rubash-coproc-select-body-status.txt";
+    fs::write(input_path, "2\n").unwrap();
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC select value in one two; do echo select:$value > {output_path}; break; done < {input_path}; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert!(coproc.body.as_ref().unwrap()[0].select_command.is_some());
+    assert!(coproc.body.as_ref().unwrap()[0].redirect_in.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "select:two\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "select:two\n");
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_executes_time_prefixed_brace_body() {
     let output_path = "target/rubash-coproc-time-brace-output.txt";
     let status_path = "target/rubash-coproc-time-brace-status.txt";
