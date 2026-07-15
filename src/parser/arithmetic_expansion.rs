@@ -151,7 +151,9 @@ fn arithmetic_expansion_node(
             .iter()
             .collect(),
         open_delimiter: open_delimiter.to_string(),
+        open_delimiter_metadata: delimiter_metadata(open_delimiter),
         close_delimiter: close_delimiter.to_string(),
+        close_delimiter_metadata: delimiter_metadata(close_delimiter),
         variables: arithmetic_variables(&expression),
         has_assignment: operators
             .iter()
@@ -170,4 +172,12 @@ fn arithmetic_expansion_node(
         word_index: None,
         assignment_name: None,
     }
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }

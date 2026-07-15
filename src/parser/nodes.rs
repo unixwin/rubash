@@ -509,8 +509,10 @@ impl Eq for CommandSubstitutionNode {}
 pub struct ArithmeticExpansion {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub expression: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub operators: Vec<ArithmeticOperator>,
     pub variables: Vec<String>,
     pub has_assignment: bool,

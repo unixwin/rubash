@@ -3545,7 +3545,11 @@ mod arithmetic_expansion_tests {
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "$((n + 1))");
         assert_eq!(expansions[0].open_delimiter, "$((");
+        assert_eq!(expansions[0].open_delimiter_metadata.value, "$((");
+        assert_eq!(expansions[0].open_delimiter_metadata.raw, "$((");
         assert_eq!(expansions[0].close_delimiter, "))");
+        assert_eq!(expansions[0].close_delimiter_metadata.value, "))");
+        assert_eq!(expansions[0].close_delimiter_metadata.raw, "))");
         assert_eq!(expansions[0].expression, "n + 1");
         assert_eq!(expansions[0].variables, ["n"]);
         assert_eq!(expansions[0].operators[0].text, "+");
@@ -3671,7 +3675,9 @@ mod arithmetic_expansion_tests {
         assert_eq!(expansions.len(), 2);
         assert_eq!(expansions[0].text, "$[count += 1]");
         assert_eq!(expansions[0].open_delimiter, "$[");
+        assert_eq!(expansions[0].open_delimiter_metadata.value, "$[");
         assert_eq!(expansions[0].close_delimiter, "]");
+        assert_eq!(expansions[0].close_delimiter_metadata.raw, "]");
         assert_eq!(expansions[0].expression, "count += 1");
         assert_eq!(expansions[0].variables, ["count"]);
         assert!(expansions[0].has_assignment);
