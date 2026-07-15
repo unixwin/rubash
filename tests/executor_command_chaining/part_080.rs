@@ -1321,6 +1321,35 @@ fn test_case_command_pipeline_stage_feeds_next_command() {
 }
 
 #[test]
+fn test_grouping_and_select_command_pipeline_stages_feed_next_command() {
+    let output_path = "target/rubash-pipeline-grouping-select-stage-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "( echo subshell ) | cat > {output_path}; \
+         select value in one two; do echo select:$value; break; done <<< 2 | cat >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].pipeline_command.as_ref().unwrap().stages[0]
+        .subshell_command
+        .is_some());
+    assert!(ast.commands[1].pipeline_command.as_ref().unwrap().stages[0]
+        .select_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "subshell\nselect:two\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_inverted_compound_commands_flip_status() {
     let output_path = "target/rubash-inverted-compound-status.txt";
     let _ = fs::remove_file(output_path);

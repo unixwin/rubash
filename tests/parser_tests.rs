@@ -300,6 +300,26 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_grouping_and_select_command_pipeline_stages() {
+        let subshell_ast = parse(&tokenize("( echo yes ) | cat"));
+        let select_ast = parse(&tokenize(
+            "select value in one two; do echo $value; break; done <<< 2 | cat",
+        ));
+
+        let subshell_pipeline = subshell_ast.commands[0].pipeline_command.as_ref().unwrap();
+        let select_pipeline = select_ast.commands[0].pipeline_command.as_ref().unwrap();
+
+        assert_eq!(subshell_pipeline.stages.len(), 2);
+        assert_eq!(subshell_pipeline.operators, ["|"]);
+        assert!(subshell_pipeline.stages[0].subshell_command.is_some());
+        assert_eq!(subshell_pipeline.stages[1].words, ["cat"]);
+        assert_eq!(select_pipeline.stages.len(), 2);
+        assert_eq!(select_pipeline.operators, ["|"]);
+        assert!(select_pipeline.stages[0].select_command.is_some());
+        assert_eq!(select_pipeline.stages[1].words, ["cat"]);
+    }
+
+    #[test]
     fn test_and_or_list_command_preserves_mixed_connectors() {
         let input = "false || echo fallback && echo done";
         let tokens = tokenize(input);
