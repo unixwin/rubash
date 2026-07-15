@@ -611,6 +611,8 @@ pub(super) fn parse_time_prefixed_compound_command(
         parse_select_command(tokens, i)?
     } else if is_keyword(tokens, i, "coproc") {
         parse_coproc_command(tokens, i)?
+    } else if let Some(parsed) = parse_function_command(tokens, i) {
+        parsed
     } else if tokens.get(i).is_some_and(|token| token.value == "[[") {
         parse_conditional_command(tokens, i)?
     } else if is_keyword(tokens, i, "{")
@@ -739,6 +741,10 @@ pub(super) fn time_prefixed_shell_command_allows_simple_pipeline(
 }
 
 fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usize) -> bool {
+    if parse_function_command(tokens, index).is_some() {
+        return true;
+    }
+
     if tokens.get(index).is_some_and(|token| {
         matches!(
             token.value.as_str(),

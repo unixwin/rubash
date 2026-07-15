@@ -444,6 +444,28 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_time_prefix_parses_function_definition() {
+        let keyword_tokens = tokenize("time function greet { echo hi; }");
+        let keyword_ast = parse(&keyword_tokens);
+        let keyword_time = keyword_ast.commands[0].time_command.as_ref().unwrap();
+        let keyword_function = keyword_time.command.function_command.as_ref().unwrap();
+
+        assert!(keyword_function.keyword);
+        assert_eq!(keyword_function.name, "greet");
+        assert_eq!(keyword_function.body[0].words, ["echo", "hi"]);
+
+        let posix_tokens = tokenize("time greet() { echo hi; }");
+        let posix_ast = parse(&posix_tokens);
+        let posix_time = posix_ast.commands[0].time_command.as_ref().unwrap();
+        let posix_function = posix_time.command.function_command.as_ref().unwrap();
+
+        assert!(!posix_function.keyword);
+        assert!(posix_function.has_parentheses);
+        assert_eq!(posix_function.name, "greet");
+        assert_eq!(posix_function.body[0].words, ["echo", "hi"]);
+    }
+
+    #[test]
     fn test_time_prefix_parses_subshell_group() {
         let input = "time -p ( echo one; echo two )";
         let tokens = tokenize(input);

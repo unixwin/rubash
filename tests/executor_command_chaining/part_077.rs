@@ -669,6 +669,43 @@ fn test_time_prefix_executes_subshell_group() {
 }
 
 #[test]
+fn test_time_prefix_executes_function_definition() {
+    let output_path = "target/rubash-time-function-definition-output.txt";
+    let error_path = "target/rubash-time-function-definition-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "time function first {{ echo first > {output_path}; }} 2> {error_path}; first; \
+         time second() {{ echo second >> {output_path}; }} 2>> {error_path}; second"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "first\nsecond\n");
+    assert!(ast.commands[0]
+        .time_command
+        .as_ref()
+        .unwrap()
+        .command
+        .function_command
+        .is_some());
+    assert!(ast.commands[2]
+        .time_command
+        .as_ref()
+        .unwrap()
+        .command
+        .function_command
+        .is_some());
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_time_inversion_prefix_executes_subshell_group() {
     let output_path = "target/rubash-time-inverted-subshell-group-output.txt";
     let _ = fs::remove_file(output_path);
