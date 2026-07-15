@@ -729,6 +729,7 @@ pub struct CasePattern {
     pub text: String,
     pub raw_text: String,
     pub operators: Vec<String>,
+    pub operator_metadata: Vec<WordMetadata>,
     pub extglob_patterns: Vec<ExtglobPattern>,
     pub brace_expansions: Vec<BraceExpansion>,
     pub parameter_expansions: Vec<ParameterExpansion>,
@@ -752,11 +753,16 @@ impl CasePattern {
         pattern_index: usize,
     ) -> Self {
         let operators = case_pattern_operators(&raw_text);
+        let operator_metadata = operators
+            .iter()
+            .map(|operator| WordMetadata::literal(0, operator.to_string(), operator.to_string()))
+            .collect();
         Self {
             has_glob: case_pattern_has_glob(&operators),
             has_extglob: case_pattern_has_extglob(&operators),
             negated_extglob: operators.iter().any(|operator| operator == "!("),
             operators,
+            operator_metadata,
             extglob_patterns: super::extglob_patterns_in_word(&text),
             brace_expansions: super::brace_expansions_in_word(&text),
             parameter_expansions: super::parameter_expansions_in_word(&text),

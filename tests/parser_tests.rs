@@ -2186,6 +2186,10 @@ mod case_tests {
         assert!(!patterns[0].has_extglob);
         assert_eq!(patterns[1].text, "@(foo|bar)");
         assert_eq!(patterns[1].operators, ["@(", "|"]);
+        assert_eq!(patterns[1].operator_metadata[0].value, "@(");
+        assert_eq!(patterns[1].operator_metadata[0].raw, "@(");
+        assert_eq!(patterns[1].operator_metadata[1].value, "|");
+        assert_eq!(patterns[1].operator_metadata[1].raw, "|");
         assert_eq!(patterns[1].extglob_patterns.len(), 1);
         assert_eq!(patterns[1].extglob_patterns[0].text, "@(foo|bar)");
         assert_eq!(patterns[1].extglob_patterns[0].alternatives, ["foo", "bar"]);
@@ -2204,6 +2208,8 @@ mod case_tests {
         assert_eq!(fallback.clause_index, 1);
         assert_eq!(fallback.pattern_index, 0);
         assert_eq!(fallback.operators, ["*"]);
+        assert_eq!(fallback.operator_metadata[0].value, "*");
+        assert_eq!(fallback.operator_metadata[0].raw, "*");
         assert!(fallback.has_glob);
         assert_eq!(case_command.clauses[1].pattern_open_delimiter, None);
         assert!(case_command.clauses[1]
@@ -2283,12 +2289,19 @@ mod case_tests {
         let first = &case_command.clauses[0].pattern_nodes[0];
         assert_eq!(first.text, "src/[ab]??.rs");
         assert_eq!(first.operators, ["[ab]", "?", "?"]);
+        assert_eq!(first.operator_metadata[0].value, "[ab]");
+        assert_eq!(first.operator_metadata[0].raw, "[ab]");
+        assert_eq!(first.operator_metadata[1].value, "?");
+        assert_eq!(first.operator_metadata[2].value, "?");
         assert!(first.has_glob);
         assert!(!first.has_extglob);
 
         let second = &case_command.clauses[1].pattern_nodes[0];
         assert_eq!(second.text, "**/*.sh");
         assert_eq!(second.operators, ["**", "*"]);
+        assert_eq!(second.operator_metadata[0].value, "**");
+        assert_eq!(second.operator_metadata[0].raw, "**");
+        assert_eq!(second.operator_metadata[1].value, "*");
         assert!(second.has_glob);
     }
 
@@ -2325,6 +2338,10 @@ mod case_tests {
         let pattern = &case_command.clauses[0].pattern_nodes[0];
         assert_eq!(pattern.text, "@(a|+(b|c))");
         assert_eq!(pattern.operators, ["@(", "|", "+(", "|"]);
+        assert_eq!(pattern.operator_metadata[0].value, "@(");
+        assert_eq!(pattern.operator_metadata[1].value, "|");
+        assert_eq!(pattern.operator_metadata[2].value, "+(");
+        assert_eq!(pattern.operator_metadata[3].value, "|");
         assert_eq!(pattern.extglob_patterns.len(), 2);
         assert_eq!(pattern.extglob_patterns[0].text, "@(a|+(b|c))");
         assert_eq!(pattern.extglob_patterns[0].alternatives, ["a", "+(b|c)"]);
