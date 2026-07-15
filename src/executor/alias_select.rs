@@ -54,6 +54,7 @@ impl Executor {
         if let Some(brace_group) = do_command.brace_group.clone() {
             let select_command = SelectCommand {
                 keyword: "select".to_string(),
+                keyword_metadata: synthetic_keyword_metadata("select"),
                 variable: variable.clone(),
                 variable_metadata: Box::new(WordMetadata::new(
                     0,
@@ -61,6 +62,9 @@ impl Executor {
                     variable.clone(),
                 )),
                 in_keyword: in_keyword.clone(),
+                in_keyword_metadata: in_keyword
+                    .as_ref()
+                    .map(|keyword| synthetic_keyword_metadata(keyword)),
                 words: select_words,
                 word_metadata: Vec::new(),
                 default_positional,
@@ -69,7 +73,9 @@ impl Executor {
                 body_open_delimiter: Some("{".to_string()),
                 body_close_delimiter: Some("}".to_string()),
                 do_keyword: None,
+                do_keyword_metadata: None,
                 end_keyword: None,
+                end_keyword_metadata: None,
                 body: brace_group.body,
             };
             self.execute_select_command(do_command, &select_command)?;
@@ -96,9 +102,11 @@ impl Executor {
 
         let select_command = SelectCommand {
             keyword: "select".to_string(),
+            keyword_metadata: synthetic_keyword_metadata("select"),
             variable: variable.clone(),
             variable_metadata: Box::new(WordMetadata::new(0, variable.clone(), variable)),
             in_keyword,
+            in_keyword_metadata: (!default_positional).then(|| synthetic_keyword_metadata("in")),
             words: select_words,
             word_metadata: Vec::new(),
             default_positional,
@@ -107,10 +115,20 @@ impl Executor {
             body_open_delimiter: Some("do".to_string()),
             body_close_delimiter: Some("done".to_string()),
             do_keyword: Some("do".to_string()),
+            do_keyword_metadata: Some(synthetic_keyword_metadata("do")),
             end_keyword: Some("done".to_string()),
+            end_keyword_metadata: Some(synthetic_keyword_metadata("done")),
             body,
         };
         self.execute_select_command(done_command, &select_command)?;
         Ok(Some(done_index + 1))
     }
+}
+
+fn synthetic_keyword_metadata(keyword: &str) -> Box<WordMetadata> {
+    Box::new(WordMetadata::new(
+        0,
+        keyword.to_string(),
+        keyword.to_string(),
+    ))
 }

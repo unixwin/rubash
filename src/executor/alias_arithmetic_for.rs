@@ -127,9 +127,11 @@ fn alias_arithmetic_for_command(
 ) -> ForCommand {
     ForCommand {
         keyword: "for".to_string(),
+        keyword_metadata: synthetic_keyword_metadata("for"),
         variable: String::new(),
         variable_metadata: Box::new(WordMetadata::new(0, String::new(), String::new())),
         in_keyword: None,
+        in_keyword_metadata: None,
         words: Vec::new(),
         word_metadata: Vec::new(),
         default_positional: false,
@@ -139,9 +141,19 @@ fn alias_arithmetic_for_command(
         body_open_delimiter: Some("do".to_string()),
         body_close_delimiter: Some("done".to_string()),
         do_keyword: Some("do".to_string()),
+        do_keyword_metadata: Some(synthetic_keyword_metadata("do")),
         end_keyword: Some("done".to_string()),
+        end_keyword_metadata: Some(synthetic_keyword_metadata("done")),
         body,
     }
+}
+
+fn synthetic_keyword_metadata(keyword: &str) -> Box<WordMetadata> {
+    Box::new(WordMetadata::new(
+        0,
+        keyword.to_string(),
+        keyword.to_string(),
+    ))
 }
 
 fn alias_arithmetic_part(command: &CommandNode, words: &[String]) -> String {

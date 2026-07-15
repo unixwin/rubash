@@ -499,9 +499,17 @@ mod command_body_kind_tests {
         let for_command = ast.commands[0].for_command.as_ref().unwrap();
 
         assert_eq!(for_command.keyword, "for");
+        assert_eq!(for_command.keyword_metadata.value, "for");
+        assert_eq!(for_command.keyword_metadata.raw, "for");
         assert_eq!(for_command.in_keyword.as_deref(), Some("in"));
+        assert_eq!(
+            for_command.in_keyword_metadata.as_ref().unwrap().value,
+            "in"
+        );
         assert_eq!(for_command.do_keyword, None);
+        assert!(for_command.do_keyword_metadata.is_none());
         assert_eq!(for_command.end_keyword, None);
+        assert!(for_command.end_keyword_metadata.is_none());
         assert_eq!(for_command.list_terminator.as_deref(), Some(";"));
         assert_eq!(for_command.body_kind, CommandBodyKind::BraceGroup);
         assert_eq!(for_command.body_open_delimiter.as_deref(), Some("{"));
@@ -685,6 +693,20 @@ mod command_body_kind_tests {
             for_command.words,
             ["${one:-1}", "pre{a,b}", "src/[ab]?", "*.rs"]
         );
+        assert_eq!(for_command.keyword_metadata.value, "for");
+        assert_eq!(for_command.keyword_metadata.raw, "for");
+        assert_eq!(
+            for_command.in_keyword_metadata.as_ref().unwrap().value,
+            "in"
+        );
+        assert_eq!(
+            for_command.do_keyword_metadata.as_ref().unwrap().value,
+            "do"
+        );
+        assert_eq!(
+            for_command.end_keyword_metadata.as_ref().unwrap().value,
+            "done"
+        );
         assert_eq!(for_command.variable, "x");
         assert_eq!(for_command.variable_metadata.word_index, 0);
         assert_eq!(for_command.variable_metadata.value, "x");
@@ -716,6 +738,20 @@ mod command_body_kind_tests {
 
         let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
         assert_eq!(select_command.words, ["$((i+1))", "@(yes|no)", "~+/bin"]);
+        assert_eq!(select_command.keyword_metadata.value, "select");
+        assert_eq!(select_command.keyword_metadata.raw, "select");
+        assert_eq!(
+            select_command.in_keyword_metadata.as_ref().unwrap().value,
+            "in"
+        );
+        assert_eq!(
+            select_command.do_keyword_metadata.as_ref().unwrap().value,
+            "do"
+        );
+        assert_eq!(
+            select_command.end_keyword_metadata.as_ref().unwrap().value,
+            "done"
+        );
         assert_eq!(select_command.variable, "x");
         assert_eq!(select_command.variable_metadata.word_index, 0);
         assert_eq!(select_command.variable_metadata.value, "x");

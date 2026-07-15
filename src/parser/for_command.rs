@@ -23,9 +23,11 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let mut words = Vec::new();
     let mut word_metadata = Vec::new();
     let mut in_keyword = None;
+    let mut in_keyword_metadata = None;
     let mut list_terminator = None;
     let default_positional = if is_keyword(tokens, i, "in") {
         in_keyword = Some(tokens[i].value.clone());
+        in_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
         i += 1;
         while i < tokens.len() {
             if tokens[i].kind == TokenKind::Semicolon {
@@ -77,51 +79,72 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         true
     };
 
-    let (body, body_end, body_kind, do_keyword, end_keyword) =
-        if let Some((body, next_i)) = parse_for_brace_body(tokens, i) {
-            (body, next_i, CommandBodyKind::BraceGroup, None, None)
-        } else {
-            if !is_keyword(tokens, i, "do") {
-                return None;
+    let (
+        body,
+        body_end,
+        body_kind,
+        do_keyword,
+        do_keyword_metadata,
+        end_keyword,
+        end_keyword_metadata,
+    ) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i) {
+        (
+            body,
+            next_i,
+            CommandBodyKind::BraceGroup,
+            None,
+            None,
+            None,
+            None,
+        )
+    } else {
+        if !is_keyword(tokens, i, "do") {
+            return None;
+        }
+        let do_keyword = Some(tokens[i].value.clone());
+        let do_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
+        i += 1;
+
+        let body_start = i;
+        let mut stack = Vec::new();
+        while i < tokens.len() {
+            if stack.is_empty()
+                && command_boundary_keyword_allowed(tokens, i)
+                && is_keyword(tokens, i, "done")
+            {
+                break;
             }
-            let do_keyword = Some(tokens[i].value.clone());
+            update_compound_boundary_stack(tokens, i, &mut stack);
             i += 1;
+        }
 
-            let body_start = i;
-            let mut stack = Vec::new();
-            while i < tokens.len() {
-                if stack.is_empty()
-                    && command_boundary_keyword_allowed(tokens, i)
-                    && is_keyword(tokens, i, "done")
-                {
-                    break;
-                }
-                update_compound_boundary_stack(tokens, i, &mut stack);
-                i += 1;
-            }
+        if !is_keyword(tokens, i, "done") {
+            return None;
+        }
+        let end_keyword = Some(tokens[i].value.clone());
+        let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 
-            if !is_keyword(tokens, i, "done") {
-                return None;
-            }
-            let end_keyword = Some(tokens[i].value.clone());
-
-            (
-                parse_for_body_commands(&tokens[body_start..i]),
-                i + 1,
-                CommandBodyKind::DoDone,
-                do_keyword,
-                end_keyword,
-            )
-        };
+        (
+            parse_for_body_commands(&tokens[body_start..i]),
+            i + 1,
+            CommandBodyKind::DoDone,
+            do_keyword,
+            do_keyword_metadata,
+            end_keyword,
+            end_keyword_metadata,
+        )
+    };
     let (body_open_delimiter, body_close_delimiter) =
         command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata: build_keyword_metadata(&tokens[start]),
         variable: variable.clone(),
         variable_metadata: Box::new(build_word_metadata(0, &variable, &variable_token.raw)),
         in_keyword,
+        in_keyword_metadata,
         words,
         word_metadata,
         default_positional,
@@ -131,7 +154,9 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         body_open_delimiter,
         body_close_delimiter,
         do_keyword,
+        do_keyword_metadata,
         end_keyword,
+        end_keyword_metadata,
         body,
     });
     Some(finish_compound_command(command, tokens, body_end))
@@ -157,6 +182,10 @@ fn parse_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
+}
+
+fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
 }
 
 fn for_brace_body_start(tokens: &[Token], index: usize) -> bool {

@@ -84,42 +84,61 @@ pub(super) fn parse_arithmetic_for_command(
         i += 1;
     }
 
-    let (body, body_end, body_kind, do_keyword, end_keyword) =
-        if let Some((body, next_i)) = parse_arithmetic_for_brace_body(tokens, i) {
-            (body, next_i, CommandBodyKind::BraceGroup, None, None)
-        } else {
-            if !is_keyword(tokens, i, "do") {
-                return None;
+    let (
+        body,
+        body_end,
+        body_kind,
+        do_keyword,
+        do_keyword_metadata,
+        end_keyword,
+        end_keyword_metadata,
+    ) = if let Some((body, next_i)) = parse_arithmetic_for_brace_body(tokens, i) {
+        (
+            body,
+            next_i,
+            CommandBodyKind::BraceGroup,
+            None,
+            None,
+            None,
+            None,
+        )
+    } else {
+        if !is_keyword(tokens, i, "do") {
+            return None;
+        }
+        let do_keyword = Some(tokens[i].value.clone());
+        let do_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
+        i += 1;
+
+        let body_start = i;
+        let mut stack = Vec::new();
+        while i < tokens.len() {
+            if stack.is_empty()
+                && command_boundary_keyword_allowed(tokens, i)
+                && is_keyword(tokens, i, "done")
+            {
+                break;
             }
-            let do_keyword = Some(tokens[i].value.clone());
+            update_compound_boundary_stack(tokens, i, &mut stack);
             i += 1;
+        }
 
-            let body_start = i;
-            let mut stack = Vec::new();
-            while i < tokens.len() {
-                if stack.is_empty()
-                    && command_boundary_keyword_allowed(tokens, i)
-                    && is_keyword(tokens, i, "done")
-                {
-                    break;
-                }
-                update_compound_boundary_stack(tokens, i, &mut stack);
-                i += 1;
-            }
+        if !is_keyword(tokens, i, "done") {
+            return None;
+        }
+        let end_keyword = Some(tokens[i].value.clone());
+        let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 
-            if !is_keyword(tokens, i, "done") {
-                return None;
-            }
-            let end_keyword = Some(tokens[i].value.clone());
-
-            (
-                parse_arithmetic_for_body_commands(&tokens[body_start..i]),
-                i + 1,
-                CommandBodyKind::DoDone,
-                do_keyword,
-                end_keyword,
-            )
-        };
+        (
+            parse_arithmetic_for_body_commands(&tokens[body_start..i]),
+            i + 1,
+            CommandBodyKind::DoDone,
+            do_keyword,
+            do_keyword_metadata,
+            end_keyword,
+            end_keyword_metadata,
+        )
+    };
     let (body_open_delimiter, body_close_delimiter) =
         command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
     let init = parts[0].join(" ");
@@ -130,9 +149,11 @@ pub(super) fn parse_arithmetic_for_command(
     command.line = tokens.get(start).map(|token| token.position);
     command.for_command = Some(ForCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata: build_keyword_metadata(&tokens[start]),
         variable: String::new(),
         variable_metadata: Box::new(build_word_metadata(0, "", "")),
         in_keyword: None,
+        in_keyword_metadata: None,
         words: Vec::new(),
         word_metadata: Vec::new(),
         default_positional: false,
@@ -152,7 +173,9 @@ pub(super) fn parse_arithmetic_for_command(
         body_open_delimiter,
         body_close_delimiter,
         do_keyword,
+        do_keyword_metadata,
         end_keyword,
+        end_keyword_metadata,
         body,
     });
     Some(finish_compound_command(command, tokens, body_end))
@@ -164,6 +187,10 @@ fn parse_arithmetic_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
+}
+
+fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
 }
 
 fn parse_arithmetic_for_brace_body(

@@ -213,6 +213,7 @@ impl Executor {
         if let Some(brace_group) = do_command.brace_group.clone() {
             let for_command = ForCommand {
                 keyword: "for".to_string(),
+                keyword_metadata: synthetic_keyword_metadata("for"),
                 variable: words[1].clone(),
                 variable_metadata: Box::new(WordMetadata::new(
                     0,
@@ -220,6 +221,7 @@ impl Executor {
                     words[1].clone(),
                 )),
                 in_keyword: Some("in".to_string()),
+                in_keyword_metadata: Some(synthetic_keyword_metadata("in")),
                 words: words[3..].to_vec(),
                 word_metadata: Vec::new(),
                 default_positional: false,
@@ -229,7 +231,9 @@ impl Executor {
                 body_open_delimiter: Some("{".to_string()),
                 body_close_delimiter: Some("}".to_string()),
                 do_keyword: None,
+                do_keyword_metadata: None,
                 end_keyword: None,
+                end_keyword_metadata: None,
                 body: brace_group.body,
             };
             self.execute_for_command_with_redirects(&for_command, do_command)?;
@@ -256,9 +260,11 @@ impl Executor {
 
         let for_command = ForCommand {
             keyword: "for".to_string(),
+            keyword_metadata: synthetic_keyword_metadata("for"),
             variable: words[1].clone(),
             variable_metadata: Box::new(WordMetadata::new(0, words[1].clone(), words[1].clone())),
             in_keyword: Some("in".to_string()),
+            in_keyword_metadata: Some(synthetic_keyword_metadata("in")),
             words: words[3..].to_vec(),
             word_metadata: Vec::new(),
             default_positional: false,
@@ -268,10 +274,20 @@ impl Executor {
             body_open_delimiter: Some("do".to_string()),
             body_close_delimiter: Some("done".to_string()),
             do_keyword: Some("do".to_string()),
+            do_keyword_metadata: Some(synthetic_keyword_metadata("do")),
             end_keyword: Some("done".to_string()),
+            end_keyword_metadata: Some(synthetic_keyword_metadata("done")),
             body,
         };
         self.execute_for_command(&for_command)?;
         Ok(Some(done_index + 1))
     }
+}
+
+fn synthetic_keyword_metadata(keyword: &str) -> Box<WordMetadata> {
+    Box::new(WordMetadata::new(
+        0,
+        keyword.to_string(),
+        keyword.to_string(),
+    ))
 }

@@ -49,9 +49,11 @@ pub struct HereDocRedirect {
 #[derive(Debug, Clone)]
 pub struct ForCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub variable: String,
     pub variable_metadata: Box<WordMetadata>,
     pub in_keyword: Option<String>,
+    pub in_keyword_metadata: Option<Box<WordMetadata>>,
     pub words: Vec<String>,
     pub word_metadata: Vec<WordMetadata>,
     pub default_positional: bool,
@@ -61,7 +63,9 @@ pub struct ForCommand {
     pub body_open_delimiter: Option<String>,
     pub body_close_delimiter: Option<String>,
     pub do_keyword: Option<String>,
+    pub do_keyword_metadata: Option<Box<WordMetadata>>,
     pub end_keyword: Option<String>,
+    pub end_keyword_metadata: Option<Box<WordMetadata>>,
     pub body: Vec<CommandNode>,
 }
 
@@ -794,9 +798,11 @@ pub enum CaseTerminator {
 #[derive(Debug, Clone)]
 pub struct SelectCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub variable: String,
     pub variable_metadata: Box<WordMetadata>,
     pub in_keyword: Option<String>,
+    pub in_keyword_metadata: Option<Box<WordMetadata>>,
     pub words: Vec<String>,
     pub word_metadata: Vec<WordMetadata>,
     pub default_positional: bool,
@@ -805,7 +811,9 @@ pub struct SelectCommand {
     pub body_open_delimiter: Option<String>,
     pub body_close_delimiter: Option<String>,
     pub do_keyword: Option<String>,
+    pub do_keyword_metadata: Option<Box<WordMetadata>>,
     pub end_keyword: Option<String>,
+    pub end_keyword_metadata: Option<Box<WordMetadata>>,
     pub body: Vec<CommandNode>,
 }
 
