@@ -616,11 +616,14 @@ impl WordMetadata {
 #[derive(Debug, Clone)]
 pub struct CaseCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub word: String,
     pub word_metadata: WordMetadata,
     pub in_keyword: String,
+    pub in_keyword_metadata: Box<WordMetadata>,
     pub clauses: Vec<CaseClause>,
     pub end_keyword: String,
+    pub end_keyword_metadata: Box<WordMetadata>,
 }
 
 #[derive(Debug, Clone)]

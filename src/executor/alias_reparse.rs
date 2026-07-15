@@ -121,11 +121,14 @@ impl Executor {
         Some((
             CaseCommand {
                 keyword: "case".to_string(),
+                keyword_metadata: synthetic_keyword_metadata("case"),
                 word_metadata: crate::parser::WordMetadata::new(0, word.clone(), word.clone()),
                 word,
                 in_keyword: "in".to_string(),
+                in_keyword_metadata: synthetic_keyword_metadata("in"),
                 clauses,
                 end_keyword: "esac".to_string(),
+                end_keyword_metadata: synthetic_keyword_metadata("esac"),
             },
             redirect_command,
             next_index,
@@ -217,4 +220,12 @@ impl Executor {
         result?;
         Ok(Some(next_index))
     }
+}
+
+fn synthetic_keyword_metadata(keyword: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        keyword.to_string(),
+        keyword.to_string(),
+    ))
 }

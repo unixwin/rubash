@@ -1902,6 +1902,8 @@ mod case_tests {
         let case_command = ast.commands[0].case_command.as_ref().unwrap();
 
         assert_eq!(case_command.keyword, "case");
+        assert_eq!(case_command.keyword_metadata.value, "case");
+        assert_eq!(case_command.keyword_metadata.raw, "case");
         assert_eq!(case_command.word, "$word");
         assert_eq!(case_command.word_metadata.value, "$word");
         assert_eq!(case_command.word_metadata.word_index, 0);
@@ -1915,7 +1917,11 @@ mod case_tests {
             "word"
         );
         assert_eq!(case_command.in_keyword, "in");
+        assert_eq!(case_command.in_keyword_metadata.value, "in");
+        assert_eq!(case_command.in_keyword_metadata.raw, "in");
         assert_eq!(case_command.end_keyword, "esac");
+        assert_eq!(case_command.end_keyword_metadata.value, "esac");
+        assert_eq!(case_command.end_keyword_metadata.raw, "esac");
         assert_eq!(case_command.clauses.len(), 2);
         assert_eq!(
             case_command.clauses[0].terminator,

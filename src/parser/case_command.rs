@@ -13,6 +13,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         return None;
     }
     let in_keyword = tokens[i].value.clone();
+    let in_keyword_metadata = build_keyword_metadata(&tokens[i]);
     i += 1;
 
     let mut clauses = Vec::new();
@@ -152,13 +153,20 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     command.line = tokens.get(start).map(|token| token.position);
     command.case_command = Some(Box::new(CaseCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata: build_keyword_metadata(&tokens[start]),
         word_metadata: build_word_metadata(0, &word, &raw_word),
         word,
         in_keyword,
+        in_keyword_metadata,
         clauses,
         end_keyword: tokens[i].value.clone(),
+        end_keyword_metadata: build_keyword_metadata(&tokens[i]),
     }));
     Some(finish_compound_command(command, tokens, i + 1))
+}
+
+fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
 }
 
 fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, usize)> {
