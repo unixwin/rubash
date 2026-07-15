@@ -2042,15 +2042,46 @@ mod case_tests {
             Some(";&")
         );
         assert_eq!(
+            case_command.clauses[0]
+                .terminator_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            ";&"
+        );
+        assert_eq!(
             case_command.clauses[0].pattern_open_delimiter.as_deref(),
             Some("(")
+        );
+        assert_eq!(
+            case_command.clauses[0]
+                .pattern_open_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            "("
         );
         assert_eq!(
             case_command.clauses[0].patterns,
             ["x", "@(foo|bar)", "!(tmp)"]
         );
         assert_eq!(case_command.clauses[0].pattern_separators, ["|", "|"]);
+        assert_eq!(case_command.clauses[0].pattern_separator_metadata.len(), 2);
+        assert_eq!(
+            case_command.clauses[0].pattern_separator_metadata[0].value,
+            "|"
+        );
+        assert_eq!(
+            case_command.clauses[0].pattern_separator_metadata[1].word_index,
+            1
+        );
         assert_eq!(case_command.clauses[0].pattern_close_delimiter, ")");
+        assert_eq!(
+            case_command.clauses[0]
+                .pattern_close_delimiter_metadata
+                .value,
+            ")"
+        );
 
         let patterns = &case_command.clauses[0].pattern_nodes;
         assert_eq!(patterns.len(), 3);
@@ -2082,11 +2113,26 @@ mod case_tests {
         assert_eq!(fallback.operators, ["*"]);
         assert!(fallback.has_glob);
         assert_eq!(case_command.clauses[1].pattern_open_delimiter, None);
+        assert!(case_command.clauses[1]
+            .pattern_open_delimiter_metadata
+            .is_none());
         assert!(case_command.clauses[1].pattern_separators.is_empty());
         assert_eq!(case_command.clauses[1].pattern_close_delimiter, ")");
         assert_eq!(
+            case_command.clauses[1].pattern_close_delimiter_metadata.raw,
+            ")"
+        );
+        assert_eq!(
             case_command.clauses[1].terminator_text.as_deref(),
             Some(";;")
+        );
+        assert_eq!(
+            case_command.clauses[1]
+                .terminator_metadata
+                .as_ref()
+                .unwrap()
+                .raw,
+            ";;"
         );
     }
 
@@ -2099,6 +2145,7 @@ mod case_tests {
 
         assert_eq!(clause.terminator, CaseTerminator::Break);
         assert_eq!(clause.terminator_text, None);
+        assert!(clause.terminator_metadata.is_none());
     }
 
     #[test]

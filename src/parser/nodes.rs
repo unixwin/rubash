@@ -648,13 +648,17 @@ pub struct CaseCommand {
 #[derive(Debug, Clone)]
 pub struct CaseClause {
     pub pattern_open_delimiter: Option<String>,
+    pub pattern_open_delimiter_metadata: Option<Box<WordMetadata>>,
     pub patterns: Vec<String>,
     pub pattern_separators: Vec<String>,
+    pub pattern_separator_metadata: Vec<WordMetadata>,
     pub pattern_close_delimiter: String,
+    pub pattern_close_delimiter_metadata: Box<WordMetadata>,
     pub pattern_nodes: Vec<CasePattern>,
     pub body: Vec<CommandNode>,
     pub terminator: CaseTerminator,
     pub terminator_text: Option<String>,
+    pub terminator_metadata: Option<Box<WordMetadata>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

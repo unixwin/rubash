@@ -95,15 +95,24 @@ impl Executor {
                 .collect();
             clauses.push(CaseClause {
                 pattern_open_delimiter: None,
+                pattern_open_delimiter_metadata: None,
                 pattern_separators: vec![
                     "|".to_string();
                     patterns.patterns.len().saturating_sub(1)
                 ],
+                pattern_separator_metadata: (0..patterns.patterns.len().saturating_sub(1))
+                    .map(|index| synthetic_word_metadata(index, "|"))
+                    .collect(),
                 pattern_close_delimiter: ")".to_string(),
+                pattern_close_delimiter_metadata: synthetic_keyword_metadata(")"),
                 patterns: patterns.patterns,
                 pattern_nodes,
                 body,
                 terminator: boundary.terminator,
+                terminator_metadata: boundary
+                    .terminator_text
+                    .as_deref()
+                    .map(synthetic_keyword_metadata),
                 terminator_text: boundary.terminator_text,
             });
             if boundary.ended_case {
@@ -223,9 +232,9 @@ impl Executor {
 }
 
 fn synthetic_keyword_metadata(keyword: &str) -> Box<crate::parser::WordMetadata> {
-    Box::new(crate::parser::WordMetadata::new(
-        0,
-        keyword.to_string(),
-        keyword.to_string(),
-    ))
+    Box::new(synthetic_word_metadata(0, keyword))
+}
+
+fn synthetic_word_metadata(word_index: usize, value: &str) -> crate::parser::WordMetadata {
+    crate::parser::WordMetadata::new(word_index, value.to_string(), value.to_string())
 }

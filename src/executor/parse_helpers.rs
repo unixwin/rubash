@@ -103,12 +103,16 @@ pub(in crate::executor) fn case_command_from_words(words: &[String]) -> Option<C
         let terminator_text = (index < words.len() && words[index] == ";;").then(|| ";;".into());
         clauses.push(CaseClause {
             pattern_open_delimiter: None,
+            pattern_open_delimiter_metadata: None,
             patterns: vec![pattern],
             pattern_separators: Vec::new(),
+            pattern_separator_metadata: Vec::new(),
             pattern_close_delimiter: ")".to_string(),
+            pattern_close_delimiter_metadata: synthetic_keyword_metadata(")"),
             pattern_nodes,
             body,
             terminator: CaseTerminator::Break,
+            terminator_metadata: terminator_text.as_deref().map(synthetic_keyword_metadata),
             terminator_text,
         });
 

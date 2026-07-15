@@ -32,10 +32,14 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
         } else {
             None
         };
+        let pattern_open_delimiter_metadata = pattern_open_delimiter
+            .as_ref()
+            .map(|delimiter| Box::new(build_word_metadata(0, delimiter, delimiter)));
 
         let mut patterns = Vec::new();
         let mut raw_patterns = Vec::new();
         let mut pattern_separators = Vec::new();
+        let mut pattern_separator_metadata = Vec::new();
         let mut current_pattern = String::new();
         let mut current_raw_pattern = String::new();
         let mut in_extglob = 0i32;
@@ -104,6 +108,11 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                     if in_extglob == 0 {
                         patterns.push(mark_case_pattern_literal_backslashes(&current_pattern));
                         raw_patterns.push(current_raw_pattern.clone());
+                        pattern_separator_metadata.push(build_word_metadata(
+                            pattern_separators.len(),
+                            &tokens[i].value,
+                            &tokens[i].raw,
+                        ));
                         pattern_separators.push(tokens[i].value.clone());
                         current_pattern.clear();
                         current_raw_pattern.clear();
@@ -120,24 +129,31 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
             return None;
         }
         let pattern_close_delimiter = tokens[i].value.clone();
+        let pattern_close_delimiter_metadata = build_keyword_metadata(&tokens[i]);
         i += 1;
 
         let body_start = i;
         i = case_body_end(tokens, i);
         let body = parse(&tokens[body_start..i]).commands;
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
+        let terminator_metadata =
+            case_terminator(tokens, i).map(|_| build_keyword_metadata(&tokens[i]));
         let terminator = case_terminator(tokens, i).unwrap_or(CaseTerminator::Break);
         let clause_index = clauses.len();
         let pattern_nodes = case_pattern_nodes(&patterns, &raw_patterns, clause_index);
         clauses.push(CaseClause {
             pattern_open_delimiter,
+            pattern_open_delimiter_metadata,
             patterns,
             pattern_separators,
+            pattern_separator_metadata,
             pattern_close_delimiter,
+            pattern_close_delimiter_metadata,
             pattern_nodes,
             body,
             terminator,
             terminator_text,
+            terminator_metadata,
         });
 
         if is_case_terminator(tokens, i) {
