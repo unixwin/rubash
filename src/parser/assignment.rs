@@ -53,7 +53,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("+=".to_string()),
             append: true,
             element_index,
-            subscript_brace_expansions: brace_expansions_in_word(subscript),
+            subscript_brace_expansions: brace_expansions_in_word_with_raw(subscript, subscript),
             subscript_parameter_expansions: parameter_expansions_in_word(subscript),
             subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
             brace_expansions: brace_expansions_in_word_with_raw(value, value),
@@ -73,7 +73,7 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             operator: Some("=".to_string()),
             append: false,
             element_index,
-            subscript_brace_expansions: brace_expansions_in_word(subscript),
+            subscript_brace_expansions: brace_expansions_in_word_with_raw(subscript, subscript),
             subscript_parameter_expansions: parameter_expansions_in_word(subscript),
             subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
             brace_expansions: brace_expansions_in_word_with_raw(value, value),
@@ -268,11 +268,13 @@ pub(super) fn collect_compound_assignment(
 
         if tokens[i].value == "[" || tokens[i].value.starts_with('[') {
             let mut subscript = String::new();
+            let mut raw_subscript = String::new();
             let mut j = i;
             if tokens[j].value == "[" {
                 j += 1;
                 while j < tokens.len() && tokens[j].value != "]" {
                     subscript.push_str(&tokens[j].value);
+                    raw_subscript.push_str(&tokens[j].raw);
                     j += 1;
                 }
                 if j >= tokens.len() || tokens[j].value != "]" {
@@ -285,6 +287,7 @@ pub(super) fn collect_compound_assignment(
                 .and_then(|value| value.strip_suffix(']'))
             {
                 subscript.push_str(inner);
+                raw_subscript.push_str(inner);
                 j += 1;
             }
 
@@ -295,7 +298,7 @@ pub(super) fn collect_compound_assignment(
                 if compound_split_subscript_value_is_empty(tokens, j) {
                     values.push(format!(
                         "[{}]{}",
-                        quote_compound_assignment_subscript(&subscript),
+                        quote_compound_assignment_raw_subscript(&subscript, &raw_subscript),
                         tokens[j].value,
                     ));
                     i = j + 1;
@@ -304,7 +307,7 @@ pub(super) fn collect_compound_assignment(
                 if let Some((rhs, next_i)) = collect_compound_or_keyword_word_value(tokens, j + 1) {
                     values.push(format!(
                         "[{}]{}{}",
-                        quote_compound_assignment_subscript(&subscript),
+                        quote_compound_assignment_raw_subscript(&subscript, &raw_subscript),
                         tokens[j].value,
                         quote_compound_assignment_word(&rhs)
                     ));
@@ -395,20 +398,23 @@ fn compound_subscript_assignment_from_raw(raw: &str) -> Option<(String, String)>
             continue;
         };
         let split = pos + operator.len();
-        let subscript = remove_compound_assignment_quotes(&raw[1..pos]);
+        let raw_subscript = &raw[1..pos];
+        let subscript = remove_compound_assignment_quotes(raw_subscript);
         let rhs = remove_compound_assignment_quotes(&raw[split..]);
         let assignment = if operator == "]=" { "=" } else { "+=" };
-        return Some((
-            format!(
-                "[{}]{}",
-                quote_compound_assignment_subscript(&subscript),
-                assignment
-            ),
-            rhs,
-        ));
+        let subscript = quote_compound_assignment_raw_subscript(&subscript, raw_subscript);
+        return Some((format!("[{}]{}", subscript, assignment), rhs));
     }
 
     None
+}
+
+fn quote_compound_assignment_raw_subscript(subscript: &str, raw_subscript: &str) -> String {
+    if raw_contains_shell_quotes(raw_subscript) {
+        return quote_compound_assignment_word_forced(subscript);
+    }
+
+    quote_compound_assignment_subscript(subscript)
 }
 
 fn find_compound_subscript_operator(value: &str, operator: &str) -> Option<usize> {

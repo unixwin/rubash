@@ -1,5 +1,5 @@
 use super::{
-    arithmetic_expansions_in_word, brace_expansions_in_word, brace_expansions_in_word_with_raw,
+    arithmetic_expansions_in_word, brace_expansions_in_word_with_raw,
     extglob_patterns_in_word_with_raw, parameter_expansions_in_word, pathname_patterns_in_word,
     tilde_expansions_in_word_with_raw, word_quotes_in_raw, ArrayElementAssignment, CommandNode,
 };
@@ -35,6 +35,7 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
 
     let subscript = &word[open + 1..close];
     let value = &word[value_start..];
+    let raw_subscript = array_element_raw_subscript(raw).unwrap_or(subscript);
     let raw_value = array_element_raw_value(raw).unwrap_or(value);
     Some(ArrayElementAssignment {
         name: name.to_string(),
@@ -42,7 +43,7 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
         open_delimiter: "[".to_string(),
         open_delimiter_metadata: Box::new(super::build_word_metadata(0, "[", "[")),
         subscript: subscript.to_string(),
-        subscript_metadata: Box::new(super::build_word_metadata(0, subscript, subscript)),
+        subscript_metadata: Box::new(super::build_word_metadata(0, subscript, raw_subscript)),
         close_delimiter: "]".to_string(),
         close_delimiter_metadata: Box::new(super::build_word_metadata(0, "]", "]")),
         value: value.to_string(),
@@ -50,7 +51,7 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
         operator_metadata: Box::new(super::build_word_metadata(0, operator, operator)),
         append,
         word_index: None,
-        subscript_brace_expansions: brace_expansions_in_word(subscript),
+        subscript_brace_expansions: brace_expansions_in_word_with_raw(subscript, raw_subscript),
         subscript_parameter_expansions: parameter_expansions_in_word(subscript),
         subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
         brace_expansions: brace_expansions_in_word_with_raw(value, raw_value),
@@ -61,6 +62,12 @@ fn array_element_assignment_from_word(word: &str, raw: &str) -> Option<ArrayElem
         tilde_expansions: tilde_expansions_in_word_with_raw(value, raw_value),
         word_quotes: word_quotes_in_raw(raw_value),
     })
+}
+
+fn array_element_raw_subscript(raw: &str) -> Option<&str> {
+    let open = raw.find('[')?;
+    let close = matching_subscript_end(raw, open)?;
+    Some(&raw[open + 1..close])
 }
 
 fn array_element_raw_value(raw: &str) -> Option<&str> {

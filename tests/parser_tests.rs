@@ -3371,6 +3371,28 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_ignores_quoted_subscript_brace_expansions() {
+        let input =
+            "arr=([\"{a,b}\"]=quoted [{c,d}]=plain [ \"{e,f}\" ] = spaced [ {g,h} ] = open)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let elements = ast.commands[0].compound_assignments[0].elements.as_slice();
+        assert_eq!(elements.len(), 4);
+        assert_eq!(elements[0].subscript.as_deref(), Some("\"{a,b}\""));
+        assert!(elements[0].subscript_brace_expansions.is_empty());
+        assert_eq!(elements[1].subscript.as_deref(), Some("{c,d}"));
+        assert_eq!(elements[1].subscript_brace_expansions.len(), 1);
+        assert_eq!(elements[1].subscript_brace_expansions[0].text, "{c,d}");
+        assert_eq!(elements[2].subscript.as_deref(), Some("\"{e,f}\""));
+        assert!(elements[2].subscript_brace_expansions.is_empty());
+        assert_eq!(elements[3].subscript.as_deref(), Some("{g,h}"));
+        assert_eq!(elements[3].subscript_brace_expansions.len(), 1);
+        assert_eq!(elements[3].subscript_brace_expansions[0].text, "{g,h}");
+    }
+
+    #[test]
     fn test_compound_assignment_keeps_process_substitution_elements() {
         let input = "arr=(<(:) >(:) [two]=<(:))";
         let tokens = tokenize(input);
@@ -3608,6 +3630,23 @@ mod assignment_tests {
         assert_eq!(elements[2].brace_expansions[0].text, "{c,d}");
         assert_eq!(elements[3].extglob_patterns.len(), 1);
         assert_eq!(elements[3].extglob_patterns[0].text, "@(one|two)");
+    }
+
+    #[test]
+    fn test_array_element_assignment_ignores_quoted_subscript_brace_expansions() {
+        let input = "echo arr[\"{a,b}\"]=quoted arr[{c,d}]=plain";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let elements = ast.commands[0].array_element_assignments.as_slice();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0].subscript, "{a,b}");
+        assert_eq!(elements[0].subscript_metadata.raw, "\"{a,b}\"");
+        assert!(elements[0].subscript_brace_expansions.is_empty());
+        assert_eq!(elements[1].subscript, "{c,d}");
+        assert_eq!(elements[1].subscript_brace_expansions.len(), 1);
+        assert_eq!(elements[1].subscript_brace_expansions[0].text, "{c,d}");
     }
 
     #[test]
