@@ -4529,6 +4529,20 @@ mod extglob_pattern_tests {
     }
 
     #[test]
+    fn test_quoted_extglob_pattern_text_is_not_recorded() {
+        let input =
+            "echo @(plain|pattern) '@(single|quoted)' \"!(double|quoted)\" $'+(ansi|quoted)'";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let patterns = ast.commands[0].extglob_patterns.as_slice();
+        assert_eq!(patterns.len(), 1);
+        assert_eq!(patterns[0].text, "@(plain|pattern)");
+        assert_eq!(patterns[0].word_index, Some(1));
+    }
+
+    #[test]
     fn test_assignment_word_extglob_pattern_records_word_index() {
         let input = "echo pattern=*(src|tests)";
         let tokens = tokenize(input);

@@ -4,8 +4,9 @@ pub(super) fn record_extglob_patterns_for_word(
     command: &mut CommandNode,
     word_index: usize,
     word: &str,
+    raw: &str,
 ) {
-    let patterns = extglob_patterns_in_word(word)
+    let patterns = extglob_patterns_in_word_with_raw(word, raw)
         .into_iter()
         .map(|mut pattern| {
             pattern.word_index = Some(word_index);
@@ -18,9 +19,10 @@ pub(super) fn record_extglob_patterns_for_assignment(
     command: &mut CommandNode,
     assignment_name: &str,
     value: &str,
+    raw_value: &str,
     word_index: Option<usize>,
 ) {
-    let patterns = extglob_patterns_in_word(value)
+    let patterns = extglob_patterns_in_word_with_raw(value, raw_value)
         .into_iter()
         .map(|mut pattern| {
             pattern.assignment_name = Some(assignment_name.to_string());
@@ -32,6 +34,19 @@ pub(super) fn record_extglob_patterns_for_assignment(
 
 pub(super) fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
     let chars = word.chars().collect::<Vec<_>>();
+    extglob_patterns_in_chars(&chars)
+}
+
+pub(super) fn extglob_patterns_in_word_with_raw(word: &str, raw: &str) -> Vec<ExtglobPattern> {
+    if word == raw {
+        return extglob_patterns_in_word(word);
+    }
+
+    let chars = raw.chars().collect::<Vec<_>>();
+    extglob_patterns_in_raw_chars(&chars)
+}
+
+fn extglob_patterns_in_chars(chars: &[char]) -> Vec<ExtglobPattern> {
     let mut patterns = Vec::new();
     let mut index = 0;
     while index < chars.len() {
@@ -73,6 +88,82 @@ pub(super) fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
                 continue;
             }
         }
+        index += 1;
+    }
+    patterns
+}
+
+fn extglob_patterns_in_raw_chars(chars: &[char]) -> Vec<ExtglobPattern> {
+    let mut patterns = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '\'' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '"' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '`' {
+            if let Some(next_index) = skip_backtick(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some(next_index) = skip_dollar_paren(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+            if let Some(next_index) = skip_dollar_bracket(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(next_index) = skip_braced_parameter(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if matches!(chars[index], '@' | '!' | '+' | '?' | '*') && chars.get(index + 1) == Some(&'(')
+        {
+            if let Some((pattern, next_index)) = extglob_pattern(&chars, index) {
+                let nested = extglob_patterns_in_word(&pattern.pattern);
+                patterns.push(pattern);
+                patterns.extend(nested);
+                index = next_index;
+                continue;
+            }
+        }
+
         index += 1;
     }
     patterns
@@ -180,6 +271,29 @@ fn split_alternatives(pattern: &str) -> (Vec<String>, Vec<String>) {
     }
     alternatives.push(chars[start..].iter().collect());
     (alternatives, operators)
+}
+
+fn skip_quoted(chars: &[char], start: usize, delimiter: char) -> Option<usize> {
+    let mut index = start;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if delimiter == '"' && ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == delimiter {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {

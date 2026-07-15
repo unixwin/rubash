@@ -261,7 +261,7 @@ impl ConditionalPatternOperand {
             Vec::new()
         };
         let extglob_patterns = if kind == ConditionalPatternKind::Glob {
-            super::extglob_patterns_in_word(&text)
+            super::extglob_patterns_in_word_with_raw(&text, &text)
         } else {
             Vec::new()
         };
@@ -684,7 +684,7 @@ impl WordMetadata {
             process_substitutions,
             parameter_expansions: super::parameter_expansions_in_word(&value),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
-            extglob_patterns: super::extglob_patterns_in_word(&value),
+            extglob_patterns: super::extglob_patterns_in_word_with_raw(&value, &raw),
             tilde_expansions: super::tilde_expansions_in_word(&value),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
             word_quotes: super::word_quotes_in_raw(&raw),
@@ -763,7 +763,7 @@ impl CasePattern {
             negated_extglob: operators.iter().any(|operator| operator == "!("),
             operators,
             operator_metadata,
-            extglob_patterns: super::extglob_patterns_in_word(&text),
+            extglob_patterns: super::extglob_patterns_in_word_with_raw(&text, &raw_text),
             brace_expansions: super::brace_expansions_in_word(&text),
             parameter_expansions: super::parameter_expansions_in_word(&text),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&text),

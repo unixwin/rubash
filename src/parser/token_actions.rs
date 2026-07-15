@@ -76,6 +76,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &mut state.current_cmd,
                         assignment_name,
                         &var_value,
+                        raw_assignment_value.unwrap_or(&var_value),
                         None,
                     );
                     record_tilde_expansions_for_assignment(
@@ -150,6 +151,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
+                            raw_assignment_value,
                             Some(word_index),
                         );
                         record_tilde_expansions_for_assignment(
