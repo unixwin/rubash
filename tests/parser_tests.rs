@@ -4654,6 +4654,33 @@ mod tilde_expansion_tests {
         assert_eq!(ast.commands.len(), 1);
         assert!(ast.commands[0].tilde_expansions.is_empty());
     }
+
+    #[test]
+    fn test_quoted_tilde_words_are_not_recorded() {
+        let input = "echo \"~\" '~user/bin' $'~+/bin' ~-/tmp";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].tilde_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "~-/tmp");
+        assert_eq!(expansions[0].word_index, Some(4));
+    }
+
+    #[test]
+    fn test_quoted_assignment_tilde_segments_are_not_recorded() {
+        let input = "PATH=~/bin:\"~+/sbin\":~+1/lib echo";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let expansions = ast.commands[0].tilde_expansions.as_slice();
+        assert_eq!(expansions.len(), 2);
+        assert_eq!(expansions[0].text, "~/bin");
+        assert_eq!(expansions[1].text, "~+1/lib");
+        assert!(expansions[1].after_colon);
+    }
 }
 
 mod pathname_pattern_tests {

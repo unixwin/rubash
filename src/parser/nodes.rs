@@ -685,7 +685,7 @@ impl WordMetadata {
             parameter_expansions: super::parameter_expansions_in_word(&value),
             arithmetic_expansions: super::arithmetic_expansions_in_word(&value),
             extglob_patterns: super::extglob_patterns_in_word_with_raw(&value, &raw),
-            tilde_expansions: super::tilde_expansions_in_word(&value),
+            tilde_expansions: super::tilde_expansions_in_word_with_raw(&value, &raw),
             pathname_patterns: super::pathname_patterns_in_word(&value, &raw),
             word_quotes: super::word_quotes_in_raw(&raw),
             value,

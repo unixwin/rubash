@@ -83,6 +83,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &mut state.current_cmd,
                         assignment_name,
                         &var_value,
+                        raw_assignment_value.unwrap_or(&var_value),
                         None,
                     );
                     if let Some((_, raw_value)) = token.raw.split_once('=') {
@@ -158,6 +159,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
+                            raw_assignment_value,
                             Some(word_index),
                         );
                         if let Some((raw_assignment_name, raw_value)) = raw_word.split_once('=') {
