@@ -995,7 +995,11 @@ mod command_body_kind_tests {
         assert_eq!(while_command.end_keyword_metadata.value, "done");
         assert_eq!(while_command.end_keyword_metadata.raw, "done");
         assert_eq!(while_command.body_open_delimiter, "do");
+        assert_eq!(while_command.body_open_delimiter_metadata.value, "do");
+        assert_eq!(while_command.body_open_delimiter_metadata.raw, "do");
         assert_eq!(while_command.body_close_delimiter, "done");
+        assert_eq!(while_command.body_close_delimiter_metadata.value, "done");
+        assert_eq!(while_command.body_close_delimiter_metadata.raw, "done");
         assert_eq!(while_command.condition_terminator.as_deref(), Some(";"));
         assert_eq!(
             while_command
@@ -1020,7 +1024,9 @@ mod command_body_kind_tests {
         assert_eq!(until_command.keyword_metadata.value, "until");
         assert_eq!(until_command.keyword_metadata.raw, "until");
         assert_eq!(until_command.body_open_delimiter, "do");
+        assert_eq!(until_command.body_open_delimiter_metadata.value, "do");
         assert_eq!(until_command.body_close_delimiter, "done");
+        assert_eq!(until_command.body_close_delimiter_metadata.value, "done");
         assert_eq!(until_command.condition_terminator.as_deref(), Some(";"));
         assert_eq!(
             until_command
