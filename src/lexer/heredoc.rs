@@ -53,9 +53,40 @@ fn heredoc_operator_context(source: &str, source_offset: &mut usize) -> HereDocO
         chars.next();
     }
     HereDocOperatorContext {
-        quoted: matches!(chars.peek(), Some('\'' | '"' | '\\')),
+        quoted: heredoc_delimiter_word_is_quoted(chars),
         in_command_substitution: command_substitution_depth_before(source, index) > 0,
     }
+}
+
+fn heredoc_delimiter_word_is_quoted<I>(chars: I) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    let mut chars = chars.peekable();
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_whitespace() {
+            break;
+        }
+        if matches!(ch, '\'' | '"') {
+            return true;
+        }
+        if ch == '\\' {
+            if chars.peek() == Some(&'\r') {
+                chars.next();
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                    continue;
+                }
+                return true;
+            }
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+                continue;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn command_substitution_depth_before(source: &str, end: usize) -> usize {

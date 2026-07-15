@@ -36,6 +36,23 @@ fn test_spaced_quoted_heredoc_keeps_parameters_literal() {
 }
 
 #[test]
+fn test_partially_quoted_heredoc_delimiter_keeps_parameters_literal() {
+    let output_path = "target/rubash-partial-quoted-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("value=expanded; cat > {output_path} <<E\"OF\"\n$value\nEOF");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "$value\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_multiple_heredocs_use_last_stdin_redirect() {
     let output_path = "target/rubash-multiple-heredoc-output.txt";
     let _ = fs::remove_file(output_path);
