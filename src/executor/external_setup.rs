@@ -285,6 +285,11 @@ impl Executor {
             fd: Some(0),
             fd_var: None,
             operator: "<".to_string(),
+            operator_metadata: Box::new(crate::parser::WordMetadata::new(
+                0,
+                "<".to_string(),
+                "<".to_string(),
+            )),
             kind: crate::parser::RedirectKind::Input,
             target_metadata: Box::new(crate::parser::WordMetadata::new(
                 0,

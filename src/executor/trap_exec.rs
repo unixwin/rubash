@@ -77,6 +77,11 @@ impl Executor {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
                 operator: ">>".to_string(),
+                operator_metadata: Box::new(crate::parser::WordMetadata::new(
+                    0,
+                    ">>".to_string(),
+                    ">>".to_string(),
+                )),
                 kind: crate::parser::RedirectKind::Append,
                 target_metadata: Box::new(crate::parser::WordMetadata::new(
                     0,
@@ -94,6 +99,7 @@ impl Executor {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
                 operator: redirect.operator.clone(),
+                operator_metadata: redirect.operator_metadata.clone(),
                 kind: redirect.kind.clone(),
                 target_metadata: Box::new(crate::parser::WordMetadata::new(
                     0,
@@ -119,6 +125,11 @@ impl Executor {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
                 operator: "2>>".to_string(),
+                operator_metadata: Box::new(crate::parser::WordMetadata::new(
+                    0,
+                    "2>>".to_string(),
+                    "2>>".to_string(),
+                )),
                 kind: crate::parser::RedirectKind::Append,
                 target_metadata: Box::new(crate::parser::WordMetadata::new(
                     0,
@@ -136,6 +147,7 @@ impl Executor {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
                 operator: redirect.operator.clone(),
+                operator_metadata: redirect.operator_metadata.clone(),
                 kind: redirect.kind.clone(),
                 target_metadata: Box::new(crate::parser::WordMetadata::new(
                     0,

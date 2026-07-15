@@ -10,6 +10,9 @@ fn test_output_redirect() {
     assert!(ast.commands[0].redirect_out.is_some());
     let redirect = ast.commands[0].redirect_out.as_ref().unwrap();
     assert_eq!(redirect.operator, ">");
+    assert_eq!(redirect.operator_metadata.word_index, 0);
+    assert_eq!(redirect.operator_metadata.value, ">");
+    assert_eq!(redirect.operator_metadata.raw, ">");
     assert_eq!(redirect.kind, RedirectKind::Output);
     assert!(!redirect.clobber);
 }
@@ -99,15 +102,19 @@ fn test_redirection_list_records_parse_order() {
 
     assert_eq!(redirects.len(), 4);
     assert_eq!(redirects[0].operator, ">");
+    assert_eq!(redirects[0].operator_metadata.value, ">");
     assert_eq!(redirects[0].kind, RedirectKind::Output);
     assert_eq!(redirects[0].target, "first");
     assert_eq!(redirects[1].operator, "2>&");
+    assert_eq!(redirects[1].operator_metadata.raw, "2>&");
     assert_eq!(redirects[1].kind, RedirectKind::DuplicateOutput);
     assert_eq!(redirects[1].target, "&1");
     assert_eq!(redirects[2].operator, ">>");
+    assert_eq!(redirects[2].operator_metadata.value, ">>");
     assert_eq!(redirects[2].kind, RedirectKind::Append);
     assert_eq!(redirects[2].target, "second");
     assert_eq!(redirects[3].operator, "<");
+    assert_eq!(redirects[3].operator_metadata.raw, "<");
     assert_eq!(redirects[3].kind, RedirectKind::Input);
     assert_eq!(redirects[3].target, "input");
 

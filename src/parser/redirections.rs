@@ -369,6 +369,7 @@ pub(super) fn redirect_node_with_raw(
         fd,
         fd_var: None,
         operator: operator.to_string(),
+        operator_metadata: Box::new(build_word_metadata(0, operator, operator)),
         kind: redirect_kind(operator, target),
         target: target.to_string(),
         target_metadata: Box::new(build_word_metadata(0, target, raw_target)),

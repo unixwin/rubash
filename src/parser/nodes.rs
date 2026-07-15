@@ -6,6 +6,7 @@ pub struct Redirect {
     pub fd: Option<u32>,
     pub fd_var: Option<String>,
     pub operator: String,
+    pub operator_metadata: Box<WordMetadata>,
     pub kind: RedirectKind,
     pub target: String,
     pub target_metadata: Box<WordMetadata>,
