@@ -34,6 +34,27 @@ fn test_leading_output_redirect_attaches_to_simple_command() {
 }
 
 #[test]
+fn test_redirection_only_commands_are_preserved() {
+    let input = "> out.txt; >> append.txt";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 2);
+    assert!(ast.commands[0].words.is_empty());
+    assert_eq!(
+        ast.commands[0].redirect_out.as_ref().unwrap().target,
+        "out.txt"
+    );
+    assert_eq!(ast.commands[0].redirects[0].kind, RedirectKind::Output);
+    assert!(ast.commands[1].words.is_empty());
+    assert_eq!(
+        ast.commands[1].append.as_ref().unwrap().target,
+        "append.txt"
+    );
+    assert_eq!(ast.commands[1].redirects[0].kind, RedirectKind::Append);
+}
+
+#[test]
 fn test_output_redirect_without_space_after_word() {
     let input = "echo hello>file.txt";
     let tokens = tokenize(input);
