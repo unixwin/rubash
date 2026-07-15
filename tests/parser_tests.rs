@@ -4392,6 +4392,17 @@ mod brace_expansion_tests {
     }
 
     #[test]
+    fn test_quoted_brace_text_does_not_record_brace_expansion() {
+        let input = "echo {a,b} $'{c,d}' '{e,f}'";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        let expansions = ast.commands[0].brace_expansions.as_slice();
+        assert_eq!(expansions.len(), 1);
+        assert_eq!(expansions[0].text, "{a,b}");
+    }
+
+    #[test]
     fn test_brace_expansion_skips_command_substitution_source() {
         let input = "echo $(echo {a,b}) {x,y}";
         let tokens = tokenize(input);

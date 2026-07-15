@@ -679,7 +679,7 @@ impl WordMetadata {
 
         Self {
             word_index,
-            brace_expansions: super::brace_expansions_in_word(&value),
+            brace_expansions: super::brace_expansions_in_word_with_raw(&value, &raw),
             command_substitutions,
             process_substitutions,
             parameter_expansions: super::parameter_expansions_in_word(&value),

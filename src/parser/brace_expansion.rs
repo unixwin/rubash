@@ -4,8 +4,9 @@ pub(super) fn record_brace_expansions_for_word(
     command: &mut CommandNode,
     word_index: usize,
     word: &str,
+    raw: &str,
 ) {
-    let expansions = brace_expansions_in_word(word)
+    let expansions = brace_expansions_in_word_with_raw(word, raw)
         .into_iter()
         .map(|mut expansion| {
             expansion.word_index = Some(word_index);
@@ -18,9 +19,10 @@ pub(super) fn record_brace_expansions_for_assignment(
     command: &mut CommandNode,
     assignment_name: &str,
     value: &str,
+    raw_value: &str,
     word_index: Option<usize>,
 ) {
-    let expansions = brace_expansions_in_word(value)
+    let expansions = brace_expansions_in_word_with_raw(value, raw_value)
         .into_iter()
         .map(|mut expansion| {
             expansion.assignment_name = Some(assignment_name.to_string());
@@ -30,11 +32,95 @@ pub(super) fn record_brace_expansions_for_assignment(
     command.brace_expansions.extend(expansions);
 }
 
+pub(super) fn brace_expansions_in_word_with_raw(word: &str, raw: &str) -> Vec<BraceExpansion> {
+    if raw == word {
+        return brace_expansions_in_word(word);
+    }
+
+    brace_expansions_in_raw_word(raw)
+}
+
 pub(super) fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {
     let chars = word.chars().collect::<Vec<_>>();
     let mut expansions = Vec::new();
     let mut index = 0;
     while index < chars.len() {
+        if chars[index] == '`' {
+            if let Some(next_index) = skip_backtick(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some(next_index) = skip_dollar_paren(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+            if let Some(next_index) = skip_dollar_bracket(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(next_index) = skip_braced_parameter(&chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '{' {
+            if let Some((expansion, next_index)) = brace_expansion(&chars, index) {
+                let nested = brace_expansions_in_word(&expansion.body);
+                expansions.push(expansion);
+                expansions.extend(nested);
+                index = next_index;
+                continue;
+            }
+        }
+
+        index += 1;
+    }
+    expansions
+}
+
+fn brace_expansions_in_raw_word(word: &str) -> Vec<BraceExpansion> {
+    let chars = word.chars().collect::<Vec<_>>();
+    let mut expansions = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+            if let Some(next_index) = skip_quoted(&chars, index + 2, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '\'' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '\'') {
+                index = next_index;
+                continue;
+            }
+        }
+
+        if chars[index] == '"' {
+            if let Some(next_index) = skip_quoted(&chars, index + 1, '"') {
+                index = next_index;
+                continue;
+            }
+        }
+
         if chars[index] == '`' {
             if let Some(next_index) = skip_backtick(&chars, index) {
                 index = next_index;
@@ -142,6 +228,28 @@ fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
         delimiter.to_string(),
         delimiter.to_string(),
     ))
+}
+
+fn skip_quoted(chars: &[char], mut index: usize, delimiter: char) -> Option<usize> {
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == delimiter {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {

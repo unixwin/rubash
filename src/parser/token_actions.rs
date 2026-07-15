@@ -64,10 +64,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         None,
                     );
+                    let raw_assignment_value = token.raw.split_once('=').map(|(_, raw)| raw);
                     record_brace_expansions_for_assignment(
                         &mut state.current_cmd,
                         assignment_name,
                         &var_value,
+                        raw_assignment_value.unwrap_or(&var_value),
                         None,
                     );
                     record_extglob_patterns_for_assignment(
@@ -133,10 +135,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             Some(word_index),
                         );
+                        let raw_assignment_value = raw_word
+                            .split_once('=')
+                            .map(|(_, raw)| raw)
+                            .unwrap_or(value);
                         record_brace_expansions_for_assignment(
                             &mut state.current_cmd,
                             assignment_name.strip_suffix('+').unwrap_or(assignment_name),
                             value,
+                            raw_assignment_value,
                             Some(word_index),
                         );
                         record_extglob_patterns_for_assignment(

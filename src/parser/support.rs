@@ -11,7 +11,7 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     record_command_substitutions_for_word(cmd, cmd.words.len(), &token.value);
     record_arithmetic_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_parameter_expansions_for_word(cmd, cmd.words.len(), &token.value);
-    record_brace_expansions_for_word(cmd, cmd.words.len(), &token.value);
+    record_brace_expansions_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
     record_extglob_patterns_for_word(cmd, cmd.words.len(), &token.value);
     record_tilde_expansions_for_word(cmd, cmd.words.len(), &token.value);
     record_pathname_patterns_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
