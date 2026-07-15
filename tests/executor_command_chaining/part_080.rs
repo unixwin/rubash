@@ -1828,6 +1828,42 @@ fn test_function_body_can_be_conditional_command() {
 }
 
 #[test]
+fn test_alias_introduced_coproc_executes_brace_body() {
+    let output_path = "target/rubash-alias-coproc-brace-output.txt";
+    let status_path = "target/rubash-alias-coproc-brace-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias c=coproc; \
+         c MYC {{ echo alias-coproc > {output_path}; }}; \
+         echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "alias-coproc\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "alias-coproc\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_executes_for_body() {
     let output_path = "target/rubash-coproc-for-body-output.txt";
     let status_path = "target/rubash-coproc-for-body-status.txt";

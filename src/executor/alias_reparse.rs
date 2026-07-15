@@ -46,6 +46,47 @@ impl Executor {
         Ok(None)
     }
 
+    pub(in crate::executor) fn execute_alias_introduced_coproc(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("coproc") {
+            return Ok(None);
+        }
+
+        let mut source = words.join(" ");
+        let mut next_index = index + 1;
+        if alias_coproc_needs_following_body(&words) {
+            let Some(next_command) = ast.commands.get(next_index) else {
+                return Ok(None);
+            };
+            if !command_is_coproc_body_candidate(next_command) {
+                return Ok(None);
+            }
+            source.push(' ');
+            source.push_str(&bash_command_source_text(next_command));
+            next_index += 1;
+        }
+
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed
+            .commands
+            .first()
+            .is_some_and(|command| command.coproc_command.is_some())
+        {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(next_index))
+    }
+
     fn alias_case_command_from_ast<'a>(
         &self,
         ast: &'a Ast,
@@ -237,4 +278,23 @@ fn synthetic_keyword_metadata(keyword: &str) -> Box<crate::parser::WordMetadata>
 
 fn synthetic_word_metadata(word_index: usize, value: &str) -> crate::parser::WordMetadata {
     crate::parser::WordMetadata::new(word_index, value.to_string(), value.to_string())
+}
+
+fn alias_coproc_needs_following_body(words: &[String]) -> bool {
+    matches!(words.len(), 1 | 2)
+}
+
+fn command_is_coproc_body_candidate(command: &CommandNode) -> bool {
+    command.brace_group.is_some()
+        || command.subshell_command.is_some()
+        || command.for_command.is_some()
+        || command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.case_command.is_some()
+        || command.select_command.is_some()
+        || command.coproc_command.is_some()
+        || command.time_command.is_some()
+        || command.function_command.is_some()
+        || command.arithmetic_command.is_some()
+        || command.conditional_command.is_some()
 }

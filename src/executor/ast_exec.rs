@@ -87,6 +87,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_alias_introduced_coproc(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
                 index = next_index;
                 continue;
