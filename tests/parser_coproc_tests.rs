@@ -340,15 +340,40 @@ fn test_named_coproc_parses_time_prefixed_compound_body() {
 }
 
 #[test]
-fn test_unsupported_coproc_time_function_body_is_not_named_shell_command() {
+fn test_named_coproc_parses_function_body() {
+    let input = "coproc MYC foo() { echo hi; }";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let function = coproc.body.as_ref().unwrap()[0]
+        .function_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(function.name, "foo");
+    assert!(function.has_parentheses);
+    assert_eq!(function.body[0].words, ["echo", "hi"]);
+}
+
+#[test]
+fn test_named_coproc_parses_time_prefixed_function_body() {
     let input = "coproc MYC time foo() { echo hi; }";
     let tokens = tokenize(input);
     let ast = parse(&tokens);
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let time_command = coproc.body.as_ref().unwrap()[0]
+        .time_command
+        .as_ref()
+        .unwrap();
+    let function = time_command.command.function_command.as_ref().unwrap();
 
-    assert_eq!(coproc.name, None);
-    assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
-    assert!(coproc.body.is_none());
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(function.name, "foo");
+    assert!(function.has_parentheses);
+    assert_eq!(function.body[0].words, ["echo", "hi"]);
 }
 
 #[test]

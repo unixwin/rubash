@@ -232,6 +232,7 @@ fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
             token.value.as_str(),
             "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
         ) || token.value.starts_with("((")
+            || parse_function_command(tokens, index).is_some()
             || time_prefixed_shell_command_allows_simple_pipeline(tokens, index)
             || time_prefixed_compound_command_start(tokens, index)
     })
@@ -257,6 +258,7 @@ fn time_prefixed_compound_command_start(tokens: &[Token], start: usize) -> bool 
                 "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
             )
             || token.value.starts_with("((")
+            || parse_function_command(tokens, index).is_some()
     }) || is_keyword(tokens, index, "{")
         || is_keyword(tokens, index, "(")
 }
@@ -317,6 +319,9 @@ fn matching_coproc_loop_end(tokens: &[Token], start: usize) -> Option<usize> {
 
 fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     if let Some(parsed) = parse_arithmetic_command(tokens, start) {
+        return Some(parsed);
+    }
+    if let Some(parsed) = parse_function_command(tokens, start) {
         return Some(parsed);
     }
 
