@@ -5,7 +5,7 @@
 use rubash::lexer::tokenize;
 use rubash::parser::{
     parse, CaseTerminator, CommandBodyKind, ConditionalExpressionKind, ConditionalPatternKind,
-    FunctionBodyKind, LoopKind, QuoteKind,
+    CoprocBodyKind, FunctionBodyKind, LoopKind, QuoteKind,
 };
 
 #[path = "parser_coproc_tests.rs"]
@@ -1673,6 +1673,24 @@ mod function_tests {
         assert_eq!(select_command.variable, "choice");
         assert_eq!(select_command.words, ["alpha", "beta"]);
         assert_eq!(select_command.body[0].words, ["echo", "$choice"]);
+    }
+
+    #[test]
+    fn test_function_body_can_be_coproc_command() {
+        let input = "foo() coproc worker { echo ready; }";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        let coproc = function.body[0].coproc_command.as_ref().unwrap();
+
+        assert_eq!(function.name, "foo");
+        assert_eq!(function.body_kind, FunctionBodyKind::CompoundCommand);
+        assert_eq!(coproc.name.as_deref(), Some("worker"));
+        assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
+        assert_eq!(coproc.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(coproc.body_close_delimiter.as_deref(), Some("}"));
+        assert_eq!(coproc.body.as_ref().unwrap()[0].words, ["echo", "ready"]);
     }
 
     #[test]
