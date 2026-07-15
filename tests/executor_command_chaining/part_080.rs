@@ -378,6 +378,33 @@ fn test_leading_redirects_apply_to_simple_command() {
 }
 
 #[test]
+fn test_leading_combined_redirects_apply_to_simple_command() {
+    let output_path = "target/rubash-leading-combined-redirect-output.txt";
+    let append_path = "target/rubash-leading-combined-append-output.txt";
+    let _ = fs::remove_file(output_path);
+    fs::write(append_path, "first\n").unwrap();
+    let input = format!(
+        "&> {output_path} sh -c 'echo out; printf err >&2'; \
+         &>> {append_path} sh -c 'echo append-out; printf append-err >&2'"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "out\nerr");
+    assert_eq!(
+        fs::read_to_string(append_path).unwrap(),
+        "first\nappend-out\nappend-err"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(append_path);
+}
+
+#[test]
 fn test_stdout_fd_close_does_not_create_file() {
     let output_path = "target/rubash-stdout-fd-close-output.txt";
     let closed_path = "&-";

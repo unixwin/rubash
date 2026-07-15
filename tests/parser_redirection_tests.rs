@@ -916,11 +916,55 @@ fn test_combined_stdout_stderr_redirect() {
 }
 
 #[test]
+fn test_leading_combined_stdout_stderr_redirect() {
+    let tokens = tokenize("&> out.txt echo both");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["echo", "both"]);
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+    assert_eq!(
+        command.redirect_out.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        "out.txt"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedOutput
+    );
+}
+
+#[test]
 fn test_combined_stdout_stderr_append_redirect() {
     let tokens = tokenize("echo both &>> out.txt");
     let ast = parse(&tokens);
     let command = &ast.commands[0];
 
+    assert_eq!(command.append.as_ref().unwrap().target, "out.txt");
+    assert_eq!(
+        command.append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().target,
+        "out.txt"
+    );
+    assert_eq!(
+        command.redirect_err_append.as_ref().unwrap().kind,
+        RedirectKind::CombinedAppend
+    );
+}
+
+#[test]
+fn test_leading_combined_stdout_stderr_append_redirect() {
+    let tokens = tokenize("&>> out.txt echo both");
+    let ast = parse(&tokens);
+    let command = &ast.commands[0];
+
+    assert_eq!(command.words, ["echo", "both"]);
     assert_eq!(command.append.as_ref().unwrap().target, "out.txt");
     assert_eq!(
         command.append.as_ref().unwrap().kind,
