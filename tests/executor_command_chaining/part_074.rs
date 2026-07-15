@@ -42,6 +42,31 @@ fn test_case_command_redirect_creates_file_without_match() {
 }
 
 #[test]
+fn test_empty_case_command_redirect_creates_file() {
+    let output_path = "target/rubash-empty-case-command-redirect-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("case z in esac > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].case_command.is_some());
+    assert!(ast.commands[0]
+        .case_command
+        .as_ref()
+        .unwrap()
+        .clauses
+        .is_empty());
+    assert!(ast.commands[0].redirect_out.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_case_command_input_redirect_feeds_clause_body() {
     let input_path = "target/rubash-case-command-input.txt";
     let output_path = "target/rubash-case-command-input-output.txt";

@@ -2494,6 +2494,22 @@ mod case_tests {
     }
 
     #[test]
+    fn test_empty_case_command_consumes_trailing_redirect() {
+        let input = "case $word in esac > out.txt";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+        let command = &ast.commands[0];
+        let case_command = command.case_command.as_ref().unwrap();
+
+        assert_eq!(case_command.word, "$word");
+        assert_eq!(case_command.in_keyword, "in");
+        assert!(case_command.clauses.is_empty());
+        assert_eq!(case_command.end_keyword, "esac");
+        assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+    }
+
+    #[test]
     fn test_case_word_keeps_process_substitution() {
         let input = "case <(:) in /dev/*) echo hit ;; esac";
         let tokens = tokenize(input);
