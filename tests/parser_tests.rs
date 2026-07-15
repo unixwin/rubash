@@ -431,6 +431,18 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_brace_group_keeps_inner_ansi_c_escaped_quote_brace() {
+        let input = "{\necho $'foo\\'{\nbar'\necho after\n}";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let brace_group = ast.commands[0].brace_group.as_ref().unwrap();
+
+        assert_eq!(brace_group.body.len(), 2);
+        assert_eq!(brace_group.body[0].words, ["echo", "foo'{\nbar"]);
+        assert_eq!(brace_group.body[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_brace_group_command_consumes_pipe_stderr_operator() {
         let input = "{ echo hi; } |& grep hi";
         let tokens = tokenize(input);

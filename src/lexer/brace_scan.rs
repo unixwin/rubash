@@ -31,6 +31,7 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
     let mut depth = 0usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     let mut case_depth = 0usize;
     let mut word = String::new();
@@ -44,9 +45,23 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         if ch == '\'' && !double {
@@ -199,6 +214,7 @@ pub(super) fn skip_braced_parameter_in_chars(chars: &[char], mut index: usize) -
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
@@ -207,9 +223,23 @@ pub(super) fn skip_braced_parameter_in_chars(chars: &[char], mut index: usize) -
             index += 1;
             continue;
         }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
         if ch == '\\' && !single {
             escaped = true;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            index += 2;
             continue;
         }
         if ch == '\'' && !double {

@@ -224,7 +224,23 @@ impl<'a> Lexer<'a> {
         let mut current_word_boundary = true;
         let mut comment_start = true;
         let mut saw_top_level_whitespace = false;
+        let mut ansi_single = false;
+        let mut escaped = false;
         while let Some(c) = self.advance() {
+            if escaped {
+                escaped = false;
+                comment_start = false;
+                continue;
+            }
+            if ansi_single {
+                if c == '\\' {
+                    escaped = true;
+                } else if c == '\'' {
+                    ansi_single = false;
+                }
+                comment_start = false;
+                continue;
+            }
             let rest = from_utf8(&self.input[self.position..]).unwrap_or("");
             update_brace_group_case_depth(
                 c,
@@ -282,6 +298,10 @@ impl<'a> Lexer<'a> {
                         Some('(') => {
                             self.advance();
                             self.skip_cmd_subst();
+                        }
+                        Some('\'') => {
+                            self.advance();
+                            ansi_single = true;
                         }
                         _ => {}
                     }
