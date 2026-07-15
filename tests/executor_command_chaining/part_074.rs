@@ -42,6 +42,26 @@ fn test_case_command_redirect_creates_file_without_match() {
 }
 
 #[test]
+fn test_case_last_clause_can_omit_terminator() {
+    let output_path = "target/rubash-case-last-clause-no-terminator-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("case x in x) echo matched; esac > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let case_command = ast.commands[0].case_command.as_ref().unwrap();
+
+    assert_eq!(case_command.clauses[0].terminator_text, None);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "matched\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_empty_case_command_redirect_creates_file() {
     let output_path = "target/rubash-empty-case-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);
