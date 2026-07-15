@@ -62,15 +62,13 @@ impl Executor {
         let mut source = words.join(" ");
         let mut next_index = index + 1;
         if alias_coproc_needs_following_body(&words) {
-            let Some(next_command) = ast.commands.get(next_index) else {
-                return Ok(None);
-            };
-            if !command_is_coproc_body_candidate(next_command) {
-                return Ok(None);
+            if let Some(next_command) = ast.commands.get(next_index) {
+                if command_is_coproc_body_candidate(next_command) {
+                    source.push(' ');
+                    source.push_str(&bash_command_source_text(next_command));
+                    next_index += 1;
+                }
             }
-            source.push(' ');
-            source.push_str(&bash_command_source_text(next_command));
-            next_index += 1;
         }
 
         let tokens = crate::lexer::tokenize(&source);

@@ -1864,6 +1864,26 @@ fn test_alias_introduced_coproc_executes_brace_body() {
 }
 
 #[test]
+fn test_alias_introduced_coproc_executes_simple_command() {
+    let status_path = "target/rubash-alias-coproc-simple-status.txt";
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias c=coproc; \
+         c -c 'true'; echo pid:${{COPROC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_executes_for_body() {
     let output_path = "target/rubash-coproc-for-body-output.txt";
     let status_path = "target/rubash-coproc-for-body-status.txt";
