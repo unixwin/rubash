@@ -10,6 +10,8 @@ fn test_named_coproc_parses_split_brace_group_body() {
     assert_eq!(ast.commands.len(), 1);
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.keyword, "coproc");
+    assert_eq!(coproc.keyword_metadata.value, "coproc");
+    assert_eq!(coproc.keyword_metadata.raw, "coproc");
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     let name_metadata = coproc.name_metadata.as_ref().unwrap();
     assert_eq!(name_metadata.word_index, 0);
@@ -19,7 +21,15 @@ fn test_named_coproc_parses_split_brace_group_body() {
     assert!(coproc.words.is_empty());
     assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(coproc.body_open_delimiter.as_deref(), Some("{"));
+    assert_eq!(
+        coproc.body_open_delimiter_metadata.as_ref().unwrap().value,
+        "{"
+    );
     assert_eq!(coproc.body_close_delimiter.as_deref(), Some("}"));
+    assert_eq!(
+        coproc.body_close_delimiter_metadata.as_ref().unwrap().raw,
+        "}"
+    );
     let body = coproc.body.as_ref().unwrap();
     assert_eq!(body.len(), 1);
     assert_eq!(body[0].words, ["echo", "hi"]);
@@ -73,7 +83,9 @@ fn test_coproc_simple_command_does_not_treat_first_word_as_name() {
     assert_eq!(coproc.words, ["MYC", "cat"]);
     assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
     assert_eq!(coproc.body_open_delimiter, None);
+    assert!(coproc.body_open_delimiter_metadata.is_none());
     assert_eq!(coproc.body_close_delimiter, None);
+    assert!(coproc.body_close_delimiter_metadata.is_none());
     assert!(coproc.body.is_none());
 }
 
@@ -144,7 +156,15 @@ fn test_named_coproc_parses_subshell_body() {
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
     assert_eq!(coproc.body_kind, CoprocBodyKind::Subshell);
     assert_eq!(coproc.body_open_delimiter.as_deref(), Some("("));
+    assert_eq!(
+        coproc.body_open_delimiter_metadata.as_ref().unwrap().value,
+        "("
+    );
     assert_eq!(coproc.body_close_delimiter.as_deref(), Some(")"));
+    assert_eq!(
+        coproc.body_close_delimiter_metadata.as_ref().unwrap().value,
+        ")"
+    );
     assert_eq!(coproc.body.as_ref().unwrap()[0].words, ["echo", "hi"]);
 }
 

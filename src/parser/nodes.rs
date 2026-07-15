@@ -887,6 +887,7 @@ pub enum FunctionBodyKind {
 #[derive(Debug, Clone)]
 pub struct CoprocCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     /// Optional name (defaults to COPROC)
     pub name: Option<String>,
     pub name_metadata: Option<Box<WordMetadata>>,
@@ -895,7 +896,9 @@ pub struct CoprocCommand {
     pub word_metadata: Vec<WordMetadata>,
     pub body_kind: CoprocBodyKind,
     pub body_open_delimiter: Option<String>,
+    pub body_open_delimiter_metadata: Option<Box<WordMetadata>>,
     pub body_close_delimiter: Option<String>,
+    pub body_close_delimiter_metadata: Option<Box<WordMetadata>>,
     /// Brace group body (for compound commands)
     pub body: Option<Vec<CommandNode>>,
 }

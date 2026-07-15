@@ -193,6 +193,12 @@ fn coproc_command(
     let (body_open_delimiter, body_close_delimiter) = body_delimiters
         .map(|(open, close)| (Some(open), Some(close)))
         .unwrap_or((None, None));
+    let body_open_delimiter_metadata = body_open_delimiter
+        .as_deref()
+        .map(synthetic_delimiter_metadata);
+    let body_close_delimiter_metadata = body_close_delimiter
+        .as_deref()
+        .map(synthetic_delimiter_metadata);
     let (name, name_metadata) = name
         .map(|(value, raw)| {
             let metadata = build_word_metadata(0, &value, &raw);
@@ -201,15 +207,22 @@ fn coproc_command(
         .unwrap_or((None, None));
     Box::new(CoprocCommand {
         keyword: "coproc".to_string(),
+        keyword_metadata: synthetic_delimiter_metadata("coproc"),
         name,
         name_metadata,
         words,
         word_metadata,
         body_kind,
         body_open_delimiter,
+        body_open_delimiter_metadata,
         body_close_delimiter,
+        body_close_delimiter_metadata,
         body,
     })
+}
+
+fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, delimiter, delimiter))
 }
 
 fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
