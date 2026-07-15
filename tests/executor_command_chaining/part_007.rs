@@ -452,6 +452,49 @@ fn test_background_loop_commands_execute_and_update_bang_pid() {
 }
 
 #[test]
+fn test_background_iteration_commands_execute_and_update_bang_pid() {
+    let output_path = "target/rubash-background-iteration-command-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "for value in one two; do echo for:$value >> {output_path}; done & \
+         printf 'for-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}; \
+         select value in one two; do echo select:$value >> {output_path}; break; done <<< 2 & \
+         printf 'select-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0]
+        .background_command
+        .as_ref()
+        .unwrap()
+        .command
+        .for_command
+        .is_some());
+    assert!(ast.commands[2]
+        .background_command
+        .as_ref()
+        .unwrap()
+        .command
+        .select_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        format!(
+            "for:one\nfor:two\nfor-status:0 bang:{}\nselect:two\nselect-status:0 bang:{}\n",
+            std::process::id(),
+            std::process::id()
+        )
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_bash_subshell_assignment_does_not_override_dynamic_value() {
     let output_path = "target/rubash-bash-subshell-assignment-output.txt";
     let _ = fs::remove_file(output_path);

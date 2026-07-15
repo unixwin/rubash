@@ -5252,6 +5252,32 @@ mod background_tests {
         assert_eq!(until_command.condition[0].words, ["true"]);
         assert_eq!(until_ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_iteration_commands() {
+        let for_ast = parse(&tokenize(
+            "for value in one two; do echo $value; done & echo done",
+        ));
+        let select_ast = parse(&tokenize(
+            "select value in one two; do echo $value; break; done & echo done",
+        ));
+
+        let for_background = for_ast.commands[0].background_command.as_ref().unwrap();
+        let for_command = for_background.command.for_command.as_ref().unwrap();
+        let select_background = select_ast.commands[0].background_command.as_ref().unwrap();
+        let select_command = select_background.command.select_command.as_ref().unwrap();
+
+        assert_eq!(for_background.operator, "&");
+        assert_eq!(for_command.variable, "value");
+        assert_eq!(for_command.words, ["one", "two"]);
+        assert_eq!(for_command.body[0].words, ["echo", "$value"]);
+        assert_eq!(for_ast.commands[1].words, ["echo", "done"]);
+        assert_eq!(select_background.operator, "&");
+        assert_eq!(select_command.variable, "value");
+        assert_eq!(select_command.words, ["one", "two"]);
+        assert_eq!(select_command.body[0].words, ["echo", "$value"]);
+        assert_eq!(select_ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
