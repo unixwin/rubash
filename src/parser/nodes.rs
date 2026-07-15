@@ -255,18 +255,22 @@ pub struct ConditionalPatternOperand {
 
 impl ConditionalPatternOperand {
     pub fn new(text: String, kind: ConditionalPatternKind) -> Self {
+        Self::new_with_raw(text.clone(), text, kind)
+    }
+
+    pub fn new_with_raw(text: String, raw_text: String, kind: ConditionalPatternKind) -> Self {
         let operators = if kind == ConditionalPatternKind::Glob {
-            case_pattern_operators(&text)
+            case_pattern_operators(&raw_text)
         } else {
             Vec::new()
         };
         let extglob_patterns = if kind == ConditionalPatternKind::Glob {
-            super::extglob_patterns_in_word_with_raw(&text, &text)
+            super::extglob_patterns_in_word_with_raw(&text, &raw_text)
         } else {
             Vec::new()
         };
         let brace_expansions = if kind == ConditionalPatternKind::Glob {
-            super::brace_expansions_in_word(&text)
+            super::brace_expansions_in_word_with_raw(&text, &raw_text)
         } else {
             Vec::new()
         };

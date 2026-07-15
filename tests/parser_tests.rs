@@ -2054,6 +2054,33 @@ mod conditional_tests {
     }
 
     #[test]
+    fn test_conditional_command_ignores_quoted_pattern_operators() {
+        let input = "[[ file == \"*.rs\" || name == '@(src|tests)' ]]";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
+
+        let first = conditional.expression.children[0]
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+        assert_eq!(first.text, "*.rs");
+        assert!(first.operators.is_empty());
+        assert!(first.extglob_patterns.is_empty());
+        assert!(!first.has_glob);
+        assert!(!first.has_extglob);
+
+        let second = conditional.expression.children[1]
+            .pattern_operand
+            .as_ref()
+            .unwrap();
+        assert_eq!(second.text, "@(src|tests)");
+        assert!(second.operators.is_empty());
+        assert!(second.extglob_patterns.is_empty());
+        assert!(!second.has_extglob);
+    }
+
+    #[test]
     fn test_conditional_command_records_brace_pattern_operand() {
         let input = "[[ name == src/{bin,{test,bench}}/*.rs ]]";
         let tokens = tokenize(input);

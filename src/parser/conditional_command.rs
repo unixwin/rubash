@@ -20,9 +20,11 @@ pub(super) fn parse_conditional_command(
         .enumerate()
         .map(|(index, (arg, raw))| build_word_metadata(index, arg, raw))
         .collect::<Vec<_>>();
-    let expression_args = args
-        .strip_suffix(&["]]".to_string()])
-        .unwrap_or(args.as_slice());
+    let expression_args = arg_parts
+        .last()
+        .is_some_and(|(arg, _)| arg == "]]")
+        .then(|| &arg_parts[..arg_parts.len() - 1])
+        .unwrap_or(arg_parts.as_slice());
     let expression = conditional_expression(expression_args);
 
     let mut command = CommandNode::new();
@@ -75,7 +77,7 @@ fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
     (start + 1..tokens.len()).find(|&index| tokens[index].raw == "]]")
 }
 
-fn conditional_expression(args: &[String]) -> ConditionalExpression {
+fn conditional_expression(args: &[(String, String)]) -> ConditionalExpression {
     if args.is_empty() {
         return conditional_leaf(ConditionalExpressionKind::Empty, None, args);
     }
@@ -101,7 +103,7 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
         return conditional_logical_expression(args, index);
     }
 
-    if args[0] == "!" {
+    if args[0].0 == "!" {
         return ConditionalExpression {
             kind: ConditionalExpressionKind::Negation,
             open_delimiter: None,
@@ -115,48 +117,66 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
         };
     }
 
-    match args {
-        [op, operand] if is_conditional_unary_operator(op) => conditional_leaf(
+    if args.len() == 2 && is_conditional_unary_operator(&args[0].0) {
+        return conditional_leaf(
             ConditionalExpressionKind::Unary,
-            Some(op.clone()),
-            std::slice::from_ref(operand),
-        ),
-        [left, op, right] if is_conditional_binary_operator(op) => conditional_leaf(
-            ConditionalExpressionKind::Binary,
-            Some(op.clone()),
-            &[left.clone(), right.clone()],
-        ),
-        [left, op, rhs @ ..]
-            if is_conditional_binary_operator(op) && conditional_rhs_fragments_can_join(rhs) =>
-        {
-            conditional_leaf(
-                ConditionalExpressionKind::Binary,
-                Some(op.clone()),
-                &[left.clone(), rhs.join("")],
-            )
-        }
-        [word] => conditional_leaf(
-            ConditionalExpressionKind::Word,
-            None,
-            std::slice::from_ref(word),
-        ),
-        _ => conditional_leaf(ConditionalExpressionKind::Unknown, None, args),
+            Some(args[0].0.clone()),
+            &args[1..2],
+        );
     }
+
+    if args.len() == 3 && is_conditional_binary_operator(&args[1].0) {
+        return conditional_leaf(
+            ConditionalExpressionKind::Binary,
+            Some(args[1].0.clone()),
+            &[args[0].clone(), args[2].clone()],
+        );
+    }
+
+    if args.len() > 3
+        && is_conditional_binary_operator(&args[1].0)
+        && conditional_rhs_fragments_can_join(&args[2..])
+    {
+        let joined_rhs = (
+            args[2..]
+                .iter()
+                .map(|(arg, _)| arg.as_str())
+                .collect::<String>(),
+            args[2..]
+                .iter()
+                .map(|(_, raw)| raw.as_str())
+                .collect::<String>(),
+        );
+        return conditional_leaf(
+            ConditionalExpressionKind::Binary,
+            Some(args[1].0.clone()),
+            &[args[0].clone(), joined_rhs],
+        );
+    }
+
+    if args.len() == 1 {
+        return conditional_leaf(ConditionalExpressionKind::Word, None, &args[0..1]);
+    }
+
+    conditional_leaf(ConditionalExpressionKind::Unknown, None, args)
 }
 
-fn conditional_rhs_fragments_can_join(rhs: &[String]) -> bool {
+fn conditional_rhs_fragments_can_join(rhs: &[(String, String)]) -> bool {
     rhs.len() > 1
         && rhs
             .iter()
-            .any(|arg| matches!(arg.as_str(), "(" | ")" | "|") || arg.contains('('))
+            .any(|(arg, _)| matches!(arg.as_str(), "(" | ")" | "|") || arg.contains('('))
 }
 
-fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalExpression {
+fn conditional_logical_expression(
+    args: &[(String, String)],
+    index: usize,
+) -> ConditionalExpression {
     ConditionalExpression {
         kind: ConditionalExpressionKind::Logical,
         open_delimiter: None,
         open_delimiter_metadata: None,
-        operator: Some(args[index].clone()),
+        operator: Some(args[index].0.clone()),
         operands: Vec::new(),
         pattern_operand: None,
         children: vec![
@@ -171,7 +191,7 @@ fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalE
 fn conditional_leaf(
     kind: ConditionalExpressionKind,
     operator: Option<String>,
-    operands: &[String],
+    operands: &[(String, String)],
 ) -> ConditionalExpression {
     ConditionalExpression {
         kind,
@@ -179,7 +199,7 @@ fn conditional_leaf(
         open_delimiter_metadata: None,
         pattern_operand: conditional_pattern_operand(operator.as_deref(), operands),
         operator,
-        operands: operands.to_vec(),
+        operands: operands.iter().map(|(arg, _)| arg.clone()).collect(),
         children: Vec::new(),
         close_delimiter: None,
         close_delimiter_metadata: None,
@@ -196,7 +216,7 @@ fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
 
 fn conditional_pattern_operand(
     operator: Option<&str>,
-    operands: &[String],
+    operands: &[(String, String)],
 ) -> Option<ConditionalPatternOperand> {
     let rhs = operands.get(1)?;
     let kind = match operator? {
@@ -204,31 +224,36 @@ fn conditional_pattern_operand(
         "=~" => ConditionalPatternKind::Regex,
         _ => return None,
     };
-    Some(ConditionalPatternOperand::new(rhs.clone(), kind))
+    Some(ConditionalPatternOperand::new_with_raw(
+        rhs.0.clone(),
+        rhs.1.clone(),
+        kind,
+    ))
 }
 
-fn top_level_operator(args: &[String], operator: &str) -> Option<usize> {
+fn top_level_operator(args: &[(String, String)], operator: &str) -> Option<usize> {
     let mut depth = 0usize;
     for (index, arg) in args.iter().enumerate() {
-        match arg.as_str() {
+        match arg.0.as_str() {
             "(" => depth += 1,
             ")" => depth = depth.saturating_sub(1),
-            _ if depth == 0 && arg == operator => return Some(index),
+            _ if depth == 0 && arg.0 == operator => return Some(index),
             _ => {}
         }
     }
     None
 }
 
-fn conditional_outer_group(args: &[String]) -> Option<&[String]> {
-    if args.first().map(String::as_str) != Some("(") || args.last().map(String::as_str) != Some(")")
+fn conditional_outer_group(args: &[(String, String)]) -> Option<&[(String, String)]> {
+    if args.first().map(|(arg, _)| arg.as_str()) != Some("(")
+        || args.last().map(|(arg, _)| arg.as_str()) != Some(")")
     {
         return None;
     }
 
     let mut depth = 0usize;
     for (index, arg) in args.iter().enumerate() {
-        match arg.as_str() {
+        match arg.0.as_str() {
             "(" => depth += 1,
             ")" => {
                 depth = depth.saturating_sub(1);
