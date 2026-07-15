@@ -475,6 +475,26 @@ fn test_named_coproc_parses_while_body() {
 }
 
 #[test]
+fn test_named_coproc_parses_until_body() {
+    let input = "coproc MYC until false; do echo loop; break; done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let loop_command = coproc.body.as_ref().unwrap()[0]
+        .loop_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(loop_command.kind, LoopKind::Until);
+    assert_eq!(loop_command.condition[0].words, ["false"]);
+    assert_eq!(loop_command.body[0].words, ["echo", "loop"]);
+    assert_eq!(loop_command.body[1].words, ["break"]);
+}
+
+#[test]
 fn test_named_coproc_parses_select_body() {
     let input = "coproc MYC select choice in alpha beta; do echo $choice; break; done";
     let tokens = tokenize(input);
