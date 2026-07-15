@@ -31,9 +31,11 @@ pub(super) fn parse_conditional_command(
     command.words.extend(args.clone());
     command.conditional_command = Some(Box::new(ConditionalCommand {
         open_delimiter: tokens[start].value.clone(),
+        open_delimiter_metadata: token_metadata(&tokens[start]),
         args,
         arg_metadata,
         close_delimiter: tokens[end].value.clone(),
+        close_delimiter_metadata: token_metadata(&tokens[end]),
         expression,
     }));
 
@@ -82,11 +84,13 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
         return ConditionalExpression {
             kind: ConditionalExpressionKind::Group,
             open_delimiter: Some("(".to_string()),
+            open_delimiter_metadata: Some(delimiter_metadata("(")),
             operator: None,
             operands: Vec::new(),
             pattern_operand: None,
             children: vec![conditional_expression(inner)],
             close_delimiter: Some(")".to_string()),
+            close_delimiter_metadata: Some(delimiter_metadata(")")),
         };
     }
 
@@ -101,11 +105,13 @@ fn conditional_expression(args: &[String]) -> ConditionalExpression {
         return ConditionalExpression {
             kind: ConditionalExpressionKind::Negation,
             open_delimiter: None,
+            open_delimiter_metadata: None,
             operator: Some("!".to_string()),
             operands: Vec::new(),
             pattern_operand: None,
             children: vec![conditional_expression(&args[1..])],
             close_delimiter: None,
+            close_delimiter_metadata: None,
         };
     }
 
@@ -149,6 +155,7 @@ fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalE
     ConditionalExpression {
         kind: ConditionalExpressionKind::Logical,
         open_delimiter: None,
+        open_delimiter_metadata: None,
         operator: Some(args[index].clone()),
         operands: Vec::new(),
         pattern_operand: None,
@@ -157,6 +164,7 @@ fn conditional_logical_expression(args: &[String], index: usize) -> ConditionalE
             conditional_expression(&args[index + 1..]),
         ],
         close_delimiter: None,
+        close_delimiter_metadata: None,
     }
 }
 
@@ -168,12 +176,22 @@ fn conditional_leaf(
     ConditionalExpression {
         kind,
         open_delimiter: None,
+        open_delimiter_metadata: None,
         pattern_operand: conditional_pattern_operand(operator.as_deref(), operands),
         operator,
         operands: operands.to_vec(),
         children: Vec::new(),
         close_delimiter: None,
+        close_delimiter_metadata: None,
     }
+}
+
+fn token_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, delimiter, delimiter))
 }
 
 fn conditional_pattern_operand(

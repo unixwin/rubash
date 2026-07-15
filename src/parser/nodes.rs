@@ -201,9 +201,11 @@ pub enum LoopKind {
 #[derive(Debug, Clone)]
 pub struct ConditionalCommand {
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub args: Vec<String>,
     pub arg_metadata: Vec<WordMetadata>,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub expression: ConditionalExpression,
 }
 
@@ -212,11 +214,13 @@ pub struct ConditionalCommand {
 pub struct ConditionalExpression {
     pub kind: ConditionalExpressionKind,
     pub open_delimiter: Option<String>,
+    pub open_delimiter_metadata: Option<Box<WordMetadata>>,
     pub operator: Option<String>,
     pub operands: Vec<String>,
     pub pattern_operand: Option<ConditionalPatternOperand>,
     pub children: Vec<ConditionalExpression>,
     pub close_delimiter: Option<String>,
+    pub close_delimiter_metadata: Option<Box<WordMetadata>>,
 }
 
 /// Represents a pattern-like right-hand operand in `[[ lhs == pat ]]` or

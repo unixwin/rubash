@@ -1487,7 +1487,11 @@ mod conditional_tests {
         assert_eq!(ast.commands.len(), 1);
         let conditional = ast.commands[0].conditional_command.as_ref().unwrap();
         assert_eq!(conditional.open_delimiter, "[[");
+        assert_eq!(conditional.open_delimiter_metadata.value, "[[");
+        assert_eq!(conditional.open_delimiter_metadata.raw, "[[");
         assert_eq!(conditional.close_delimiter, "]]");
+        assert_eq!(conditional.close_delimiter_metadata.value, "]]");
+        assert_eq!(conditional.close_delimiter_metadata.raw, "]]");
         assert_eq!(
             conditional.args,
             ["$value", "==", "a*", "&&", "-n", "$other", "]]"]
@@ -1501,7 +1505,9 @@ mod conditional_tests {
             ConditionalExpressionKind::Logical
         );
         assert_eq!(conditional.expression.open_delimiter, None);
+        assert!(conditional.expression.open_delimiter_metadata.is_none());
         assert_eq!(conditional.expression.close_delimiter, None);
+        assert!(conditional.expression.close_delimiter_metadata.is_none());
         assert_eq!(conditional.expression.operator.as_deref(), Some("&&"));
         assert_eq!(conditional.expression.children.len(), 2);
         assert_eq!(
@@ -1574,7 +1580,11 @@ mod conditional_tests {
         let group = &conditional.expression.children[0];
         assert_eq!(group.kind, ConditionalExpressionKind::Group);
         assert_eq!(group.open_delimiter.as_deref(), Some("("));
+        assert_eq!(group.open_delimiter_metadata.as_ref().unwrap().value, "(");
+        assert_eq!(group.open_delimiter_metadata.as_ref().unwrap().raw, "(");
         assert_eq!(group.close_delimiter.as_deref(), Some(")"));
+        assert_eq!(group.close_delimiter_metadata.as_ref().unwrap().value, ")");
+        assert_eq!(group.close_delimiter_metadata.as_ref().unwrap().raw, ")");
         let logical = &group.children[0];
         assert_eq!(logical.kind, ConditionalExpressionKind::Logical);
         assert_eq!(logical.operator.as_deref(), Some("||"));
