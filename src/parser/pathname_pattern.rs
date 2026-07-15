@@ -115,9 +115,14 @@ pub(super) fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePa
     }
 
     if has_star || has_question || has_bracket {
+        let operator_metadata = operators
+            .iter()
+            .map(|operator| operator_metadata(operator))
+            .collect();
         vec![PathnamePattern {
             text: word.to_string(),
             operators,
+            operator_metadata,
             has_star,
             has_question,
             has_bracket,
@@ -128,6 +133,10 @@ pub(super) fn pathname_patterns_in_word(word: &str, raw: &str) -> Vec<PathnamePa
     } else {
         Vec::new()
     }
+}
+
+fn operator_metadata(operator: &str) -> crate::parser::WordMetadata {
+    crate::parser::WordMetadata::literal(0, operator.to_string(), operator.to_string())
 }
 
 fn skip_bracket_class(chars: &[char], start: usize) -> Option<usize> {
