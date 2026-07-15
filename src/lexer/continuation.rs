@@ -115,6 +115,7 @@ pub(super) fn has_unclosed_command_substitution(input: &str) -> bool {
     let mut backtick = false;
     let mut single = false;
     let mut double = false;
+    let mut ansi_single = false;
     let mut escaped = false;
     let mut comment_start = true;
     let mut in_comment = false;
@@ -135,18 +136,35 @@ pub(super) fn has_unclosed_command_substitution(input: &str) -> bool {
             index += 1;
             continue;
         }
-        if ch == '\n' && !single && !double && !backtick && depth == 0 {
+        if ch == '\n' && !single && !double && !ansi_single && !backtick && depth == 0 {
             comment_start = true;
             index += 1;
             continue;
         }
-        if ch == '#' && !single && !double && !backtick && depth == 0 && comment_start {
+        if ch == '#'
+            && !single
+            && !double
+            && !ansi_single
+            && !backtick
+            && depth == 0
+            && comment_start
+        {
             in_comment = true;
             index += 1;
             continue;
         }
-        if ch.is_whitespace() && !single && !double && !backtick && depth == 0 {
+        if ch.is_whitespace() && !single && !double && !ansi_single && !backtick && depth == 0 {
             comment_start = true;
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            comment_start = false;
             index += 1;
             continue;
         }
@@ -154,6 +172,12 @@ pub(super) fn has_unclosed_command_substitution(input: &str) -> bool {
             escaped = true;
             comment_start = false;
             index += 1;
+            continue;
+        }
+        if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
+            ansi_single = true;
+            comment_start = false;
+            index += 2;
             continue;
         }
         if ch == '\'' && !double {
@@ -208,16 +232,16 @@ pub(super) fn has_unclosed_command_substitution(input: &str) -> bool {
             index = skip_heredoc_in_chars(&chars, index);
             continue;
         }
-        if depth > 0 && ch == '(' {
+        if depth > 0 && !ansi_single && ch == '(' {
             depth += 1;
-        } else if depth > 0 && ch == ')' {
+        } else if depth > 0 && !ansi_single && ch == ')' {
             depth -= 1;
         }
-        if !single && !double && !backtick && depth == 0 {
+        if !single && !double && !ansi_single && !backtick && depth == 0 {
             comment_start = false;
         }
         index += 1;
     }
 
-    depth > 0 || backtick
+    depth > 0 || backtick || ansi_single
 }

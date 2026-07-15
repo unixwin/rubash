@@ -86,6 +86,28 @@ fn test_command_substitution_preserves_inner_ansi_c_quotes() {
 }
 
 #[test]
+fn test_command_substitution_ansi_c_quote_does_not_swallow_next_command() {
+    let tokens = tokenize("echo $(printf $'foo\\'\nbar')\necho after");
+    assert_eq!(tokens.len(), 5);
+    assert_eq!(tokens[0].value, "echo");
+    assert_eq!(tokens[1].value, "$(printf $'foo\\'\nbar')");
+    assert_eq!(tokens[2].kind, TokenKind::Semicolon);
+    assert_eq!(tokens[3].value, "echo");
+    assert_eq!(tokens[4].value, "after");
+}
+
+#[test]
+fn test_command_substitution_ansi_c_escaped_quote_mid_line_continues_correctly() {
+    let tokens = tokenize("echo $(printf $'foo\\'x\nbar')\necho after");
+    assert_eq!(tokens.len(), 5);
+    assert_eq!(tokens[0].value, "echo");
+    assert_eq!(tokens[1].value, "$(printf $'foo\\'x\nbar')");
+    assert_eq!(tokens[2].kind, TokenKind::Semicolon);
+    assert_eq!(tokens[3].value, "echo");
+    assert_eq!(tokens[4].value, "after");
+}
+
+#[test]
 fn test_pipeline_multiline_single_quote_is_one_word() {
     let tokens = tokenize("printf x | awk '\n/^}$/ { print $0 }\n/.*/ { next }\n'");
     assert_eq!(tokens.len(), 5);
