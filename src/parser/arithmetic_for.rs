@@ -74,12 +74,14 @@ pub(super) fn parse_arithmetic_for_command(
     }
 
     let mut list_terminator = None;
+    let mut list_terminator_metadata = None;
     while tokens
         .get(i)
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
     {
         if list_terminator.is_none() {
             list_terminator = Some(tokens[i].value.clone());
+            list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
         }
         i += 1;
     }
@@ -158,6 +160,7 @@ pub(super) fn parse_arithmetic_for_command(
         word_metadata: Vec::new(),
         default_positional: false,
         list_terminator,
+        list_terminator_metadata,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
             open_delimiter_metadata: delimiter_metadata("(("),

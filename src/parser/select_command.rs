@@ -18,6 +18,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     let mut in_keyword = None;
     let mut in_keyword_metadata = None;
     let mut list_terminator = None;
+    let mut list_terminator_metadata = None;
 
     // Optional `in words...`
     let default_positional = if is_keyword(tokens, i, "in") {
@@ -28,6 +29,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
             if tokens[i].kind == TokenKind::Semicolon {
                 if list_terminator.is_none() {
                     list_terminator = Some(tokens[i].value.clone());
+                    list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
                 }
                 i += 1;
                 while tokens
@@ -69,6 +71,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         {
             if list_terminator.is_none() {
                 list_terminator = Some(tokens[i].value.clone());
+                list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
             }
             i += 1;
         }
@@ -146,6 +149,7 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         word_metadata,
         default_positional,
         list_terminator,
+        list_terminator_metadata,
         body_kind,
         body_open_delimiter,
         body_close_delimiter,

@@ -82,6 +82,7 @@ fn inline_arithmetic_for_command(
         word_metadata: Vec::new(),
         default_positional: false,
         list_terminator: None,
+        list_terminator_metadata: None,
         arithmetic: Some(ArithmeticForCommand {
             open_delimiter: "((".to_string(),
             open_delimiter_metadata: synthetic_keyword_metadata("(("),

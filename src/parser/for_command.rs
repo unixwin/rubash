@@ -25,6 +25,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let mut in_keyword = None;
     let mut in_keyword_metadata = None;
     let mut list_terminator = None;
+    let mut list_terminator_metadata = None;
     let default_positional = if is_keyword(tokens, i, "in") {
         in_keyword = Some(tokens[i].value.clone());
         in_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
@@ -33,6 +34,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
             if tokens[i].kind == TokenKind::Semicolon {
                 if list_terminator.is_none() {
                     list_terminator = Some(tokens[i].value.clone());
+                    list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
                 }
                 i += 1;
                 while tokens
@@ -73,6 +75,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         {
             if list_terminator.is_none() {
                 list_terminator = Some(tokens[i].value.clone());
+                list_terminator_metadata = Some(build_keyword_metadata(&tokens[i]));
             }
             i += 1;
         }
@@ -149,6 +152,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         word_metadata,
         default_positional,
         list_terminator,
+        list_terminator_metadata,
         arithmetic: None,
         body_kind,
         body_open_delimiter,

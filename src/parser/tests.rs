@@ -198,6 +198,10 @@ fn test_parse_arithmetic_for_command() {
     assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
     assert_eq!(for_command.end_keyword.as_deref(), Some("done"));
     assert_eq!(for_command.list_terminator.as_deref(), Some(";"));
+    assert_eq!(
+        for_command.list_terminator_metadata.as_ref().unwrap().value,
+        ";"
+    );
     assert_eq!(arithmetic.open_delimiter, "((");
     assert_eq!(arithmetic.init, "i = 0");
     assert_eq!(arithmetic.init_metadata.expression, "i = 0");
