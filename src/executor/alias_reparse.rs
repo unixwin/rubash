@@ -59,7 +59,8 @@ impl Executor {
             return Ok(None);
         }
 
-        let mut source = words.join(" ");
+        let mut source = alias_coproc_source_words(&words);
+        append_source_redirects(&mut source, command);
         let mut next_index = index + 1;
         if alias_coproc_needs_following_body(&words) {
             if let Some(next_command) = ast.commands.get(next_index) {
@@ -280,6 +281,29 @@ fn synthetic_word_metadata(word_index: usize, value: &str) -> crate::parser::Wor
 
 fn alias_coproc_needs_following_body(words: &[String]) -> bool {
     matches!(words.len(), 1 | 2)
+}
+
+fn alias_coproc_source_words(words: &[String]) -> String {
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            if index == 0 || alias_coproc_word_is_source_safe(word) {
+                word.clone()
+            } else {
+                shell_single_quote_assignment_value(word)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn alias_coproc_word_is_source_safe(word: &str) -> bool {
+    if word.starts_with('{') && word.ends_with('}') {
+        return true;
+    }
+
+    !word.is_empty() && !word.contains(char::is_whitespace) && !word.contains('\'')
 }
 
 fn command_is_coproc_body_candidate(command: &CommandNode) -> bool {

@@ -603,7 +603,7 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
     }
 }
 
-fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
+pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &CommandNode) {
     append_function_redirect(text, cmd.redirect_in.as_ref(), "<");
     append_function_redirect(
         text,
