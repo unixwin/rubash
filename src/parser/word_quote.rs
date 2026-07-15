@@ -89,13 +89,17 @@ fn quoted_segment(
             continue;
         }
         if chars[index] == terminator {
+            let open_delimiter = chars[start..start + opener_len].iter().collect::<String>();
+            let close_delimiter = terminator.to_string();
             return Some((
                 WordQuote {
                     text: chars[start..=index].iter().collect(),
-                    open_delimiter: chars[start..start + opener_len].iter().collect(),
+                    open_delimiter_metadata: delimiter_metadata(&open_delimiter),
+                    open_delimiter,
                     body: chars[start + opener_len..index].iter().collect(),
                     kind,
-                    close_delimiter: terminator.to_string(),
+                    close_delimiter_metadata: delimiter_metadata(&close_delimiter),
+                    close_delimiter,
                     word_index: None,
                     assignment_name: None,
                 },
@@ -105,4 +109,12 @@ fn quoted_segment(
         index += 1;
     }
     None
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::literal(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }

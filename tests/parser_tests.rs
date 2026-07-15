@@ -4439,8 +4439,12 @@ mod word_quote_tests {
         assert_eq!(quotes.len(), 4);
         assert_eq!(quotes[0].text, "'one two'");
         assert_eq!(quotes[0].open_delimiter, "'");
+        assert_eq!(quotes[0].open_delimiter_metadata.value, "'");
+        assert_eq!(quotes[0].open_delimiter_metadata.raw, "'");
         assert_eq!(quotes[0].body, "one two");
         assert_eq!(quotes[0].close_delimiter, "'");
+        assert_eq!(quotes[0].close_delimiter_metadata.value, "'");
+        assert_eq!(quotes[0].close_delimiter_metadata.raw, "'");
         assert_eq!(quotes[0].kind, QuoteKind::Single);
         assert_eq!(quotes[0].word_index, Some(1));
         assert_eq!(quotes[1].text, "\"three $HOME\"");
@@ -4451,8 +4455,12 @@ mod word_quote_tests {
         assert_eq!(quotes[1].word_index, Some(2));
         assert_eq!(quotes[2].text, "$'line\\n'");
         assert_eq!(quotes[2].open_delimiter, "$'");
+        assert_eq!(quotes[2].open_delimiter_metadata.value, "$'");
+        assert_eq!(quotes[2].open_delimiter_metadata.raw, "$'");
         assert_eq!(quotes[2].body, "line\\n");
         assert_eq!(quotes[2].close_delimiter, "'");
+        assert_eq!(quotes[2].close_delimiter_metadata.value, "'");
+        assert_eq!(quotes[2].close_delimiter_metadata.raw, "'");
         assert_eq!(quotes[2].kind, QuoteKind::AnsiC);
         assert_eq!(quotes[2].word_index, Some(3));
         assert_eq!(quotes[3].text, "$\"locale\"");
