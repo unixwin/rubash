@@ -232,6 +232,7 @@ fn fold_time_pipeline_stage_command(mut command: CommandNode) -> CommandNode {
     command.inverted = false;
     timed.time_command = Some(TimeCommand {
         keyword: prefix.keyword,
+        keyword_metadata: prefix.keyword_metadata,
         prefix_words: prefix.prefix_words,
         prefix_word_metadata: prefix.prefix_word_metadata,
         command: Box::new(command),
@@ -266,6 +267,7 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             timed.background = background;
             timed.time_command = Some(TimeCommand {
                 keyword: prefix.keyword,
+                keyword_metadata: prefix.keyword_metadata,
                 prefix_words: prefix.prefix_words,
                 prefix_word_metadata: prefix.prefix_word_metadata,
                 command: Box::new(command),
@@ -279,6 +281,7 @@ fn fold_time_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
 
 struct TimePipelinePrefix {
     keyword: String,
+    keyword_metadata: Box<WordMetadata>,
     prefix_words: Vec<String>,
     prefix_word_metadata: Vec<WordMetadata>,
     posix_format: bool,
@@ -314,6 +317,7 @@ fn fold_time_simple_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             timed.background = background;
             timed.time_command = Some(TimeCommand {
                 keyword: prefix.keyword,
+                keyword_metadata: prefix.keyword_metadata,
                 prefix_words: prefix.prefix_words,
                 prefix_word_metadata: prefix.prefix_word_metadata,
                 command: Box::new(command),
@@ -370,6 +374,7 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
         }
     }
     let keyword = command.words[0].clone();
+    let keyword_metadata = Box::new(build_word_metadata(0, &keyword, &keyword));
     let old_word_len = command.words.len();
     command.words = command.words[index..].to_vec();
     if command.word_kinds.len() == old_word_len {
@@ -377,6 +382,7 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
     }
     Some(TimePipelinePrefix {
         keyword,
+        keyword_metadata,
         prefix_words,
         prefix_word_metadata,
         posix_format,
@@ -615,6 +621,11 @@ fn parse_time_prefixed_compound_command(
     timed.background = background;
     timed.time_command = Some(TimeCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata: Box::new(build_word_metadata(
+            0,
+            &tokens[start].value,
+            &tokens[start].raw,
+        )),
         prefix_words,
         prefix_word_metadata,
         command: Box::new(command),

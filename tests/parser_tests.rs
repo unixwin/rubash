@@ -82,6 +82,8 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.keyword_metadata.value, "time");
+        assert_eq!(time_command.keyword_metadata.raw, "time");
         assert_eq!(time_command.prefix_words, ["-p", "!"]);
         assert_eq!(time_command.prefix_word_metadata.len(), 2);
         assert_eq!(time_command.prefix_word_metadata[0].word_index, 0);
@@ -109,6 +111,7 @@ mod pipeline_tests {
         assert_eq!(list.operators, ["||"]);
         let time_command = list.commands[0].time_command.as_ref().unwrap();
         assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.keyword_metadata.value, "time");
         assert_eq!(time_command.prefix_words, ["-p", "!"]);
         assert!(time_command.posix_format);
         assert!(time_command.inverted);
@@ -262,6 +265,8 @@ mod pipeline_tests {
         assert_eq!(ast.commands.len(), 1);
         let time_command = ast.commands[0].time_command.as_ref().unwrap();
         assert_eq!(time_command.keyword, "time");
+        assert_eq!(time_command.keyword_metadata.value, "time");
+        assert_eq!(time_command.keyword_metadata.raw, "time");
         assert_eq!(time_command.prefix_words, ["-p"]);
         assert_eq!(time_command.prefix_word_metadata.len(), 1);
         assert_eq!(time_command.prefix_word_metadata[0].word_index, 0);
@@ -370,6 +375,7 @@ mod pipeline_tests {
         assert_eq!(pipeline.operators, ["|"]);
         assert_eq!(pipeline.stages[0].pipe, Some(1));
         let time_command = pipeline.stages[0].time_command.as_ref().unwrap();
+        assert_eq!(time_command.keyword_metadata.value, "time");
         assert!(time_command.command.brace_group.is_some());
         assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
     }

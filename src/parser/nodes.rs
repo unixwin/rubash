@@ -330,6 +330,7 @@ pub struct AndOrListCommand {
 #[derive(Debug, Clone)]
 pub struct TimeCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub prefix_words: Vec<String>,
     pub prefix_word_metadata: Vec<WordMetadata>,
     pub command: Box<CommandNode>,
