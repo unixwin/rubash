@@ -1743,6 +1743,42 @@ fn test_named_coproc_executes_for_body() {
 }
 
 #[test]
+fn test_named_coproc_executes_case_body() {
+    let output_path = "target/rubash-coproc-case-body-output.txt";
+    let status_path = "target/rubash-coproc-case-body-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC case beta in alpha) echo alpha > {output_path} ;; beta) echo beta > {output_path} ;; esac; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert!(coproc.body.as_ref().unwrap()[0].case_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "beta\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "beta\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_executes_time_prefixed_brace_body() {
     let output_path = "target/rubash-coproc-time-brace-output.txt";
     let status_path = "target/rubash-coproc-time-brace-status.txt";

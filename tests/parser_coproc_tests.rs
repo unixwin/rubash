@@ -413,6 +413,26 @@ fn test_named_coproc_parses_conditional_body() {
 }
 
 #[test]
+fn test_named_coproc_parses_case_body() {
+    let input = "coproc MYC case beta in alpha) echo alpha ;; beta) echo beta ;; esac";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let case_command = coproc.body.as_ref().unwrap()[0]
+        .case_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(case_command.word, "beta");
+    assert_eq!(case_command.clauses.len(), 2);
+    assert_eq!(case_command.clauses[1].patterns, ["beta"]);
+    assert_eq!(case_command.clauses[1].body[0].words, ["echo", "beta"]);
+}
+
+#[test]
 fn test_named_coproc_parses_select_body() {
     let input = "coproc MYC select choice in alpha beta; do echo $choice; break; done";
     let tokens = tokenize(input);
