@@ -5428,6 +5428,31 @@ mod inverted_tests {
         assert_eq!(conditional.expression.operator.as_deref(), Some("=="));
         assert_eq!(conditional.expression.operands, ["$value", "yes"]);
     }
+
+    #[test]
+    fn test_inverted_command_wraps_grouping_and_select_commands() {
+        let brace_ast = parse(&tokenize("! { true; }"));
+        let subshell_ast = parse(&tokenize("! ( false )"));
+        let select_ast = parse(&tokenize(
+            "! select value in one two; do echo $value; break; done",
+        ));
+
+        let brace_inverted = brace_ast.commands[0].inverted_command.as_ref().unwrap();
+        let brace_group = brace_inverted.command.brace_group.as_ref().unwrap();
+        let subshell_inverted = subshell_ast.commands[0].inverted_command.as_ref().unwrap();
+        let subshell = subshell_inverted.command.subshell_command.as_ref().unwrap();
+        let select_inverted = select_ast.commands[0].inverted_command.as_ref().unwrap();
+        let select_command = select_inverted.command.select_command.as_ref().unwrap();
+
+        assert_eq!(brace_inverted.operator, "!");
+        assert_eq!(brace_group.body[0].words, ["true"]);
+        assert_eq!(subshell_inverted.operator, "!");
+        assert_eq!(subshell.body[0].words, ["false"]);
+        assert_eq!(select_inverted.operator, "!");
+        assert_eq!(select_command.variable, "value");
+        assert_eq!(select_command.words, ["one", "two"]);
+        assert_eq!(select_command.body[0].words, ["echo", "$value"]);
+    }
 }
 
 mod variable_tests {

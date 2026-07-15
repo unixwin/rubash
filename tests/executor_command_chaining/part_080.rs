@@ -1390,6 +1390,51 @@ fn test_inverted_case_and_test_commands_flip_status() {
 }
 
 #[test]
+fn test_inverted_grouping_and_select_commands_flip_status() {
+    let output_path = "target/rubash-inverted-grouping-select-status.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "! {{ true; }}; echo brace:$? > {output_path}; \
+         ! ( false ); echo subshell:$? >> {output_path}; \
+         ! select value in one two; do true; break; done <<< 2; echo select:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .brace_group
+        .is_some());
+    assert!(ast.commands[2]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .subshell_command
+        .is_some());
+    assert!(ast.commands[4]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .select_command
+        .is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "brace:1\nsubshell:0\nselect:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_inverted_function_definitions_still_define_functions() {
     let output_path = "target/rubash-inverted-function-definition-output.txt";
     let _ = fs::remove_file(output_path);
