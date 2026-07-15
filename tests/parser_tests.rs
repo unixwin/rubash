@@ -642,6 +642,18 @@ mod command_body_kind_tests {
             "<(printf a)"
         );
         assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0]
+                .open_delimiter_metadata
+                .value,
+            "<("
+        );
+        assert_eq!(
+            for_command.word_metadata[0].process_substitutions[0]
+                .close_delimiter_metadata
+                .value,
+            ")"
+        );
+        assert_eq!(
             for_command.word_metadata[0].process_substitutions[0].source,
             "printf a"
         );
@@ -658,6 +670,12 @@ mod command_body_kind_tests {
         assert_eq!(
             for_command.word_metadata[1].process_substitutions[0].target,
             ">(cat)"
+        );
+        assert_eq!(
+            for_command.word_metadata[1].process_substitutions[0]
+                .open_delimiter_metadata
+                .value,
+            ">("
         );
         assert!(for_command.word_metadata[1].process_substitutions[0].output);
         assert_eq!(
@@ -3127,8 +3145,12 @@ mod command_substitution_tests {
         assert_eq!(substitutions.len(), 3);
         assert_eq!(substitutions[0].text, "$(printf hi)");
         assert_eq!(substitutions[0].open_delimiter, "$(");
+        assert_eq!(substitutions[0].open_delimiter_metadata.value, "$(");
+        assert_eq!(substitutions[0].open_delimiter_metadata.raw, "$(");
         assert_eq!(substitutions[0].operator, "$");
         assert_eq!(substitutions[0].close_delimiter, ")");
+        assert_eq!(substitutions[0].close_delimiter_metadata.value, ")");
+        assert_eq!(substitutions[0].close_delimiter_metadata.raw, ")");
         assert_eq!(substitutions[0].source, "printf hi");
         assert_eq!(substitutions[0].commands.len(), 1);
         assert_eq!(substitutions[0].commands[0].words, ["printf", "hi"]);
@@ -3144,8 +3166,10 @@ mod command_substitution_tests {
         assert_eq!(substitutions[1].word_index, Some(2));
         assert_eq!(substitutions[2].text, "`whoami`");
         assert_eq!(substitutions[2].open_delimiter, "`");
+        assert_eq!(substitutions[2].open_delimiter_metadata.value, "`");
         assert_eq!(substitutions[2].operator, "`");
         assert_eq!(substitutions[2].close_delimiter, "`");
+        assert_eq!(substitutions[2].close_delimiter_metadata.value, "`");
         assert_eq!(substitutions[2].source, "whoami");
         assert_eq!(substitutions[2].commands[0].words, ["whoami"]);
         assert!(substitutions[2].backtick);

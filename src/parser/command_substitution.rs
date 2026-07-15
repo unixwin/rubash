@@ -296,9 +296,11 @@ fn command_substitution_node(
     };
     CommandSubstitutionNode {
         text,
+        open_delimiter_metadata: delimiter_metadata(&open_delimiter),
         open_delimiter,
         operator,
         source,
+        close_delimiter_metadata: delimiter_metadata(&close_delimiter),
         close_delimiter,
         commands,
         backtick,
@@ -307,4 +309,12 @@ fn command_substitution_node(
         word_index: None,
         assignment_name: None,
     }
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }

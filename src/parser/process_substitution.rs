@@ -232,9 +232,11 @@ fn collect_process_substitution_target_with_prefix(
     Some((
         ProcessSubstitution {
             target: format!("{prefix}{source})"),
+            open_delimiter_metadata: delimiter_metadata(&prefix),
             open_delimiter: prefix,
             operator: operator.to_string(),
             source,
+            close_delimiter_metadata: delimiter_metadata(")"),
             close_delimiter: ")".to_string(),
             commands,
             output,
@@ -242,5 +244,13 @@ fn collect_process_substitution_target_with_prefix(
             redirect_fd: None,
         },
         index,
+    ))
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
+    Box::new(crate::parser::WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
     ))
 }

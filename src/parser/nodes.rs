@@ -406,9 +406,11 @@ pub struct ArrayElementAssignment {
 pub struct ProcessSubstitution {
     pub target: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub operator: String,
     pub source: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub commands: Vec<CommandNode>,
     pub output: bool,
     pub word_index: Option<usize>,
@@ -435,9 +437,11 @@ impl Eq for ProcessSubstitution {}
 pub struct CommandSubstitutionNode {
     pub text: String,
     pub open_delimiter: String,
+    pub open_delimiter_metadata: Box<WordMetadata>,
     pub operator: String,
     pub source: String,
     pub close_delimiter: String,
+    pub close_delimiter_metadata: Box<WordMetadata>,
     pub commands: Vec<CommandNode>,
     pub backtick: bool,
     pub current_shell: bool,
