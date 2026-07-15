@@ -887,6 +887,55 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_default_positional_without_semicolon() {
+        let for_ast = parse(&tokenize("for x do echo $x; done"));
+        let select_ast = parse(&tokenize("select x do echo $x; done"));
+
+        let for_command = for_ast.commands[0].for_command.as_ref().unwrap();
+        assert_eq!(for_command.variable, "x");
+        assert!(for_command.default_positional);
+        assert_eq!(for_command.in_keyword, None);
+        assert_eq!(for_command.list_terminator, None);
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.body[0].words, ["echo", "$x"]);
+
+        let select_command = select_ast.commands[0].select_command.as_ref().unwrap();
+        assert_eq!(select_command.variable, "x");
+        assert!(select_command.default_positional);
+        assert_eq!(select_command.in_keyword, None);
+        assert_eq!(select_command.list_terminator, None);
+        assert_eq!(select_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(select_command.body[0].words, ["echo", "$x"]);
+    }
+
+    #[test]
+    fn test_arithmetic_for_records_empty_expression_slots() {
+        let tokens = tokenize("for (( ; ; i++ )); do echo $i; done");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+        let arithmetic = for_command.arithmetic.as_ref().unwrap();
+
+        assert_eq!(arithmetic.init, "");
+        assert_eq!(arithmetic.test, "");
+        assert_eq!(arithmetic.update, "i++");
+        assert_eq!(for_command.do_keyword.as_deref(), Some("do"));
+        assert_eq!(for_command.body[0].words, ["echo", "$i"]);
+    }
+
+    #[test]
+    fn test_arithmetic_for_records_all_empty_expression_slots() {
+        let tokens = tokenize("for (( ; ; )); do :; done");
+        let ast = parse(&tokens);
+        let for_command = ast.commands[0].for_command.as_ref().unwrap();
+        let arithmetic = for_command.arithmetic.as_ref().unwrap();
+
+        assert_eq!(arithmetic.init, "");
+        assert_eq!(arithmetic.test, "");
+        assert_eq!(arithmetic.update, "");
+        assert_eq!(for_command.body[0].words, [":"]);
+    }
+
+    #[test]
     fn test_for_and_select_words_record_metadata() {
         let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
         let for_ast = parse(&for_tokens);
