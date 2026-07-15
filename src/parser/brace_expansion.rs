@@ -33,11 +33,15 @@ pub(super) fn record_brace_expansions_for_assignment(
 }
 
 pub(super) fn brace_expansions_in_word_with_raw(word: &str, raw: &str) -> Vec<BraceExpansion> {
-    if raw == word {
+    if raw == word && !raw_contains_shell_quotes(raw) {
         return brace_expansions_in_word(word);
     }
 
     brace_expansions_in_raw_word(raw)
+}
+
+fn raw_contains_shell_quotes(raw: &str) -> bool {
+    raw.contains('\'') || raw.contains('"')
 }
 
 pub(super) fn brace_expansions_in_word(word: &str) -> Vec<BraceExpansion> {

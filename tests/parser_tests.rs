@@ -3218,6 +3218,25 @@ mod assignment_tests {
     }
 
     #[test]
+    fn test_compound_assignment_ignores_quoted_brace_and_extglob_elements() {
+        let input = "arr=(\"{a,b}\" '@(x|y)' {c,d} @(one|two))";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 1);
+
+        let elements = ast.commands[0].compound_assignments[0].elements.as_slice();
+        assert_eq!(elements.len(), 4);
+        assert_eq!(elements[0].value, "\"{a,b}\"");
+        assert!(elements[0].brace_expansions.is_empty());
+        assert_eq!(elements[1].value, "\"@(x|y)\"");
+        assert!(elements[1].extglob_patterns.is_empty());
+        assert_eq!(elements[2].brace_expansions.len(), 1);
+        assert_eq!(elements[2].brace_expansions[0].text, "{c,d}");
+        assert_eq!(elements[3].extglob_patterns.len(), 1);
+        assert_eq!(elements[3].extglob_patterns[0].text, "@(one|two)");
+    }
+
+    #[test]
     fn test_compound_assignment_records_pathname_pattern_elements() {
         let input = "arr=(*.rs [src]=src/[ab]? **/*.txt)";
         let tokens = tokenize(input);

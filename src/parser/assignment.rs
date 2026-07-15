@@ -56,10 +56,10 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             subscript_brace_expansions: brace_expansions_in_word(subscript),
             subscript_parameter_expansions: parameter_expansions_in_word(subscript),
             subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
-            brace_expansions: brace_expansions_in_word(value),
+            brace_expansions: brace_expansions_in_word_with_raw(value, value),
             parameter_expansions: parameter_expansions_in_word(value),
             arithmetic_expansions: arithmetic_expansions_in_word(value),
-            extglob_patterns: extglob_patterns_in_word(value),
+            extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
             pathname_patterns: pathname_patterns_in_word(value, value),
             tilde_expansions: tilde_expansions_in_word(value),
             word_quotes: word_quotes_in_raw(value),
@@ -76,10 +76,10 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
             subscript_brace_expansions: brace_expansions_in_word(subscript),
             subscript_parameter_expansions: parameter_expansions_in_word(subscript),
             subscript_arithmetic_expansions: arithmetic_expansions_in_word(subscript),
-            brace_expansions: brace_expansions_in_word(value),
+            brace_expansions: brace_expansions_in_word_with_raw(value, value),
             parameter_expansions: parameter_expansions_in_word(value),
             arithmetic_expansions: arithmetic_expansions_in_word(value),
-            extglob_patterns: extglob_patterns_in_word(value),
+            extglob_patterns: extglob_patterns_in_word_with_raw(value, value),
             pathname_patterns: pathname_patterns_in_word(value, value),
             tilde_expansions: tilde_expansions_in_word(value),
             word_quotes: word_quotes_in_raw(value),
@@ -95,10 +95,10 @@ fn compound_assignment_element(word: &str, element_index: usize) -> CompoundAssi
         subscript_brace_expansions: Vec::new(),
         subscript_parameter_expansions: Vec::new(),
         subscript_arithmetic_expansions: Vec::new(),
-        brace_expansions: brace_expansions_in_word(word),
+        brace_expansions: brace_expansions_in_word_with_raw(word, word),
         parameter_expansions: parameter_expansions_in_word(word),
         arithmetic_expansions: arithmetic_expansions_in_word(word),
-        extglob_patterns: extglob_patterns_in_word(word),
+        extglob_patterns: extglob_patterns_in_word_with_raw(word, word),
         pathname_patterns: pathname_patterns_in_word(word, word),
         tilde_expansions: tilde_expansions_in_word(word),
         word_quotes: word_quotes_in_raw(word),
@@ -315,7 +315,9 @@ pub(super) fn collect_compound_assignment(
         }
 
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
-            values.push(quote_compound_assignment_word(&word));
+            values.push(quote_compound_assignment_token_word(
+                tokens, i, next_i, &word,
+            ));
             i = next_i;
             continue;
         }
@@ -484,6 +486,27 @@ fn remove_compound_assignment_quotes(raw: &str) -> String {
     }
 
     out
+}
+
+fn quote_compound_assignment_token_word(
+    tokens: &[Token],
+    index: usize,
+    next_index: usize,
+    word: &str,
+) -> String {
+    if next_index == index + 1
+        && tokens
+            .get(index)
+            .is_some_and(|token| token.raw != token.value && raw_contains_shell_quotes(&token.raw))
+    {
+        return quote_compound_assignment_word_forced(word);
+    }
+
+    quote_compound_assignment_word(word)
+}
+
+fn raw_contains_shell_quotes(raw: &str) -> bool {
+    raw.contains('\'') || raw.contains('"')
 }
 
 fn quote_compound_assignment_subscript(value: &str) -> String {

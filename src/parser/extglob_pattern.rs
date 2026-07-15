@@ -38,12 +38,16 @@ pub(super) fn extglob_patterns_in_word(word: &str) -> Vec<ExtglobPattern> {
 }
 
 pub(super) fn extglob_patterns_in_word_with_raw(word: &str, raw: &str) -> Vec<ExtglobPattern> {
-    if word == raw {
+    if word == raw && !raw_contains_shell_quotes(raw) {
         return extglob_patterns_in_word(word);
     }
 
     let chars = raw.chars().collect::<Vec<_>>();
     extglob_patterns_in_raw_chars(&chars)
+}
+
+fn raw_contains_shell_quotes(raw: &str) -> bool {
+    raw.contains('\'') || raw.contains('"')
 }
 
 fn extglob_patterns_in_chars(chars: &[char]) -> Vec<ExtglobPattern> {
