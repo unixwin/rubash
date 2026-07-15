@@ -5094,6 +5094,24 @@ mod background_tests {
         assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
         assert_eq!(ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_function_definition() {
+        let input = "foo() { echo hi; } & echo done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        assert_eq!(ast.commands.len(), 2);
+        let background = ast.commands[0].background_command.as_ref().unwrap();
+        let function = background.command.function_command.as_ref().unwrap();
+
+        assert_eq!(background.operator, "&");
+        assert_eq!(background.operator_metadata.value, "&");
+        assert_eq!(function.name, "foo");
+        assert!(function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body[0].words, ["echo", "hi"]);
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
