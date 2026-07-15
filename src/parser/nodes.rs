@@ -144,22 +144,28 @@ pub enum CommandBodyKind {
 #[derive(Debug, Clone)]
 pub struct IfCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub condition: Vec<CommandNode>,
     pub condition_terminator: Option<String>,
     pub then_keyword: String,
+    pub then_keyword_metadata: Box<WordMetadata>,
     pub then_body: Vec<CommandNode>,
     pub elif_branches: Vec<ElifBranch>,
     pub else_keyword: Option<String>,
+    pub else_keyword_metadata: Option<Box<WordMetadata>>,
     pub else_body: Option<Vec<CommandNode>>,
     pub end_keyword: String,
+    pub end_keyword_metadata: Box<WordMetadata>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ElifBranch {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub condition: Vec<CommandNode>,
     pub condition_terminator: Option<String>,
     pub then_keyword: String,
+    pub then_keyword_metadata: Box<WordMetadata>,
     pub body: Vec<CommandNode>,
 }
 

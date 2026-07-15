@@ -887,13 +887,20 @@ mod if_tests {
         assert_eq!(ast.commands.len(), 1);
         let if_command = ast.commands[0].if_command.as_ref().unwrap();
         assert_eq!(if_command.keyword, "if");
+        assert_eq!(if_command.keyword_metadata.value, "if");
+        assert_eq!(if_command.keyword_metadata.raw, "if");
         assert_eq!(if_command.then_keyword, "then");
+        assert_eq!(if_command.then_keyword_metadata.value, "then");
+        assert_eq!(if_command.then_keyword_metadata.raw, "then");
         assert_eq!(if_command.end_keyword, "fi");
+        assert_eq!(if_command.end_keyword_metadata.value, "fi");
+        assert_eq!(if_command.end_keyword_metadata.raw, "fi");
         assert_eq!(if_command.condition_terminator.as_deref(), Some(";"));
         assert_eq!(if_command.condition[0].words, ["true"]);
         assert_eq!(if_command.then_body[0].words, ["echo", "yes"]);
         assert!(if_command.elif_branches.is_empty());
         assert_eq!(if_command.else_keyword, None);
+        assert!(if_command.else_keyword_metadata.is_none());
         assert!(if_command.else_body.is_none());
     }
 
@@ -908,7 +915,17 @@ mod if_tests {
         assert_eq!(if_command.then_body[0].words, ["echo", "no"]);
         assert_eq!(if_command.elif_branches.len(), 1);
         assert_eq!(if_command.elif_branches[0].keyword, "elif");
+        assert_eq!(if_command.elif_branches[0].keyword_metadata.value, "elif");
+        assert_eq!(if_command.elif_branches[0].keyword_metadata.raw, "elif");
         assert_eq!(if_command.elif_branches[0].then_keyword, "then");
+        assert_eq!(
+            if_command.elif_branches[0].then_keyword_metadata.value,
+            "then"
+        );
+        assert_eq!(
+            if_command.elif_branches[0].then_keyword_metadata.raw,
+            "then"
+        );
         assert_eq!(
             if_command.elif_branches[0].condition_terminator.as_deref(),
             Some(";")
@@ -916,6 +933,9 @@ mod if_tests {
         assert_eq!(if_command.elif_branches[0].condition[0].words, ["true"]);
         assert_eq!(if_command.elif_branches[0].body[0].words, ["echo", "yes"]);
         assert_eq!(if_command.else_keyword.as_deref(), Some("else"));
+        let else_keyword_metadata = if_command.else_keyword_metadata.as_ref().unwrap();
+        assert_eq!(else_keyword_metadata.value, "else");
+        assert_eq!(else_keyword_metadata.raw, "else");
         assert_eq!(if_command.end_keyword, "fi");
         assert_eq!(
             if_command.else_body.as_ref().unwrap()[0].words,

@@ -7,7 +7,9 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     }
 
     let then_index = find_if_then(tokens, start + 1)?;
+    let keyword_metadata = build_keyword_metadata(&tokens[start]);
     let then_keyword = tokens[then_index].value.clone();
+    let then_keyword_metadata = build_keyword_metadata(&tokens[then_index]);
     let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
     let condition_terminator = condition_terminator_before(tokens, then_index);
     let mut index = then_index + 1;
@@ -18,28 +20,33 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let mut elif_branches = Vec::new();
     while is_keyword(tokens, index, "elif") {
         let elif_keyword = tokens[index].value.clone();
+        let elif_keyword_metadata = build_keyword_metadata(&tokens[index]);
         let elif_then = find_if_then(tokens, index + 1)?;
         let elif_then_keyword = tokens[elif_then].value.clone();
+        let elif_then_keyword_metadata = build_keyword_metadata(&tokens[elif_then]);
         let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
         let condition_terminator = condition_terminator_before(tokens, elif_then);
         let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
         elif_branches.push(ElifBranch {
             keyword: elif_keyword,
+            keyword_metadata: elif_keyword_metadata,
             condition,
             condition_terminator,
             then_keyword: elif_then_keyword,
+            then_keyword_metadata: elif_then_keyword_metadata,
             body,
         });
         index = next_boundary;
     }
 
-    let (else_keyword, else_body) = if is_keyword(tokens, index, "else") {
+    let (else_keyword, else_keyword_metadata, else_body) = if is_keyword(tokens, index, "else") {
         let else_keyword = tokens[index].value.clone();
+        let else_keyword_metadata = build_keyword_metadata(&tokens[index]);
         let (body, next_boundary) = parse_if_section(tokens, index + 1)?;
         index = next_boundary;
-        (Some(else_keyword), Some(body))
+        (Some(else_keyword), Some(else_keyword_metadata), Some(body))
     } else {
-        (None, None)
+        (None, None, None)
     };
 
     if !is_keyword(tokens, index, "fi") {
@@ -50,17 +57,25 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     command.line = tokens.get(start).map(|token| token.position);
     command.if_command = Some(IfCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata,
         condition,
         condition_terminator,
         then_keyword,
+        then_keyword_metadata,
         then_body,
         elif_branches,
         else_keyword,
+        else_keyword_metadata,
         else_body,
         end_keyword: tokens[index].value.clone(),
+        end_keyword_metadata: build_keyword_metadata(&tokens[index]),
     });
 
     Some(finish_compound_command(command, tokens, index + 1))
+}
+
+fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
 }
 
 fn condition_terminator_before(tokens: &[Token], then_index: usize) -> Option<String> {
