@@ -1509,6 +1509,24 @@ fn test_function_body_can_be_while_command_sequence() {
 }
 
 #[test]
+fn test_function_body_can_be_until_command_sequence() {
+    let output_path = "target/rubash-function-until-body-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("n=0; f() until [[ $n -ge 2 ]]; do echo $n >> {output_path}; (( n++ )); done; f");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_select_command() {
     let output_path = "target/rubash-function-select-body-output.txt";
     let _ = fs::remove_file(output_path);
