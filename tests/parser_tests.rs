@@ -2472,6 +2472,27 @@ mod case_tests {
     }
 
     #[test]
+    fn test_case_pattern_can_start_with_esac_text() {
+        let single_tokens = tokenize("case esac in esac) echo single ;; esac");
+        let single_ast = parse(&single_tokens);
+        let single_case = single_ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(single_case.word, "esac");
+        assert_eq!(single_case.clauses.len(), 1);
+        assert_eq!(single_case.clauses[0].patterns, ["esac"]);
+        assert_eq!(single_case.clauses[0].body[0].words, ["echo", "single"]);
+
+        let multi_tokens = tokenize("case esac in esac|fi) echo multi ;; esac");
+        let multi_ast = parse(&multi_tokens);
+        let multi_case = multi_ast.commands[0].case_command.as_ref().unwrap();
+
+        assert_eq!(multi_case.clauses.len(), 1);
+        assert_eq!(multi_case.clauses[0].patterns, ["esac", "fi"]);
+        assert_eq!(multi_case.clauses[0].pattern_separators, ["|"]);
+        assert_eq!(multi_case.clauses[0].body[0].words, ["echo", "multi"]);
+    }
+
+    #[test]
     fn test_case_body_keeps_reserved_word_arguments() {
         let input = "case x in x) echo if for done ;; esac";
         let tokens = tokenize(input);

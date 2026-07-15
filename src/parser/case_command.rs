@@ -17,11 +17,11 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     i += 1;
 
     let mut clauses = Vec::new();
-    while i < tokens.len() && !is_keyword(tokens, i, "esac") {
+    while i < tokens.len() {
         while i < tokens.len() && tokens[i].kind == TokenKind::Semicolon {
             i += 1;
         }
-        if is_keyword(tokens, i, "esac") {
+        if is_case_end_keyword(tokens, i) {
             break;
         }
 
@@ -183,6 +183,14 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
+    is_keyword(tokens, index, "esac")
+        && !matches!(
+            tokens.get(index + 1).map(|token| token.value.as_str()),
+            Some(")" | "|")
+        )
 }
 
 fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, usize)> {
