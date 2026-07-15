@@ -173,13 +173,16 @@ pub struct ElifBranch {
 #[derive(Debug, Clone)]
 pub struct LoopCommand {
     pub keyword: String,
+    pub keyword_metadata: Box<WordMetadata>,
     pub condition: Vec<CommandNode>,
     pub condition_terminator: Option<String>,
     pub do_keyword: String,
+    pub do_keyword_metadata: Box<WordMetadata>,
     pub body_open_delimiter: String,
     pub body_close_delimiter: String,
     pub body: Vec<CommandNode>,
     pub end_keyword: String,
+    pub end_keyword_metadata: Box<WordMetadata>,
     pub kind: LoopKind,
     pub until: bool,
 }

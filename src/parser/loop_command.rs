@@ -22,13 +22,16 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
     command.line = tokens.get(start).map(|token| token.position);
     command.loop_command = Some(LoopCommand {
         keyword: tokens[start].value.clone(),
+        keyword_metadata: build_loop_keyword_metadata(&tokens[start]),
         condition,
         condition_terminator,
         do_keyword: tokens[do_index].value.clone(),
+        do_keyword_metadata: build_loop_keyword_metadata(&tokens[do_index]),
         body_open_delimiter: tokens[do_index].value.clone(),
         body_close_delimiter: tokens[done_index].value.clone(),
         body,
         end_keyword: tokens[done_index].value.clone(),
+        end_keyword_metadata: build_loop_keyword_metadata(&tokens[done_index]),
         kind,
         until,
     });
@@ -84,4 +87,8 @@ fn parse_loop_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
+}
+
+fn build_loop_keyword_metadata(token: &Token) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, &token.value, &token.raw))
 }

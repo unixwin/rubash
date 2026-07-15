@@ -860,8 +860,14 @@ mod command_body_kind_tests {
 
         assert_eq!(while_command.kind, LoopKind::While);
         assert_eq!(while_command.keyword, "while");
+        assert_eq!(while_command.keyword_metadata.value, "while");
+        assert_eq!(while_command.keyword_metadata.raw, "while");
         assert_eq!(while_command.do_keyword, "do");
+        assert_eq!(while_command.do_keyword_metadata.value, "do");
+        assert_eq!(while_command.do_keyword_metadata.raw, "do");
         assert_eq!(while_command.end_keyword, "done");
+        assert_eq!(while_command.end_keyword_metadata.value, "done");
+        assert_eq!(while_command.end_keyword_metadata.raw, "done");
         assert_eq!(while_command.body_open_delimiter, "do");
         assert_eq!(while_command.body_close_delimiter, "done");
         assert_eq!(while_command.condition_terminator.as_deref(), Some(";"));
@@ -869,6 +875,8 @@ mod command_body_kind_tests {
         assert_eq!(while_command.body[0].words, ["echo", "bad"]);
         assert_eq!(until_command.kind, LoopKind::Until);
         assert_eq!(until_command.keyword, "until");
+        assert_eq!(until_command.keyword_metadata.value, "until");
+        assert_eq!(until_command.keyword_metadata.raw, "until");
         assert_eq!(until_command.body_open_delimiter, "do");
         assert_eq!(until_command.body_close_delimiter, "done");
         assert_eq!(until_command.condition[0].words, ["true"]);
