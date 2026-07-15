@@ -511,3 +511,17 @@ fn test_coproc_command_consumes_and_or_connector() {
     assert!(list.commands[0].coproc_command.is_some());
     assert_eq!(list.commands[1].words, ["echo", "done"]);
 }
+
+#[test]
+fn test_coproc_command_consumes_trailing_stdout_redirect() {
+    let input = "coproc MYC { echo hi; } > out.txt";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 1);
+    let command = &ast.commands[0];
+    let coproc = command.coproc_command.as_ref().unwrap();
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
+    assert_eq!(command.redirect_out.as_ref().unwrap().target, "out.txt");
+}

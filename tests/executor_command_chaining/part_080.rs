@@ -1726,3 +1726,35 @@ fn test_named_coproc_redirects_stderr_to_file() {
     let _ = fs::remove_file(status_path);
     let _ = fs::remove_file(error_path);
 }
+
+#[test]
+fn test_named_coproc_redirects_stdout_to_file() {
+    let status_path = "target/rubash-coproc-stdout-redirect-status.txt";
+    let output_path = "target/rubash-coproc-stdout-redirect-output.txt";
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "coproc MYC {{ printf coproc-output; }} > {output_path}; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        output = fs::read_to_string(output_path).unwrap_or_default();
+        if output == "coproc-output" {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "coproc-output");
+    let _ = fs::remove_file(status_path);
+    let _ = fs::remove_file(output_path);
+}
