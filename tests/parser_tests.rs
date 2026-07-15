@@ -5278,6 +5278,44 @@ mod background_tests {
         assert_eq!(select_command.body[0].words, ["echo", "$value"]);
         assert_eq!(select_ast.commands[1].words, ["echo", "done"]);
     }
+
+    #[test]
+    fn test_background_command_wraps_test_commands() {
+        let arithmetic_ast = parse(&tokenize("(( count += 1 )) & echo done"));
+        let conditional_ast = parse(&tokenize("[[ $value == yes ]] & echo done"));
+
+        let arithmetic_background = arithmetic_ast.commands[0]
+            .background_command
+            .as_ref()
+            .unwrap();
+        let arithmetic = arithmetic_background
+            .command
+            .arithmetic_command
+            .as_ref()
+            .unwrap();
+        let conditional_background = conditional_ast.commands[0]
+            .background_command
+            .as_ref()
+            .unwrap();
+        let conditional = conditional_background
+            .command
+            .conditional_command
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(arithmetic_background.operator, "&");
+        assert_eq!(arithmetic.expression, "count += 1");
+        assert_eq!(arithmetic_ast.commands[1].words, ["echo", "done"]);
+        assert_eq!(conditional_background.operator, "&");
+        assert_eq!(conditional.args, ["$value", "==", "yes", "]]"]);
+        assert_eq!(
+            conditional.expression.kind,
+            ConditionalExpressionKind::Binary
+        );
+        assert_eq!(conditional.expression.operator.as_deref(), Some("=="));
+        assert_eq!(conditional.expression.operands, ["$value", "yes"]);
+        assert_eq!(conditional_ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod inverted_tests {
