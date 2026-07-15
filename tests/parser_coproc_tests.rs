@@ -1,5 +1,5 @@
 use rubash::lexer::tokenize;
-use rubash::parser::{parse, CoprocBodyKind, QuoteKind};
+use rubash::parser::{parse, CoprocBodyKind, LoopKind, QuoteKind};
 
 #[test]
 fn test_named_coproc_parses_split_brace_group_body() {
@@ -452,6 +452,26 @@ fn test_named_coproc_parses_if_body() {
         if_command.else_body.as_ref().unwrap()[0].words,
         ["echo", "no"]
     );
+}
+
+#[test]
+fn test_named_coproc_parses_while_body() {
+    let input = "coproc MYC while true; do echo loop; break; done";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    let loop_command = coproc.body.as_ref().unwrap()[0]
+        .loop_command
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    assert_eq!(coproc.body_kind, CoprocBodyKind::CompoundCommand);
+    assert_eq!(loop_command.kind, LoopKind::While);
+    assert_eq!(loop_command.condition[0].words, ["true"]);
+    assert_eq!(loop_command.body[0].words, ["echo", "loop"]);
+    assert_eq!(loop_command.body[1].words, ["break"]);
 }
 
 #[test]

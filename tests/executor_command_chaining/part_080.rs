@@ -1815,6 +1815,42 @@ fn test_named_coproc_executes_if_body() {
 }
 
 #[test]
+fn test_named_coproc_executes_while_body() {
+    let output_path = "target/rubash-coproc-while-body-output.txt";
+    let status_path = "target/rubash-coproc-while-body-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc MYC while true; do echo loop > {output_path}; break; done; echo pid:${{MYC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+    assert!(coproc.body.as_ref().unwrap()[0].loop_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "loop\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "loop\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_named_coproc_executes_time_prefixed_brace_body() {
     let output_path = "target/rubash-coproc-time-brace-output.txt";
     let status_path = "target/rubash-coproc-time-brace-status.txt";
