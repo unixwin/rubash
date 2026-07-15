@@ -454,11 +454,10 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if ((token.kind == TokenKind::Word)
         || (token.kind == TokenKind::Keyword && token.value == "function"))
-        && command_is_empty(&state.current_cmd)
+        && command_allows_compound_start(&state.current_cmd)
     {
         if let Some((function_cmd, next_i)) = parse_function_command(tokens, i) {
-            state.ast.commands.push(function_cmd);
-            state.current_cmd = CommandNode::new();
+            push_compound_command(state, function_cmd);
             return Some(next_i);
         }
     }

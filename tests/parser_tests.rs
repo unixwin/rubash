@@ -4794,6 +4794,30 @@ mod inverted_tests {
         assert_eq!(for_command.words, ["one"]);
         assert_eq!(for_command.body[0].words, ["false"]);
     }
+
+    #[test]
+    fn test_inverted_command_wraps_function_definition() {
+        let keyword_tokens = tokenize("! function f { echo hi; }");
+        let keyword_ast = parse(&keyword_tokens);
+        let keyword_inverted = keyword_ast.commands[0].inverted_command.as_ref().unwrap();
+        let keyword_function = keyword_inverted.command.function_command.as_ref().unwrap();
+
+        assert_eq!(keyword_inverted.operator, "!");
+        assert!(keyword_function.keyword);
+        assert_eq!(keyword_function.name, "f");
+        assert_eq!(keyword_function.body[0].words, ["echo", "hi"]);
+
+        let posix_tokens = tokenize("! f() { echo hi; }");
+        let posix_ast = parse(&posix_tokens);
+        let posix_inverted = posix_ast.commands[0].inverted_command.as_ref().unwrap();
+        let posix_function = posix_inverted.command.function_command.as_ref().unwrap();
+
+        assert_eq!(posix_inverted.operator, "!");
+        assert!(!posix_function.keyword);
+        assert!(posix_function.has_parentheses);
+        assert_eq!(posix_function.name, "f");
+        assert_eq!(posix_function.body[0].words, ["echo", "hi"]);
+    }
 }
 
 mod variable_tests {

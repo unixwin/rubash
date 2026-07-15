@@ -1241,6 +1241,40 @@ fn test_inverted_compound_commands_flip_status() {
 }
 
 #[test]
+fn test_inverted_function_definitions_still_define_functions() {
+    let output_path = "target/rubash-inverted-function-definition-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "! function first {{ echo first > {output_path}; }}; first; \
+         ! second() {{ echo second >> {output_path}; }}; second"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert!(ast.commands[0]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .function_command
+        .is_some());
+    assert!(ast.commands[2]
+        .inverted_command
+        .as_ref()
+        .unwrap()
+        .command
+        .function_command
+        .is_some());
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "first\nsecond\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_for_command() {
     let output_path = "target/rubash-function-for-body-output.txt";
     let _ = fs::remove_file(output_path);
