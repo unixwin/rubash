@@ -11,6 +11,11 @@ fn test_named_coproc_parses_split_brace_group_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.keyword, "coproc");
     assert_eq!(coproc.name.as_deref(), Some("MYC"));
+    let name_metadata = coproc.name_metadata.as_ref().unwrap();
+    assert_eq!(name_metadata.word_index, 0);
+    assert_eq!(name_metadata.value, "MYC");
+    assert_eq!(name_metadata.raw, "MYC");
+    assert!(name_metadata.word_quotes.is_empty());
     assert!(coproc.words.is_empty());
     assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(coproc.body_open_delimiter.as_deref(), Some("{"));
@@ -30,6 +35,7 @@ fn test_unnamed_coproc_parses_split_brace_group_body() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.keyword, "coproc");
     assert_eq!(coproc.name, None);
+    assert!(coproc.name_metadata.is_none());
     assert!(coproc.words.is_empty());
     assert_eq!(coproc.body_kind, CoprocBodyKind::BraceGroup);
     assert_eq!(coproc.body_open_delimiter.as_deref(), Some("{"));
@@ -63,6 +69,7 @@ fn test_coproc_simple_command_does_not_treat_first_word_as_name() {
     let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
     assert_eq!(coproc.keyword, "coproc");
     assert_eq!(coproc.name, None);
+    assert!(coproc.name_metadata.is_none());
     assert_eq!(coproc.words, ["MYC", "cat"]);
     assert_eq!(coproc.body_kind, CoprocBodyKind::SimpleCommand);
     assert_eq!(coproc.body_open_delimiter, None);

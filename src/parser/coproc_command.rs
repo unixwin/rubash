@@ -10,7 +10,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     // Determine if next token is a name followed by a compound command,
     // or if the next token is itself the command.
-    let mut name: Option<String> = None;
+    let mut name: Option<(String, String)> = None;
     let lookahead = tokens.get(i);
     if let Some(lookahead) = lookahead {
         let is_brace = is_brace_group_token(lookahead) || is_keyword(tokens, i, "{");
@@ -25,7 +25,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 || is_keyword(tokens, i + 1, "(")
                 || is_coproc_shell_command_start(tokens, i + 1);
             if next_is_compound {
-                name = Some(lookahead.value.clone());
+                name = Some((lookahead.value.clone(), lookahead.raw.clone()));
                 i += 1; // consume the name
             }
             // Otherwise: no name, the token is part of the simple command
@@ -183,7 +183,7 @@ fn finish_coproc_command(
 }
 
 fn coproc_command(
-    name: Option<String>,
+    name: Option<(String, String)>,
     words: Vec<String>,
     word_metadata: Vec<WordMetadata>,
     body_kind: CoprocBodyKind,
@@ -193,9 +193,16 @@ fn coproc_command(
     let (body_open_delimiter, body_close_delimiter) = body_delimiters
         .map(|(open, close)| (Some(open), Some(close)))
         .unwrap_or((None, None));
+    let (name, name_metadata) = name
+        .map(|(value, raw)| {
+            let metadata = build_word_metadata(0, &value, &raw);
+            (Some(value), Some(Box::new(metadata)))
+        })
+        .unwrap_or((None, None));
     Box::new(CoprocCommand {
         keyword: "coproc".to_string(),
         name,
+        name_metadata,
         words,
         word_metadata,
         body_kind,

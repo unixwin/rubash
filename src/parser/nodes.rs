@@ -832,6 +832,7 @@ pub struct CoprocCommand {
     pub keyword: String,
     /// Optional name (defaults to COPROC)
     pub name: Option<String>,
+    pub name_metadata: Option<Box<WordMetadata>>,
     /// The command words (for simple commands)
     pub words: Vec<String>,
     pub word_metadata: Vec<WordMetadata>,
