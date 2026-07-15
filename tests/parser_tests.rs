@@ -2342,7 +2342,11 @@ mod arithmetic_command_tests {
         assert_eq!(ast.commands.len(), 1);
         let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
         assert_eq!(arithmetic.open_delimiter, "((");
+        assert_eq!(arithmetic.open_delimiter_metadata.value, "((");
+        assert_eq!(arithmetic.open_delimiter_metadata.raw, "((");
         assert_eq!(arithmetic.close_delimiter, "))");
+        assert_eq!(arithmetic.close_delimiter_metadata.value, "))");
+        assert_eq!(arithmetic.close_delimiter_metadata.raw, "))");
         assert_eq!(arithmetic.expression, "n += 2");
         assert_eq!(arithmetic.variables, ["n"]);
         assert!(arithmetic.has_assignment);
@@ -2430,7 +2434,9 @@ mod arithmetic_command_tests {
         let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
 
         assert_eq!(arithmetic.open_delimiter, "((");
+        assert_eq!(arithmetic.open_delimiter_metadata.value, "((");
         assert_eq!(arithmetic.close_delimiter, "))");
+        assert_eq!(arithmetic.close_delimiter_metadata.value, "))");
         assert_eq!(arithmetic.variables, ["a", "b", "done"]);
         assert!(arithmetic.has_assignment);
         assert!(arithmetic.has_comparison);

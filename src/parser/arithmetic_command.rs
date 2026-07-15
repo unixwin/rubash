@@ -86,7 +86,9 @@ fn arithmetic_command(expression: String) -> ArithmeticCommand {
     let operators = arithmetic_operators(&expression);
     ArithmeticCommand {
         open_delimiter: "((".to_string(),
+        open_delimiter_metadata: delimiter_metadata("(("),
         close_delimiter: "))".to_string(),
+        close_delimiter_metadata: delimiter_metadata("))"),
         variables: arithmetic_variables(&expression),
         has_assignment: operators
             .iter()
@@ -103,6 +105,14 @@ fn arithmetic_command(expression: String) -> ArithmeticCommand {
         operators,
         expression,
     }
+}
+
+fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(WordMetadata::new(
+        0,
+        delimiter.to_string(),
+        delimiter.to_string(),
+    ))
 }
 
 pub(super) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
