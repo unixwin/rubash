@@ -551,7 +551,23 @@ mod command_body_kind_tests {
         );
         assert_eq!(for_command.body_kind, CommandBodyKind::BraceGroup);
         assert_eq!(for_command.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(
+            for_command
+                .body_open_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .value,
+            "{"
+        );
         assert_eq!(for_command.body_close_delimiter.as_deref(), Some("}"));
+        assert_eq!(
+            for_command
+                .body_close_delimiter_metadata
+                .as_ref()
+                .unwrap()
+                .raw,
+            "}"
+        );
         assert_eq!(for_command.body[0].words, ["echo", "$x"]);
     }
 
@@ -637,7 +653,15 @@ mod command_body_kind_tests {
         assert_eq!(first.list_terminator.as_deref(), Some(";"));
         assert_eq!(first.list_terminator_metadata.as_ref().unwrap().value, ";");
         assert_eq!(first.body_open_delimiter.as_deref(), Some("do"));
+        assert_eq!(
+            first.body_open_delimiter_metadata.as_ref().unwrap().value,
+            "do"
+        );
         assert_eq!(first.body_close_delimiter.as_deref(), Some("done"));
+        assert_eq!(
+            first.body_close_delimiter_metadata.as_ref().unwrap().value,
+            "done"
+        );
         assert_eq!(first.body[0].words, ["echo", "$x"]);
         assert_eq!(second.body_kind, CommandBodyKind::BraceGroup);
         assert_eq!(second.keyword, "select");
@@ -647,7 +671,15 @@ mod command_body_kind_tests {
         assert_eq!(second.list_terminator.as_deref(), Some(";"));
         assert_eq!(second.list_terminator_metadata.as_ref().unwrap().raw, ";");
         assert_eq!(second.body_open_delimiter.as_deref(), Some("{"));
+        assert_eq!(
+            second.body_open_delimiter_metadata.as_ref().unwrap().value,
+            "{"
+        );
         assert_eq!(second.body_close_delimiter.as_deref(), Some("}"));
+        assert_eq!(
+            second.body_close_delimiter_metadata.as_ref().unwrap().value,
+            "}"
+        );
         assert_eq!(second.body[0].words, ["echo", "$y"]);
     }
 

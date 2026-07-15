@@ -71,7 +71,7 @@ fn inline_arithmetic_for_command(
     let init = command.words[1].clone();
     let update = command.words[3].clone();
 
-    for_node.for_command = Some(ForCommand {
+    for_node.for_command = Some(Box::new(ForCommand {
         keyword: "for".to_string(),
         keyword_metadata: synthetic_keyword_metadata("for"),
         variable: String::new(),
@@ -102,13 +102,15 @@ fn inline_arithmetic_for_command(
         }),
         body_kind: CommandBodyKind::DoDone,
         body_open_delimiter: Some("do".to_string()),
+        body_open_delimiter_metadata: Some(synthetic_keyword_metadata("do")),
         body_close_delimiter: Some("done".to_string()),
+        body_close_delimiter_metadata: Some(synthetic_keyword_metadata("done")),
         do_keyword: Some("do".to_string()),
         do_keyword_metadata: Some(synthetic_keyword_metadata("do")),
         end_keyword: Some("done".to_string()),
         end_keyword_metadata: Some(synthetic_keyword_metadata("done")),
         body: normalize_inline_compound_commands(body),
-    });
+    }));
     Some((for_node, done_index + 1))
 }
 

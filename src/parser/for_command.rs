@@ -139,9 +139,17 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     };
     let (body_open_delimiter, body_close_delimiter) =
         command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
+    let (body_open_delimiter_metadata, body_close_delimiter_metadata) =
+        command_body_delimiter_metadata(
+            body_kind,
+            do_keyword_metadata.as_ref(),
+            end_keyword_metadata.as_ref(),
+            body_open_delimiter.as_deref(),
+            body_close_delimiter.as_deref(),
+        );
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.for_command = Some(ForCommand {
+    command.for_command = Some(Box::new(ForCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_keyword_metadata(&tokens[start]),
         variable: variable.clone(),
@@ -156,13 +164,15 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         arithmetic: None,
         body_kind,
         body_open_delimiter,
+        body_open_delimiter_metadata,
         body_close_delimiter,
+        body_close_delimiter_metadata,
         do_keyword,
         do_keyword_metadata,
         end_keyword,
         end_keyword_metadata,
         body,
-    });
+    }));
     Some(finish_compound_command(command, tokens, body_end))
 }
 
@@ -178,6 +188,26 @@ pub(super) fn command_body_delimiters(
             end_keyword.map(str::to_string),
         ),
     }
+}
+
+pub(super) fn command_body_delimiter_metadata(
+    body_kind: CommandBodyKind,
+    do_keyword_metadata: Option<&Box<WordMetadata>>,
+    end_keyword_metadata: Option<&Box<WordMetadata>>,
+    body_open_delimiter: Option<&str>,
+    body_close_delimiter: Option<&str>,
+) -> (Option<Box<WordMetadata>>, Option<Box<WordMetadata>>) {
+    match body_kind {
+        CommandBodyKind::DoDone => (do_keyword_metadata.cloned(), end_keyword_metadata.cloned()),
+        CommandBodyKind::BraceGroup => (
+            body_open_delimiter.map(synthetic_delimiter_metadata),
+            body_close_delimiter.map(synthetic_delimiter_metadata),
+        ),
+    }
+}
+
+fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
+    Box::new(build_word_metadata(0, delimiter, delimiter))
 }
 
 fn parse_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {

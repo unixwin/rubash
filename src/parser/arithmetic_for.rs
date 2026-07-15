@@ -143,13 +143,21 @@ pub(super) fn parse_arithmetic_for_command(
     };
     let (body_open_delimiter, body_close_delimiter) =
         command_body_delimiters(body_kind, do_keyword.as_deref(), end_keyword.as_deref());
+    let (body_open_delimiter_metadata, body_close_delimiter_metadata) =
+        command_body_delimiter_metadata(
+            body_kind,
+            do_keyword_metadata.as_ref(),
+            end_keyword_metadata.as_ref(),
+            body_open_delimiter.as_deref(),
+            body_close_delimiter.as_deref(),
+        );
     let init = parts[0].join(" ");
     let test = parts[1].join(" ");
     let update = parts[2].join(" ");
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
-    command.for_command = Some(ForCommand {
+    command.for_command = Some(Box::new(ForCommand {
         keyword: tokens[start].value.clone(),
         keyword_metadata: build_keyword_metadata(&tokens[start]),
         variable: String::new(),
@@ -177,13 +185,15 @@ pub(super) fn parse_arithmetic_for_command(
         }),
         body_kind,
         body_open_delimiter,
+        body_open_delimiter_metadata,
         body_close_delimiter,
+        body_close_delimiter_metadata,
         do_keyword,
         do_keyword_metadata,
         end_keyword,
         end_keyword_metadata,
         body,
-    });
+    }));
     Some(finish_compound_command(command, tokens, body_end))
 }
 

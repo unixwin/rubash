@@ -62,7 +62,9 @@ pub struct ForCommand {
     pub arithmetic: Option<ArithmeticForCommand>,
     pub body_kind: CommandBodyKind,
     pub body_open_delimiter: Option<String>,
+    pub body_open_delimiter_metadata: Option<Box<WordMetadata>>,
     pub body_close_delimiter: Option<String>,
+    pub body_close_delimiter_metadata: Option<Box<WordMetadata>>,
     pub do_keyword: Option<String>,
     pub do_keyword_metadata: Option<Box<WordMetadata>>,
     pub end_keyword: Option<String>,
@@ -840,7 +842,9 @@ pub struct SelectCommand {
     pub list_terminator_metadata: Option<Box<WordMetadata>>,
     pub body_kind: CommandBodyKind,
     pub body_open_delimiter: Option<String>,
+    pub body_open_delimiter_metadata: Option<Box<WordMetadata>>,
     pub body_close_delimiter: Option<String>,
+    pub body_close_delimiter_metadata: Option<Box<WordMetadata>>,
     pub do_keyword: Option<String>,
     pub do_keyword_metadata: Option<Box<WordMetadata>>,
     pub end_keyword: Option<String>,
@@ -980,7 +984,7 @@ pub struct CommandNode {
     /// This command closes the current subshell grouping.
     pub subshell_end: bool,
     /// `for name in words; do ...; done`
-    pub for_command: Option<ForCommand>,
+    pub for_command: Option<Box<ForCommand>>,
     /// `(( expression ))`
     pub arithmetic_command: Option<ArithmeticCommand>,
     /// `if condition; then body; fi`
