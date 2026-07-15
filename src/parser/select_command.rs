@@ -11,6 +11,9 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
     ) {
         return None;
     }
+    if !is_shell_name(&variable) {
+        return None;
+    }
 
     let mut i = skip_newline_list(tokens, start + 2);
     let mut words = Vec::new();

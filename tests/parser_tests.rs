@@ -796,6 +796,31 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_for_and_select_require_shell_name_variables() {
+        let invalid_for_ast = parse(&tokenize("for 1bad in a; do echo $x; done"));
+        let variable_for_ast = parse(&tokenize("for $name in a; do echo $name; done"));
+        let invalid_select_ast = parse(&tokenize("select 1bad in a; do echo $x; done"));
+        let variable_select_ast = parse(&tokenize("select $name in a; do echo $name; done"));
+
+        assert!(invalid_for_ast
+            .commands
+            .iter()
+            .all(|command| command.for_command.is_none()));
+        assert!(variable_for_ast
+            .commands
+            .iter()
+            .all(|command| command.for_command.is_none()));
+        assert!(invalid_select_ast
+            .commands
+            .iter()
+            .all(|command| command.select_command.is_none()));
+        assert!(variable_select_ast
+            .commands
+            .iter()
+            .all(|command| command.select_command.is_none()));
+    }
+
+    #[test]
     fn test_for_and_select_words_record_metadata() {
         let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
         let for_ast = parse(&for_tokens);

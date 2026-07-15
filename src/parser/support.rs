@@ -250,3 +250,14 @@ pub(super) fn is_function_keyword_name(name: &str) -> bool {
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
+
+pub(super) fn is_shell_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
