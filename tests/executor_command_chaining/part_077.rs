@@ -821,3 +821,52 @@ fn test_alias_introduced_time_preserves_brace_group_redirects() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
+
+#[test]
+fn test_alias_introduced_time_executes_if_sequence() {
+    let output_path = "target/rubash-alias-time-if-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p if true; then echo alias-if > {output_path}; fi; \
+         echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "alias-if\nstatus:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_time_executes_for_sequence_with_redirect() {
+    let output_path = "target/rubash-alias-time-for-redirect-output.txt";
+    let status_path = "target/rubash-alias-time-for-redirect-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p for value in a b; do echo $value; done > {output_path}; \
+         echo status:$? > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\nb\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "status:0\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}

@@ -15,8 +15,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let mut source = alias_compound_source_words(&words);
-        append_source_redirects(&mut source, command);
+        let (source, next_index) = alias_time_source(ast, index, command, &words);
         let tokens = crate::lexer::tokenize(&source);
         let reparsed = crate::parser::parse(&tokens);
         if !reparsed
@@ -28,7 +27,7 @@ impl Executor {
         }
 
         self.execute_ast(&reparsed)?;
-        Ok(Some(index + 1))
+        Ok(Some(next_index))
     }
 
     pub(in crate::executor) fn execute_alias_introduced_case(
@@ -310,6 +309,58 @@ fn synthetic_word_metadata(word_index: usize, value: &str) -> crate::parser::Wor
 
 fn alias_coproc_needs_following_body(words: &[String]) -> bool {
     matches!(words.len(), 1 | 2)
+}
+
+fn alias_time_source(
+    ast: &Ast,
+    index: usize,
+    command: &CommandNode,
+    words: &[String],
+) -> (String, usize) {
+    let mut source = alias_compound_source_words(words);
+    append_source_redirects(&mut source, command);
+    let mut next_index = index + 1;
+    let Some(end_word) = alias_time_compound_end_word(words) else {
+        return (source, next_index);
+    };
+
+    if words.iter().any(|word| word == end_word) {
+        return (source, next_index);
+    }
+
+    for command_index in index + 1..ast.commands.len() {
+        let Some(next_command) = ast.commands.get(command_index) else {
+            break;
+        };
+        let command_source = bash_command_source_text(next_command);
+        if !command_source.is_empty() {
+            source.push_str("; ");
+            source.push_str(&command_source);
+        }
+        next_index = command_index + 1;
+        if command_contains_word(next_command, end_word) {
+            break;
+        }
+    }
+
+    (source, next_index)
+}
+
+fn alias_time_compound_end_word(words: &[String]) -> Option<&'static str> {
+    let mut index = 1;
+    while matches!(
+        words.get(index).map(String::as_str),
+        Some("-p" | "--" | "!")
+    ) {
+        index += 1;
+    }
+
+    match words.get(index).map(String::as_str)? {
+        "if" => Some("fi"),
+        "case" => Some("esac"),
+        "for" | "while" | "until" | "select" => Some("done"),
+        _ => None,
+    }
 }
 
 fn alias_compound_source_words(words: &[String]) -> String {
