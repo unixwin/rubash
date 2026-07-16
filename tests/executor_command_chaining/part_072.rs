@@ -264,6 +264,32 @@ fn test_conditional_quoted_regex_rhs_matches_literal_text() {
 }
 
 #[test]
+fn test_conditional_regex_honors_nocasematch() {
+    let output_path = "target/rubash-conditional-regex-nocasematch-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ ABC =~ ^abc$ ]]; echo before:$? > {output_path}; \
+         shopt -s nocasematch; \
+         [[ ABC =~ ^abc$ ]]; echo after:$? >> {output_path}; \
+         [[ ABC =~ ^(ab)(c)$ ]]; echo caps:$?:${{BASH_REMATCH[1]}}:${{BASH_REMATCH[2]}} >> {output_path}; \
+         [[ ABC =~ \"^abc$\" ]]; echo quoted:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "before:1\nafter:0\ncaps:0:AB:C\nquoted:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_bare_regex_groups_set_bash_rematch() {
     let output_path = "target/rubash-conditional-bare-regex-output.txt";
     let _ = fs::remove_file(output_path);

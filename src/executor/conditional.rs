@@ -306,7 +306,7 @@ impl Executor {
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
         let right = unescape_remaining_shell_escapes(right);
         let right = restore_numeric_decimal_regex_escapes(&right);
-        let Ok(regex) = regex::Regex::new(&right) else {
+        let Ok(regex) = self.compile_conditional_regex(&right) else {
             return false;
         };
         let Some(captures) = regex.captures(left) else {
@@ -345,7 +345,7 @@ impl Executor {
         let left = self.expand_word(left);
         let right = unescape_remaining_shell_escapes(&self.expand_word(right));
         let right = restore_numeric_decimal_regex_escapes(&right);
-        let Ok(regex) = regex::Regex::new(&right) else {
+        let Ok(regex) = self.compile_conditional_regex(&right) else {
             return 2;
         };
         let Some(captures) = regex.captures(&left) else {
@@ -366,7 +366,7 @@ impl Executor {
         let left = self.expand_word(left);
         let right = self.quote_aware_regex_rhs(right, metadata);
         let right = restore_numeric_decimal_regex_escapes(&right);
-        let Ok(regex) = regex::Regex::new(&right) else {
+        let Ok(regex) = self.compile_conditional_regex(&right) else {
             return 2;
         };
         let Some(captures) = regex.captures(&left) else {
@@ -376,6 +376,15 @@ impl Executor {
 
         self.store_bash_rematch(captures);
         0
+    }
+
+    fn compile_conditional_regex(&self, pattern: &str) -> Result<regex::Regex, regex::Error> {
+        regex::RegexBuilder::new(pattern)
+            .case_insensitive(crate::builtins::shopt::option_enabled(
+                &self.env_vars,
+                "nocasematch",
+            ))
+            .build()
     }
 
     fn quote_aware_regex_rhs(
