@@ -7,11 +7,12 @@
 use std::collections::BTreeMap;
 
 use super::{
-    is_marked_var, mark_env_name, unescape_remaining_shell_escapes, Executor, ARRAY_VARS,
-    NAMEREF_VARS,
+    is_marked_var, mark_env_name, parse_helpers::decode_ansi_c_escapes,
+    unescape_remaining_shell_escapes, Executor, ARRAY_VARS, NAMEREF_VARS,
 };
 use crate::executor::arithmetic::eval_mutable_arith_value_with_random;
 use crate::executor::arrays::format_indexed_array_storage;
+use crate::parser::QuoteKind;
 
 mod args;
 mod extglob;
@@ -230,6 +231,23 @@ impl Executor {
                     _ => i32::from(!matched),
                 })
             }
+            [left, op, right, end]
+                if end == "]]"
+                    && op == "=~"
+                    && metadata
+                        .get(2)
+                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+            {
+                Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
+            }
+            [left, op, right]
+                if op == "=~"
+                    && metadata
+                        .get(2)
+                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+            {
+                Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
+            }
             _ => None,
         }
     }
@@ -339,6 +357,82 @@ impl Executor {
         0
     }
 
+    fn conditional_quoted_regex_match_status(
+        &mut self,
+        left: &str,
+        right: &str,
+        metadata: &crate::parser::WordMetadata,
+    ) -> i32 {
+        let left = self.expand_word(left);
+        let right = self.quote_aware_regex_rhs(right, metadata);
+        let right = restore_numeric_decimal_regex_escapes(&right);
+        let Ok(regex) = regex::Regex::new(&right) else {
+            return 2;
+        };
+        let Some(captures) = regex.captures(&left) else {
+            self.clear_bash_rematch();
+            return 1;
+        };
+
+        self.store_bash_rematch(captures);
+        0
+    }
+
+    fn quote_aware_regex_rhs(
+        &mut self,
+        right: &str,
+        metadata: &crate::parser::WordMetadata,
+    ) -> String {
+        if metadata.raw.is_empty() {
+            return regex::escape(&self.expand_word(right));
+        }
+
+        let chars = metadata.raw.chars().collect::<Vec<_>>();
+        let mut output = String::new();
+        let mut index = 0usize;
+        while index < chars.len() {
+            if chars[index] == '\\' {
+                let mut segment = String::from("\\");
+                if let Some(next) = chars.get(index + 1) {
+                    segment.push(*next);
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                output.push_str(&unescape_remaining_shell_escapes(
+                    &self.expand_word(&segment),
+                ));
+                continue;
+            }
+
+            if let Some((kind, opener_len, end)) = raw_quote_at(&chars, index) {
+                let body = chars[index + opener_len..end].iter().collect::<String>();
+                let quoted = match kind {
+                    QuoteKind::Single => body,
+                    QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
+                    QuoteKind::Double | QuoteKind::Locale => self.expand_word(&body),
+                };
+                output.push_str(&regex::escape(&quoted));
+                index = end + 1;
+                continue;
+            }
+
+            let start = index;
+            while index < chars.len()
+                && chars[index] != '\\'
+                && raw_quote_at(&chars, index).is_none()
+            {
+                index += 1;
+            }
+            let segment = chars[start..index].iter().collect::<String>();
+            output.push_str(&unescape_remaining_shell_escapes(
+                &self.expand_word(&segment),
+            ));
+        }
+
+        output
+    }
+
     pub(super) fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
         let left = self.expand_word(left);
         let right = self.expand_word(right);
@@ -376,4 +470,28 @@ fn contains_extglob_pattern(pattern: &str) -> bool {
         }
     }
     false
+}
+
+fn raw_quote_at(chars: &[char], start: usize) -> Option<(QuoteKind, usize, usize)> {
+    let (kind, opener_len, terminator) = match chars.get(start)? {
+        '$' if chars.get(start + 1) == Some(&'\'') => (QuoteKind::AnsiC, 2, '\''),
+        '$' if chars.get(start + 1) == Some(&'"') => (QuoteKind::Locale, 2, '"'),
+        '\'' => (QuoteKind::Single, 1, '\''),
+        '"' => (QuoteKind::Double, 1, '"'),
+        _ => return None,
+    };
+
+    let mut index = start + opener_len;
+    while index < chars.len() {
+        if chars[index] == '\\' && terminator != '\'' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == terminator {
+            return Some((kind, opener_len, index));
+        }
+        index += 1;
+    }
+
+    None
 }

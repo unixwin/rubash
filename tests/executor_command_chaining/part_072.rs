@@ -219,7 +219,7 @@ fn test_conditional_regex_match_sets_bash_rematch() {
     let output_path = "target/rubash-conditional-regex-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}; [[ $value =~ '[' ]]; echo $? >> {output_path}"
+        "value=abc123; pattern='([a-z]+)([0-9]+)'; [[ $value =~ $pattern ]]; echo $? ${{BASH_REMATCH[0]}} ${{BASH_REMATCH[1]}} ${{BASH_REMATCH[2]}} > {output_path}; [[ $value =~ z+ ]]; echo $? >> {output_path}; [[ $value =~ '[' ]]; echo $? >> {output_path}; [[ $value =~ [ ]]; echo $? >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -231,7 +231,34 @@ fn test_conditional_regex_match_sets_bash_rematch() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "0 abc123 abc 123\n1\n2\n"
+        "0 abc123 abc 123\n1\n1\n2\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_conditional_quoted_regex_rhs_matches_literal_text() {
+    let output_path = "target/rubash-conditional-quoted-regex-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ abc =~ a.* ]]; echo unquoted:$? > {output_path}; \
+         [[ abc =~ \"a.*\" ]]; echo quoted:$? >> {output_path}; \
+         pattern='a.*'; [[ abc =~ \"$pattern\" ]]; echo quoted_var:$? >> {output_path}; \
+         [[ \"a.*\" =~ \"a.*\" ]]; echo literal:$? >> {output_path}; \
+         [[ abcdef =~ ^\"abc\".* ]]; echo partial:$? >> {output_path}; \
+         [[ ^abczzz =~ \"^abc\".* ]]; echo quoted_anchor:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "unquoted:0\nquoted:1\nquoted_var:1\nliteral:0\npartial:0\nquoted_anchor:0\n"
     );
     let _ = fs::remove_file(output_path);
 }
