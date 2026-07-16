@@ -46,12 +46,16 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
 
     let arrays = marked_vars(env_vars, ARRAY_VARS);
     let assocs = marked_vars(env_vars, ASSOC_VARS);
-    if arrays.iter().any(|marked| marked == operand)
-        || assocs.iter().any(|marked| marked == operand)
-    {
+    if assocs.iter().any(|marked| marked == operand) {
         return env_vars
             .get(operand)
-            .map(|value| !value.starts_with('(') && !value.is_empty())
+            .map(|value| assoc_key_is_set(value, "0"))
+            .unwrap_or(false);
+    }
+    if arrays.iter().any(|marked| marked == operand) {
+        return env_vars
+            .get(operand)
+            .map(|value| array_index_is_set(value, 0))
             .unwrap_or(false);
     }
 

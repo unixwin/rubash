@@ -279,6 +279,37 @@ fn test_v_array_whole_subscript_checks_indexed_array_elements() {
 }
 
 #[test]
+fn test_v_bare_array_name_checks_zero_element() {
+    let output_path = "target/rubash-v-bare-array-name-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one); sparse=([2]=two); empty=(); \
+         declare -A assoc_zero=([0]=zero [k]=v); declare -A assoc_key=([k]=v); \
+         [[ -v arr ]]; echo cond_arr:$? > {output_path}; \
+         [[ -v sparse ]]; echo cond_sparse:$? >> {output_path}; \
+         [[ -v empty ]]; echo cond_empty:$? >> {output_path}; \
+         [[ -v assoc_zero ]]; echo cond_assoc_zero:$? >> {output_path}; \
+         [[ -v assoc_key ]]; echo cond_assoc_key:$? >> {output_path}; \
+         test -v arr; echo test_arr:$? >> {output_path}; \
+         test -v sparse; echo test_sparse:$? >> {output_path}; \
+         test -v assoc_zero; echo test_assoc_zero:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "cond_arr:0\ncond_sparse:1\ncond_empty:1\ncond_assoc_zero:0\ncond_assoc_key:1\ntest_arr:0\ntest_sparse:1\ntest_assoc_zero:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_r_checks_nameref_variables() {
     let output_path = "target/rubash-conditional-nameref-unary-output.txt";
     let _ = fs::remove_file(output_path);
