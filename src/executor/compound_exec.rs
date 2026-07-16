@@ -658,10 +658,14 @@ impl Executor {
                 });
             if matched {
                 matched_any = true;
-                let body = Ast {
-                    commands: clause.body.clone(),
-                };
-                self.execute_ast(&body)?;
+                if clause.body.is_empty() {
+                    self.exit_code = 0;
+                } else {
+                    let body = Ast {
+                        commands: clause.body.clone(),
+                    };
+                    self.execute_ast(&body)?;
+                }
                 match clause.terminator {
                     CaseTerminator::Break => return Ok(()),
                     CaseTerminator::FallThrough => {

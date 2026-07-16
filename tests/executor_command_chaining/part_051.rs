@@ -79,6 +79,43 @@ fn test_case_fallthrough_preserves_status_at_end_of_case() {
 }
 
 #[test]
+fn test_case_empty_matching_clause_sets_success_status() {
+    let output_path = "target/rubash-case-empty-clause-status-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("false; case beta in beta) ;; esac; echo $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[1].case_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_case_empty_test_next_preserves_success_when_later_clauses_do_not_match() {
+    let output_path = "target/rubash-case-empty-test-next-status-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("false; case beta in beta) ;;& gamma) true ;; esac; echo $? > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[1].case_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_case_optional_pattern_list_paren_with_alternates() {
     let output_path = "target/rubash-case-paren-alternates-output.txt";
     let _ = fs::remove_file(output_path);
