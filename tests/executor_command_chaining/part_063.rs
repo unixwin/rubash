@@ -120,7 +120,7 @@ fn test_parameter_replacement_preserves_double_quoted_single_quote_pattern() {
 fn test_parameter_substring_uses_offset_and_length() {
     let output_path = "target/rubash-param-substring-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("v=abcdef; echo ${{v:2:3}} ${{v:3}} > {output_path}");
+    let input = format!("v=abcdef; echo ${{v:2:3}} ${{v:3}} ${{v::3}} > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -129,7 +129,7 @@ fn test_parameter_substring_uses_offset_and_length() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "cde def\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "cde def abc\n");
     let _ = fs::remove_file(output_path);
 }
 
@@ -205,7 +205,8 @@ fn test_parameter_substring_does_not_shadow_colon_dash_default() {
 fn test_array_parameter_substring_uses_offset_and_length() {
     let output_path = "target/rubash-array-substring-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("arr=(zero one two three); echo ${{arr[@]:1:2}} > {output_path}");
+    let input =
+        format!("arr=(zero one two three); echo ${{arr[@]:1:2}} / ${{arr[@]::2}} > {output_path}");
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -214,7 +215,10 @@ fn test_array_parameter_substring_uses_offset_and_length() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "one two\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "one two / zero one\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

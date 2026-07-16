@@ -158,11 +158,15 @@ impl Executor {
 
         let (offset, length) = rest.split_once(':').unwrap_or((rest, ""));
         let offset = offset.trim_start();
-        if offset.is_empty() {
+        if offset.is_empty() && length.is_empty() {
             return None;
         }
 
-        let offset = self.eval_parameter_substring_offset(offset)?;
+        let offset = if offset.is_empty() {
+            0
+        } else {
+            self.eval_parameter_substring_offset(offset)?
+        };
         let length = if length.is_empty() {
             None
         } else {
