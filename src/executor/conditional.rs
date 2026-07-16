@@ -18,7 +18,7 @@ mod extglob;
 mod pattern;
 
 use args::{
-    conditional_logical_index, conditional_outer_parentheses,
+    conditional_effective_len, conditional_logical_index, conditional_outer_parentheses,
     conditional_pattern_or_string_matches, conditional_regex_operands, is_conditional_file_binary,
     is_conditional_file_unary, reassemble_extglob_args, restore_numeric_decimal_regex_escapes,
 };
@@ -34,7 +34,9 @@ impl Executor {
         &mut self,
         command: &crate::parser::ConditionalCommand,
     ) -> i32 {
-        if let Some(status) = self.quoted_conditional_pattern_status(command) {
+        if let Some(status) =
+            self.conditional_status_with_metadata(&command.args, &command.arg_metadata)
+        {
             return status;
         }
         self.execute_conditional(&command.args)
@@ -139,16 +141,80 @@ impl Executor {
         }
     }
 
+    fn conditional_status_with_metadata(
+        &mut self,
+        args: &[String],
+        metadata: &[crate::parser::WordMetadata],
+    ) -> Option<i32> {
+        if args.len() != metadata.len() {
+            return None;
+        }
+
+        if conditional_outer_parentheses(args).is_some() {
+            let end = conditional_effective_len(args);
+            return self.conditional_status_with_metadata(&args[1..end - 1], &metadata[1..end - 1]);
+        }
+
+        if let Some(index) = conditional_logical_index(args, "||") {
+            let left = self
+                .conditional_status_with_metadata(&args[..index], &metadata[..index])
+                .unwrap_or_else(|| self.execute_conditional(&args[..index]));
+            return Some(if left == 0 {
+                0
+            } else {
+                self.conditional_status_with_metadata(&args[index + 1..], &metadata[index + 1..])
+                    .unwrap_or_else(|| self.execute_conditional(&args[index + 1..]))
+            });
+        }
+
+        if let Some(index) = conditional_logical_index(args, "&&") {
+            let left = self
+                .conditional_status_with_metadata(&args[..index], &metadata[..index])
+                .unwrap_or_else(|| self.execute_conditional(&args[..index]));
+            return Some(if left == 0 {
+                self.conditional_status_with_metadata(&args[index + 1..], &metadata[index + 1..])
+                    .unwrap_or_else(|| self.execute_conditional(&args[index + 1..]))
+            } else {
+                1
+            });
+        }
+
+        if let [not, rest @ ..] = args {
+            if not == "!" {
+                let status = self
+                    .conditional_status_with_metadata(rest, &metadata[1..])
+                    .unwrap_or_else(|| self.execute_conditional(rest));
+                return Some(i32::from(status == 0));
+            }
+        }
+
+        self.quoted_conditional_pattern_status(args, metadata)
+    }
+
     fn quoted_conditional_pattern_status(
         &mut self,
-        command: &crate::parser::ConditionalCommand,
+        args: &[String],
+        metadata: &[crate::parser::WordMetadata],
     ) -> Option<i32> {
-        match command.args.as_slice() {
+        match args {
             [left, op, right, end]
                 if end == "]]"
                     && matches!(op.as_str(), "=" | "==" | "!=")
-                    && command
-                        .arg_metadata
+                    && metadata
+                        .get(2)
+                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+            {
+                let left = self.expand_word(left);
+                let right = self.expand_word(right);
+                let matched = left == right;
+                Some(match op.as_str() {
+                    "!=" => i32::from(matched),
+                    _ => i32::from(!matched),
+                })
+            }
+            [left, op, right]
+                if matches!(op.as_str(), "=" | "==" | "!=")
+                    && metadata
                         .get(2)
                         .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
             {
