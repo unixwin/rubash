@@ -99,9 +99,9 @@ impl Executor {
             return self.expand_braced_substring_parameter(var_name, offset, length);
         }
 
-        if let Some(var_name) = name.strip_prefix('#') {
-            if let Some(value) = self.array_element_parameter_value(var_name) {
-                return value.chars().count().to_string();
+        if name.starts_with('#') {
+            if let Some(value) = self.expand_braced_indexed_parameter(name) {
+                return value;
             }
         }
 
@@ -229,9 +229,9 @@ impl Executor {
             return self.expand_braced_substring_parameter(var_name, offset, length);
         }
 
-        if let Some(var_name) = name.strip_prefix('#') {
-            if let Some(value) = self.array_element_parameter_value(var_name) {
-                return value.chars().count().to_string();
+        if name.starts_with('#') {
+            if let Some(value) = self.expand_braced_indexed_parameter(name) {
+                return value;
             }
         }
 
