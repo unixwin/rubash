@@ -3,7 +3,7 @@
 //! Run with: cargo run
 
 use rubash::executor::{ExecuteError, Executor};
-use rubash::lexer::tokenize;
+use rubash::lexer::{tokenize, TokenKind};
 use rubash::parser::parse;
 use std::env;
 use std::fs;
@@ -210,9 +210,11 @@ fn run_repl(executor: &mut Executor) {
 fn run_stdin_script(executor: &mut Executor) -> i32 {
     // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
     // prompting, while commands launched from that stream inherit the same
-    // input. Keep this line-oriented until parse.y owns incremental input.
+    // input. Keep ordinary input line-oriented, but gather obvious compound
+    // commands until their closing reserved word arrives.
     executor.inherit_process_stdin();
     let mut input = String::new();
+    let mut pending = String::new();
 
     loop {
         input.clear();
@@ -222,11 +224,41 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             Err(_) => break,
         }
 
-        run_line(executor, &input, false);
+        pending.push_str(&input);
+        if stdin_source_needs_more(&pending) {
+            continue;
+        }
+
+        run_line(executor, &pending, false);
+        pending.clear();
+    }
+
+    if !pending.trim().is_empty() {
+        run_line(executor, &pending, false);
     }
 
     let status = executor.last_exit_code();
     finish_shell(executor, status, false)
+}
+
+fn stdin_source_needs_more(source: &str) -> bool {
+    let tokens = tokenize(source);
+    let mut stack = Vec::new();
+    for token in tokens {
+        if token.kind != TokenKind::Keyword {
+            continue;
+        }
+        match token.value.as_str() {
+            "case" => stack.push("esac"),
+            "if" => stack.push("fi"),
+            "for" | "select" | "while" | "until" => stack.push("done"),
+            "esac" | "fi" | "done" if stack.last() == Some(&token.value.as_str()) => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    !stack.is_empty()
 }
 
 fn read_unbuffered_line(output: &mut String) -> io::Result<usize> {

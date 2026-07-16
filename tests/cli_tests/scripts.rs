@@ -67,6 +67,29 @@ fn stdin_script_child_shell_inherits_unread_input() {
 }
 
 #[test]
+fn stdin_script_runs_multiline_case_command() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"case x in\n  x) echo one ;&\n  y) echo two ;;\n  *) echo star ;;\nesac\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one\ntwo\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_multiline_quoted_assignment_is_one_command() {
     let script_path = Path::new("target").join("rubash-cli-multiline-assignment.sh");
     fs::create_dir_all("target").unwrap();
