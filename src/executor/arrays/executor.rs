@@ -76,6 +76,20 @@ impl Executor {
             .unwrap_or(word);
         let word = word.strip_prefix('\x1d').unwrap_or(word);
         if quoted_array_word {
+            if let Some(prefix) = word
+                .strip_prefix("${!")
+                .and_then(|word| word.strip_suffix("@}"))
+            {
+                let mut names = self
+                    .env_vars
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| name.starts_with(prefix))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                names.sort_unstable();
+                return Some(names);
+            }
             if let Some(name) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("[@]}"))
