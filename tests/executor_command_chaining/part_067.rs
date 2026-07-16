@@ -207,6 +207,31 @@ fn test_arithmetic_expansion_applies_side_effects() {
 }
 
 #[test]
+fn test_legacy_bracket_arithmetic_expansion_evaluates() {
+    let output_path = "target/rubash-legacy-bracket-arithmetic-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(4 7); i=1; n=2; \
+         echo $[1 + 2] pre$[n * 3]post $[arr[i] + 5] > {output_path}; \
+         echo $[n++] $n >> {output_path}; \
+         x=$[n += 4]; echo $x $n >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "3 pre6post 12\n2 3\n7 7\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_arithmetic_command_updates_variables() {
     let output_path = "target/rubash-arithmetic-command-updates-output.txt";
     let _ = fs::remove_file(output_path);

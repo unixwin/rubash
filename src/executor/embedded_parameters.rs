@@ -177,6 +177,40 @@ impl Executor {
                     }
                     output.push_str(&self.expand_command_substitution(&source));
                 }
+                Some('[') => {
+                    chars.next();
+                    let mut expression = String::new();
+                    let mut bracket_depth: usize = 0;
+                    let mut closed = false;
+                    for expression_ch in chars.by_ref() {
+                        match expression_ch {
+                            '[' => {
+                                bracket_depth += 1;
+                                expression.push(expression_ch);
+                            }
+                            ']' if bracket_depth == 0 => {
+                                closed = true;
+                                break;
+                            }
+                            ']' => {
+                                bracket_depth = bracket_depth.saturating_sub(1);
+                                expression.push(expression_ch);
+                            }
+                            _ => expression.push(expression_ch),
+                        }
+                    }
+                    if closed {
+                        let expression = self.expand_arithmetic_special_parameters(&expression);
+                        if let Some(value) =
+                            eval_conditional_arith_value(&expression, &self.env_vars)
+                        {
+                            output.push_str(&value.to_string());
+                        }
+                    } else {
+                        output.push_str("$[");
+                        output.push_str(&expression);
+                    }
+                }
                 Some(first) if first.is_ascii_digit() => {
                     chars.next();
                     let index = first.to_digit(10).unwrap_or(0) as usize;

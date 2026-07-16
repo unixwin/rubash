@@ -381,6 +381,47 @@ impl Executor {
                 continue;
             }
 
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+                index += 2;
+                let mut expression = String::new();
+                let mut bracket_depth: usize = 0;
+                let mut matched = false;
+
+                while index < chars.len() {
+                    match chars[index] {
+                        '[' => {
+                            bracket_depth += 1;
+                            expression.push(chars[index]);
+                            index += 1;
+                        }
+                        ']' if bracket_depth == 0 => {
+                            index += 1;
+                            matched = true;
+                            break;
+                        }
+                        ']' => {
+                            bracket_depth = bracket_depth.saturating_sub(1);
+                            expression.push(chars[index]);
+                            index += 1;
+                        }
+                        ch => {
+                            expression.push(ch);
+                            index += 1;
+                        }
+                    }
+                }
+
+                if matched {
+                    if let Some(value) = self.eval_arithmetic_command_value(&expression) {
+                        output.push_str(&value.to_string());
+                    }
+                } else {
+                    output.push_str("$[");
+                    output.push_str(&expression);
+                }
+                continue;
+            }
+
             output.push(chars[index]);
             index += 1;
         }

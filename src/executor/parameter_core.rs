@@ -89,7 +89,7 @@ impl Executor {
             }
         }
 
-        if word.contains("$((") {
+        if word.contains("$((") || word.contains("$[") {
             return self.expand_embedded_parameters_mut(word);
         }
 
