@@ -76,10 +76,10 @@ impl Executor {
         match args {
             [not, rest @ ..] if not == "!" => i32::from(self.execute_conditional(rest) == 0),
             [op, operand, end] if op == "-v" && end == "]]" => i32::from(
-                !crate::builtins::test::variable_is_set(operand, &self.env_vars),
+                !crate::builtins::test::variable_is_set(&self.expand_word(operand), &self.env_vars),
             ),
             [op, operand] if op == "-v" => i32::from(!crate::builtins::test::variable_is_set(
-                operand,
+                &self.expand_word(operand),
                 &self.env_vars,
             )),
             [op, operand, end] if op == "-R" && end == "]]" => {

@@ -310,6 +310,33 @@ fn test_v_bare_array_name_checks_zero_element() {
 }
 
 #[test]
+fn test_conditional_v_expands_dynamic_operand() {
+    let output_path = "target/rubash-conditional-v-dynamic-operand-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero); name='arr[0]'; declare -A assoc; assoc[one]=1; key=one; operand='assoc[one]'; \
+         [[ -v $name ]]; echo indexed_name:$? > {output_path}; \
+         [[ -v assoc[$key] ]]; echo assoc_key:$? >> {output_path}; \
+         [[ -v $operand ]]; echo assoc_operand:$? >> {output_path}; \
+         [[ -v name ]]; echo plain_name:$? >> {output_path}; \
+         [[ -v missing[$key] ]]; echo missing_assoc:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "indexed_name:0\nassoc_key:0\nassoc_operand:0\nplain_name:0\nmissing_assoc:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_r_checks_nameref_variables() {
     let output_path = "target/rubash-conditional-nameref-unary-output.txt";
     let _ = fs::remove_file(output_path);
