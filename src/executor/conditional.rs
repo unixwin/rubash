@@ -82,12 +82,16 @@ impl Executor {
                 &self.expand_word(operand),
                 &self.env_vars,
             )),
-            [op, operand, end] if op == "-R" && end == "]]" => {
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, operand))
-            }
-            [op, operand] if op == "-R" => {
-                i32::from(!is_marked_var(&self.env_vars, NAMEREF_VARS, operand))
-            }
+            [op, operand, end] if op == "-R" && end == "]]" => i32::from(!is_marked_var(
+                &self.env_vars,
+                NAMEREF_VARS,
+                &self.expand_word(operand),
+            )),
+            [op, operand] if op == "-R" => i32::from(!is_marked_var(
+                &self.env_vars,
+                NAMEREF_VARS,
+                &self.expand_word(operand),
+            )),
             [op, operand, end] if op == "-o" && end == "]]" => {
                 i32::from(!self.conditional_shell_option_unary(operand))
             }

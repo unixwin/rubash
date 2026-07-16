@@ -359,6 +359,31 @@ fn test_conditional_r_checks_nameref_variables() {
 }
 
 #[test]
+fn test_conditional_r_expands_dynamic_operand() {
+    let output_path = "target/rubash-conditional-nameref-dynamic-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "target=value; declare -n ref=target; name=ref; plain=target; \
+         [[ -R $name ]]; echo dynamic_ref:$? > {output_path}; \
+         [[ -R $plain ]]; echo dynamic_plain:$? >> {output_path}; \
+         [[ -R name ]]; echo literal_name:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "dynamic_ref:0\ndynamic_plain:1\nliteral_name:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_string_unary_checks_expanded_value() {
     let output_path = "target/rubash-conditional-string-unary-output.txt";
     let _ = fs::remove_file(output_path);
