@@ -191,6 +191,7 @@ pub(in crate::executor) enum ParameterTransform {
     KeyValueSplit,
     Prompt,
     Upper,
+    UpperFirst,
     Lower,
 }
 
@@ -207,6 +208,7 @@ pub(in crate::executor) fn parse_parameter_transform(
         "k" => ParameterTransform::KeyValueSplit,
         "P" => ParameterTransform::Prompt,
         "U" => ParameterTransform::Upper,
+        "u" => ParameterTransform::UpperFirst,
         "L" => ParameterTransform::Lower,
         _ => return None,
     };
@@ -226,8 +228,17 @@ pub(in crate::executor) fn apply_parameter_transform(
         ParameterTransform::KeyValueSplit => shell_single_quote_assignment_value(value),
         ParameterTransform::Prompt => value.to_string(),
         ParameterTransform::Upper => value.chars().flat_map(char::to_uppercase).collect(),
+        ParameterTransform::UpperFirst => uppercase_first_char(value),
         ParameterTransform::Lower => value.chars().flat_map(char::to_lowercase).collect(),
     }
+}
+
+fn uppercase_first_char(value: &str) -> String {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(chars).collect::<String>()
 }
 
 pub(in crate::executor) fn format_key_value_transform_part(

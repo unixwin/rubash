@@ -141,6 +141,39 @@ fn test_array_value_parameter_transforms_apply_to_elements() {
 }
 
 #[test]
+fn test_parameter_upper_first_transform_applies_to_values() {
+    let output_path = "target/rubash-param-upper-first-transform-output.txt";
+    let _ = fs::remove_file(output_path);
+    for name in ["RUBASH_UPPER_FIRST_ARRAY", "RUBASH_UPPER_FIRST_REF"] {
+        std::env::remove_var(name);
+    }
+    let input = format!(
+        "v=alpha; RUBASH_UPPER_FIRST_ARRAY=(alpha beta); \
+         declare -n RUBASH_UPPER_FIRST_REF=RUBASH_UPPER_FIRST_ARRAY; \
+         echo scalar:${{v@u}} > {output_path}; \
+         echo elem:${{RUBASH_UPPER_FIRST_ARRAY[1]@u}} >> {output_path}; \
+         echo arr:${{RUBASH_UPPER_FIRST_ARRAY[@]@u}} >> {output_path}; \
+         echo ref:${{RUBASH_UPPER_FIRST_REF@u}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "scalar:Alpha\nelem:Beta\narr:Alpha Beta\nref:Alpha\n"
+    );
+    let _ = fs::remove_file(output_path);
+    for name in ["RUBASH_UPPER_FIRST_ARRAY", "RUBASH_UPPER_FIRST_REF"] {
+        std::env::remove_var(name);
+    }
+}
+
+#[test]
 fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
     let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
     let _ = fs::remove_file(output_path);
