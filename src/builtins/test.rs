@@ -19,7 +19,7 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_BADUSAGE: i32 = 2;
-const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
+const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 
 /// Execute `test` or `[` with arguments after the command name.
 pub fn execute(
@@ -181,7 +181,7 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-o" => Ok(crate::builtins::set::is_shell_option(operand)
             && crate::builtins::set::shell_option_enabled(env_vars, operand)),
         "-v" => Ok(variable_is_set(operand, env_vars)),
-        "-R" => Ok(marked_vars(env_vars, READONLY_VARS)
+        "-R" => Ok(marked_vars(env_vars, NAMEREF_VARS)
             .iter()
             .any(|name| name == operand)),
         "-a" | "-e" => Ok(test_path(operand, env_vars).exists()),

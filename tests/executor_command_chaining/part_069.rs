@@ -70,6 +70,52 @@ fn test_declare_nameref_reads_and_assigns_target() {
 }
 
 #[test]
+fn test_nameref_unary_conditionals_use_nameref_attribute() {
+    let output_path = target_test_path("rubash-nameref-unary-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    for name in [
+        "RUBASH_NAMEREF_UNARY_TARGET",
+        "RUBASH_NAMEREF_UNARY_REF",
+        "RUBASH_NAMEREF_UNARY_PLAIN",
+    ] {
+        std::env::remove_var(name);
+    }
+    let input = format!(
+        "RUBASH_NAMEREF_UNARY_TARGET=value; \
+         RUBASH_NAMEREF_UNARY_PLAIN=value; \
+         readonly RUBASH_NAMEREF_UNARY_READONLY=value; \
+         declare -n RUBASH_NAMEREF_UNARY_REF=RUBASH_NAMEREF_UNARY_TARGET; \
+         [[ -R RUBASH_NAMEREF_UNARY_REF ]]; echo cond_ref:$? > {shell_output_path}; \
+         [[ -R RUBASH_NAMEREF_UNARY_PLAIN ]]; echo cond_plain:$? >> {shell_output_path}; \
+         [[ -R RUBASH_NAMEREF_UNARY_READONLY ]]; echo cond_readonly:$? >> {shell_output_path}; \
+         test -R RUBASH_NAMEREF_UNARY_REF; echo test_ref:$? >> {shell_output_path}; \
+         test -R RUBASH_NAMEREF_UNARY_PLAIN; echo test_plain:$? >> {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "cond_ref:0\ncond_plain:1\ncond_readonly:1\ntest_ref:0\ntest_plain:1\n"
+    );
+    for name in [
+        "RUBASH_NAMEREF_UNARY_TARGET",
+        "RUBASH_NAMEREF_UNARY_REF",
+        "RUBASH_NAMEREF_UNARY_PLAIN",
+        "RUBASH_NAMEREF_UNARY_READONLY",
+    ] {
+        std::env::remove_var(name);
+    }
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_declare_plus_n_clears_nameref_attribute() {
     let output_path = target_test_path("rubash-declare-plus-nameref-output.txt");
     let shell_output_path = shell_test_path(&output_path);
