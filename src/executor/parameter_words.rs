@@ -70,6 +70,25 @@ impl Executor {
             }
         }
 
+        if let Some((var_name, word)) = name.split_once(":=") {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(word));
+            }
+        }
+
+        if let Some((var_name, word)) = name.split_once('=') {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(word));
+            }
+        }
+
         if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
             return self.expand_braced_substring_parameter(var_name, offset, length);
         }
@@ -160,6 +179,25 @@ impl Executor {
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| self.expand_embedded_parameters_mut(error_word));
+            }
+        }
+
+        if let Some((var_name, word)) = name.split_once(":=") {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters_mut(word));
+            }
+        }
+
+        if let Some((var_name, word)) = name.split_once('=') {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters_mut(word));
             }
         }
 

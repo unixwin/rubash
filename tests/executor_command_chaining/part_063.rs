@@ -19,6 +19,30 @@ fn test_parameter_colon_equals_assigns_empty_value() {
 }
 
 #[test]
+fn test_quoted_assignment_parameter_operators_preserve_word_with_dash() {
+    let output_path = "target/rubash-param-quoted-assignment-operator-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "unset v w; \
+         printf '<%s:%s>\\n' \"${{v:=a-b}}\" \"$v\" > {output_path}; \
+         printf '<%s:%s>\\n' \"${{w=a-b}}\" \"$w\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<a-b:a-b>\n<a-b:a-b>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_question_operator_distinguishes_null_from_unset() {
     let output_path = "target/rubash-param-question-operator-output.txt";
     let _ = fs::remove_file(output_path);
