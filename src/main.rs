@@ -281,14 +281,19 @@ fn stdin_source_is_function_signature(source: &str) -> bool {
 }
 
 fn stdin_source_has_unclosed_function_body(source: &str) -> bool {
-    let Some(open_brace) = first_unquoted_char(source, '{') else {
+    stdin_source_has_unclosed_function_delimited_body(source, '{')
+        || stdin_source_has_unclosed_function_delimited_body(source, '(')
+}
+
+fn stdin_source_has_unclosed_function_delimited_body(source: &str, delimiter: char) -> bool {
+    let Some(open_delimiter) = first_unquoted_function_body_delimiter(source, delimiter) else {
         return false;
     };
-    if unquoted_brace_depth(source) == 0 {
+    if unquoted_delimiter_depth(&source[open_delimiter..], delimiter) == 0 {
         return false;
     }
 
-    let signature = source[..open_brace].trim_end();
+    let signature = source[..open_delimiter].trim_end();
     if let Some(name) = signature.strip_suffix("()") {
         return is_stdin_function_name(name.trim_end());
     }
@@ -337,7 +342,29 @@ fn first_unquoted_char(source: &str, target: char) -> Option<usize> {
     None
 }
 
-fn unquoted_brace_depth(source: &str) -> usize {
+fn first_unquoted_function_body_delimiter(source: &str, target: char) -> Option<usize> {
+    let mut search_from = 0usize;
+    while let Some(relative_index) = first_unquoted_char(&source[search_from..], target) {
+        let index = search_from + relative_index;
+        if target == '('
+            && source[index + target.len_utf8()..]
+                .trim_start()
+                .starts_with(')')
+        {
+            search_from = index + target.len_utf8();
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn unquoted_delimiter_depth(source: &str, open: char) -> usize {
+    let close = match open {
+        '{' => '}',
+        '(' => ')',
+        _ => return 0,
+    };
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
@@ -363,8 +390,8 @@ fn unquoted_brace_depth(source: &str) -> usize {
             continue;
         }
         match ch {
-            '{' => depth += 1,
-            '}' => depth = depth.saturating_sub(1),
+            ch if ch == open => depth += 1,
+            ch if ch == close => depth = depth.saturating_sub(1),
             _ => {}
         }
     }
