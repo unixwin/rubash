@@ -1,14 +1,21 @@
 pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
-    case_pattern_matches_at(&pattern, 0, &word, 0)
+    case_pattern_matches_at_with_case(&pattern, 0, &word, 0, false)
 }
 
-pub(in crate::executor) fn case_pattern_matches_at(
+pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let word: Vec<char> = word.chars().collect();
+    case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true)
+}
+
+pub(in crate::executor) fn case_pattern_matches_at_with_case(
     pattern: &[char],
     p_index: usize,
     word: &[char],
     w_index: usize,
+    nocase: bool,
 ) -> bool {
     if p_index == pattern.len() {
         return w_index == word.len();
@@ -18,36 +25,77 @@ pub(in crate::executor) fn case_pattern_matches_at(
         '\x18' => {
             w_index < word.len()
                 && word[w_index] == '\\'
-                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+                && case_pattern_matches_at_with_case(
+                    pattern,
+                    p_index + 1,
+                    word,
+                    w_index + 1,
+                    nocase,
+                )
         }
         '*' => {
-            case_pattern_matches_at(pattern, p_index + 1, word, w_index)
+            case_pattern_matches_at_with_case(pattern, p_index + 1, word, w_index, nocase)
                 || (w_index < word.len()
-                    && case_pattern_matches_at(pattern, p_index, word, w_index + 1))
+                    && case_pattern_matches_at_with_case(
+                        pattern,
+                        p_index,
+                        word,
+                        w_index + 1,
+                        nocase,
+                    ))
         }
         '?' => {
-            w_index < word.len() && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+            w_index < word.len()
+                && case_pattern_matches_at_with_case(
+                    pattern,
+                    p_index + 1,
+                    word,
+                    w_index + 1,
+                    nocase,
+                )
         }
         '[' => {
-            let Some((matches_class, next_index)) =
-                case_bracket_expression_matches(pattern, p_index, word.get(w_index).copied())
-            else {
+            let Some((matches_class, next_index)) = case_bracket_expression_matches_with_case(
+                pattern,
+                p_index,
+                word.get(w_index).copied(),
+                nocase,
+            ) else {
                 return w_index < word.len()
-                    && pattern[p_index] == word[w_index]
-                    && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1);
+                    && chars_match(pattern[p_index], word[w_index], nocase)
+                    && case_pattern_matches_at_with_case(
+                        pattern,
+                        p_index + 1,
+                        word,
+                        w_index + 1,
+                        nocase,
+                    );
             };
 
-            matches_class && case_pattern_matches_at(pattern, next_index, word, w_index + 1)
+            matches_class
+                && case_pattern_matches_at_with_case(pattern, next_index, word, w_index + 1, nocase)
         }
         '\\' if p_index + 1 < pattern.len() => {
             w_index < word.len()
-                && pattern[p_index + 1] == word[w_index]
-                && case_pattern_matches_at(pattern, p_index + 2, word, w_index + 1)
+                && chars_match(pattern[p_index + 1], word[w_index], nocase)
+                && case_pattern_matches_at_with_case(
+                    pattern,
+                    p_index + 2,
+                    word,
+                    w_index + 1,
+                    nocase,
+                )
         }
         literal => {
             w_index < word.len()
-                && literal == word[w_index]
-                && case_pattern_matches_at(pattern, p_index + 1, word, w_index + 1)
+                && chars_match(literal, word[w_index], nocase)
+                && case_pattern_matches_at_with_case(
+                    pattern,
+                    p_index + 1,
+                    word,
+                    w_index + 1,
+                    nocase,
+                )
         }
     }
 }
@@ -58,39 +106,63 @@ pub(in crate::executor) fn extglob_match_literal(
     word: &[char],
     w: usize,
 ) -> bool {
+    extglob_match_literal_with_case(pattern, p, word, w, false)
+}
+
+pub(in crate::executor) fn extglob_match_literal_nocase(
+    pattern: &[char],
+    p: usize,
+    word: &[char],
+    w: usize,
+) -> bool {
+    extglob_match_literal_with_case(pattern, p, word, w, true)
+}
+
+fn extglob_match_literal_with_case(
+    pattern: &[char],
+    p: usize,
+    word: &[char],
+    w: usize,
+    nocase: bool,
+) -> bool {
     if p == pattern.len() {
         return w == word.len();
     }
     match pattern[p] {
         '*' => {
-            extglob_matches_at(pattern, p + 1, word, w)
-                || (w < word.len() && extglob_matches_at(pattern, p, word, w + 1))
+            extglob_matches_at_with_case(pattern, p + 1, word, w, nocase)
+                || (w < word.len() && extglob_matches_at_with_case(pattern, p, word, w + 1, nocase))
         }
-        '?' => w < word.len() && extglob_matches_at(pattern, p + 1, word, w + 1),
+        '?' => w < word.len() && extglob_matches_at_with_case(pattern, p + 1, word, w + 1, nocase),
         '[' => {
             if let Some((matched, next)) =
-                case_bracket_expression_matches(pattern, p, word.get(w).copied())
+                case_bracket_expression_matches_with_case(pattern, p, word.get(w).copied(), nocase)
             {
-                matched && extglob_matches_at(pattern, next, word, w + 1)
+                matched && extglob_matches_at_with_case(pattern, next, word, w + 1, nocase)
             } else {
                 w < word.len()
-                    && pattern[p] == word[w]
-                    && extglob_matches_at(pattern, p + 1, word, w + 1)
+                    && chars_match(pattern[p], word[w], nocase)
+                    && extglob_matches_at_with_case(pattern, p + 1, word, w + 1, nocase)
             }
         }
         '\\' if p + 1 < pattern.len() => {
             w < word.len()
-                && pattern[p + 1] == word[w]
-                && extglob_matches_at(pattern, p + 2, word, w + 1)
+                && chars_match(pattern[p + 1], word[w], nocase)
+                && extglob_matches_at_with_case(pattern, p + 2, word, w + 1, nocase)
         }
-        c => w < word.len() && c == word[w] && extglob_matches_at(pattern, p + 1, word, w + 1),
+        c => {
+            w < word.len()
+                && chars_match(c, word[w], nocase)
+                && extglob_matches_at_with_case(pattern, p + 1, word, w + 1, nocase)
+        }
     }
 }
 
-pub(in crate::executor) fn case_bracket_expression_matches(
+fn case_bracket_expression_matches_with_case(
     pattern: &[char],
     start: usize,
     candidate: Option<char>,
+    nocase: bool,
 ) -> Option<(bool, usize)> {
     let mut index = start + 1;
     if index >= pattern.len() {
@@ -105,6 +177,7 @@ pub(in crate::executor) fn case_bracket_expression_matches(
     let mut matched = false;
     let mut saw_member = false;
     let candidate = candidate?;
+    let candidate_cmp = comparable_char(candidate, nocase);
     while index < pattern.len() {
         if pattern[index] == ']' && saw_member {
             return Some((if negated { !matched } else { matched }, index + 1));
@@ -124,13 +197,15 @@ pub(in crate::executor) fn case_bracket_expression_matches(
             && pattern[index + 2] != ']'
         {
             let end = pattern[index + 2];
-            if current <= candidate && candidate <= end {
+            let current_cmp = comparable_char(current, nocase);
+            let end_cmp = comparable_char(end, nocase);
+            if current_cmp <= candidate_cmp && candidate_cmp <= end_cmp {
                 matched = true;
             }
             saw_member = true;
             index += 3;
         } else {
-            if current == candidate {
+            if chars_match(current, candidate, nocase) {
                 matched = true;
             }
             saw_member = true;
@@ -139,6 +214,22 @@ pub(in crate::executor) fn case_bracket_expression_matches(
     }
 
     None
+}
+
+fn chars_match(pattern: char, candidate: char, nocase: bool) -> bool {
+    if nocase {
+        pattern.eq_ignore_ascii_case(&candidate)
+    } else {
+        pattern == candidate
+    }
+}
+
+fn comparable_char(ch: char, nocase: bool) -> char {
+    if nocase {
+        ch.to_ascii_lowercase()
+    } else {
+        ch
+    }
 }
 
 fn bracket_posix_class_matches(
@@ -180,4 +271,4 @@ fn posix_class_matches(class: &str, candidate: char) -> bool {
         _ => false,
     }
 }
-use super::extglob::extglob_matches_at;
+use super::extglob::extglob_matches_at_with_case;

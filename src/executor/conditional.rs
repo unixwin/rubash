@@ -24,8 +24,10 @@ use args::{
 };
 
 pub(super) use args::simple_grep_pattern_matches;
-pub(in crate::executor) use extglob::extglob_case_pattern_matches;
-pub(super) use pattern::case_pattern_matches;
+pub(in crate::executor) use extglob::{
+    extglob_case_pattern_matches, extglob_case_pattern_matches_nocase,
+};
+pub(super) use pattern::{case_pattern_matches, case_pattern_matches_nocase};
 
 impl Executor {
     pub(super) fn execute_conditional(&mut self, args: &[String]) -> i32 {
@@ -130,11 +132,16 @@ impl Executor {
         let right = self.expand_word(right);
         let extglob = crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
             || contains_extglob_pattern(&right);
+        let nocasematch = crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch");
         match op {
+            "=" | "==" if extglob && nocasematch => {
+                extglob_case_pattern_matches_nocase(&right, &left)
+            }
             "=" | "==" if extglob => extglob_case_pattern_matches(&right, &left),
-            "=" | "==" => conditional_pattern_or_string_matches(&left, &right),
+            "=" | "==" => conditional_pattern_or_string_matches(&left, &right, nocasematch),
+            "!=" if extglob && nocasematch => !extglob_case_pattern_matches_nocase(&right, &left),
             "!=" if extglob => !extglob_case_pattern_matches(&right, &left),
-            "!=" => !conditional_pattern_or_string_matches(&left, &right),
+            "!=" => !conditional_pattern_or_string_matches(&left, &right, nocasematch),
             "=~" => self.conditional_regex_match(&left, &right),
             "<" => left < right,
             ">" => left > right,

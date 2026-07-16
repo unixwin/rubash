@@ -625,6 +625,7 @@ impl Executor {
         let word = self.expand_case_word(&case_command.word);
         // Strip surrounding quotes from word (bash behavior: quotes are literal in case patterns)
         let word = strip_surrounding_quotes(&word);
+        let nocasematch = crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch");
         let mut fall_through = false;
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
@@ -639,7 +640,17 @@ impl Executor {
                         || stripped.contains("?(")
                         || stripped.contains("!(")
                     {
-                        crate::executor::conditional::extglob_case_pattern_matches(&stripped, &word)
+                        if nocasematch {
+                            crate::executor::conditional::extglob_case_pattern_matches_nocase(
+                                &stripped, &word,
+                            )
+                        } else {
+                            crate::executor::conditional::extglob_case_pattern_matches(
+                                &stripped, &word,
+                            )
+                        }
+                    } else if nocasematch {
+                        case_pattern_matches_nocase(&stripped, &word)
                     } else {
                         case_pattern_matches(&stripped, &word)
                     }

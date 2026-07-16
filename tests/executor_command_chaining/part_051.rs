@@ -102,6 +102,62 @@ fn test_case_extglob_pattern_expands_variable_before_matching() {
 }
 
 #[test]
+fn test_case_nocasematch_matches_literals_ranges_and_extglob() {
+    let output_path = "target/rubash-case-nocasematch-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s nocasematch extglob; \
+         case Alpha in alpha) echo literal > {output_path} ;; *) echo no-literal > {output_path} ;; esac; \
+         case A in [a-z]) echo range >> {output_path} ;; *) echo no-range >> {output_path} ;; esac; \
+         case BAR in @(foo|bar)) echo extglob >> {output_path} ;; *) echo no-extglob >> {output_path} ;; esac"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert_eq!(
+        ast.commands
+            .iter()
+            .filter(|command| command.case_command.is_some())
+            .count(),
+        3
+    );
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "literal\nrange\nextglob\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_case_nocasematch_preserves_posix_character_class_case() {
+    let output_path = "target/rubash-case-nocasematch-posix-class-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s nocasematch; \
+         case a in [[:upper:]]) echo upper > {output_path} ;; *) echo no-upper > {output_path} ;; esac; \
+         case A in [[:lower:]]) echo lower >> {output_path} ;; *) echo no-lower >> {output_path} ;; esac"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "no-upper\nno-lower\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_keyword_definition_executes_body() {
     let output_path = "target/rubash-function-keyword-output.txt";
     let _ = fs::remove_file(output_path);

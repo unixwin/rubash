@@ -1,5 +1,5 @@
 use super::super::pattern_contains_glob;
-use super::pattern::case_pattern_matches;
+use super::pattern::{case_pattern_matches, case_pattern_matches_nocase};
 
 pub(in crate::executor) fn is_conditional_file_unary(op: &str) -> bool {
     matches!(
@@ -201,9 +201,19 @@ pub(in crate::executor) fn conditional_effective_len(args: &[String]) -> usize {
     args.len() - usize::from(args.last().map(String::as_str) == Some("]]"))
 }
 
-pub(in crate::executor) fn conditional_pattern_or_string_matches(left: &str, right: &str) -> bool {
+pub(in crate::executor) fn conditional_pattern_or_string_matches(
+    left: &str,
+    right: &str,
+    nocase: bool,
+) -> bool {
     if pattern_contains_glob(right) {
-        case_pattern_matches(right, left)
+        if nocase {
+            case_pattern_matches_nocase(right, left)
+        } else {
+            case_pattern_matches(right, left)
+        }
+    } else if nocase {
+        left.eq_ignore_ascii_case(right)
     } else {
         left == right
     }

@@ -65,6 +65,32 @@ fn test_conditional_string_equality_uses_shell_patterns() {
 }
 
 #[test]
+fn test_conditional_string_equality_honors_nocasematch() {
+    let output_path = "target/rubash-conditional-nocasematch-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s nocasematch extglob; \
+         [[ Alpha == alpha ]]; echo literal:$? > {output_path}; \
+         [[ A == [a-z] ]]; echo range:$? >> {output_path}; \
+         [[ BAR == @(foo|bar) ]]; echo extglob:$? >> {output_path}; \
+         [[ a == [[:upper:]] ]]; echo upper:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "literal:0\nrange:0\nextglob:0\nupper:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_string_equality_uses_negated_extglob_patterns() {
     let output_path = "target/rubash-conditional-negated-extglob-output.txt";
     let _ = fs::remove_file(output_path);
