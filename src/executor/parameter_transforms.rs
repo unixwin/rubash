@@ -247,10 +247,16 @@ impl Executor {
             .unwrap_or_default()
     }
 
-    pub(in crate::executor) fn parameter_prompt_transform(&self, name: &str) -> String {
-        let Some(value) = self.parameter_error_value(name) else {
-            return String::new();
-        };
-        self.expand_prompt_parameters(&self.decode_prompt_string(strip_matching_quotes(&value)))
+    pub(in crate::executor) fn apply_parameter_transform_value(
+        &self,
+        value: &str,
+        transform: ParameterTransform,
+    ) -> String {
+        if transform == ParameterTransform::Prompt {
+            return self.expand_prompt_parameters(
+                &self.decode_prompt_string(strip_matching_quotes(value)),
+            );
+        }
+        apply_parameter_transform(value, transform)
     }
 }

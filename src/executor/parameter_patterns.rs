@@ -24,9 +24,6 @@ impl Executor {
             if transform == ParameterTransform::KeyValueSplit {
                 return Some(self.parameter_key_value_transform(target_name, false));
             }
-            if transform == ParameterTransform::Prompt {
-                return Some(self.parameter_prompt_transform(target_name));
-            }
             let value = self
                 .array_element_parameter_value(target_name)
                 .or_else(|| {
@@ -41,7 +38,7 @@ impl Executor {
                     })
                 })
                 .unwrap_or_default();
-            return Some(apply_parameter_transform(&value, transform));
+            return Some(self.apply_parameter_transform_value(&value, transform));
         }
         let ref_name = ref_name?;
         let target_name = self.env_vars.get(ref_name)?;
@@ -65,7 +62,7 @@ impl Executor {
                 })
                 .unwrap_or_default()
         };
-        Some(apply_parameter_transform(&value, transform))
+        Some(self.apply_parameter_transform_value(&value, transform))
     }
 
     pub(in crate::executor) fn expand_parameter_pattern_removal(

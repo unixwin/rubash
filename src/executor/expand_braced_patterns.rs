@@ -135,9 +135,6 @@ impl Executor {
         if transform == ParameterTransform::Attributes {
             return Some(self.parameter_attribute_transform(var_name));
         }
-        if transform == ParameterTransform::Prompt {
-            return Some(self.parameter_prompt_transform(var_name));
-        }
         if let Some(value) = self.indirect_parameter_transform(var_name, transform) {
             return Some(value);
         }
@@ -145,7 +142,7 @@ impl Executor {
             return Some(
                 self.positional_params
                     .iter()
-                    .map(|value| apply_parameter_transform(value, transform))
+                    .map(|value| self.apply_parameter_transform_value(value, transform))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -154,12 +151,12 @@ impl Executor {
             return Some(
                 self.positional_params
                     .get(index.saturating_sub(1))
-                    .map(|value| apply_parameter_transform(value, transform))
+                    .map(|value| self.apply_parameter_transform_value(value, transform))
                     .unwrap_or_default(),
             );
         }
         if let Some(value) = self.array_element_parameter_value(var_name) {
-            return Some(apply_parameter_transform(&value, transform));
+            return Some(self.apply_parameter_transform_value(&value, transform));
         }
         if let Some(array_name) = var_name
             .strip_suffix("[@]")
@@ -170,7 +167,7 @@ impl Executor {
                     .map(|value| {
                         array_values(&value)
                             .into_iter()
-                            .map(|value| apply_parameter_transform(&value, transform))
+                            .map(|value| self.apply_parameter_transform_value(&value, transform))
                             .collect::<Vec<_>>()
                             .join(" ")
                     })
@@ -185,18 +182,18 @@ impl Executor {
                 if is_marked_var(&self.env_vars, ASSOC_VARS, &name) {
                     return Some(
                         assoc_value_at(value, "0")
-                            .map(|value| apply_parameter_transform(&value, transform))
+                            .map(|value| self.apply_parameter_transform_value(&value, transform))
                             .unwrap_or_default(),
                     );
                 }
                 if is_marked_array_var(&self.env_vars, &name) || is_array_storage(value) {
                     return Some(
                         array_value_at(value, 0)
-                            .map(|value| apply_parameter_transform(&value, transform))
+                            .map(|value| self.apply_parameter_transform_value(&value, transform))
                             .unwrap_or_default(),
                     );
                 }
-                return Some(apply_parameter_transform(value, transform));
+                return Some(self.apply_parameter_transform_value(value, transform));
             }
             return Some(String::new());
         }
