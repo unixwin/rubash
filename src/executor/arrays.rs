@@ -58,6 +58,31 @@ pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec
         .collect()
 }
 
+pub(super) fn field_split_array_values_with_ifs(
+    values: Vec<String>,
+    ifs: Option<&str>,
+) -> Vec<String> {
+    values
+        .into_iter()
+        .flat_map(|value| field_split_values_with_ifs(&value, ifs))
+        .collect()
+}
+
+pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
+    if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\x1d') {
+        return false;
+    }
+
+    let Some(inner) = word
+        .strip_prefix("${")
+        .and_then(|word| word.strip_suffix('}'))
+    else {
+        return false;
+    };
+    let name = inner.split_once(':').map_or(inner, |(name, _)| name);
+    name.ends_with("[@]") || name.ends_with("[*]")
+}
+
 pub(super) fn pathname_expand_array_token(token: &str) -> Option<Vec<String>> {
     if token.starts_with('"') || token.starts_with('\'') || !pattern_contains_glob(token) {
         return None;

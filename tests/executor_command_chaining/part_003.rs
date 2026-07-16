@@ -167,6 +167,31 @@ fn test_quoted_array_at_slice_expands_to_multiple_arguments() {
 }
 
 #[test]
+fn test_unquoted_array_expansion_field_splits_values() {
+    let output_path = "target/rubash-unquoted-array-field-split-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one 'two words' three); \
+         printf 'all<%s>\\n' ${{arr[@]}} > {output_path}; \
+         printf 'slice<%s>\\n' ${{arr[@]:1:2}} >> {output_path}; \
+         printf 'star<%s>\\n' ${{arr[*]:1:2}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "all<zero>\nall<one>\nall<two>\nall<words>\nall<three>\nslice<one>\nslice<two>\nslice<words>\nstar<one>\nstar<two>\nstar<words>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_quoted_positional_at_expands_to_multiple_arguments() {
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);

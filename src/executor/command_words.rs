@@ -52,6 +52,12 @@ impl Executor {
         word: &str,
     ) -> Result<Vec<String>, String> {
         if let Some(values) = self.array_at_word_values(word) {
+            if word_is_unquoted_array_list_expansion(word) {
+                return Ok(field_split_array_values_with_ifs(
+                    values,
+                    self.env_vars.get("IFS").map(String::as_str),
+                ));
+            }
             return Ok(values);
         }
         if self.is_brace_expand_enabled() && !word.contains("${") {
