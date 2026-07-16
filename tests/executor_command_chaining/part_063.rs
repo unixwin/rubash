@@ -175,7 +175,9 @@ fn test_parameter_substring_slices_characters() {
 fn test_parameter_substring_supports_negative_offset() {
     let output_path = "target/rubash-param-substring-negative-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("v=abcdef; echo ${{v: -2}} ${{v: -4:2}} > {output_path}");
+    let input = format!(
+        "v=abcdef; echo ${{v: -2}} ${{v: -4:2}} \"${{v: -2}}\" \"${{v: -4:2}}\" > {output_path}"
+    );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -184,7 +186,7 @@ fn test_parameter_substring_supports_negative_offset() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "ef cd\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "ef cd ef cd\n");
     let _ = fs::remove_file(output_path);
 }
 
@@ -247,7 +249,9 @@ fn test_array_parameter_substring_uses_offset_and_length() {
 fn test_array_parameter_substring_supports_negative_offset() {
     let output_path = "target/rubash-array-substring-negative-output.txt";
     let _ = fs::remove_file(output_path);
-    let input = format!("arr=(zero one two three); echo ${{arr[*]: -2}} > {output_path}");
+    let input = format!(
+        "arr=(zero one two three); echo ${{arr[*]: -2}} / \"${{arr[*]: -2}}\" > {output_path}"
+    );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
@@ -256,7 +260,10 @@ fn test_array_parameter_substring_supports_negative_offset() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "two three\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "two three / two three\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

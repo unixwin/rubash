@@ -70,6 +70,10 @@ impl Executor {
             }
         }
 
+        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+            return self.expand_braced_substring_parameter(var_name, offset, length);
+        }
+
         if let Some(var_name) = name.strip_prefix('#') {
             if let Some(value) = self.array_element_parameter_value(var_name) {
                 return value.chars().count().to_string();
@@ -157,6 +161,10 @@ impl Executor {
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| self.expand_embedded_parameters_mut(error_word));
             }
+        }
+
+        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+            return self.expand_braced_substring_parameter(var_name, offset, length);
         }
 
         if let Some(var_name) = name.strip_prefix('#') {

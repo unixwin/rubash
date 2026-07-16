@@ -103,7 +103,7 @@ impl Executor {
             .unwrap_or_else(|| "0".to_string())
     }
 
-    fn expand_braced_substring_parameter(
+    pub(in crate::executor) fn expand_braced_substring_parameter(
         &self,
         var_name: &str,
         offset: isize,
