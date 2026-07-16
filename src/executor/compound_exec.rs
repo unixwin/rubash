@@ -30,12 +30,18 @@ impl Executor {
         &mut self,
         time_command: &TimeCommand,
     ) -> Result<(), ExecuteError> {
-        if time_command.command.words.is_empty() && command_has_no_effect(&time_command.command) {
+        if let Some(coproc_cmd) = &time_command.command.coproc_command {
+            self.execute_coproc_command(&time_command.command, coproc_cmd)?;
+        } else if time_command.command.words.is_empty()
+            && command_has_no_effect(&time_command.command)
+        {
             self.exit_code = 0;
         } else if let Some(pipeline_command) = &time_command.command.pipeline_command {
             self.execute_pipeline_command(pipeline_command)?;
         } else if time_command.command.brace_group.is_some() {
             self.execute_brace_group_pipeline(&time_command.command)?;
+        } else if time_command.command.words.first().map(String::as_str) == Some("coproc") {
+            self.execute_time_reparsed_coproc(&time_command.command)?;
         } else {
             self.execute_command(&time_command.command)?;
         }
@@ -44,6 +50,21 @@ impl Executor {
             self.exit_code = invert_exit_status(self.exit_code);
         }
         Ok(())
+    }
+
+    fn execute_time_reparsed_coproc(&mut self, command: &CommandNode) -> Result<(), ExecuteError> {
+        let source = bash_command_source_text(command);
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if let Some(coproc_command) = reparsed
+            .commands
+            .first()
+            .and_then(|command| command.coproc_command.as_ref())
+        {
+            return self.execute_coproc_command(command, coproc_command);
+        }
+
+        self.execute_command(command)
     }
 
     pub(in crate::executor) fn execute_time_prefixed_compound_command(

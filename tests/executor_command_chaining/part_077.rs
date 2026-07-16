@@ -729,6 +729,24 @@ fn test_time_prefix_executes_function_definition() {
 }
 
 #[test]
+fn test_time_prefix_executes_coproc_command() {
+    let status_path = "target/rubash-time-coproc-status.txt";
+    let _ = fs::remove_file(status_path);
+    let input =
+        format!("time -p coproc TIMEDC {{ :; }}; echo pid:${{TIMEDC_PID:+set}} > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_time_inversion_prefix_executes_function_definition() {
     let output_path = "target/rubash-time-inverted-function-definition-output.txt";
     let error_path = "target/rubash-time-inverted-function-definition-error.txt";
@@ -915,4 +933,24 @@ fn test_alias_introduced_time_executes_arithmetic_command() {
         "true:0\nfalse:1\n"
     );
     let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_time_executes_coproc_command() {
+    let status_path = "target/rubash-alias-time-coproc-status.txt";
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p coproc ATIMEDC {{ :; }}; echo pid:${{ATIMEDC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+    let _ = fs::remove_file(status_path);
 }
