@@ -627,6 +627,7 @@ impl Executor {
         let word = strip_surrounding_quotes(&word);
         let nocasematch = crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch");
         let mut fall_through = false;
+        let mut matched_any = false;
         let mut index = 0;
         while let Some(clause) = case_command.clauses.get(index) {
             let matched = fall_through
@@ -656,6 +657,7 @@ impl Executor {
                     }
                 });
             if matched {
+                matched_any = true;
                 let body = Ast {
                     commands: clause.body.clone(),
                 };
@@ -673,7 +675,9 @@ impl Executor {
             index += 1;
         }
 
-        self.exit_code = 0;
+        if !matched_any {
+            self.exit_code = 0;
+        }
         Ok(())
     }
 
