@@ -32,10 +32,12 @@ pub(in crate::builtins::declare) fn append_array_value(
             if let Some(index) = array_assignment_index(left, &entries) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
                 let rhs = unquote_storage_value(rhs);
-                entries.insert(
-                    index,
-                    (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string(),
-                );
+                let value = if integer {
+                    (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
+                } else {
+                    format!("{current}{rhs}")
+                };
+                entries.insert(index, value);
                 next_index = index + 1;
                 continue;
             }

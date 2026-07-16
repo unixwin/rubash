@@ -260,6 +260,51 @@ fn test_compound_indexed_array_assignment_evaluates_arithmetic_indices() {
 }
 
 #[test]
+fn test_indexed_compound_append_uses_string_append_for_plain_arrays() {
+    let output_path = "target/rubash-indexed-compound-string-append-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=([0]=a); arr+=([0]+=b [2]+=z); \
+         printf '%s / %s / %s\\n' \"${{arr[0]}}\" \"${{arr[2]}}\" \"${{!arr[*]}}\" > {output_path}; \
+         declare -a darr=([0]=a); declare -a darr+=([0]+=b); \
+         printf '%s\\n' \"${{darr[0]}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "ab / z / 0 2\nab\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_integer_indexed_compound_append_uses_arithmetic_append() {
+    let output_path = "target/rubash-indexed-compound-integer-append-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "declare -i -a arr=([0]=1); arr+=([0]+=2 [2]+=5); \
+         printf '%s / %s\\n' \"${{arr[0]}}\" \"${{arr[2]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "3 / 5\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_compound_indexed_array_assignment_preserves_quoted_words() {
     let output_path = "target/rubash-indexed-array-compound-quotes-output.txt";
     let _ = fs::remove_file(output_path);
