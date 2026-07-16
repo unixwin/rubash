@@ -77,10 +77,12 @@ impl Executor {
         let mut stdin_offset = self.select_stdin_offset(has_stdin);
 
         loop {
+            let mut prompt = Vec::new();
             for (i, value) in values.iter().enumerate() {
-                eprintln!("{}{}", i + 1, value);
+                writeln!(&mut prompt, "{}) {}", i + 1, value)?;
             }
-            eprint!("{}", ps3);
+            write!(&mut prompt, "{ps3}")?;
+            self.write_default_stderr(&prompt)?;
 
             let Some(input) = self.read_select_input(has_stdin, &mut stdin_offset) else {
                 self.exit_code = 0;

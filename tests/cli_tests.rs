@@ -51,6 +51,25 @@ fn c_command_uses_command_name_and_positional_arguments() {
 }
 
 #[test]
+fn select_menu_uses_bash_stderr_format() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("select x; do printf '<%s>\\n' \"$x\"; break; done <<< 2")
+        .arg("arg0")
+        .arg("alpha")
+        .arg("beta")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "<beta>\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "1) alpha\n2) beta\n#? "
+    );
+}
+
+#[test]
 fn c_command_redirects_stdout_to_stderr_fd() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
