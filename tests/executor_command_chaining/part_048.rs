@@ -84,6 +84,55 @@ fn test_read_invalid_counts_redirect_stderr() {
 }
 
 #[test]
+fn test_read_timeout_zero_checks_without_consuming_input() {
+    let output_path = "target/rubash-read-timeout-zero-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "{{ read -t 0 probe; first_status=$?; read value; \
+         printf '<%s>:%s:<%s>' \"$probe\" \"$first_status\" \"$value\" > {output_path}; }} <<< abc"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<>:0:<abc>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_t_rejects_invalid_timeout_specification() {
+    let output_path = "target/rubash-read-invalid-timeout-status.txt";
+    let error_path = "target/rubash-read-invalid-timeout-error.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+    let input = format!(
+        "read -t abc value <<< data 2> {error_path}; echo word:$? > {output_path}; \
+         read -t-1 value <<< data 2>> {error_path}; echo negative:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "word:1\nnegative:1\n"
+    );
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("read: abc: invalid timeout specification"));
+    assert!(error.contains("read: -1: invalid timeout specification"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(error_path);
+}
+
+#[test]
 fn test_read_invalid_options_fail_with_status_two() {
     let output_path = "target/rubash-read-invalid-option-status.txt";
     let error_path = "target/rubash-read-invalid-option-error.txt";

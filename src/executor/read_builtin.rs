@@ -17,6 +17,7 @@ impl Executor {
         let mut stop_scalar_names = false;
         let mut prompt: Option<String> = None;
         let mut read_fd: Option<u32> = None;
+        let mut timeout_zero = false;
         let mut index = 1;
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
@@ -167,7 +168,30 @@ impl Executor {
                     };
                     index += 2;
                 }
-                "-i" | "-t" => {
+                "-i" => {
+                    index += 2;
+                }
+                "-t" => {
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -t: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    match parse_read_timeout(word) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
                     index += 2;
                 }
                 "-p" => {
@@ -284,6 +308,18 @@ impl Executor {
                                 return self.finish_read_error(cmd, &stderr, 1);
                             }
                         };
+                    } else if let Some(value) = word.strip_prefix("-t") {
+                        match parse_read_timeout(value) {
+                            Ok(is_zero) => timeout_zero = is_zero,
+                            Err(()) => {
+                                let _ = writeln!(
+                                    &mut stderr,
+                                    "{}read: {value}: invalid timeout specification",
+                                    self.diagnostic_prefix()
+                                );
+                                return self.finish_read_error(cmd, &stderr, 1);
+                            }
+                        }
                     }
                     index += 1;
                 }
@@ -338,6 +374,37 @@ impl Executor {
                 );
                 return self.finish_read_error(cmd, &stderr, 1);
             }
+        }
+
+        if timeout_zero {
+            let status = self.read_timeout_zero_status(cmd, read_fd);
+            if let Some(name) = array_name {
+                self.env_vars.insert(name.clone(), read_array_storage(&[]));
+                mark_env_name(&mut self.env_vars, "__RUBASH_ARRAY_VARS", &name);
+                return if invalid_name {
+                    self.finish_read_error(cmd, &stderr, 1)
+                } else {
+                    status
+                };
+            }
+
+            let scalar_names = if scalar_names.is_empty() {
+                if invalid_name {
+                    Vec::new()
+                } else {
+                    vec!["REPLY".to_string()]
+                }
+            } else {
+                scalar_names.clone()
+            };
+            if !scalar_names.is_empty() {
+                self.assign_read_scalar_names(&scalar_names, "", raw);
+            }
+            return if invalid_name {
+                self.finish_read_error(cmd, &stderr, 1)
+            } else {
+                status
+            };
         }
 
         if let Some(name) = array_name {
@@ -457,11 +524,69 @@ impl Executor {
                 && !is_closed_redirect_target(&self.expand_word(&redirect.target))
         })
     }
+
+    fn read_timeout_zero_status(&self, cmd: &CommandNode, read_fd: Option<u32>) -> i32 {
+        if let Some(fd) = read_fd {
+            let input_key = fd_stdin_key(fd);
+            if let Some(input) = self.env_vars.get(&input_key) {
+                if input == FD_PROCESS_STDIN_TARGET {
+                    return 1;
+                }
+                return 0;
+            }
+            if cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd == Some(fd) && redirect.body.is_some())
+            {
+                return 0;
+            }
+            if cmd.redirect_in.as_ref().is_some_and(|redirect| {
+                redirect.fd == Some(fd)
+                    && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+            }) {
+                return 0;
+            }
+            return 1;
+        }
+
+        if command_closes_stdin(cmd) || self.env_vars.contains_key(&fd_closed_key(0)) {
+            return 1;
+        }
+        if cmd.redirect_in.as_ref().is_some_and(|redirect| {
+            redirect.fd.unwrap_or(0) == 0
+                && !is_closed_redirect_target(&self.expand_word(&redirect.target))
+        }) {
+            return 0;
+        }
+        if cmd
+            .heredoc_redirects
+            .iter()
+            .any(|redirect| redirect.fd.unwrap_or(0) == 0 && redirect.body.is_some())
+        {
+            return 0;
+        }
+        if self.stdin_string_for_command(cmd).is_some()
+            || self.env_vars.contains_key(&fd_stdin_key(0))
+            || self.env_vars.contains_key(FUNCTION_STDIN)
+        {
+            return 0;
+        }
+        1
+    }
 }
 
 fn parse_read_fd(value: &str) -> Result<u32, ()> {
     let fd = value.parse::<i32>().map_err(|_| ())?;
     u32::try_from(fd).map_err(|_| ())
+}
+
+fn parse_read_timeout(value: &str) -> Result<bool, ()> {
+    let timeout = value.parse::<f64>().map_err(|_| ())?;
+    if !timeout.is_finite() || timeout < 0.0 {
+        return Err(());
+    }
+    Ok(timeout == 0.0)
 }
 
 fn report_read_invalid_identifier(stderr: &mut Vec<u8>, diagnostic_prefix: &str, name: &str) {
