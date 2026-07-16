@@ -281,6 +281,67 @@ fn posix_long_option_enables_posix_mode() {
 }
 
 #[test]
+fn cli_shell_option_name_applies_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-o")
+        .arg("errexit")
+        .arg("-c")
+        .arg("[[ -o errexit ]]; echo $?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "0\n");
+}
+
+#[test]
+fn cli_plus_shell_option_name_disables_previous_option() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-e")
+        .arg("+o")
+        .arg("errexit")
+        .arg("-c")
+        .arg("[[ -o errexit ]]; echo $?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+}
+
+#[test]
+fn cli_o_posix_sets_posix_mode_and_shell_option() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-o")
+        .arg("posix")
+        .arg("-c")
+        .arg("type break; [[ -o posix ]]; echo option:$?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "break is a special shell builtin\noption:0\n"
+    );
+}
+
+#[test]
+fn invalid_cli_shell_option_fails_before_command_string() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-o")
+        .arg("no_such_shell_option")
+        .arg("-c")
+        .arg("echo should-not-run")
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid shell option name"));
+}
+
+#[test]
 fn profile_startup_options_are_accepted_before_command_string() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("--noprofile")

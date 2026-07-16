@@ -37,12 +37,26 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "-o" if args.get(index + 1).map(String::as_str) == Some("posix") => {
-                executor.set_env("__RUBASH_POSIX_MODE", "1");
-                index += 2;
+            "-o" | "+o" => {
+                if let Some(option) = args.get(index + 1) {
+                    if !executor.is_shell_option(option) {
+                        eprintln!("rubash: {option}: invalid shell option name");
+                        return 2;
+                    }
+                    let enabled = args[index] == "-o";
+                    executor.set_shell_option(option, enabled);
+                    if option == "posix" {
+                        executor.set_env("__RUBASH_POSIX_MODE", if enabled { "1" } else { "0" });
+                    }
+                    index += 2;
+                } else {
+                    eprintln!("rubash: {}: option requires an argument", args[index]);
+                    return 2;
+                }
             }
             "--posix" => {
                 executor.set_env("__RUBASH_POSIX_MODE", "1");
+                executor.set_shell_option("posix", true);
                 index += 1;
             }
             "--login" | "--noprofile" | "--norc" | "-l" => {

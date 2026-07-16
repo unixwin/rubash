@@ -37,6 +37,10 @@ impl Executor {
         crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
     }
 
+    pub fn is_shell_option(&self, name: &str) -> bool {
+        crate::builtins::set::is_shell_option(name)
+    }
+
     pub fn set_shopt_option(&mut self, name: &str, enabled: bool) -> bool {
         if !crate::builtins::shopt::is_supported_option(name) {
             return false;
