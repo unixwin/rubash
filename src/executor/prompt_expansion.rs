@@ -50,6 +50,10 @@ impl Executor {
                 .unwrap_or_default();
         }
 
+        if let Some(value) = self.array_element_parameter_value(target_expr) {
+            return vec![value];
+        }
+
         self.env_vars
             .get(target_expr)
             .map(|value| {

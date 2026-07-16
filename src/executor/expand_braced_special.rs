@@ -104,6 +104,10 @@ impl Executor {
                 .unwrap_or_default()
         };
 
+        if let Some(value) = self.array_element_parameter_value(&target_name) {
+            return Some(value);
+        }
+
         Some(self.expand_parameter_named_value(&target_name))
     }
 }
