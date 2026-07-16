@@ -164,3 +164,22 @@ impl Default for Executor {
         Self::new()
     }
 }
+
+impl Drop for Executor {
+    fn drop(&mut self) {
+        let current_names: Vec<String> = env::vars().map(|(name, _)| name).collect();
+        for name in current_names {
+            if !self.process_env_snapshot.contains_key(&name) {
+                env::remove_var(name);
+            }
+        }
+
+        for (name, value) in &self.process_env_snapshot {
+            if is_valid_process_env(name, value) {
+                set_process_env(name, value);
+            } else {
+                env::remove_var(name);
+            }
+        }
+    }
+}

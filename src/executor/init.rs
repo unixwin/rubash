@@ -2,7 +2,8 @@ use super::*;
 
 impl Executor {
     pub fn new() -> Self {
-        let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+        let process_env_snapshot: HashMap<String, String> = std::env::vars().collect();
+        let mut env_vars = process_env_snapshot.clone();
         // On Windows, std::env::vars() returns PATH as "Path" (capital P).
         // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
         // which is a case-sensitive HashMap lookup — it misses on Windows.
@@ -112,6 +113,7 @@ impl Executor {
             last_command_substitution_status: Cell::new(None),
             stdout_capture: None,
             stderr_capture: None,
+            process_env_snapshot,
         }
     }
 }

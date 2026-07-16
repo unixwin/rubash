@@ -193,6 +193,7 @@ where
                 diagnostic_prefix(),
                 var_name
             )?;
+            variables.insert(var_name.to_string(), String::new());
             attr_status = EXECUTION_FAILURE;
             continue;
         }

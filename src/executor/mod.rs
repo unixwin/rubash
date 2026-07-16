@@ -306,6 +306,7 @@ pub struct Executor {
     last_command_substitution_status: Cell<Option<i32>>,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
+    process_env_snapshot: HashMap<String, String>,
 }
 
 #[cfg(test)]

@@ -12,6 +12,12 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         return None;
     }
 
+    if cfg!(windows) && name == "sh" {
+        if let Some(shell) = find_windows_sh_compatible_command(env_vars) {
+            return Some(shell);
+        }
+    }
+
     if has_path_separator(name) {
         let candidate = shell_path_to_windows(name, env_vars);
         return executable_candidate(&candidate);
@@ -133,6 +139,42 @@ fn find_windows_git_bash_from_env(env_vars: &HashMap<String, String>) -> Option<
         .map(PathBuf::from)
         .flat_map(|dir| [dir.join("bash.exe"), dir.join("sh.exe")])
         .find(|path| is_native_windows_shell(path))
+}
+
+fn find_windows_sh_compatible_command(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    if let Some(root) = git_bash_root(env_vars) {
+        if !path_contains_git_bash_dir(env_vars, &root) {
+            return None;
+        }
+        for candidate in [
+            root.join("usr").join("bin").join("sh.exe"),
+            root.join("bin").join("sh.exe"),
+            root.join("bin").join("bash.exe"),
+            root.join("usr").join("bin").join("bash.exe"),
+        ] {
+            if is_native_windows_shell(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    find_windows_git_bash_from_env(env_vars).or_else(find_windows_git_bash)
+}
+
+fn path_contains_git_bash_dir(env_vars: &HashMap<String, String>, root: &Path) -> bool {
+    let Some(path) = env_vars.get("PATH") else {
+        return false;
+    };
+    let bin = root.join("bin");
+    let usr_bin = root.join("usr").join("bin");
+    split_path(path).into_iter().any(|entry| {
+        let path = shell_path_to_windows(&entry, env_vars);
+        path.to_string_lossy()
+            .eq_ignore_ascii_case(&bin.to_string_lossy())
+            || path
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&usr_bin.to_string_lossy())
+    })
 }
 
 fn find_native_shell_on_path(env_vars: &HashMap<String, String>) -> Option<PathBuf> {

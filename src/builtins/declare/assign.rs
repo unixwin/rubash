@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::env;
 use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
@@ -96,7 +95,6 @@ where
         };
         variables.insert(var_name.to_string(), value.clone());
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
-        env::set_var(var_name, value);
     }
     Ok(status)
 }
