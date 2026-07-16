@@ -251,6 +251,34 @@ fn test_conditional_v_checks_array_subscripts() {
 }
 
 #[test]
+fn test_v_array_whole_subscript_checks_indexed_array_elements() {
+    let output_path = "target/rubash-v-array-whole-subscript-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one); empty=(); declare -A assoc; assoc[k]=v; \
+         [[ -v arr[@] ]]; echo cond_arr_at:$? > {output_path}; \
+         [[ -v arr[*] ]]; echo cond_arr_star:$? >> {output_path}; \
+         [[ -v empty[@] ]]; echo cond_empty:$? >> {output_path}; \
+         [[ -v assoc[@] ]]; echo cond_assoc:$? >> {output_path}; \
+         test -v 'arr[@]'; echo test_arr_at:$? >> {output_path}; \
+         test -v 'empty[@]'; echo test_empty:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "cond_arr_at:0\ncond_arr_star:0\ncond_empty:1\ncond_assoc:1\ntest_arr_at:0\ntest_empty:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_r_checks_nameref_variables() {
     let output_path = "target/rubash-conditional-nameref-unary-output.txt";
     let _ = fs::remove_file(output_path);

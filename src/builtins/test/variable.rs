@@ -17,7 +17,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
         if arrays.iter().any(|marked| marked == name) {
             return env_vars
                 .get(name)
-                .map(|value| value.starts_with('(') && value.ends_with(')') && value.len() > 2)
+                .map(|value| !array_entries(value).is_empty())
                 .unwrap_or(false);
         }
         return env_vars.contains_key(name) || env::var_os(name).is_some();
