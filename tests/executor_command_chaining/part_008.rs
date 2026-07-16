@@ -170,7 +170,7 @@ fn test_uid_and_euid_are_readonly_nonzero_ids() {
     let output_path = "target/rubash-uid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "echo $UID:$EUID > {output_path}; if (( UID == 0 )); then echo root >> {output_path}; else echo user >> {output_path}; fi; test -R UID; echo readonly:$? >> {output_path}; UID=0; echo assign:$?:$UID >> {output_path}"
+        "echo $UID:$EUID > {output_path}; if (( UID == 0 )); then echo root >> {output_path}; else echo user >> {output_path}; fi; test -v UID; echo set:$? >> {output_path}; UID=0; echo assign:$?:$UID >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -186,7 +186,7 @@ fn test_uid_and_euid_are_readonly_nonzero_ids() {
     assert!(!uid.is_empty());
     assert!(!euid.is_empty());
     assert_eq!(lines[1], if uid == "0" { "root" } else { "user" });
-    assert_eq!(lines[2], "readonly:0");
+    assert_eq!(lines[2], "set:0");
     assert_eq!(lines[3], format!("assign:1:{uid}"));
     let _ = fs::remove_file(output_path);
 }
@@ -197,7 +197,7 @@ fn test_ppid_is_readonly_numeric_id() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "echo $PPID > {output_path}; \
-         test -R PPID; echo readonly:$? >> {output_path}; \
+         test -v PPID; echo set:$? >> {output_path}; \
          PPID=1; echo assign:$?:$PPID >> {output_path}"
     );
     let tokens = tokenize(&input);
@@ -211,7 +211,7 @@ fn test_ppid_is_readonly_numeric_id() {
     let output = fs::read_to_string(output_path).unwrap();
     let lines: Vec<&str> = output.lines().collect();
     assert!(lines[0].chars().all(|ch| ch.is_ascii_digit()));
-    assert_eq!(lines[1], "readonly:0");
+    assert_eq!(lines[1], "set:0");
     assert_eq!(lines[2], format!("assign:1:{}", lines[0]));
     let _ = fs::remove_file(output_path);
 }

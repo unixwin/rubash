@@ -90,7 +90,8 @@ fn test_nameref_unary_conditionals_use_nameref_attribute() {
          [[ -R RUBASH_NAMEREF_UNARY_PLAIN ]]; echo cond_plain:$? >> {shell_output_path}; \
          [[ -R RUBASH_NAMEREF_UNARY_READONLY ]]; echo cond_readonly:$? >> {shell_output_path}; \
          test -R RUBASH_NAMEREF_UNARY_REF; echo test_ref:$? >> {shell_output_path}; \
-         test -R RUBASH_NAMEREF_UNARY_PLAIN; echo test_plain:$? >> {shell_output_path}"
+         test -R RUBASH_NAMEREF_UNARY_PLAIN; echo test_plain:$? >> {shell_output_path}; \
+         test -R RUBASH_NAMEREF_UNARY_READONLY; echo test_readonly:$? >> {shell_output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -102,7 +103,7 @@ fn test_nameref_unary_conditionals_use_nameref_attribute() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
-        "cond_ref:0\ncond_plain:1\ncond_readonly:1\ntest_ref:0\ntest_plain:1\n"
+        "cond_ref:0\ncond_plain:1\ncond_readonly:1\ntest_ref:0\ntest_plain:1\ntest_readonly:1\n"
     );
     for name in [
         "RUBASH_NAMEREF_UNARY_TARGET",

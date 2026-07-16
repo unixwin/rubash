@@ -20,7 +20,6 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_BADUSAGE: i32 = 2;
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
-const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 
 /// Execute `test` or `[` with arguments after the command name.
 pub fn execute(
@@ -184,11 +183,7 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-v" => Ok(variable_is_set(operand, env_vars)),
         "-R" => {
             let namerefs = marked_vars(env_vars, NAMEREF_VARS);
-            let readonly = marked_vars(env_vars, READONLY_VARS);
-            Ok(namerefs
-                .iter()
-                .chain(readonly.iter())
-                .any(|name| name == operand))
+            Ok(namerefs.iter().any(|name| name == operand))
         }
         "-a" | "-e" => Ok(test_path(operand, env_vars).exists()),
         "-d" => Ok(test_path(operand, env_vars).is_dir()),
