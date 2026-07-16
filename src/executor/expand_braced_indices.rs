@@ -120,12 +120,24 @@ impl Executor {
             return self
                 .parameter_array_storage(array_name)
                 .map(|value| {
-                    array_parameter_slice(
+                    let values = array_parameter_slice(
                         &value,
                         offset,
                         length.and_then(|length| usize::try_from(length).ok()),
                     )
-                    .join(" ")
+                    .into_iter()
+                    .map(normalize_array_expanded_value)
+                    .collect::<Vec<_>>();
+                    if var_name.ends_with("[*]") {
+                        let separator = self
+                            .env_vars
+                            .get("IFS")
+                            .and_then(|ifs| ifs.chars().next())
+                            .unwrap_or(' ');
+                        values.join(&separator.to_string())
+                    } else {
+                        values.join(" ")
+                    }
                 })
                 .unwrap_or_default();
         }

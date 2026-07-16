@@ -167,6 +167,29 @@ fn test_quoted_array_at_slice_expands_to_multiple_arguments() {
 }
 
 #[test]
+fn test_quoted_array_star_slice_uses_ifs_first_char() {
+    let output_path = "target/rubash-quoted-array-star-slice-ifs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "IFS=,; arr=(zero one 'two words' three); \
+         printf 'star<%s>\\n' \"${{arr[*]:1:2}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "star<one,two words>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_unquoted_array_expansion_field_splits_values() {
     let output_path = "target/rubash-unquoted-array-field-split-output.txt";
     let _ = fs::remove_file(output_path);
