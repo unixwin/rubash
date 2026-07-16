@@ -18,26 +18,24 @@ impl Executor {
         }
 
         let pattern = self.expand_embedded_parameters(pattern);
-        Some(
-            values
-                .into_iter()
-                .map(|value| match operation {
-                    PatternRemoval::ShortestPrefix => {
-                        remove_matching_prefix(&value, &pattern, MatchLength::Shortest)
-                    }
-                    PatternRemoval::LongestPrefix => {
-                        remove_matching_prefix(&value, &pattern, MatchLength::Longest)
-                    }
-                    PatternRemoval::ShortestSuffix => {
-                        remove_matching_suffix(&value, &pattern, MatchLength::Shortest)
-                    }
-                    PatternRemoval::LongestSuffix => {
-                        remove_matching_suffix(&value, &pattern, MatchLength::Longest)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
+        let values = values
+            .into_iter()
+            .map(|value| match operation {
+                PatternRemoval::ShortestPrefix => {
+                    remove_matching_prefix(&value, &pattern, MatchLength::Shortest)
+                }
+                PatternRemoval::LongestPrefix => {
+                    remove_matching_prefix(&value, &pattern, MatchLength::Longest)
+                }
+                PatternRemoval::ShortestSuffix => {
+                    remove_matching_suffix(&value, &pattern, MatchLength::Shortest)
+                }
+                PatternRemoval::LongestSuffix => {
+                    remove_matching_suffix(&value, &pattern, MatchLength::Longest)
+                }
+            })
+            .collect::<Vec<_>>();
+        Some(self.join_expanded_array_values(values, target_expr))
     }
 
     pub(in crate::executor) fn indirect_target_values(&self, target_expr: &str) -> Vec<String> {

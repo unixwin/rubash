@@ -257,6 +257,30 @@ fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
 }
 
 #[test]
+fn test_indirect_array_star_pattern_and_case_use_ifs_first_char() {
+    let output_path = "target/rubash-param-indirect-array-star-ifs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "IFS=,; arr=(alpha 'two words'); target='arr[*]'; \
+         printf 'case<%s>\\n' \"${{!target^^}}\" > {output_path}; \
+         printf 'pat<%s>\\n' \"${{!target#a}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "case<ALPHA,TWO WORDS>\npat<lpha,two words>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_test_v_checks_array_subscripts() {
     let output_path = "target/rubash-test-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
