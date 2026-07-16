@@ -2,6 +2,34 @@ use super::alias_case::*;
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_alias_introduced_brace_group(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("{") {
+            return Ok(None);
+        }
+
+        let (source, next_index) = alias_brace_group_source(ast, index, command, &words);
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed
+            .commands
+            .first()
+            .is_some_and(|command| command.brace_group.is_some())
+        {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(next_index))
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_function(
         &mut self,
         ast: &Ast,
@@ -364,6 +392,43 @@ fn synthetic_word_metadata(word_index: usize, value: &str) -> crate::parser::Wor
 
 fn alias_coproc_needs_following_body(words: &[String]) -> bool {
     matches!(words.len(), 1 | 2)
+}
+
+fn alias_brace_group_source(
+    ast: &Ast,
+    index: usize,
+    command: &CommandNode,
+    words: &[String],
+) -> (String, usize) {
+    let mut source = alias_compound_source_words(words);
+    let mut next_index = index + 1;
+    if words.iter().any(|word| word == "}") {
+        append_source_redirects(&mut source, command);
+        return (source, next_index);
+    }
+
+    let mut closed = false;
+    for command_index in index + 1..ast.commands.len() {
+        let Some(next_command) = ast.commands.get(command_index) else {
+            break;
+        };
+        let command_source = bash_command_source_text(next_command);
+        if !command_source.is_empty() {
+            source.push_str("; ");
+            source.push_str(&command_source);
+        }
+        next_index = command_index + 1;
+        if command_contains_word(next_command, "}") {
+            closed = true;
+            break;
+        }
+    }
+    if !closed {
+        source.push_str("; }");
+        append_source_redirects(&mut source, command);
+    }
+
+    (source, next_index)
 }
 
 fn alias_time_source(

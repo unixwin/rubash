@@ -82,6 +82,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_alias_introduced_brace_group(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
                 index = next_index;
                 continue;
