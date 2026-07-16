@@ -101,6 +101,18 @@ impl Executor {
                 .and_then(|word| word.strip_suffix('}'))
                 .and_then(|name| self.parse_parameter_substring(name))
             {
+                if let Some(indirect_name) = name.strip_prefix('!') {
+                    let target_expr = self.env_vars.get(indirect_name)?;
+                    let expands_as_array = target_expr.ends_with("[@]")
+                        || (!quoted_array_word && target_expr.ends_with("[*]"));
+                    if expands_as_array {
+                        return Some(slice_array_values(
+                            self.indirect_target_values(target_expr),
+                            offset,
+                            length.and_then(|length| usize::try_from(length).ok()),
+                        ));
+                    }
+                }
                 if let Some(array_name) = name.strip_suffix("[@]") {
                     return self.parameter_array_storage(array_name).map(|value| {
                         array_parameter_slice(

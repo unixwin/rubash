@@ -305,6 +305,31 @@ fn test_indirect_replacement_expands_target_values() {
 }
 
 #[test]
+fn test_indirect_substring_expands_target_values() {
+    let output_path = "target/rubash-param-indirect-substring-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abcdef; ref=value; printf 'scalar<%s>\\n' \"${{!ref:1:3}}\" > {output_path}; \
+         IFS=,; arr=(zero one two); star='arr[*]'; at='arr[@]'; \
+         printf 'star<%s>\\n' \"${{!star:1:2}}\" >> {output_path}; \
+         printf 'at<%s>\\n' \"${{!at:1:2}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "scalar<bcd>\nstar<one,two>\nat<one>\nat<two>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_test_v_checks_array_subscripts() {
     let output_path = "target/rubash-test-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);

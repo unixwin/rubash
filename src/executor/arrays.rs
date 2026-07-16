@@ -253,6 +253,24 @@ pub(super) fn array_parameter_slice(
         .collect()
 }
 
+pub(super) fn slice_array_values(
+    values: Vec<String>,
+    offset: isize,
+    length: Option<usize>,
+) -> Vec<String> {
+    let start = if offset < 0 {
+        values.len().saturating_sub(offset.unsigned_abs())
+    } else {
+        offset as usize
+    };
+
+    values
+        .into_iter()
+        .skip(start)
+        .take(length.unwrap_or(usize::MAX))
+        .collect()
+}
+
 pub(super) fn is_noassign_bash_array(name: &str) -> bool {
     matches!(
         name,

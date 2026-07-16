@@ -109,6 +109,9 @@ impl Executor {
         offset: isize,
         length: Option<isize>,
     ) -> String {
+        if let Some(value) = self.indirect_substring_parameter(var_name, offset, length) {
+            return value;
+        }
         if matches!(var_name, "@" | "*") {
             return positional_parameter_substring(&self.positional_params, offset, length)
                 .join(" ");
@@ -143,5 +146,33 @@ impl Executor {
                 .unwrap_or_default();
         }
         String::new()
+    }
+
+    fn indirect_substring_parameter(
+        &self,
+        var_name: &str,
+        offset: isize,
+        length: Option<isize>,
+    ) -> Option<String> {
+        let indirect_name = var_name.strip_prefix('!')?;
+        if let Some(target_name) = self.nameref_target_name(indirect_name) {
+            return Some(parameter_substring(&target_name, offset, length));
+        }
+
+        let target_expr = self.env_vars.get(indirect_name)?;
+        if target_expr.ends_with("[@]") || target_expr.ends_with("[*]") {
+            let values = slice_array_values(
+                self.indirect_target_values(target_expr),
+                offset,
+                length.and_then(|length| usize::try_from(length).ok()),
+            );
+            return Some(self.join_expanded_array_values(values, target_expr));
+        }
+
+        let value = self
+            .indirect_target_values(target_expr)
+            .into_iter()
+            .next()?;
+        Some(parameter_substring(&value, offset, length))
     }
 }

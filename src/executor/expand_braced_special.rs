@@ -26,6 +26,9 @@ impl Executor {
         }
 
         let indirect_name = name.strip_prefix('!')?;
+        if self.parse_parameter_substring(name).is_some() {
+            return None;
+        }
         if parse_parameter_replacement(name).is_some() {
             return None;
         }
