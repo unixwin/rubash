@@ -12,6 +12,21 @@ impl Executor {
             .or_else(|| indirect_name.strip_suffix("[*]"));
         if ref_name.is_none() {
             let target_name = self.env_vars.get(indirect_name)?;
+            if transform == ParameterTransform::Assignment {
+                return Some(self.parameter_assignment_transform(target_name));
+            }
+            if transform == ParameterTransform::Attributes {
+                return Some(self.parameter_attribute_transform(target_name));
+            }
+            if transform == ParameterTransform::KeyValueQuoted {
+                return Some(self.parameter_key_value_transform(target_name, true));
+            }
+            if transform == ParameterTransform::KeyValueSplit {
+                return Some(self.parameter_key_value_transform(target_name, false));
+            }
+            if transform == ParameterTransform::Prompt {
+                return Some(self.parameter_prompt_transform(target_name));
+            }
             let value = self
                 .array_element_parameter_value(target_name)
                 .or_else(|| {

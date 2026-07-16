@@ -28,8 +28,10 @@ fn test_indirect_parameter_transform_applies_to_target_value() {
     let output_path = "target/rubash-param-transform-indirect-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "value='two words'; ref=value; arr=(alpha beta); elem='arr[1]'; \
-         printf '<%s>\\n' \"${{!ref@Q}}\" \"${{!ref@U}}\" \"${{!elem@Q}}\" > {output_path}"
+        "USER=alice; export value='two words'; ref=value; arr=(alpha beta); elem='arr[1]'; \
+         PS='\\u'; psref=PS; \
+         printf '<%s>\\n' \"${{!ref@Q}}\" \"${{!ref@U}}\" \"${{!elem@Q}}\" \
+         \"${{!ref@A}}\" \"${{!ref@a}}\" \"${{!elem@A}}\" \"${{!psref@P}}\" > {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -41,7 +43,7 @@ fn test_indirect_parameter_transform_applies_to_target_value() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "<'two words'>\n<TWO WORDS>\n<'beta'>\n"
+        "<'two words'>\n<TWO WORDS>\n<'beta'>\n<declare -x value='two words'>\n<x>\n<declare -a arr='beta'>\n<alice>\n"
     );
     let _ = fs::remove_file(output_path);
 }
