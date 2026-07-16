@@ -471,11 +471,18 @@ impl Executor {
             child
         } else if !coproc_cmd.words.is_empty() {
             // Simple command: coproc [NAME] command [args...]
-            let words: Vec<&str> = coproc_cmd.words.iter().map(|w| w.as_str()).collect();
             let mut child = Command::new(&exe);
             child.arg("--");
-            for w in &words {
-                child.arg(w);
+            if coproc_cmd
+                .words
+                .first()
+                .is_some_and(|word| word.starts_with('-'))
+            {
+                for word in &coproc_cmd.words {
+                    child.arg(word);
+                }
+            } else {
+                child.arg("-c").arg(coproc_cmd.words.join(" "));
             }
             child
         } else {
