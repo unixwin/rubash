@@ -191,9 +191,25 @@ pub(in crate::executor) fn backtick_substitution_spans_whole_word(word: &str) ->
 
 pub(in crate::executor) fn is_parameter_error_name(name: &str) -> bool {
     is_shell_name(name)
+        || name
+            .strip_prefix('!')
+            .is_some_and(|name| !name.is_empty() && is_shell_name(name))
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
         || name.parse::<usize>().is_ok()
         || parse_array_subscript(name).is_some()
+}
+
+pub(in crate::executor) fn has_indirect_parameter_word_operator(name: &str) -> bool {
+    let Some(indirect) = name.strip_prefix('!') else {
+        return false;
+    };
+    [":-", ":=", ":?", ":+", "-", "=", "?", "+"]
+        .iter()
+        .any(|operator| {
+            indirect
+                .split_once(operator)
+                .is_some_and(|(left, _)| !left.is_empty())
+        })
 }
 
 pub(in crate::executor) fn parameter_substring(

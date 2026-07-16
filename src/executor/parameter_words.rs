@@ -316,6 +316,9 @@ impl Executor {
             if self.apply_array_element_parameter_assignment(name, value.clone()) {
                 return;
             }
+            if self.apply_indirect_parameter_assignment(name, value.clone()) {
+                return;
+            }
             if !is_shell_name(name) {
                 return;
             }
@@ -331,10 +334,33 @@ impl Executor {
             if self.apply_array_element_parameter_assignment(name, value.clone()) {
                 return;
             }
+            if self.apply_indirect_parameter_assignment(name, value.clone()) {
+                return;
+            }
             if !is_shell_name(name) {
                 return;
             }
             self.apply_shell_assignment(name, value);
         }
+    }
+
+    fn apply_indirect_parameter_assignment(&mut self, name: &str, value: String) -> bool {
+        let Some(indirect_name) = name.strip_prefix('!') else {
+            return false;
+        };
+        if self.nameref_target_name(indirect_name).is_some() {
+            return false;
+        }
+        let Some(target_name) = self.env_vars.get(indirect_name).cloned() else {
+            return false;
+        };
+        if self.apply_array_element_parameter_assignment(&target_name, value.clone()) {
+            return true;
+        }
+        if !is_shell_name(&target_name) {
+            return false;
+        }
+        self.apply_shell_assignment(&target_name, value);
+        true
     }
 }

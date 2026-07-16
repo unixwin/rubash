@@ -66,6 +66,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn parameter_operator_value(&self, name: &str) -> Option<String> {
+        if let Some(value) = self.indirect_parameter_operator_value(name) {
+            return value;
+        }
         if is_shell_name(name) {
             return self
                 .dynamic_parameter_value(name)
@@ -75,6 +78,24 @@ impl Executor {
             return Some(value);
         }
         self.parameter_error_value(&name)
+    }
+
+    fn indirect_parameter_operator_value(&self, name: &str) -> Option<Option<String>> {
+        let indirect_name = name.strip_prefix('!')?;
+        if let Some(target_name) = self.nameref_target_name(indirect_name) {
+            return Some(Some(target_name));
+        }
+
+        let target_expr = self.env_vars.get(indirect_name)?;
+        if target_expr.ends_with("[@]") || target_expr.ends_with("[*]") {
+            let values = self.indirect_target_values(target_expr);
+            if values.is_empty() {
+                return Some(None);
+            }
+            return Some(Some(self.join_expanded_array_values(values, target_expr)));
+        }
+
+        Some(self.indirect_target_values(target_expr).into_iter().next())
     }
 
     pub(in crate::executor) fn parameter_expansion_error(
