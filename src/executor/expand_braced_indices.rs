@@ -128,16 +128,7 @@ impl Executor {
                     .into_iter()
                     .map(normalize_array_expanded_value)
                     .collect::<Vec<_>>();
-                    if var_name.ends_with("[*]") {
-                        let separator = self
-                            .env_vars
-                            .get("IFS")
-                            .and_then(|ifs| ifs.chars().next())
-                            .unwrap_or(' ');
-                        values.join(&separator.to_string())
-                    } else {
-                        values.join(" ")
-                    }
+                    self.join_expanded_array_values(values, var_name)
                 })
                 .unwrap_or_default();
         }

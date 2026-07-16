@@ -43,13 +43,13 @@ impl Executor {
                 self.env_vars
                     .get(array_name)
                     .map(|value| {
-                        array_values(value)
+                        let values = array_values(value)
                             .into_iter()
                             .map(|value| {
                                 replace_parameter_pattern(&value, &pattern, &replacement, global)
                             })
-                            .collect::<Vec<_>>()
-                            .join(" ")
+                            .collect::<Vec<_>>();
+                        self.join_expanded_array_values(values, var_name)
                     })
                     .unwrap_or_default(),
             );

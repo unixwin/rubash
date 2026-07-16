@@ -140,6 +140,14 @@ impl Executor {
             .into_iter()
             .map(normalize_array_expanded_value)
             .collect::<Vec<_>>();
+        self.join_expanded_array_values(values, expression)
+    }
+
+    pub(in crate::executor) fn join_expanded_array_values(
+        &self,
+        values: Vec<String>,
+        expression: &str,
+    ) -> String {
         if expression.ends_with("[*]") {
             let separator = self
                 .env_vars

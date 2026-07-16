@@ -19,6 +19,31 @@ fn test_array_parameter_pattern_removal_applies_to_each_value() {
 }
 
 #[test]
+fn test_quoted_array_star_pattern_ops_use_ifs_first_char() {
+    let output_path = "target/rubash-array-star-pattern-ifs-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "IFS=,; arr=(src/main.rs src/lib.rs); \
+         printf 'pat<%s>\\n' \"${{arr[*]#*/}}\" > {output_path}; \
+         arr=(banana gamma); \
+         printf 'rep<%s>\\n' \"${{arr[*]//a/o}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "pat<main.rs,lib.rs>\nrep<bonono,gommo>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_array_element_parameter_substring_uses_element_value() {
     let output_path = "target/rubash-array-element-substring-output.txt";
     let _ = fs::remove_file(output_path);
