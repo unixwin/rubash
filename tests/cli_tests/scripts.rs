@@ -90,6 +90,52 @@ fn stdin_script_runs_multiline_case_command() {
 }
 
 #[test]
+fn stdin_script_runs_multiline_function_definition() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"f() {\n  echo body\n}\nf\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "body\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn stdin_script_runs_split_function_definition() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"f()\n{\n  echo split\n}\nf\nfunction g\n{\n  echo keyword\n}\ng\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "split\nkeyword\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn script_multiline_quoted_assignment_is_one_command() {
     let script_path = Path::new("target").join("rubash-cli-multiline-assignment.sh");
     fs::create_dir_all("target").unwrap();

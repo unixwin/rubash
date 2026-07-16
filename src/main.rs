@@ -242,6 +242,13 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
 }
 
 fn stdin_source_needs_more(source: &str) -> bool {
+    if stdin_source_is_function_signature(source) {
+        return true;
+    }
+    if stdin_source_has_unclosed_function_body(source) {
+        return true;
+    }
+
     let tokens = tokenize(source);
     let mut stack = Vec::new();
     for token in tokens {
@@ -259,6 +266,109 @@ fn stdin_source_needs_more(source: &str) -> bool {
         }
     }
     !stack.is_empty()
+}
+
+fn stdin_source_is_function_signature(source: &str) -> bool {
+    let trimmed = source.trim();
+    if let Some(name) = trimmed.strip_suffix("()") {
+        return is_stdin_function_name(name.trim());
+    }
+
+    trimmed
+        .strip_prefix("function ")
+        .map(str::trim)
+        .is_some_and(is_stdin_function_name)
+}
+
+fn stdin_source_has_unclosed_function_body(source: &str) -> bool {
+    let Some(open_brace) = first_unquoted_char(source, '{') else {
+        return false;
+    };
+    if unquoted_brace_depth(source) == 0 {
+        return false;
+    }
+
+    let signature = source[..open_brace].trim_end();
+    if let Some(name) = signature.strip_suffix("()") {
+        return is_stdin_function_name(name.trim_end());
+    }
+
+    signature
+        .strip_prefix("function ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .is_some_and(is_stdin_function_name)
+}
+
+fn is_stdin_function_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn first_unquoted_char(source: &str, target: char) -> Option<usize> {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for (index, ch) in source.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            continue;
+        }
+        if !single && !double && ch == target {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn unquoted_brace_depth(source: &str) -> usize {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut depth = 0usize;
+    for ch in source.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            continue;
+        }
+        if single || double {
+            continue;
+        }
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth
 }
 
 fn read_unbuffered_line(output: &mut String) -> io::Result<usize> {
