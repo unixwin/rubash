@@ -16,6 +16,17 @@ impl Executor {
         }
 
         let (source, next_index) = alias_time_source(ast, index, command, &words);
+        if let Some((case_command, redirect_command, next_index)) =
+            alias_time_case_command(ast, index, command, &words)
+        {
+            let time_command = alias_time_command_from_words(
+                &words,
+                alias_timed_case_command(case_command, redirect_command),
+            );
+            self.execute_time_ast_command(&time_command)?;
+            return Ok(Some(next_index));
+        }
+
         let tokens = crate::lexer::tokenize(&source);
         let reparsed = crate::parser::parse(&tokens);
         if !reparsed
@@ -347,6 +358,17 @@ fn alias_time_source(
 }
 
 fn alias_time_compound_end_word(words: &[String]) -> Option<&'static str> {
+    let index = alias_time_compound_word_index(words)?;
+
+    match words.get(index).map(String::as_str)? {
+        "if" => Some("fi"),
+        "case" => Some("esac"),
+        "for" | "while" | "until" | "select" => Some("done"),
+        _ => None,
+    }
+}
+
+fn alias_time_compound_word_index(words: &[String]) -> Option<usize> {
     let mut index = 1;
     while matches!(
         words.get(index).map(String::as_str),
@@ -355,11 +377,87 @@ fn alias_time_compound_end_word(words: &[String]) -> Option<&'static str> {
         index += 1;
     }
 
-    match words.get(index).map(String::as_str)? {
-        "if" => Some("fi"),
-        "case" => Some("esac"),
-        "for" | "while" | "until" | "select" => Some("done"),
-        _ => None,
+    words.get(index)?;
+    Some(index)
+}
+
+fn alias_time_case_command<'a>(
+    ast: &'a Ast,
+    index: usize,
+    command: &'a CommandNode,
+    words: &[String],
+) -> Option<(CaseCommand, &'a CommandNode, usize)> {
+    let case_word_index = alias_time_compound_word_index(words)?;
+    if words.get(case_word_index).map(String::as_str) != Some("case") {
+        return None;
+    }
+
+    let mut case_words = words[case_word_index..].to_vec();
+    let mut redirect_command = command;
+    let mut next_index = index + 1;
+    if !case_words.iter().any(|word| word == "esac") {
+        for command_index in index + 1..ast.commands.len() {
+            let Some(next_command) = ast.commands.get(command_index) else {
+                break;
+            };
+            case_words.extend(next_command.words.iter().cloned());
+            redirect_command = next_command;
+            next_index = command_index + 1;
+            if command_contains_word(next_command, "esac") {
+                break;
+            }
+        }
+    }
+
+    case_command_from_words(&case_words)
+        .map(|case_command| (case_command, redirect_command, next_index))
+}
+
+fn alias_timed_case_command(
+    case_command: CaseCommand,
+    redirect_command: &CommandNode,
+) -> CommandNode {
+    let mut command = CommandNode::new();
+    command.line = redirect_command.line;
+    command.case_command = Some(Box::new(case_command));
+    command.redirects = redirect_command.redirects.clone();
+    command.redirect_in = redirect_command.redirect_in.clone();
+    command.redirect_out = redirect_command.redirect_out.clone();
+    command.append = redirect_command.append.clone();
+    command.redirect_err = redirect_command.redirect_err.clone();
+    command.redirect_err_append = redirect_command.redirect_err_append.clone();
+    command.heredoc = redirect_command.heredoc.clone();
+    command.heredoc_delimiter = redirect_command.heredoc_delimiter.clone();
+    command.heredoc_redirects = redirect_command.heredoc_redirects.clone();
+    command.here_string = redirect_command.here_string.clone();
+    command
+}
+
+fn alias_time_command_from_words(words: &[String], command: CommandNode) -> TimeCommand {
+    let prefix_words = words
+        .iter()
+        .skip(1)
+        .take_while(|word| matches!(word.as_str(), "-p" | "--" | "!"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let prefix_word_metadata = prefix_words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| WordMetadata::new(index, word.clone(), word.clone()))
+        .collect::<Vec<_>>();
+    TimeCommand {
+        keyword: "time".to_string(),
+        keyword_metadata: synthetic_keyword_metadata("time"),
+        posix_format: prefix_words.iter().any(|word| word == "-p"),
+        inverted: prefix_words
+            .iter()
+            .filter(|word| word.as_str() == "!")
+            .count()
+            % 2
+            == 1,
+        prefix_words,
+        prefix_word_metadata,
+        command: Box::new(command),
     }
 }
 

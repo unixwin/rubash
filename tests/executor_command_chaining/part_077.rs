@@ -870,3 +870,25 @@ fn test_alias_introduced_time_executes_for_sequence_with_redirect() {
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
 }
+
+#[test]
+fn test_alias_introduced_time_executes_case_sequence() {
+    let output_path = "target/rubash-alias-time-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias t=time; \
+         t -p case beta in alpha) echo alpha ;; \
+         beta) echo beta ;; esac > {output_path}; \
+         echo status:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\nstatus:0\n");
+    let _ = fs::remove_file(output_path);
+}
