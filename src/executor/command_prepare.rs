@@ -1,4 +1,4 @@
-use super::glob::pathname_expand_word;
+use super::glob::{pathname_expand_word, PathnameExpansion};
 use super::*;
 
 impl Executor {
@@ -105,7 +105,10 @@ impl Executor {
         Ok(())
     }
 
-    pub(in crate::executor) fn expand_command_words(&mut self, cmd: &CommandNode) -> CommandNode {
+    pub(in crate::executor) fn expand_command_words(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<CommandNode, ExecuteError> {
         let mut variable_expanded = cmd.clone();
         variable_expanded.words = cmd
             .words
@@ -117,16 +120,20 @@ impl Executor {
 
         let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
         if !is_test_cmd {
-            variable_expanded.words = variable_expanded
-                .words
-                .into_iter()
-                .flat_map(|word| match pathname_expand_word(&word, &self.env_vars) {
-                    Some(matches) => matches,
-                    None => vec![word],
-                })
-                .collect();
+            let mut words = Vec::new();
+            for word in variable_expanded.words {
+                match pathname_expand_word(&word, &self.env_vars) {
+                    PathnameExpansion::Matches(matches) => words.extend(matches),
+                    PathnameExpansion::NoMatch => words.push(word),
+                    PathnameExpansion::Fail(pattern) => {
+                        self.report_failglob(&pattern);
+                        return Err(ExecuteError::ExitCode(1));
+                    }
+                }
+            }
+            variable_expanded.words = words;
         }
-        variable_expanded
+        Ok(variable_expanded)
     }
 
     fn expand_command_word(&mut self, cmd: &CommandNode, index: usize, word: &str) -> Vec<String> {
@@ -226,5 +233,10 @@ impl Executor {
             return true;
         }
         false
+    }
+
+    pub(in crate::executor) fn report_failglob(&mut self, pattern: &str) {
+        eprintln!("{}no match: {pattern}", self.diagnostic_prefix());
+        self.exit_code = 1;
     }
 }

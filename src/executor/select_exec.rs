@@ -31,11 +31,18 @@ impl Executor {
         let values: Vec<String> = if select_command.default_positional {
             self.positional_params.clone()
         } else {
-            select_command
-                .words
-                .iter()
-                .flat_map(|word| self.expand_for_word_values(word))
-                .collect()
+            let mut values = Vec::new();
+            for word in &select_command.words {
+                match self.expand_for_word_values_result(word) {
+                    Ok(expanded) => values.extend(expanded),
+                    Err(pattern) => {
+                        self.report_failglob(&pattern);
+                        self.finish_compound_output_process_substitutions(group_outputs)?;
+                        return Err(ExecuteError::ExitCode(1));
+                    }
+                }
+            }
+            values
         };
 
         if values.is_empty() {

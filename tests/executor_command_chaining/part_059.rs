@@ -227,6 +227,100 @@ fn test_pathname_expansion_matches_intermediate_segments() {
 }
 
 #[test]
+fn test_failglob_unmatched_command_word_aborts_command_list() {
+    let output_path = "target/rubash-failglob-command-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s failglob; printf '%s\\n' target/rubash-no-such-*.zzz > {output_path}; echo after >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
+}
+
+#[test]
+fn test_failglob_takes_precedence_over_nullglob() {
+    let output_path = "target/rubash-failglob-nullglob-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s nullglob failglob; printf '%s\\n' target/rubash-no-such-*.zzz > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
+}
+
+#[test]
+fn test_failglob_unmatched_for_word_skips_loop_body() {
+    let output_path = "target/rubash-failglob-for-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s failglob; for item in target/rubash-no-such-*.zzz; do echo $item > {output_path}; done; echo after >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
+}
+
+#[test]
+fn test_failglob_unmatched_select_word_skips_body() {
+    let output_path = "target/rubash-failglob-select-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s failglob; select item in target/rubash-no-such-*.zzz; do echo $item > {output_path}; break; done <<< 1; echo after >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
+    assert!(!std::path::Path::new(output_path).exists());
+}
+
+#[test]
+fn test_noglob_suppresses_failglob_pathname_expansion() {
+    let output_path = "target/rubash-noglob-suppresses-failglob-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s failglob; set -f; printf '%s\\n' target/rubash-no-such-*.zzz > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "target/rubash-no-such-*.zzz\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_set_noexec_updates_shell_option() {
     let tokens = tokenize("set -n");
     let ast = parse(&tokens);

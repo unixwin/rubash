@@ -21,7 +21,7 @@ impl Executor {
             return Ok(());
         }
 
-        let expanded = self.expand_command_words(cmd);
+        let expanded = self.expand_command_words(cmd)?;
         let cmd = self.apply_alias_expansion_after_word_expansion(&expanded);
 
         if self.execute_alias_expanded_syntax(&cmd)? {

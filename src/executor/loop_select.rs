@@ -15,11 +15,17 @@ impl Executor {
         let values = if for_command.default_positional {
             self.positional_params.clone()
         } else {
-            for_command
-                .words
-                .iter()
-                .flat_map(|word| self.expand_for_word_values(word))
-                .collect()
+            let mut values = Vec::new();
+            for word in &for_command.words {
+                match self.expand_for_word_values_result(word) {
+                    Ok(expanded) => values.extend(expanded),
+                    Err(pattern) => {
+                        self.report_failglob(&pattern);
+                        return Err(ExecuteError::ExitCode(1));
+                    }
+                }
+            }
+            values
         };
         let mut ran_body = false;
         for value in values {

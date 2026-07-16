@@ -3,6 +3,12 @@
 use std::fs;
 use std::path::Path;
 
+pub(crate) enum PathnameExpansion {
+    Matches(Vec<String>),
+    NoMatch,
+    Fail(String),
+}
+
 /// Check if a shopt option is enabled.
 fn shopt_enabled(env_vars: &std::collections::HashMap<String, String>, name: &str) -> bool {
     crate::builtins::shopt::option_enabled(env_vars, name)
@@ -12,7 +18,7 @@ fn shopt_enabled(env_vars: &std::collections::HashMap<String, String>, name: &st
 fn contains_glob_or_extglob(word: &str) -> bool {
     let chars: Vec<char> = word.chars().collect();
     for (i, &ch) in chars.iter().enumerate() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
+        if matches!(ch, '*' | '?' | '[') {
             return true;
         }
         if matches!(ch, '@' | '+' | '!') && chars.get(i + 1) == Some(&'(') {
@@ -34,32 +40,36 @@ fn contains_extglob(pattern: &str) -> bool {
 pub(crate) fn pathname_expand_word(
     word: &str,
     env_vars: &std::collections::HashMap<String, String>,
-) -> Option<Vec<String>> {
+) -> PathnameExpansion {
     if word.is_empty() {
-        return None;
+        return PathnameExpansion::NoMatch;
     }
     if word.starts_with('"') || word.starts_with('\'') {
-        return None;
+        return PathnameExpansion::NoMatch;
     }
     if !contains_glob_or_extglob(word) {
-        return None;
+        return PathnameExpansion::NoMatch;
     }
     if word.contains('=') || word.contains('{') || word.contains('}') {
-        return None;
+        return PathnameExpansion::NoMatch;
+    }
+    if crate::builtins::set::shell_option_enabled(env_vars, "noglob") {
+        return PathnameExpansion::NoMatch;
     }
 
     let nullglob = shopt_enabled(env_vars, "nullglob");
+    let failglob = shopt_enabled(env_vars, "failglob");
     let dotglob = shopt_enabled(env_vars, "dotglob");
     let nocaseglob = shopt_enabled(env_vars, "nocaseglob");
     let globstar = shopt_enabled(env_vars, "globstar");
     let extglob = shopt_enabled(env_vars, "extglob");
 
     if word.contains("**") && globstar {
-        return globstar_expand(word, nullglob, nocaseglob, dotglob);
+        return globstar_expand(word, nullglob, failglob, nocaseglob, dotglob);
     }
 
     if word.contains('/') {
-        return pathname_expand_segments(word, nullglob, nocaseglob, dotglob, extglob);
+        return pathname_expand_segments(word, nullglob, failglob, nocaseglob, dotglob, extglob);
     }
 
     let (dir_path, pattern) = match word.rsplit_once('/') {
@@ -69,7 +79,7 @@ pub(crate) fn pathname_expand_word(
     let include_dotfiles = dotglob || pattern.starts_with('.');
     let entries = match fs::read_dir(&dir_path) {
         Ok(rd) => rd,
-        Err(_) => return None,
+        Err(_) => return unmatched_expansion(word, nullglob, failglob),
     };
     let mut matches: Vec<String> = entries
         .filter_map(Result::ok)
@@ -91,22 +101,20 @@ pub(crate) fn pathname_expand_word(
         })
         .collect();
     if matches.is_empty() {
-        if nullglob {
-            return Some(Vec::new());
-        }
-        return None;
+        return unmatched_expansion(word, nullglob, failglob);
     }
     matches.sort();
-    Some(matches)
+    PathnameExpansion::Matches(matches)
 }
 
 fn pathname_expand_segments(
     word: &str,
     nullglob: bool,
+    failglob: bool,
     nocaseglob: bool,
     dotglob: bool,
     extglob: bool,
-) -> Option<Vec<String>> {
+) -> PathnameExpansion {
     let parts: Vec<&str> = word.split('/').collect();
     let mut prefixes = if word.starts_with('/') {
         vec!["/".to_string()]
@@ -162,13 +170,10 @@ fn pathname_expand_segments(
     }
 
     if prefixes.is_empty() {
-        if nullglob {
-            return Some(Vec::new());
-        }
-        return None;
+        return unmatched_expansion(word, nullglob, failglob);
     }
     prefixes.sort();
-    Some(prefixes)
+    PathnameExpansion::Matches(prefixes)
 }
 
 fn join_path_segment(prefix: &str, segment: &str) -> String {
@@ -210,12 +215,13 @@ fn extglob_pattern_matches(pattern: &str, word: &str, nocaseglob: bool) -> bool 
 fn globstar_expand(
     word: &str,
     nullglob: bool,
+    failglob: bool,
     nocaseglob: bool,
     dotglob: bool,
-) -> Option<Vec<String>> {
+) -> PathnameExpansion {
     let parts: Vec<&str> = word.split("**").collect();
     if parts.len() != 2 {
-        return None;
+        return PathnameExpansion::NoMatch;
     }
     let prefix = parts[0];
     let suffix = parts[1].trim_start_matches('/');
@@ -236,13 +242,20 @@ fn globstar_expand(
     );
 
     if matches.is_empty() {
-        if nullglob {
-            return Some(Vec::new());
-        }
-        return None;
+        return unmatched_expansion(word, nullglob, failglob);
     }
     matches.sort();
-    Some(matches)
+    PathnameExpansion::Matches(matches)
+}
+
+fn unmatched_expansion(word: &str, nullglob: bool, failglob: bool) -> PathnameExpansion {
+    if failglob {
+        PathnameExpansion::Fail(word.to_string())
+    } else if nullglob {
+        PathnameExpansion::Matches(Vec::new())
+    } else {
+        PathnameExpansion::NoMatch
+    }
 }
 
 fn collect_globstar_matches(

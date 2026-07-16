@@ -42,33 +42,41 @@ impl Executor {
             && expanded.split_whitespace().nth(1).is_some()
     }
 
-    pub(in crate::executor) fn expand_for_word_values(&self, word: &str) -> Vec<String> {
+    pub(in crate::executor) fn expand_for_word_values_result(
+        &self,
+        word: &str,
+    ) -> Result<Vec<String>, String> {
         if let Some(values) = self.array_at_word_values(word) {
-            return values;
+            return Ok(values);
         }
         if self.is_brace_expand_enabled() && !word.contains("${") {
             let braced = crate::expand::braces::expand_braces(word);
             if braced.len() > 1 {
-                return braced
+                let values = braced
                     .into_iter()
-                    .flat_map(|word| self.expand_for_brace_word_values(&word))
+                    .map(|word| self.expand_for_brace_word_values(&word))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .into_iter()
+                    .flatten()
                     .collect();
+                return Ok(values);
             }
         }
 
         self.expand_for_brace_word_values(word)
     }
 
-    fn expand_for_brace_word_values(&self, word: &str) -> Vec<String> {
+    fn expand_for_brace_word_values(&self, word: &str) -> Result<Vec<String>, String> {
         let expanded = self.expand_word(word);
         if for_word_has_unquoted_expansion(word) {
-            return expanded.split_whitespace().map(str::to_string).collect();
+            return Ok(expanded.split_whitespace().map(str::to_string).collect());
         }
         // Apply glob expansion for for-loop words
-        if let Some(matches) = glob::pathname_expand_word(&expanded, &self.env_vars) {
-            return matches;
+        match glob::pathname_expand_word(&expanded, &self.env_vars) {
+            glob::PathnameExpansion::Matches(matches) => Ok(matches),
+            glob::PathnameExpansion::NoMatch => Ok(vec![expanded]),
+            glob::PathnameExpansion::Fail(pattern) => Err(pattern),
         }
-        vec![expanded]
     }
 
     pub(in crate::executor) fn field_split_values(&self, value: &str) -> Vec<String> {
