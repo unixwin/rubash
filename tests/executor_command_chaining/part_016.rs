@@ -232,6 +232,54 @@ fn test_assoc_compound_append_accepts_key_value_pairs() {
 }
 
 #[test]
+fn test_assoc_compound_append_accepts_element_append_assignments() {
+    let output_path = "target/rubash-assoc-append-element-assign-output.txt";
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_ASSOC_APPEND_ELEMENTS");
+    let input = format!(
+        "declare -A RUBASH_ASSOC_APPEND_ELEMENTS=([a]=1); \
+         RUBASH_ASSOC_APPEND_ELEMENTS+=([a]+=2 [b]+=x); \
+         printf '%s:%s\\n' \"${{RUBASH_ASSOC_APPEND_ELEMENTS[a]}}\" \
+         \"${{RUBASH_ASSOC_APPEND_ELEMENTS[b]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "12:x\n");
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_ASSOC_APPEND_ELEMENTS");
+}
+
+#[test]
+fn test_declare_assoc_append_accepts_element_append_assignments() {
+    let output_path = "target/rubash-declare-assoc-append-element-output.txt";
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS");
+    let input = format!(
+        "declare -A RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS=([a]=1); \
+         declare -A RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS+=([a]+=2 [b]+=x); \
+         printf '%s:%s\\n' \"${{RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS[a]}}\" \
+         \"${{RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS[b]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "12:x\n");
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_DECLARE_ASSOC_APPEND_ELEMENTS");
+}
+
+#[test]
 fn test_assoc_scalar_append_assigns_zero_key() {
     let output_path = "target/rubash-assoc-scalar-append-output.txt";
     let _ = fs::remove_file(output_path);

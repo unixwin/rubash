@@ -41,12 +41,9 @@ pub(in crate::executor) fn single_unquoted_parameter_name(value: &str) -> Option
 pub(in crate::executor) fn append_assoc_value(current: &str, value: &str) -> String {
     let mut entries = assoc_entries(current);
     let tokens = array_assignment_tokens(value);
-    let explicit_subscripts = tokens.iter().any(|token| {
-        token
-            .split_once('=')
-            .and_then(|(left, _)| left.strip_prefix('[')?.strip_suffix(']'))
-            .is_some()
-    });
+    let explicit_subscripts = tokens
+        .iter()
+        .any(|token| assoc_assignment_token(token).is_some());
 
     if !explicit_subscripts {
         for pair in tokens.chunks(2) {
@@ -64,19 +61,45 @@ pub(in crate::executor) fn append_assoc_value(current: &str, value: &str) -> Str
     }
 
     for token in tokens {
-        if let Some((left, rhs)) = token.split_once('=') {
-            if let Some(key) = left
-                .strip_prefix('[')
-                .and_then(|left| left.strip_suffix(']'))
-            {
-                entries.push((unquote_storage_value(key), unquote_storage_value(rhs)));
+        if let Some((key, rhs, append)) = assoc_assignment_token(&token) {
+            let key = unquote_storage_value(key);
+            let rhs = unquote_storage_value(rhs);
+            if append {
+                if let Some((_, entry_value)) = entries
+                    .iter_mut()
+                    .rev()
+                    .find(|(entry_key, _)| entry_key == &key)
+                {
+                    *entry_value = append_scalar_value(entry_value, &rhs);
+                } else {
+                    entries.push((key, rhs));
+                }
                 continue;
             }
+            entries.push((key, rhs));
+            continue;
         }
         entries.push(("0".to_string(), unquote_storage_value(&token)));
     }
 
     format_assoc_storage(entries)
+}
+
+fn assoc_assignment_token(token: &str) -> Option<(&str, &str, bool)> {
+    if let Some((left, rhs)) = token.split_once("+=") {
+        if let Some(key) = left
+            .strip_prefix('[')
+            .and_then(|left| left.strip_suffix(']'))
+        {
+            return Some((key, rhs, true));
+        }
+    }
+
+    let (left, rhs) = token.split_once('=')?;
+    let key = left
+        .strip_prefix('[')
+        .and_then(|left| left.strip_suffix(']'))?;
+    Some((key, rhs, false))
 }
 
 pub(in crate::executor) fn append_assoc_scalar_value(current: &str, value: &str) -> String {
