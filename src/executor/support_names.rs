@@ -131,6 +131,26 @@ pub(in crate::executor) fn is_reserved_word(word: &str) -> bool {
     )
 }
 
+pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "." | ":"
+            | "break"
+            | "continue"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "times"
+            | "trap"
+            | "unset"
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::executor) enum LoopControlError {
     TooManyArguments,

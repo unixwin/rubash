@@ -55,9 +55,7 @@ impl Executor {
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
-                        if name == "break"
-                            && self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str)
-                                == Some("1") =>
+                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
                     {
                         println!("{name} is a special shell builtin")
                     }
@@ -143,9 +141,7 @@ impl Executor {
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
-                        if name == "break"
-                            && self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str)
-                                == Some("1") =>
+                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
                     {
                         writeln!(stdout, "{name} is a special shell builtin")?
                     }
@@ -246,9 +242,7 @@ impl Executor {
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
                     TypeDescribeMode::Verbose
-                        if name == "break"
-                            && self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str)
-                                == Some("1") =>
+                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
                     {
                         writeln!(stdout, "{name} is a special shell builtin")?
                     }
