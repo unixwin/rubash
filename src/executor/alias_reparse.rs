@@ -2,6 +2,34 @@ use super::alias_case::*;
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_alias_introduced_subshell(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("(") {
+            return Ok(None);
+        }
+
+        let (source, next_index) = alias_group_source(ast, index, command, &words, ")");
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed
+            .commands
+            .first()
+            .is_some_and(|command| command.subshell_command.is_some())
+        {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(next_index))
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_brace_group(
         &mut self,
         ast: &Ast,
@@ -15,7 +43,7 @@ impl Executor {
             return Ok(None);
         }
 
-        let (source, next_index) = alias_brace_group_source(ast, index, command, &words);
+        let (source, next_index) = alias_group_source(ast, index, command, &words, "}");
         let tokens = crate::lexer::tokenize(&source);
         let reparsed = crate::parser::parse(&tokens);
         if !reparsed
@@ -394,15 +422,16 @@ fn alias_coproc_needs_following_body(words: &[String]) -> bool {
     matches!(words.len(), 1 | 2)
 }
 
-fn alias_brace_group_source(
+fn alias_group_source(
     ast: &Ast,
     index: usize,
     command: &CommandNode,
     words: &[String],
+    close_word: &str,
 ) -> (String, usize) {
     let mut source = alias_compound_source_words(words);
     let mut next_index = index + 1;
-    if words.iter().any(|word| word == "}") {
+    if words.iter().any(|word| word == close_word) {
         append_source_redirects(&mut source, command);
         return (source, next_index);
     }
@@ -418,13 +447,14 @@ fn alias_brace_group_source(
             source.push_str(&command_source);
         }
         next_index = command_index + 1;
-        if command_contains_word(next_command, "}") {
+        if command_contains_word(next_command, close_word) {
             closed = true;
             break;
         }
     }
     if !closed {
-        source.push_str("; }");
+        source.push_str("; ");
+        source.push_str(close_word);
         append_source_redirects(&mut source, command);
     }
 

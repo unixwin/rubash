@@ -1911,6 +1911,46 @@ fn test_alias_introduced_brace_group_collects_multiple_commands() {
 }
 
 #[test]
+fn test_alias_introduced_subshell_executes_body() {
+    let output_path = "target/rubash-alias-subshell-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias s='('; \
+         s echo alias-subshell > {output_path}; )"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alias-subshell\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_subshell_collects_multiple_commands() {
+    let output_path = "target/rubash-alias-subshell-multi-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias s='('; \
+         s echo first > {output_path}; echo second >> {output_path}; )"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "first\nsecond\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_alias_introduced_coproc_executes_brace_body() {
     let output_path = "target/rubash-alias-coproc-brace-output.txt";
     let status_path = "target/rubash-alias-coproc-brace-status.txt";
