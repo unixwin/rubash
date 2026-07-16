@@ -76,6 +76,21 @@ impl Executor {
             .unwrap_or(word);
         let word = word.strip_prefix('\x1d').unwrap_or(word);
         if quoted_array_word {
+            if let Some((name, offset, length)) = word
+                .strip_prefix("${")
+                .and_then(|word| word.strip_suffix('}'))
+                .and_then(|name| self.parse_parameter_substring(name))
+            {
+                if let Some(array_name) = name.strip_suffix("[@]") {
+                    return self.parameter_array_storage(array_name).map(|value| {
+                        array_parameter_slice(
+                            &value,
+                            offset,
+                            length.and_then(|length| usize::try_from(length).ok()),
+                        )
+                    });
+                }
+            }
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("@}"))

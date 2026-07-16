@@ -143,6 +143,30 @@ fn test_quoted_positional_slice_expands_to_multiple_arguments() {
 }
 
 #[test]
+fn test_quoted_array_at_slice_expands_to_multiple_arguments() {
+    let output_path = "target/rubash-quoted-array-at-slice-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(zero one 'two words' three); \
+         printf 'at<%s>\\n' \"${{arr[@]:1:2}}\" > {output_path}; \
+         printf 'star<%s>\\n' \"${{arr[*]:1:2}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "at<one>\nat<two words>\nstar<one two words>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_quoted_positional_at_expands_to_multiple_arguments() {
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);
