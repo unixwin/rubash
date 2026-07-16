@@ -34,6 +34,8 @@ pub(in crate::executor) enum CaseMod {
     UpperAll,
     LowerFirst,
     LowerAll,
+    ToggleFirst,
+    ToggleAll,
 }
 
 pub(in crate::executor) fn parse_parameter_case_mod(name: &str) -> Option<(&str, CaseMod, &str)> {
@@ -46,11 +48,17 @@ pub(in crate::executor) fn parse_parameter_case_mod(name: &str) -> Option<(&str,
     if let Some((var_name, pattern)) = name.split_once(",,") {
         return Some((var_name, CaseMod::LowerAll, pattern));
     }
+    if let Some((var_name, pattern)) = name.split_once("~~") {
+        return Some((var_name, CaseMod::ToggleAll, pattern));
+    }
     if let Some((var_name, pattern)) = name.split_once('^') {
         return Some((var_name, CaseMod::UpperFirst, pattern));
     }
     if let Some((var_name, pattern)) = name.split_once(',') {
         return Some((var_name, CaseMod::LowerFirst, pattern));
+    }
+    if let Some((var_name, pattern)) = name.split_once('~') {
+        return Some((var_name, CaseMod::ToggleFirst, pattern));
     }
     None
 }
@@ -70,8 +78,10 @@ pub(in crate::executor) fn apply_parameter_case_mod(
             let matches = case_pattern_matches(pattern, &char_value);
             let should_change = matches
                 && match operation {
-                    CaseMod::UpperAll | CaseMod::LowerAll => true,
-                    CaseMod::UpperFirst | CaseMod::LowerFirst => !changed_first,
+                    CaseMod::UpperAll | CaseMod::LowerAll | CaseMod::ToggleAll => true,
+                    CaseMod::UpperFirst | CaseMod::LowerFirst | CaseMod::ToggleFirst => {
+                        !changed_first
+                    }
                 };
 
             if should_change {
@@ -79,6 +89,13 @@ pub(in crate::executor) fn apply_parameter_case_mod(
                 match operation {
                     CaseMod::UpperFirst | CaseMod::UpperAll => ch.to_uppercase().collect(),
                     CaseMod::LowerFirst | CaseMod::LowerAll => ch.to_lowercase().collect(),
+                    CaseMod::ToggleFirst | CaseMod::ToggleAll if ch.is_lowercase() => {
+                        ch.to_uppercase().collect()
+                    }
+                    CaseMod::ToggleFirst | CaseMod::ToggleAll if ch.is_uppercase() => {
+                        ch.to_lowercase().collect()
+                    }
+                    CaseMod::ToggleFirst | CaseMod::ToggleAll => char_value,
                 }
             } else {
                 char_value
