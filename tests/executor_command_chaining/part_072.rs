@@ -65,6 +65,31 @@ fn test_conditional_string_equality_uses_shell_patterns() {
 }
 
 #[test]
+fn test_conditional_quoted_rhs_compares_literal_pattern_text() {
+    let output_path = "target/rubash-conditional-quoted-pattern-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ abc == a* ]]; echo unquoted:$? > {output_path}; \
+         [[ abc == \"a*\" ]]; echo quoted:$? >> {output_path}; \
+         [[ abc != \"a*\" ]]; echo quoted_ne:$? >> {output_path}; \
+         pattern='a*'; [[ abc == \"$pattern\" ]]; echo quoted_var:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "unquoted:0\nquoted:1\nquoted_ne:0\nquoted_var:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_string_equality_honors_nocasematch() {
     let output_path = "target/rubash-conditional-nocasematch-output.txt";
     let _ = fs::remove_file(output_path);

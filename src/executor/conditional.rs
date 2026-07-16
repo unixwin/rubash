@@ -30,6 +30,16 @@ pub(in crate::executor) use extglob::{
 pub(super) use pattern::{case_pattern_matches, case_pattern_matches_nocase};
 
 impl Executor {
+    pub(super) fn execute_conditional_command(
+        &mut self,
+        command: &crate::parser::ConditionalCommand,
+    ) -> i32 {
+        if let Some(status) = self.quoted_conditional_pattern_status(command) {
+            return status;
+        }
+        self.execute_conditional(&command.args)
+    }
+
     pub(super) fn execute_conditional(&mut self, args: &[String]) -> i32 {
         // TODO(parse.y/execute_cmd.c/test.c): Bash `[[` is a compound command
         // with its own parser, operators, pattern matching, and short-circuit
@@ -126,6 +136,31 @@ impl Executor {
                 i32::from(!self.conditional_file_binary(left, op, right))
             }
             _ => 1,
+        }
+    }
+
+    fn quoted_conditional_pattern_status(
+        &mut self,
+        command: &crate::parser::ConditionalCommand,
+    ) -> Option<i32> {
+        match command.args.as_slice() {
+            [left, op, right, end]
+                if end == "]]"
+                    && matches!(op.as_str(), "=" | "==" | "!=")
+                    && command
+                        .arg_metadata
+                        .get(2)
+                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+            {
+                let left = self.expand_word(left);
+                let right = self.expand_word(right);
+                let matched = left == right;
+                Some(match op.as_str() {
+                    "!=" => i32::from(matched),
+                    _ => i32::from(!matched),
+                })
+            }
+            _ => None,
         }
     }
 
