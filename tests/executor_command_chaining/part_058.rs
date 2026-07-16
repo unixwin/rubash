@@ -56,6 +56,40 @@ fn test_shift_too_many_arguments_fails_without_changing_positional_params() {
 }
 
 #[test]
+fn test_shift_verbose_reports_count_out_of_range() {
+    let quiet_error_path = "target/rubash-shift-verbose-quiet-error.txt";
+    let verbose_error_path = "target/rubash-shift-verbose-error.txt";
+    let output_path = "target/rubash-shift-verbose-output.txt";
+    for path in [quiet_error_path, verbose_error_path, output_path] {
+        let _ = fs::remove_file(path);
+    }
+    let input = format!(
+        "function s {{ shift 3 2> {quiet_error_path}; echo quiet:$?:$#:$1 > {output_path}; \
+         shopt -s shift_verbose; shift 3 2> {verbose_error_path}; \
+         echo verbose:$?:$#:$1 >> {output_path}; }}; s one two"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "quiet:1:2:one\nverbose:1:2:one\n"
+    );
+    assert_eq!(fs::read_to_string(quiet_error_path).unwrap(), "");
+    assert!(fs::read_to_string(verbose_error_path)
+        .unwrap()
+        .contains("shift: 3: shift count out of range"));
+    for path in [quiet_error_path, verbose_error_path, output_path] {
+        let _ = fs::remove_file(path);
+    }
+}
+
+#[test]
 fn test_function_return_sets_status_and_skips_rest() {
     let output_path = "target/rubash-function-return-output.txt";
     let _ = fs::remove_file(output_path);

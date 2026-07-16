@@ -17,7 +17,8 @@ impl Executor {
         // TODO(builtins/shift.def): Bash observes `shift_verbose` for out of
         // range `$#` shifts. Keep that validation here while positional
         // parameters live on Executor.
-        self.apply_shift_action(crate::builtins::shift::execute(args)?)
+        let mut stderr = std::io::stderr().lock();
+        self.apply_shift_action_with_stderr(crate::builtins::shift::execute(args)?, &mut stderr)
     }
 
     pub(in crate::executor) fn execute_shift_command(
@@ -30,7 +31,7 @@ impl Executor {
             let mut stderr = std::io::stderr().lock();
             let action =
                 crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut file, &mut stderr)?;
-            return self.apply_shift_action(action);
+            return self.apply_shift_action_with_stderr(action, &mut stderr);
         }
 
         if let Some(redirect) = &cmd.append {
@@ -42,7 +43,7 @@ impl Executor {
             let mut stderr = std::io::stderr().lock();
             let action =
                 crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut file, &mut stderr)?;
-            return self.apply_shift_action(action);
+            return self.apply_shift_action_with_stderr(action, &mut stderr);
         }
 
         if let Some(redirect) = &cmd.redirect_err {
@@ -51,7 +52,7 @@ impl Executor {
             let mut stdout = std::io::stdout().lock();
             let action =
                 crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut stdout, &mut file)?;
-            return self.apply_shift_action(action);
+            return self.apply_shift_action_with_stderr(action, &mut file);
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
@@ -63,15 +64,16 @@ impl Executor {
             let mut stdout = std::io::stdout().lock();
             let action =
                 crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut stdout, &mut file)?;
-            return self.apply_shift_action(action);
+            return self.apply_shift_action_with_stderr(action, &mut file);
         }
 
         self.execute_shift(&cmd.words[1..])
     }
 
-    pub(in crate::executor) fn apply_shift_action(
+    pub(in crate::executor) fn apply_shift_action_with_stderr<W: Write>(
         &mut self,
         action: crate::builtins::shift::ShiftAction,
+        stderr: &mut W,
     ) -> Result<(), ExecuteError> {
         match action {
             crate::builtins::shift::ShiftAction::Complete(status) => {
@@ -79,6 +81,13 @@ impl Executor {
             }
             crate::builtins::shift::ShiftAction::Shift(amount) => {
                 if amount > self.positional_params.len() {
+                    if crate::builtins::shopt::option_enabled(&self.env_vars, "shift_verbose") {
+                        writeln!(
+                            stderr,
+                            "{}shift: {amount}: shift count out of range",
+                            self.diagnostic_prefix()
+                        )?;
+                    }
                     self.exit_code = 1;
                     return Ok(());
                 }
