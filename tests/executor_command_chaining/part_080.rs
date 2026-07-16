@@ -1498,6 +1498,30 @@ fn test_inverted_function_definitions_still_define_functions() {
 }
 
 #[test]
+fn test_alias_introduced_inversion_flips_status() {
+    let output_path = "target/rubash-alias-inversion-status.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias bang='!'; \
+         bang false; echo false:$? > {output_path}; \
+         bang true; echo true:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "false:0\ntrue:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_function_body_can_be_for_command() {
     let output_path = "target/rubash-function-for-body-output.txt";
     let _ = fs::remove_file(output_path);

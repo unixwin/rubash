@@ -2,6 +2,35 @@ use super::alias_case::*;
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_alias_introduced_inversion(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("!") {
+            return Ok(None);
+        }
+
+        let mut source = alias_compound_source_words(&words);
+        append_source_redirects(&mut source, command);
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed.commands.first().is_some_and(|command| {
+            command.inverted
+                || command.inverted_command.is_some()
+                || command.words.first().map(String::as_str) == Some("!")
+        }) {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(index + 1))
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_subshell(
         &mut self,
         ast: &Ast,
