@@ -227,6 +227,37 @@ fn test_pathname_expansion_matches_intermediate_segments() {
 }
 
 #[test]
+fn test_globskipdots_controls_dot_and_dotdot_matches() {
+    let dir_path = "target/rubash-globskipdots";
+    let output_path = "target/rubash-globskipdots-output.txt";
+    let _ = fs::remove_dir_all(dir_path);
+    let _ = fs::remove_file(output_path);
+    fs::create_dir_all(dir_path).unwrap();
+    fs::write(format!("{dir_path}/.hidden"), "hidden").unwrap();
+    let input = format!(
+        "printf '%s\\n' {dir_path}/.* > {output_path}; \
+         shopt -u globskipdots; printf '%s\\n' {dir_path}/.* >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "target/rubash-globskipdots/.hidden\n\
+         target/rubash-globskipdots/.\n\
+         target/rubash-globskipdots/..\n\
+         target/rubash-globskipdots/.hidden\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
 fn test_failglob_unmatched_command_word_aborts_command_list() {
     let output_path = "target/rubash-failglob-command-output.txt";
     let _ = fs::remove_file(output_path);

@@ -60,16 +60,25 @@ pub(crate) fn pathname_expand_word(
     let nullglob = shopt_enabled(env_vars, "nullglob");
     let failglob = shopt_enabled(env_vars, "failglob");
     let dotglob = shopt_enabled(env_vars, "dotglob");
+    let globskipdots = shopt_enabled(env_vars, "globskipdots");
     let nocaseglob = shopt_enabled(env_vars, "nocaseglob");
     let globstar = shopt_enabled(env_vars, "globstar");
     let extglob = shopt_enabled(env_vars, "extglob");
 
     if word.contains("**") && globstar {
-        return globstar_expand(word, nullglob, failglob, nocaseglob, dotglob);
+        return globstar_expand(word, nullglob, failglob, nocaseglob, dotglob, globskipdots);
     }
 
     if word.contains('/') {
-        return pathname_expand_segments(word, nullglob, failglob, nocaseglob, dotglob, extglob);
+        return pathname_expand_segments(
+            word,
+            nullglob,
+            failglob,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            extglob,
+        );
     }
 
     let (dir_path, pattern) = match word.rsplit_once('/') {
@@ -81,10 +90,15 @@ pub(crate) fn pathname_expand_word(
         Ok(rd) => rd,
         Err(_) => return unmatched_expansion(word, nullglob, failglob),
     };
-    let mut matches: Vec<String> = entries
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name().into_string().ok()?;
+    let mut names = synthetic_dot_names(pattern, globskipdots);
+    names.extend(
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok()),
+    );
+    let mut matches: Vec<String> = names
+        .into_iter()
+        .filter_map(|name| {
             if !include_dotfiles && name.starts_with('.') {
                 return None;
             }
@@ -113,6 +127,7 @@ fn pathname_expand_segments(
     failglob: bool,
     nocaseglob: bool,
     dotglob: bool,
+    globskipdots: bool,
     extglob: bool,
 ) -> PathnameExpansion {
     let parts: Vec<&str> = word.split('/').collect();
@@ -144,10 +159,13 @@ fn pathname_expand_segments(
                     Err(_) => continue,
                 };
                 let include_dotfiles = dotglob || part.starts_with('.');
-                for entry in entries.filter_map(Result::ok) {
-                    let Some(name) = entry.file_name().into_string().ok() else {
-                        continue;
-                    };
+                let mut names = synthetic_dot_names(part, globskipdots);
+                names.extend(
+                    entries
+                        .filter_map(Result::ok)
+                        .filter_map(|entry| entry.file_name().into_string().ok()),
+                );
+                for name in names {
                     if !include_dotfiles && name.starts_with('.') {
                         continue;
                     }
@@ -218,6 +236,7 @@ fn globstar_expand(
     failglob: bool,
     nocaseglob: bool,
     dotglob: bool,
+    globskipdots: bool,
 ) -> PathnameExpansion {
     let parts: Vec<&str> = word.split("**").collect();
     if parts.len() != 2 {
@@ -239,6 +258,7 @@ fn globstar_expand(
         &mut matches,
         nocaseglob,
         dotglob,
+        globskipdots,
     );
 
     if matches.is_empty() {
@@ -264,17 +284,21 @@ fn collect_globstar_matches(
     matches: &mut Vec<String>,
     nocaseglob: bool,
     dotglob: bool,
+    globskipdots: bool,
 ) {
     let entries = match fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => return,
     };
-    for entry in entries.filter_map(Result::ok) {
-        let name = match entry.file_name().into_string() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        if name.starts_with('.') && !dotglob {
+    let mut names = synthetic_dot_names(suffix, globskipdots);
+    names.extend(
+        entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok()),
+    );
+    let include_dotfiles = dotglob || suffix.starts_with('.');
+    for name in names {
+        if name.starts_with('.') && !include_dotfiles {
             continue;
         }
         let path = dir.join(&name);
@@ -287,7 +311,9 @@ fn collect_globstar_matches(
             if matched {
                 matches.push(path.to_string_lossy().to_string());
             }
-            collect_globstar_matches(&path, suffix, matches, nocaseglob, dotglob);
+            if name != "." && name != ".." {
+                collect_globstar_matches(&path, suffix, matches, nocaseglob, dotglob, globskipdots);
+            }
         } else {
             let matched = if nocaseglob {
                 case_pattern_matches_nocase(suffix, &name)
@@ -298,5 +324,13 @@ fn collect_globstar_matches(
                 matches.push(path.to_string_lossy().to_string());
             }
         }
+    }
+}
+
+fn synthetic_dot_names(pattern: &str, globskipdots: bool) -> Vec<String> {
+    if globskipdots || !pattern.starts_with('.') {
+        Vec::new()
+    } else {
+        vec![".".to_string(), "..".to_string()]
     }
 }
