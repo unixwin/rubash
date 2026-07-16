@@ -48,6 +48,28 @@ impl Executor {
             return String::new();
         }
 
+        if let Some((var_name, error_word)) = name.split_once(":?") {
+            if self
+                .parameter_operator_value(var_name)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_default();
+            }
+            return self.expand_embedded_parameters(error_word);
+        }
+
+        if let Some((var_name, error_word)) = name.split_once('?') {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(error_word));
+            }
+        }
+
         if let Some(var_name) = name.strip_prefix('#') {
             if let Some(value) = self.array_element_parameter_value(var_name) {
                 return value.chars().count().to_string();
@@ -113,6 +135,28 @@ impl Executor {
                 return self.expand_embedded_parameters_mut(alternate);
             }
             return String::new();
+        }
+
+        if let Some((var_name, error_word)) = name.split_once(":?") {
+            if self
+                .parameter_operator_value(var_name)
+                .is_some_and(|value| !value.is_empty())
+            {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_default();
+            }
+            return self.expand_embedded_parameters_mut(error_word);
+        }
+
+        if let Some((var_name, error_word)) = name.split_once('?') {
+            if !var_name.is_empty() {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters_mut(error_word));
+            }
         }
 
         if let Some(var_name) = name.strip_prefix('#') {

@@ -40,6 +40,30 @@ impl Executor {
             }
             return Some(String::new());
         }
+        if let Some((var_name, word)) = name.split_once(":?") {
+            if !var_name.is_empty() {
+                if self
+                    .parameter_operator_value(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return Some(
+                        self.parameter_operator_value(var_name)
+                            .map(|value| shell_safe_value(&value))
+                            .unwrap_or_default(),
+                    );
+                }
+                return Some(self.expand_parameter_word(word));
+            }
+        }
+        if let Some((var_name, word)) = name.split_once('?') {
+            if !var_name.is_empty() {
+                return Some(
+                    self.parameter_operator_value(var_name)
+                        .map(|value| shell_safe_value(&value))
+                        .unwrap_or_else(|| self.expand_parameter_word(word)),
+                );
+            }
+        }
         if let Some((var_name, word)) = name.split_once('=') {
             return Some(
                 self.parameter_operator_value(var_name)

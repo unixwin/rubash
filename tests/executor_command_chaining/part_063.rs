@@ -19,6 +19,27 @@ fn test_parameter_colon_equals_assigns_empty_value() {
 }
 
 #[test]
+fn test_parameter_question_operator_distinguishes_null_from_unset() {
+    let output_path = "target/rubash-param-question-operator-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=; printf '<%s>\\n' \"${{v?empty-ok}}\" > {output_path}; \
+         v=value; printf '<%s>\\n' \"${{v:?nonempty}}\" >> {output_path}; \
+         unset v; echo ${{v?missing}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_err());
+    assert_eq!(executor.last_exit_code(), 1);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<>\n<value>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_pattern_removes_prefixes_and_suffixes() {
     let output_path = "target/rubash-param-pattern-remove-output.txt";
     let _ = fs::remove_file(output_path);
