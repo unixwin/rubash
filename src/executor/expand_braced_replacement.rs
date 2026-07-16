@@ -10,6 +10,11 @@ impl Executor {
         let replacement = decode_parameter_replacement_quotes(
             &self.expand_embedded_parameters_preserving_escaped_single_quotes(replacement),
         );
+        if let Some(value) =
+            self.indirect_replacement_parameter(var_name, &pattern, &replacement, global)
+        {
+            return Some(value);
+        }
         if matches!(var_name, "@" | "*") {
             return Some(
                 self.positional_params
@@ -63,5 +68,35 @@ impl Executor {
             );
         }
         None
+    }
+
+    fn indirect_replacement_parameter(
+        &self,
+        var_name: &str,
+        pattern: &str,
+        replacement: &str,
+        global: bool,
+    ) -> Option<String> {
+        let indirect_name = var_name.strip_prefix('!')?;
+        if let Some(target_name) = self.nameref_target_name(indirect_name) {
+            return Some(replace_parameter_pattern(
+                &target_name,
+                pattern,
+                replacement,
+                global,
+            ));
+        }
+
+        let target_expr = self.env_vars.get(indirect_name)?;
+        let values = self.indirect_target_values(target_expr);
+        if values.is_empty() {
+            return Some(String::new());
+        }
+
+        let values = values
+            .into_iter()
+            .map(|value| replace_parameter_pattern(&value, pattern, replacement, global))
+            .collect::<Vec<_>>();
+        Some(self.join_expanded_array_values(values, target_expr))
     }
 }
