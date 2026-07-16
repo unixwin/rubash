@@ -152,6 +152,10 @@ impl Executor {
                 self.exit_code = self.execute_let(&cmd.words[1..]);
                 Ok(())
             }
+            "time" => {
+                self.execute_time_command_node(cmd)?;
+                Ok(())
+            }
             "umask" => {
                 if crate::builtins::enable::is_disabled(&self.env_vars, "umask") {
                     return self.execute_external(cmd);

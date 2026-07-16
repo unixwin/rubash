@@ -334,6 +334,29 @@ fn test_time_null_command_resets_status() {
 }
 
 #[test]
+fn test_command_builtin_can_invoke_time_keyword_bridge() {
+    let output_path = "target/rubash-command-time-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "command time -p false; echo false:$? > {output_path}; \
+         command time -p true; echo true:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "false:1\ntrue:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_outer_inversion_wraps_time_simple_command() {
     let output_path = "target/rubash-inverted-time-simple-output.txt";
     let _ = fs::remove_file(output_path);
