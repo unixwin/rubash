@@ -41,6 +41,46 @@ fn test_indirect_prefix_expands_matching_variable_names() {
 }
 
 #[test]
+fn test_unquoted_indirect_prefix_expansion_splits_names() {
+    let output_path = "target/rubash-param-indirect-prefix-split-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "RUBASH_INDIRECT_SPLIT_A=1; RUBASH_INDIRECT_SPLIT_B=2; \
+         printf '<%s>\\n' ${{!RUBASH_INDIRECT_SPLIT_*}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<RUBASH_INDIRECT_SPLIT_A>\n<RUBASH_INDIRECT_SPLIT_B>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_unquoted_indirect_array_indices_split_words() {
+    let output_path = "target/rubash-param-indirect-array-indices-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("arr=([2]=two [5]=five); printf '[%s]\\n' ${{!arr[@]}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "[2]\n[5]\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_array_parameter_transform_expands_first_value() {
     let output_path = "target/rubash-param-indirect-array-transform-output.txt";
     let _ = fs::remove_file(output_path);

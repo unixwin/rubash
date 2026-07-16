@@ -204,7 +204,7 @@ fn test_nameref_assoc_array_elements_read_keys_and_assign_target() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
-        "read:v len:1\nassign:V new:N len:2\nkey:k new\n"
+        "read:v len:1\nassign:V new:N len:2\nkey:k\nkey:new\n"
     );
     let _ = fs::remove_file(output_path);
     for name in ["RUBASH_NAMEREF_ASSOC_TARGET", "RUBASH_NAMEREF_ASSOC_REF"] {

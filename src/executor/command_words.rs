@@ -36,9 +36,14 @@ impl Executor {
             .words
             .get(index)
             .is_some_and(|word| word_has_unquoted_command_substitution(word));
+        let unquoted_indirect_name_list = cmd
+            .words
+            .get(index)
+            .is_some_and(|word| word_is_unquoted_indirect_name_list(word));
 
         ((unquoted_variable && expanded.contains(['\n', '\t']))
-            || (unquoted_command_substitution && expanded.contains(char::is_whitespace)))
+            || (unquoted_command_substitution && expanded.contains(char::is_whitespace))
+            || (unquoted_indirect_name_list && expanded.contains(char::is_whitespace)))
             && expanded.split_whitespace().nth(1).is_some()
     }
 
@@ -114,4 +119,22 @@ impl Executor {
         output.push_str(&tail[end + 1..]);
         Some(output)
     }
+}
+
+fn word_is_unquoted_indirect_name_list(word: &str) -> bool {
+    let Some(inner) = word
+        .strip_prefix("${!")
+        .and_then(|word| word.strip_suffix('}'))
+    else {
+        return false;
+    };
+
+    inner
+        .strip_suffix("[@]")
+        .or_else(|| inner.strip_suffix("[*]"))
+        .is_some_and(|name| !name.is_empty())
+        || inner
+            .strip_suffix('*')
+            .or_else(|| inner.strip_suffix('@'))
+            .is_some_and(|prefix| !prefix.is_empty())
 }
