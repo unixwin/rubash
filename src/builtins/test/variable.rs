@@ -35,9 +35,8 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
         }
 
         if arrays.iter().any(|marked| marked == name) || is_array_storage(value) {
-            return subscript
-                .parse::<usize>()
-                .ok()
+            return crate::executor::arithmetic::eval_conditional_arith_value(subscript, env_vars)
+                .and_then(|index| resolve_array_index(value, index))
                 .map(|index| array_index_is_set(value, index))
                 .unwrap_or(false);
         }
@@ -72,6 +71,22 @@ fn array_index_is_set(value: &str, index: usize) -> bool {
     array_entries(value)
         .into_iter()
         .any(|(entry_index, _)| entry_index == index)
+}
+
+fn resolve_array_index(value: &str, index: i128) -> Option<usize> {
+    if index >= 0 {
+        return usize::try_from(index).ok();
+    }
+
+    let max_index = array_entries(value)
+        .into_iter()
+        .map(|(entry_index, _)| entry_index)
+        .max()?;
+    let resolved = i128::try_from(max_index)
+        .ok()?
+        .checked_add(1)?
+        .checked_add(index)?;
+    usize::try_from(resolved).ok()
 }
 
 fn array_entries(value: &str) -> Vec<(usize, String)> {

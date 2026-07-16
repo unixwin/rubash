@@ -2,7 +2,7 @@
 //!
 //! Executes parsed AST commands.
 
-mod arithmetic;
+pub(crate) mod arithmetic;
 mod glob;
 pub(crate) mod path;
 mod upstream_scripts;

@@ -34,7 +34,7 @@ pub(super) fn eval_arith_value(value: &str) -> i128 {
         .sum()
 }
 
-pub(super) fn eval_conditional_arith_value(
+pub(crate) fn eval_conditional_arith_value(
     value: &str,
     env_vars: &HashMap<String, String>,
 ) -> Option<i128> {

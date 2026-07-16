@@ -164,7 +164,14 @@ fn test_test_v_checks_array_subscripts() {
     let output_path = "target/rubash-test-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "v=value; arr=(zero one); declare -A assoc; assoc[one]=alpha; test -v 'v[0]'; echo $? > {output_path}; test -v 'v[1]'; echo $? >> {output_path}; test -v 'arr[1]'; echo $? >> {output_path}; test -v 'arr[9]'; echo $? >> {output_path}; test -v 'assoc[one]'; echo $? >> {output_path}; test -v 'assoc[two]'; echo $? >> {output_path}"
+        "v=value; arr=(zero one two); i=1; declare -A assoc; assoc[one]=alpha; \
+         test -v 'v[0]'; echo $? > {output_path}; \
+         test -v 'v[1]'; echo $? >> {output_path}; \
+         test -v 'arr[i+1]'; echo $? >> {output_path}; \
+         test -v 'arr[-1]'; echo $? >> {output_path}; \
+         test -v 'arr[9]'; echo $? >> {output_path}; \
+         test -v 'assoc[one]'; echo $? >> {output_path}; \
+         test -v 'assoc[two]'; echo $? >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -176,7 +183,7 @@ fn test_test_v_checks_array_subscripts() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "0\n1\n0\n1\n0\n1\n"
+        "0\n1\n0\n0\n1\n0\n1\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -186,7 +193,14 @@ fn test_conditional_v_checks_array_subscripts() {
     let output_path = "target/rubash-conditional-v-array-subscript-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "v=value; arr=(zero one); declare -A assoc; assoc[one]=alpha; [[ -v v[0] ]]; echo $? > {output_path}; [[ -v v[1] ]]; echo $? >> {output_path}; [[ -v arr[1] ]]; echo $? >> {output_path}; [[ -v arr[9] ]]; echo $? >> {output_path}; [[ -v assoc[one] ]]; echo $? >> {output_path}; [[ -v assoc[two] ]]; echo $? >> {output_path}"
+        "v=value; arr=(zero one two); i=1; declare -A assoc; assoc[one]=alpha; \
+         [[ -v v[0] ]]; echo $? > {output_path}; \
+         [[ -v v[1] ]]; echo $? >> {output_path}; \
+         [[ -v arr[i+1] ]]; echo $? >> {output_path}; \
+         [[ -v arr[-1] ]]; echo $? >> {output_path}; \
+         [[ -v arr[9] ]]; echo $? >> {output_path}; \
+         [[ -v assoc[one] ]]; echo $? >> {output_path}; \
+         [[ -v assoc[two] ]]; echo $? >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -198,20 +212,20 @@ fn test_conditional_v_checks_array_subscripts() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "0\n1\n0\n1\n0\n1\n"
+        "0\n1\n0\n0\n1\n0\n1\n"
     );
     let _ = fs::remove_file(output_path);
 }
 
 #[test]
-fn test_conditional_r_checks_readonly_variables() {
-    let output_path = "target/rubash-conditional-readonly-unary-output.txt";
+fn test_conditional_r_checks_nameref_variables() {
+    let output_path = "target/rubash-conditional-nameref-unary-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "readonly RUBASH_CONDITIONAL_READONLY_VAR=value; plain=value; \
-         [[ -R RUBASH_CONDITIONAL_READONLY_VAR ]]; echo $? > {output_path}; \
-         [[ -R plain ]]; echo $? >> {output_path}; \
-         [[ -R UID ]]; echo $? >> {output_path}"
+        "target=value; declare -n ref=target; readonly ro=value; \
+         [[ -R ref ]]; echo $? > {output_path}; \
+         [[ -R target ]]; echo $? >> {output_path}; \
+         [[ -R ro ]]; echo $? >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -221,7 +235,7 @@ fn test_conditional_r_checks_readonly_variables() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n0\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n1\n");
     let _ = fs::remove_file(output_path);
 }
 
