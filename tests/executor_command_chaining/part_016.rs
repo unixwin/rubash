@@ -92,6 +92,33 @@ fn test_declare_assoc_compound_assignment_preserves_quoted_keys() {
 }
 
 #[test]
+fn test_declare_assoc_compound_assignment_accepts_unquoted_keys_with_spaces() {
+    let output_path = "target/rubash-declare-assoc-spaced-keys-output.txt";
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_ASSOC_SPACED_KEYS");
+    let input = format!(
+        "declare -A RUBASH_ASSOC_SPACED_KEYS=([two words]=v [other key]=w); \
+         printf '%s/%s\\n' \"${{RUBASH_ASSOC_SPACED_KEYS[two words]}}\" \
+         \"${{RUBASH_ASSOC_SPACED_KEYS[other key]}}\" > {output_path}; \
+         declare -p RUBASH_ASSOC_SPACED_KEYS >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "v/w\ndeclare -A RUBASH_ASSOC_SPACED_KEYS=([\"two words\"]=\"v\" [\"other key\"]=\"w\" )\n"
+    );
+    let _ = fs::remove_file(output_path);
+    std::env::remove_var("RUBASH_ASSOC_SPACED_KEYS");
+}
+
+#[test]
 fn test_assoc_parameter_expansion_accepts_quoted_keys() {
     let output_path = "target/rubash-assoc-quoted-key-expansion-output.txt";
     let _ = fs::remove_file(output_path);

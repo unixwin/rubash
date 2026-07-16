@@ -266,54 +266,30 @@ pub(super) fn collect_compound_assignment(
             continue;
         }
 
-        if tokens[i].value == "[" || tokens[i].value.starts_with('[') {
-            let mut subscript = String::new();
-            let mut raw_subscript = String::new();
-            let mut j = i;
-            if tokens[j].value == "[" {
-                j += 1;
-                while j < tokens.len() && tokens[j].value != "]" {
-                    subscript.push_str(&tokens[j].value);
-                    raw_subscript.push_str(&tokens[j].raw);
-                    j += 1;
-                }
-                if j >= tokens.len() || tokens[j].value != "]" {
-                    return None;
-                }
-                j += 1;
-            } else if let Some(inner) = tokens[j]
-                .value
-                .strip_prefix('[')
-                .and_then(|value| value.strip_suffix(']'))
-            {
-                subscript.push_str(inner);
-                raw_subscript.push_str(inner);
-                j += 1;
+        if let Some((subscript, raw_subscript, operator, rhs, value_index, next_i)) =
+            collect_split_compound_subscript_assignment(tokens, i)
+        {
+            let left = format!(
+                "[{}]{}",
+                quote_compound_assignment_raw_subscript(&subscript, &raw_subscript),
+                operator
+            );
+            if let Some(rhs) = rhs {
+                values.push(format!("{}{}", left, quote_compound_assignment_word(&rhs)));
+                i = next_i;
+                continue;
             }
-
-            if matches!(
-                tokens.get(j).map(|token| token.value.as_str()),
-                Some("=" | "+=")
-            ) {
-                if compound_split_subscript_value_is_empty(tokens, j) {
-                    values.push(format!(
-                        "[{}]{}",
-                        quote_compound_assignment_raw_subscript(&subscript, &raw_subscript),
-                        tokens[j].value,
-                    ));
-                    i = j + 1;
-                    continue;
-                }
-                if let Some((rhs, next_i)) = collect_compound_or_keyword_word_value(tokens, j + 1) {
-                    values.push(format!(
-                        "[{}]{}{}",
-                        quote_compound_assignment_raw_subscript(&subscript, &raw_subscript),
-                        tokens[j].value,
-                        quote_compound_assignment_word(&rhs)
-                    ));
-                    i = next_i;
-                    continue;
-                }
+            if compound_split_subscript_value_is_empty(tokens, value_index) {
+                values.push(left);
+                i = next_i;
+                continue;
+            }
+            if let Some((rhs, next_i)) =
+                collect_compound_or_keyword_word_value(tokens, value_index + 1)
+            {
+                values.push(format!("{}{}", left, quote_compound_assignment_word(&rhs)));
+                i = next_i;
+                continue;
             }
         }
 
@@ -352,6 +328,143 @@ fn compound_split_subscript_value_is_empty(tokens: &[Token], operator_index: usi
     tokens.get(operator_index + 1).is_some_and(|token| {
         token.value == "[" || compound_subscript_assignment_token(token).is_some()
     })
+}
+
+fn collect_split_compound_subscript_assignment(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(String, String, String, Option<String>, usize, usize)> {
+    let token = tokens.get(start)?;
+    if token.value == "[" {
+        return collect_bracket_token_compound_subscript_assignment(tokens, start);
+    }
+
+    let first = token.value.strip_prefix('[')?;
+    let first_raw = token.raw.strip_prefix('[').unwrap_or(first);
+    let Some((head, operator, rhs)) = split_subscript_close_operator(first) else {
+        return collect_spanning_compound_subscript_assignment(tokens, start, first, first_raw);
+    };
+
+    Some((
+        head.to_string(),
+        first_raw
+            .strip_suffix(&format!("]{}{}", operator, rhs))
+            .unwrap_or(head)
+            .to_string(),
+        operator.to_string(),
+        Some(rhs.to_string()),
+        start,
+        start + 1,
+    ))
+}
+
+fn collect_bracket_token_compound_subscript_assignment(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(String, String, String, Option<String>, usize, usize)> {
+    let mut subscript = String::new();
+    let mut raw_subscript = String::new();
+    let mut j = start + 1;
+    while j < tokens.len() && tokens[j].value != "]" {
+        push_compound_subscript_piece(&mut subscript, &mut raw_subscript, &tokens[j]);
+        j += 1;
+    }
+    if j >= tokens.len() || tokens[j].value != "]" {
+        return None;
+    }
+    let operator_index = j + 1;
+    let operator = tokens.get(operator_index)?.value.as_str();
+    if !matches!(operator, "=" | "+=") {
+        return None;
+    }
+
+    Some((
+        subscript,
+        raw_subscript,
+        operator.to_string(),
+        None,
+        operator_index,
+        operator_index + 1,
+    ))
+}
+
+fn collect_spanning_compound_subscript_assignment(
+    tokens: &[Token],
+    start: usize,
+    first: &str,
+    first_raw: &str,
+) -> Option<(String, String, String, Option<String>, usize, usize)> {
+    let mut subscript = first.to_string();
+    let mut raw_subscript = first_raw.to_string();
+    let mut j = start + 1;
+    while let Some(token) = tokens.get(j) {
+        if let Some((head, operator, rhs)) = split_subscript_close_operator(&token.value) {
+            push_compound_subscript_fragment(&mut subscript, head);
+            let raw_head = token
+                .raw
+                .strip_suffix(&format!("]{}{}", operator, rhs))
+                .unwrap_or(head);
+            push_compound_subscript_fragment(&mut raw_subscript, raw_head);
+            return Some((
+                subscript,
+                raw_subscript,
+                operator.to_string(),
+                Some(rhs.to_string()),
+                j,
+                j + 1,
+            ));
+        }
+
+        if let Some(head) = token.value.strip_suffix(']') {
+            push_compound_subscript_fragment(&mut subscript, head);
+            let raw_head = token.raw.strip_suffix(']').unwrap_or(head);
+            push_compound_subscript_fragment(&mut raw_subscript, raw_head);
+            let operator_index = j + 1;
+            let operator = tokens.get(operator_index)?.value.as_str();
+            if !matches!(operator, "=" | "+=") {
+                return None;
+            }
+            return Some((
+                subscript,
+                raw_subscript,
+                operator.to_string(),
+                None,
+                operator_index,
+                operator_index + 1,
+            ));
+        }
+
+        push_compound_subscript_piece(&mut subscript, &mut raw_subscript, token);
+        j += 1;
+    }
+
+    None
+}
+
+fn split_subscript_close_operator(value: &str) -> Option<(&str, &str, &str)> {
+    for operator in ["]+=", "]="] {
+        if let Some((head, rhs)) = value.split_once(operator) {
+            return Some((head, if operator == "]=" { "=" } else { "+=" }, rhs));
+        }
+    }
+
+    None
+}
+
+fn push_compound_subscript_piece(
+    subscript: &mut String,
+    raw_subscript: &mut String,
+    token: &Token,
+) {
+    push_compound_subscript_fragment(subscript, &token.value);
+    push_compound_subscript_fragment(raw_subscript, &token.raw);
+}
+
+fn push_compound_subscript_fragment(out: &mut String, fragment: &str) {
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    out.push_str(fragment);
 }
 
 pub(super) fn compound_subscript_assignment(value: &str) -> Option<(String, &str)> {
