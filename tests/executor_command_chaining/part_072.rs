@@ -140,6 +140,32 @@ fn test_conditional_string_equality_uses_extglob_without_shopt() {
 }
 
 #[test]
+fn test_conditional_single_word_tests_non_empty_expansion() {
+    let output_path = "target/rubash-conditional-single-word-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value=abc; empty=; \
+         [[ $value ]]; echo nonempty:$? > {output_path}; \
+         [[ $empty ]]; echo empty:$? >> {output_path}; \
+         [[ literal ]]; echo literal:$? >> {output_path}; \
+         [[ $missing ]]; echo missing:$? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "nonempty:0\nempty:1\nliteral:0\nmissing:1\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_conditional_regex_match_sets_bash_rematch() {
     let output_path = "target/rubash-conditional-regex-output.txt";
     let _ = fs::remove_file(output_path);

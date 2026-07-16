@@ -86,6 +86,8 @@ impl Executor {
             [op, operand] if matches!(op.as_str(), "-n" | "-z") => {
                 i32::from(!self.conditional_string_unary(op, operand))
             }
+            [operand, end] if end == "]]" => i32::from(self.expand_word(operand).is_empty()),
+            [operand] => i32::from(self.expand_word(operand).is_empty()),
             [op, operand, end] if is_conditional_file_unary(op) && end == "]]" => {
                 i32::from(!self.conditional_file_unary(op, operand))
             }
