@@ -31,38 +31,44 @@ impl Executor {
         }
 
         if let Some((var_name, default)) = name.split_once(":-") {
-            return self
-                .parameter_operator_value(var_name)
-                .filter(|value| !value.is_empty())
-                .map(|value| shell_safe_value(&value))
-                .unwrap_or_else(|| self.expand_embedded_parameters(default));
+            if is_parameter_error_name(var_name) {
+                return self
+                    .parameter_operator_value(var_name)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(default));
+            }
         }
 
         if let Some((var_name, alternate)) = name.split_once(":+") {
-            if self
-                .parameter_operator_value(var_name)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return self.expand_embedded_parameters(alternate);
+            if is_parameter_error_name(var_name) {
+                if self
+                    .parameter_operator_value(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self.expand_embedded_parameters(alternate);
+                }
+                return String::new();
             }
-            return String::new();
         }
 
         if let Some((var_name, error_word)) = name.split_once(":?") {
-            if self
-                .parameter_operator_value(var_name)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return self
+            if is_parameter_error_name(var_name) {
+                if self
                     .parameter_operator_value(var_name)
-                    .map(|value| shell_safe_value(&value))
-                    .unwrap_or_default();
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self
+                        .parameter_operator_value(var_name)
+                        .map(|value| shell_safe_value(&value))
+                        .unwrap_or_default();
+                }
+                return self.expand_embedded_parameters(error_word);
             }
-            return self.expand_embedded_parameters(error_word);
         }
 
         if let Some((var_name, error_word)) = name.split_once('?') {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -71,7 +77,7 @@ impl Executor {
         }
 
         if let Some((var_name, word)) = name.split_once(":=") {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
@@ -81,7 +87,7 @@ impl Executor {
         }
 
         if let Some((var_name, word)) = name.split_once('=') {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -115,17 +121,25 @@ impl Executor {
         }
 
         if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.parameter_operator_value(var_name).is_some() {
-                return self.expand_embedded_parameters(alternate);
+            if is_parameter_error_name(var_name) {
+                if self.parameter_operator_value(var_name).is_some() {
+                    return self.expand_embedded_parameters(alternate);
+                }
+                return String::new();
             }
-            return String::new();
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
-            return self
-                .parameter_operator_value(var_name)
-                .map(|value| shell_safe_value(&value))
-                .unwrap_or_else(|| self.expand_embedded_parameters(default));
+            if is_parameter_error_name(var_name) {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters(default));
+            }
+        }
+
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+            return value;
         }
 
         self.expand_word(word)
@@ -143,38 +157,44 @@ impl Executor {
         }
 
         if let Some((var_name, default)) = name.split_once(":-") {
-            return self
-                .parameter_operator_value(var_name)
-                .filter(|value| !value.is_empty())
-                .map(|value| shell_safe_value(&value))
-                .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
+            if is_parameter_error_name(var_name) {
+                return self
+                    .parameter_operator_value(var_name)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
+            }
         }
 
         if let Some((var_name, alternate)) = name.split_once(":+") {
-            if self
-                .parameter_operator_value(var_name)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return self.expand_embedded_parameters_mut(alternate);
+            if is_parameter_error_name(var_name) {
+                if self
+                    .parameter_operator_value(var_name)
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self.expand_embedded_parameters_mut(alternate);
+                }
+                return String::new();
             }
-            return String::new();
         }
 
         if let Some((var_name, error_word)) = name.split_once(":?") {
-            if self
-                .parameter_operator_value(var_name)
-                .is_some_and(|value| !value.is_empty())
-            {
-                return self
+            if is_parameter_error_name(var_name) {
+                if self
                     .parameter_operator_value(var_name)
-                    .map(|value| shell_safe_value(&value))
-                    .unwrap_or_default();
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    return self
+                        .parameter_operator_value(var_name)
+                        .map(|value| shell_safe_value(&value))
+                        .unwrap_or_default();
+                }
+                return self.expand_embedded_parameters_mut(error_word);
             }
-            return self.expand_embedded_parameters_mut(error_word);
         }
 
         if let Some((var_name, error_word)) = name.split_once('?') {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -183,7 +203,7 @@ impl Executor {
         }
 
         if let Some((var_name, word)) = name.split_once(":=") {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .filter(|value| !value.is_empty())
@@ -193,7 +213,7 @@ impl Executor {
         }
 
         if let Some((var_name, word)) = name.split_once('=') {
-            if !var_name.is_empty() {
+            if is_parameter_error_name(var_name) {
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
@@ -227,17 +247,25 @@ impl Executor {
         }
 
         if let Some((var_name, alternate)) = name.split_once('+') {
-            if self.parameter_operator_value(var_name).is_some() {
-                return self.expand_embedded_parameters_mut(alternate);
+            if is_parameter_error_name(var_name) {
+                if self.parameter_operator_value(var_name).is_some() {
+                    return self.expand_embedded_parameters_mut(alternate);
+                }
+                return String::new();
             }
-            return String::new();
         }
 
         if let Some((var_name, default)) = name.split_once('-') {
-            return self
-                .parameter_operator_value(var_name)
-                .map(|value| shell_safe_value(&value))
-                .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
+            if is_parameter_error_name(var_name) {
+                return self
+                    .parameter_operator_value(var_name)
+                    .map(|value| shell_safe_value(&value))
+                    .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
+            }
+        }
+
+        if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
+            return value;
         }
 
         self.expand_word(word)
