@@ -135,6 +135,20 @@ impl Executor {
                     return Some((name.to_string(), message, 1));
                 }
             }
+            if let Some((name, _, Some(length))) = self.parse_parameter_substring(inner) {
+                if length < 0
+                    && name
+                        .strip_suffix("[@]")
+                        .or_else(|| name.strip_suffix("[*]"))
+                        .is_some()
+                {
+                    return Some((
+                        length.to_string(),
+                        "substring expression < 0".to_string(),
+                        1,
+                    ));
+                }
+            }
             rest = &after_start[end + 1..];
         }
         None

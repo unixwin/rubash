@@ -192,6 +192,28 @@ fn test_unquoted_array_expansion_field_splits_values() {
 }
 
 #[test]
+fn test_array_slice_negative_length_reports_error() {
+    let output_path = "target/rubash-array-negative-length-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "s=abcd; arr=(zero one two three); \
+         printf 'scalar<%s>\\n' \"${{s:1:-1}}\" > {output_path}; \
+         printf 'array<%s>\\n' \"${{arr[@]:1:-1}}\" >> {output_path}; \
+         echo after >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "scalar<bc>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_quoted_positional_at_expands_to_multiple_arguments() {
     let output_path = "target/rubash-quoted-positional-at-output.txt";
     let _ = fs::remove_file(output_path);
