@@ -15,11 +15,20 @@ const ALL_BUILTINS: &[&str] = &[
     ":",
     "[",
     "alias",
+    "bg",
+    "bind",
     "break",
     "builtin",
+    "caller",
     "cd",
     "command",
+    "compgen",
+    "complete",
+    "compopt",
     "continue",
+    "declare",
+    "dirs",
+    "disown",
     "echo",
     "enable",
     "eval",
@@ -27,9 +36,21 @@ const ALL_BUILTINS: &[&str] = &[
     "exit",
     "export",
     "false",
+    "fc",
+    "fg",
+    "getopts",
     "hash",
+    "help",
+    "history",
+    "jobs",
+    "kill",
+    "let",
+    "local",
+    "logout",
     "mapfile",
+    "popd",
     "printf",
+    "pushd",
     "pwd",
     "read",
     "readarray",
@@ -37,14 +58,20 @@ const ALL_BUILTINS: &[&str] = &[
     "return",
     "set",
     "shift",
+    "shopt",
     "source",
+    "suspend",
     "test",
     "times",
     "trap",
     "true",
     "type",
+    "typeset",
+    "ulimit",
     "umask",
+    "unalias",
     "unset",
+    "wait",
 ];
 const SPECIAL_BUILTINS: &[&str] = &[
     ".", ":", "break", "continue", "eval", "exec", "exit", "export", "readonly", "return", "set",
@@ -67,10 +94,8 @@ where
     W: Write,
     E: Write,
 {
-    // TODO(builtins/enable.def/builtins.c): Bash can enable or disable every
-    // builtin and dynamically load/unload builtins. This state is narrowed to
-    // the upstream builtins tests, where `test` is toggled and POSIX special
-    // builtins are listed with `-ps`/`-aps`/`-nps`.
+    // TODO(builtins/enable.def/builtins.c): Bash can dynamically load/unload
+    // builtins. This implementation tracks the builtins that rubash dispatches.
     let mut list_all = false;
     let mut disable = false;
     let mut reusable = false;

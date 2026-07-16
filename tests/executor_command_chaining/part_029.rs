@@ -187,6 +187,26 @@ fn test_enable_a_marks_disabled_builtins() {
 }
 
 #[test]
+fn test_enable_can_disable_extended_builtin_set() {
+    let output_path = "target/rubash-enable-extended-builtins-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("enable -n declare local typeset shopt wait; enable -a > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    for name in ["declare", "local", "typeset", "shopt", "wait"] {
+        assert!(output.contains(&format!("enable -n {name}\n")));
+    }
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_builtin_enable_updates_disabled_builtin_state() {
     let bin_dir = target_test_path("rubash-builtin-enable-bin");
     #[cfg(windows)]
