@@ -24,6 +24,29 @@ fn test_parameter_transform_quotes_value() {
 }
 
 #[test]
+fn test_indirect_parameter_transform_applies_to_target_value() {
+    let output_path = "target/rubash-param-transform-indirect-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "value='two words'; ref=value; arr=(alpha beta); elem='arr[1]'; \
+         printf '<%s>\\n' \"${{!ref@Q}}\" \"${{!ref@U}}\" \"${{!elem@Q}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<'two words'>\n<TWO WORDS>\n<'beta'>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_parameter_transform_expands_ansi_c_escapes() {
     let output_path = "target/rubash-param-transform-escape-output.txt";
     let _ = fs::remove_file(output_path);

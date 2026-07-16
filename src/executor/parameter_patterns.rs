@@ -9,7 +9,26 @@ impl Executor {
         let indirect_name = name.strip_prefix('!')?;
         let ref_name = indirect_name
             .strip_suffix("[@]")
-            .or_else(|| indirect_name.strip_suffix("[*]"))?;
+            .or_else(|| indirect_name.strip_suffix("[*]"));
+        if ref_name.is_none() {
+            let target_name = self.env_vars.get(indirect_name)?;
+            let value = self
+                .array_element_parameter_value(target_name)
+                .or_else(|| {
+                    self.env_vars.get(target_name).and_then(|value| {
+                        if is_array_storage(value)
+                            || is_marked_array_var(&self.env_vars, target_name)
+                        {
+                            array_value_at(value, 0)
+                        } else {
+                            Some(value.clone())
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            return Some(apply_parameter_transform(&value, transform));
+        }
+        let ref_name = ref_name?;
         let target_name = self.env_vars.get(ref_name)?;
         let value = if let Some(array_expr) = target_name
             .strip_suffix("[@]")
