@@ -77,6 +77,11 @@ impl Executor {
                 continue;
             }
 
+            if let Some(next_index) = self.execute_alias_introduced_function(ast, index)? {
+                index = next_index;
+                continue;
+            }
+
             if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
                 index = next_index;
                 continue;

@@ -1828,6 +1828,49 @@ fn test_function_body_can_be_conditional_command() {
 }
 
 #[test]
+fn test_alias_introduced_function_defines_brace_body() {
+    let output_path = "target/rubash-alias-function-brace-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias fn=function; \
+         fn af {{ echo alias-function > {output_path}; }}; af"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alias-function\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_alias_introduced_function_accepts_following_brace_body() {
+    let output_path = "target/rubash-alias-function-following-brace-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "shopt -s expand_aliases; alias fn=function; \
+         fn af; {{ echo alias-following-function > {output_path}; }}; af"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "alias-following-function\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_alias_introduced_coproc_executes_brace_body() {
     let output_path = "target/rubash-alias-coproc-brace-output.txt";
     let status_path = "target/rubash-alias-coproc-brace-status.txt";

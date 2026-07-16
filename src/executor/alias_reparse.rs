@@ -2,6 +2,46 @@ use super::alias_case::*;
 use super::*;
 
 impl Executor {
+    pub(in crate::executor) fn execute_alias_introduced_function(
+        &mut self,
+        ast: &Ast,
+        index: usize,
+    ) -> Result<Option<usize>, ExecuteError> {
+        let Some(command) = ast.commands.get(index) else {
+            return Ok(None);
+        };
+        let words = self.expand_aliases(&command.words);
+        if words.first().map(String::as_str) != Some("function") {
+            return Ok(None);
+        }
+
+        let mut source = alias_compound_source_words(&words);
+        append_source_redirects(&mut source, command);
+        let mut next_index = index + 1;
+        if words.len() == 2 {
+            if let Some(next_command) = ast.commands.get(next_index) {
+                if command_is_function_body_candidate(next_command) {
+                    source.push(' ');
+                    source.push_str(&bash_command_source_text(next_command));
+                    next_index += 1;
+                }
+            }
+        }
+
+        let tokens = crate::lexer::tokenize(&source);
+        let reparsed = crate::parser::parse(&tokens);
+        if !reparsed
+            .commands
+            .first()
+            .is_some_and(|command| command.function_command.is_some())
+        {
+            return Ok(None);
+        }
+
+        self.execute_ast(&reparsed)?;
+        Ok(Some(next_index))
+    }
+
     pub(in crate::executor) fn execute_alias_introduced_time(
         &mut self,
         ast: &Ast,
@@ -568,6 +608,20 @@ fn command_is_coproc_body_candidate(command: &CommandNode) -> bool {
         || command.coproc_command.is_some()
         || command.time_command.is_some()
         || command.function_command.is_some()
+        || command.arithmetic_command.is_some()
+        || command.conditional_command.is_some()
+}
+
+fn command_is_function_body_candidate(command: &CommandNode) -> bool {
+    command.brace_group.is_some()
+        || command.subshell_command.is_some()
+        || command.for_command.is_some()
+        || command.if_command.is_some()
+        || command.loop_command.is_some()
+        || command.case_command.is_some()
+        || command.select_command.is_some()
+        || command.coproc_command.is_some()
+        || command.time_command.is_some()
         || command.arithmetic_command.is_some()
         || command.conditional_command.is_some()
 }
