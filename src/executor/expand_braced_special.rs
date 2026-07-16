@@ -26,6 +26,9 @@ impl Executor {
         }
 
         let indirect_name = name.strip_prefix('!')?;
+        if parse_parameter_case_mod(name).is_some() {
+            return None;
+        }
         if let Some((var_name, transform)) = parse_parameter_transform(name) {
             if let Some(value) = self.indirect_parameter_transform(var_name, transform) {
                 return Some(value);

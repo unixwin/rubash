@@ -206,6 +206,9 @@ impl Executor {
     fn expand_braced_case_parameter(&self, name: &str) -> Option<String> {
         let (var_name, operation, pattern) = parse_parameter_case_mod(name)?;
         let pattern = self.expand_embedded_parameters(pattern);
+        if let Some(value) = self.indirect_case_parameter(var_name, operation, &pattern) {
+            return Some(value);
+        }
         if matches!(var_name, "@" | "*") {
             return Some(
                 self.positional_params
@@ -252,5 +255,51 @@ impl Executor {
             );
         }
         None
+    }
+
+    fn indirect_case_parameter(
+        &self,
+        var_name: &str,
+        operation: CaseMod,
+        pattern: &str,
+    ) -> Option<String> {
+        let indirect_name = var_name.strip_prefix('!')?;
+        if let Some(target_name) = self.nameref_target_name(indirect_name) {
+            return Some(apply_parameter_case_mod(&target_name, operation, pattern));
+        }
+
+        let target_name = self.env_vars.get(indirect_name)?;
+        if let Some(array_expr) = target_name
+            .strip_suffix("[@]")
+            .or_else(|| target_name.strip_suffix("[*]"))
+        {
+            return Some(
+                self.env_vars
+                    .get(array_expr)
+                    .map(|value| {
+                        array_values(value)
+                            .into_iter()
+                            .map(|value| apply_parameter_case_mod(&value, operation, pattern))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(value) = self.array_element_parameter_value(target_name) {
+            return Some(apply_parameter_case_mod(&value, operation, pattern));
+        }
+        if let Some(value) = self.env_vars.get(target_name) {
+            if is_marked_array_var(&self.env_vars, target_name) || is_array_storage(value) {
+                return Some(
+                    array_value_at(value, 0)
+                        .map(|value| apply_parameter_case_mod(&value, operation, pattern))
+                        .unwrap_or_default(),
+                );
+            }
+            return Some(apply_parameter_case_mod(value, operation, pattern));
+        }
+
+        Some(String::new())
     }
 }
