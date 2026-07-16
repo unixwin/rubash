@@ -122,6 +122,27 @@ fn test_ansi_c_quoted_words_decode_as_single_arguments() {
 }
 
 #[test]
+fn test_locale_quoted_words_expand_like_double_quotes() {
+    let output_path = "target/rubash-locale-quoted-word-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("v=VALUE; printf '<%s>\\n' $\"hello\" $\"$v\" $\"hello world\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<hello>\n<VALUE>\n<hello world>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipeline_redirects_filtered_output() {
     let output_path = "target/rubash-pipeline-output.txt";
     let _ = fs::remove_file(output_path);

@@ -34,6 +34,10 @@ pub(super) fn remove_shell_quotes(raw: &str) -> String {
                 }
                 out.push_str(&decode_ansi_c_quoted(&quoted));
             }
+            '$' if chars.peek() == Some(&'"') => {
+                chars.next();
+                remove_double_quoted_into(&mut out, &mut chars, false);
+            }
             '\'' => {
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
@@ -47,36 +51,7 @@ pub(super) fn remove_shell_quotes(raw: &str) -> String {
                 }
             }
             '"' => {
-                while let Some(quoted) = chars.next() {
-                    if quoted == '$' && chars.peek() == Some(&'(') {
-                        copy_dollar_paren_substitution(&mut out, &mut chars);
-                        continue;
-                    }
-                    if quoted == '$' && chars.peek() == Some(&'{') {
-                        copy_braced_parameter_after_dollar(&mut out, &mut chars);
-                        continue;
-                    }
-                    match quoted {
-                        '"' => break,
-                        '\\' => {
-                            if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) =
-                                chars.peek().copied()
-                            {
-                                chars.next();
-                                if escaped != '\n' {
-                                    match escaped {
-                                        '$' => out.push('\x1f'),
-                                        '`' => out.push('\x1a'),
-                                        _ => out.push(escaped),
-                                    }
-                                }
-                            } else {
-                                out.push('\\');
-                            }
-                        }
-                        _ => out.push(quoted),
-                    }
-                }
+                remove_double_quoted_into(&mut out, &mut chars, false);
             }
             '\\' => {
                 if let Some(escaped) = chars.next() {
@@ -116,6 +91,10 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                     }
                 }
             }
+            '$' if chars.peek() == Some(&'"') => {
+                chars.next();
+                remove_double_quoted_into(&mut out, &mut chars, true);
+            }
             '\'' => {
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
@@ -125,50 +104,7 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                 }
             }
             '"' => {
-                while let Some(quoted) = chars.next() {
-                    if quoted == '$' && chars.peek() == Some(&'(') {
-                        copy_dollar_paren_substitution(&mut out, &mut chars);
-                        continue;
-                    }
-                    if quoted == '$' && chars.peek() == Some(&'{') {
-                        copy_braced_parameter_after_dollar(&mut out, &mut chars);
-                        continue;
-                    }
-                    match quoted {
-                        '"' => break,
-                        '`' => {
-                            out.push(quoted);
-                            while let Some(inner) = chars.next() {
-                                out.push(inner);
-                                if inner == '`' {
-                                    break;
-                                }
-                                if inner == '\\' {
-                                    if let Some(escaped) = chars.next() {
-                                        out.push(escaped);
-                                    }
-                                }
-                            }
-                        }
-                        '\\' => {
-                            if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) =
-                                chars.peek().copied()
-                            {
-                                chars.next();
-                                if escaped != '\n' {
-                                    if escaped == '`' {
-                                        out.push('\x1a');
-                                    } else {
-                                        out.push(escaped);
-                                    }
-                                }
-                            } else {
-                                out.push('\\');
-                            }
-                        }
-                        _ => out.push(quoted),
-                    }
-                }
+                remove_double_quoted_into(&mut out, &mut chars, true);
             }
             '\\' => {
                 if let Some(escaped) = chars.next() {
@@ -184,6 +120,55 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
     }
 
     out
+}
+
+fn remove_double_quoted_into(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    preserve_backticks: bool,
+) {
+    while let Some(quoted) = chars.next() {
+        if quoted == '$' && chars.peek() == Some(&'(') {
+            copy_dollar_paren_substitution(out, chars);
+            continue;
+        }
+        if quoted == '$' && chars.peek() == Some(&'{') {
+            copy_braced_parameter_after_dollar(out, chars);
+            continue;
+        }
+        match quoted {
+            '"' => break,
+            '`' if preserve_backticks => {
+                out.push(quoted);
+                while let Some(inner) = chars.next() {
+                    out.push(inner);
+                    if inner == '`' {
+                        break;
+                    }
+                    if inner == '\\' {
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    }
+                }
+            }
+            '\\' => {
+                if let Some(escaped @ ('\\' | '"' | '$' | '`' | '\n')) = chars.peek().copied() {
+                    chars.next();
+                    if escaped != '\n' {
+                        match escaped {
+                            '$' => out.push('\x1f'),
+                            '`' => out.push('\x1a'),
+                            _ => out.push(escaped),
+                        }
+                    }
+                } else {
+                    out.push('\\');
+                }
+            }
+            _ => out.push(quoted),
+        }
+    }
 }
 
 fn copy_dollar_paren_substitution(

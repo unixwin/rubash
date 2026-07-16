@@ -225,6 +225,11 @@ impl<'a> Lexer<'a> {
                     self.skip_ansi_c_single();
                     Some(self.finish_word_token(start, false))
                 }
+                Some('"') => {
+                    self.advance();
+                    self.skip_double();
+                    Some(self.finish_word_token(start, false))
+                }
                 Some('(') => {
                     self.advance();
                     self.skip_cmd_subst();
