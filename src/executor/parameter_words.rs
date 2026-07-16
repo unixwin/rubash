@@ -138,6 +138,10 @@ impl Executor {
             }
         }
 
+        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {
+            return value;
+        }
+
         if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
             return value;
         }
@@ -262,6 +266,10 @@ impl Executor {
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| self.expand_embedded_parameters_mut(default));
             }
+        }
+
+        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {
+            return value;
         }
 
         if let Some(value) = self.expand_braced_pattern_or_transform_parameter(name) {
