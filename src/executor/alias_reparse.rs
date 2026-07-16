@@ -16,6 +16,10 @@ impl Executor {
         }
 
         let (source, next_index) = alias_time_source(ast, index, command, &words);
+        if let Some(time_command) = alias_time_arithmetic_command(command, &words) {
+            self.execute_time_ast_command(&time_command)?;
+            return Ok(Some(index + 1));
+        }
         if let Some((case_command, redirect_command, next_index)) =
             alias_time_case_command(ast, index, command, &words)
         {
@@ -413,6 +417,71 @@ fn alias_time_case_command<'a>(
         .map(|case_command| (case_command, redirect_command, next_index))
 }
 
+fn alias_time_arithmetic_command(command: &CommandNode, words: &[String]) -> Option<TimeCommand> {
+    let expression_index = alias_time_compound_word_index(words)?;
+    if matches!(
+        words.get(expression_index).map(String::as_str),
+        Some(
+            "if" | "case"
+                | "for"
+                | "while"
+                | "until"
+                | "select"
+                | "function"
+                | "coproc"
+                | "[["
+                | "{"
+                | "("
+        )
+    ) {
+        return None;
+    }
+    if words
+        .get(expression_index)
+        .is_some_and(|word| word.starts_with('{') || word.starts_with('('))
+    {
+        return None;
+    }
+
+    let expression = words[expression_index..].join(" ");
+    if !alias_time_arithmetic_expression_likely(&expression) {
+        return None;
+    }
+
+    let metadata = ArithmeticExpressionMetadata::new(expression.clone());
+    let mut arithmetic = CommandNode::new();
+    arithmetic.words = vec!["((".to_string(), expression.clone(), "))".to_string()];
+    arithmetic.arithmetic_command = Some(ArithmeticCommand {
+        open_delimiter: "((".to_string(),
+        open_delimiter_metadata: synthetic_keyword_metadata("(("),
+        expression,
+        close_delimiter: "))".to_string(),
+        close_delimiter_metadata: synthetic_keyword_metadata("))"),
+        operators: metadata.operators,
+        variables: metadata.variables,
+        has_assignment: metadata.has_assignment,
+        has_comparison: metadata.has_comparison,
+        has_logical: metadata.has_logical,
+        has_update: metadata.has_update,
+    });
+    copy_command_redirects(command, &mut arithmetic);
+    Some(alias_time_command_from_words(words, arithmetic))
+}
+
+fn alias_time_arithmetic_expression_likely(expression: &str) -> bool {
+    let trimmed = expression.trim();
+    if trimmed.parse::<i128>().is_ok() {
+        return true;
+    }
+
+    trimmed.chars().any(|ch| {
+        matches!(
+            ch,
+            '+' | '-' | '*' | '/' | '%' | '<' | '>' | '=' | '!' | '&' | '|'
+        )
+    })
+}
+
 fn alias_timed_case_command(
     case_command: CaseCommand,
     redirect_command: &CommandNode,
@@ -420,17 +489,21 @@ fn alias_timed_case_command(
     let mut command = CommandNode::new();
     command.line = redirect_command.line;
     command.case_command = Some(Box::new(case_command));
-    command.redirects = redirect_command.redirects.clone();
-    command.redirect_in = redirect_command.redirect_in.clone();
-    command.redirect_out = redirect_command.redirect_out.clone();
-    command.append = redirect_command.append.clone();
-    command.redirect_err = redirect_command.redirect_err.clone();
-    command.redirect_err_append = redirect_command.redirect_err_append.clone();
-    command.heredoc = redirect_command.heredoc.clone();
-    command.heredoc_delimiter = redirect_command.heredoc_delimiter.clone();
-    command.heredoc_redirects = redirect_command.heredoc_redirects.clone();
-    command.here_string = redirect_command.here_string.clone();
+    copy_command_redirects(redirect_command, &mut command);
     command
+}
+
+fn copy_command_redirects(from: &CommandNode, to: &mut CommandNode) {
+    to.redirects = from.redirects.clone();
+    to.redirect_in = from.redirect_in.clone();
+    to.redirect_out = from.redirect_out.clone();
+    to.append = from.append.clone();
+    to.redirect_err = from.redirect_err.clone();
+    to.redirect_err_append = from.redirect_err_append.clone();
+    to.heredoc = from.heredoc.clone();
+    to.heredoc_delimiter = from.heredoc_delimiter.clone();
+    to.heredoc_redirects = from.heredoc_redirects.clone();
+    to.here_string = from.here_string.clone();
 }
 
 fn alias_time_command_from_words(words: &[String], command: CommandNode) -> TimeCommand {
