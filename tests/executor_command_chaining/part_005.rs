@@ -198,6 +198,29 @@ fn test_adjacent_current_shell_reply_substitutions_update_reply_left_to_right() 
 }
 
 #[test]
+fn test_current_shell_reply_substitution_expands_inside_command_substitutions() {
+    let output_path = "target/rubash-nested-current-shell-reply-substitution-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "echo $(echo combined ${{| REPLY=comsubs; }}) > {output_path}; \
+         echo ${{ echo $(echo combined ${{| REPLY=comsubs; }}); }} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "combined comsubs\ncombined comsubs\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_printf_command_substitution_strips_trailing_newlines() {
     let output_path = "target/rubash-printf-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);

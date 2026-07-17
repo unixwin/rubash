@@ -442,6 +442,10 @@ impl Executor {
 
 fn command_substitution_needs_ast_execution(ast: &Ast) -> bool {
     ast.commands.iter().any(command_has_ast_substitution_shape)
+        || ast
+            .commands
+            .iter()
+            .any(command_contains_current_shell_substitution)
         || (ast.commands.len() > 1 && ast.commands.iter().all(command_is_ast_list_substitution))
 }
 
@@ -489,6 +493,13 @@ fn command_has_compound_substitution(command: &CommandNode) -> bool {
         || command.brace_group.is_some()
         || command.arithmetic_command.is_some()
         || command.conditional_command.is_some()
+}
+
+fn command_contains_current_shell_substitution(command: &CommandNode) -> bool {
+    command
+        .words
+        .iter()
+        .any(|word| word_contains_current_shell_command_substitution(word))
 }
 
 fn command_is_ast_list_substitution(command: &CommandNode) -> bool {
