@@ -53,7 +53,7 @@ fn execute_ast_with_args(
         None => executor.remove_env("__RUBASH_IN_SOURCE"),
     }
 
-    if had_source_args && executor.positional_params() == source_positional_params {
+    if had_source_args {
         executor.set_positional_params(old_positional_params);
     }
 

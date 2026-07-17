@@ -184,6 +184,62 @@ fn test_source_process_substitution_uses_source_arguments() {
 }
 
 #[test]
+fn test_source_with_arguments_restores_caller_positional_params() {
+    let script_path = "target/rubash-source-args-restore.sh";
+    let output_path = "target/rubash-source-args-restore-output.txt";
+    let _ = fs::remove_file(script_path);
+    let _ = fs::remove_file(output_path);
+    fs::write(
+        script_path,
+        format!("printf 'inside:%s:%s\\n' \"$1\" \"$2\" > {output_path}\nset -- changed\n"),
+    )
+    .unwrap();
+    let input = format!(
+        "set -- outer1 outer2; source {script_path} inner1 inner2; printf 'after:%s:%s\\n' \"$1\" \"$2\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "inside:inner1:inner2\nafter:outer1:outer2\n"
+    );
+    let _ = fs::remove_file(script_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_source_without_arguments_keeps_positional_param_changes() {
+    let script_path = "target/rubash-source-args-persist.sh";
+    let output_path = "target/rubash-source-args-persist-output.txt";
+    let _ = fs::remove_file(script_path);
+    let _ = fs::remove_file(output_path);
+    fs::write(script_path, "set -- changed value\n").unwrap();
+    let input = format!(
+        "set -- outer1 outer2; source {script_path}; printf 'after:%s:%s\\n' \"$1\" \"$2\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "after:changed:value\n"
+    );
+    let _ = fs::remove_file(script_path);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_builtin_return_returns_from_function() {
     let output_path = "target/rubash-builtin-return-output.txt";
     let _ = fs::remove_file(output_path);
