@@ -387,6 +387,44 @@ impl Executor {
                 word if word.starts_with("-ei") && word.len() > 3 => {
                     index += 1;
                 }
+                "-et" => {
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -et: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    match parse_read_timeout(word) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-et") && word.len() > 3 => {
+                    let value = &word[3..];
+                    match parse_read_timeout(value) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
