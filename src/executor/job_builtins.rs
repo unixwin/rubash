@@ -322,7 +322,7 @@ impl Executor {
         true
     }
 
-    fn resolve_background_job(&self, job: &str) -> Option<u32> {
+    pub(in crate::executor) fn resolve_background_job(&self, job: &str) -> Option<u32> {
         if let Some(number) = job.strip_prefix('%') {
             return self.resolve_background_job_number(number);
         }

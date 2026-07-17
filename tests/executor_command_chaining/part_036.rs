@@ -145,6 +145,67 @@ fn test_wait_np_assigns_requested_jobspec_pid() {
 }
 
 #[test]
+fn test_kill_background_jobspec_removes_job() {
+    let output_path = "target/rubash-kill-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "while true; do true; done & kill %1; printf 'kill:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "kill:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_kill_current_jobspec_uses_last_background_job() {
+    let output_path = "target/rubash-kill-current-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "while true; do true; done & kill %+; printf 'kill:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "kill:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_kill_unknown_jobspec_reports_failure() {
+    let error_path = "target/rubash-kill-unknown-jobspec-error.txt";
+    let status_path = "target/rubash-kill-unknown-jobspec-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("kill %1 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    assert!(fs::read_to_string(error_path)
+        .unwrap()
+        .contains("kill: %1: no such job"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_wait_for_unknown_pid_returns_notfound() {
     let error_path = "target/rubash-wait-pid-error.txt";
     let status_path = "target/rubash-wait-pid-status.txt";
