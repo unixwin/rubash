@@ -126,6 +126,27 @@ fn assigns_output_with_v() {
 }
 
 #[test]
+fn assigns_output_with_compact_v() {
+    let (status, stdout, stderr, env_vars) = run(&["-vNAME", "%s", "value"]);
+
+    assert_eq!(status, EXECUTION_SUCCESS);
+    assert!(stdout.is_empty());
+    assert!(stderr.is_empty());
+    assert_eq!(env_vars.get("NAME"), Some(&"value".to_string()));
+}
+
+#[test]
+fn compact_v_rejects_invalid_identifier() {
+    let (status, stdout, stderr, env_vars) = run(&["-vBAD-NAME", "%s", "value"]);
+
+    assert_eq!(status, EX_USAGE);
+    assert!(stdout.is_empty());
+    assert!(env_vars.is_empty());
+    assert!(stderr.contains("BAD-NAME"));
+    assert!(stderr.contains("not a valid identifier"));
+}
+
+#[test]
 fn percent_n_assigns_character_count_without_output() {
     let (_status, stdout, _stderr, env_vars) = run(&["abc%n:%s", "COUNT", "done"]);
 

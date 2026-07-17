@@ -92,29 +92,44 @@ where
     }
 
     if !end_options
-        && matches!(args.get(index), Some(option) if option.starts_with('-') && *option != "-v")
+        && matches!(args.get(index), Some(option) if option.starts_with('-') && !option.starts_with("-v"))
     {
         writeln!(stderr, "rubash: printf: {}: invalid option", args[index])?;
         writeln!(stderr, "printf: usage: printf [-v var] format [arguments]")?;
         return Ok(EX_USAGE);
     }
 
-    if args.get(index) == Some(&"-v") {
-        let Some(name) = args.get(index + 1) else {
-            writeln!(stderr, "rubash: printf: -v: option requires an argument")?;
-            return Ok(EX_USAGE);
+    if !end_options {
+        let name = match args.get(index) {
+            Some(&"-v") => {
+                let Some(name) = args.get(index + 1) else {
+                    writeln!(stderr, "rubash: printf: -v: option requires an argument")?;
+                    return Ok(EX_USAGE);
+                };
+                index += 2;
+                Some(*name)
+            }
+            Some(option) => option
+                .strip_prefix("-v")
+                .filter(|name| !name.is_empty())
+                .map(|name| {
+                    index += 1;
+                    name
+                }),
+            None => None,
         };
 
-        if !valid_identifier(name) {
-            writeln!(stderr, "rubash: printf: `{}`: not a valid identifier", name)?;
-            return Ok(EX_USAGE);
-        }
+        if let Some(name) = name {
+            if !valid_identifier(name) {
+                writeln!(stderr, "rubash: printf: `{}`: not a valid identifier", name)?;
+                return Ok(EX_USAGE);
+            }
 
-        output_var = Some(*name);
-        index += 2;
-        if args.get(index) == Some(&"--") {
-            index += 1;
-            end_options = true;
+            output_var = Some(name);
+            if args.get(index) == Some(&"--") {
+                index += 1;
+                end_options = true;
+            }
         }
     }
 
