@@ -218,11 +218,7 @@ fn collect_process_substitution_target_with_prefix(
         return None;
     }
 
-    let source = tokens[source_start..index]
-        .iter()
-        .map(|token| token.raw.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let source = process_substitution_source(&tokens[source_start..index]);
     let operator = if output { ">" } else { "<" };
     let prefix = format!("{operator}(");
     let commands = parse(&crate::lexer::tokenize(&source)).commands;
@@ -243,6 +239,46 @@ fn collect_process_substitution_target_with_prefix(
         },
         index,
     ))
+}
+
+fn process_substitution_source(tokens: &[Token]) -> String {
+    let mut source = String::new();
+    let mut pending_heredoc_delimiter: Option<String> = None;
+    let mut skip_next_semicolon = false;
+
+    for (index, token) in tokens.iter().enumerate() {
+        if skip_next_semicolon && token.kind == TokenKind::Semicolon {
+            skip_next_semicolon = false;
+            continue;
+        }
+        skip_next_semicolon = false;
+
+        if token.kind == TokenKind::HereDocBody {
+            if !source.ends_with('\n') {
+                source.push('\n');
+            }
+            source.push_str(token.value.trim_start_matches(['\x1e', '\x1f']));
+            if !source.ends_with('\n') {
+                source.push('\n');
+            }
+            if let Some(delimiter) = pending_heredoc_delimiter.take() {
+                source.push_str(&delimiter);
+            }
+            skip_next_semicolon = true;
+            continue;
+        }
+
+        if !source.is_empty() && !source.ends_with('\n') {
+            source.push(' ');
+        }
+        source.push_str(&token.raw);
+
+        if token.kind == TokenKind::HereDoc {
+            pending_heredoc_delimiter = tokens.get(index + 1).map(|token| token.value.clone());
+        }
+    }
+
+    source
 }
 
 fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {

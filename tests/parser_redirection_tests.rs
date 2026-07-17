@@ -470,6 +470,19 @@ fn test_process_substitution_records_nested_body_ast() {
 }
 
 #[test]
+fn test_process_substitution_keeps_heredoc_body() {
+    let input = "cat <(cat <<EOF\nhi\nEOF\n)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].source, "cat << EOF\nhi\nEOF");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].heredoc.as_deref(), Some("hi\n"));
+}
+
+#[test]
 fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
     let input = "cat <(case esac in\nesac) printf matched ;; esac)";
     let tokens = tokenize(input);
