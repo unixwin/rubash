@@ -198,10 +198,12 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         TokenKind::Semicolon => {
             // Command separator
             state.current_cmd.subshell |= state.in_subshell;
-            state
-                .ast
-                .commands
-                .push(std::mem::take(&mut state.current_cmd));
+            if !command_is_empty(&state.current_cmd) {
+                state
+                    .ast
+                    .commands
+                    .push(std::mem::take(&mut state.current_cmd));
+            }
         }
         TokenKind::RedirectIn => {
             if command_is_open_conditional(&state.current_cmd) {

@@ -714,6 +714,28 @@ mod semicolon_tests {
         let ast = parse(&tokens);
         assert_eq!(ast.commands.len(), 2);
     }
+
+    #[test]
+    fn test_newline_list_does_not_create_empty_commands() {
+        let input = "\n\nls;\n\ncd /;\n";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 2);
+        assert_eq!(ast.commands[0].words, ["ls"]);
+        assert_eq!(ast.commands[1].words, ["cd", "/"]);
+    }
+
+    #[test]
+    fn test_background_newline_does_not_create_empty_command() {
+        let input = "sleep 0 &\necho done";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 2);
+        assert!(ast.commands[0].background_command.is_some());
+        assert_eq!(ast.commands[1].words, ["echo", "done"]);
+    }
 }
 
 mod command_body_kind_tests {
