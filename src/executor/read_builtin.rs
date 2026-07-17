@@ -565,6 +565,16 @@ impl Executor {
                 word if word.starts_with("-ei") && word.len() > 3 => {
                     index += 1;
                 }
+                "-rei" | "-eri" => {
+                    raw = true;
+                    index += 2;
+                }
+                word if (word.starts_with("-rei") || word.starts_with("-eri"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    index += 1;
+                }
                 "-et" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         let _ = writeln!(
