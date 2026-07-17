@@ -451,6 +451,27 @@ fn test_indirect_array_reference_expands_target_words() {
 }
 
 #[test]
+fn test_indirect_groups_array_reference_expands_dynamic_values() {
+    let output_path = "target/rubash-param-indirect-groups-reference-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "at='GROUPS[@]'; star='GROUPS[*]'; IFS=:; \
+         printf 'at<%s>\\n' \"${{!at}}\" > {output_path}; \
+         printf 'star<%s>\\n' \"${{!star}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "at<0>\nstar<0>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_replacement_expands_target_values() {
     let output_path = "target/rubash-param-indirect-replacement-output.txt";
     let _ = fs::remove_file(output_path);

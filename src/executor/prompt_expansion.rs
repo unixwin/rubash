@@ -44,9 +44,8 @@ impl Executor {
             .or_else(|| target_expr.strip_suffix("[*]"))
         {
             return self
-                .env_vars
-                .get(array_name)
-                .map(|value| array_values(value))
+                .parameter_array_storage(array_name)
+                .map(|value| array_values(&value))
                 .unwrap_or_default();
         }
 

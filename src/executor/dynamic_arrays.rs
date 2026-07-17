@@ -85,6 +85,11 @@ impl Executor {
     pub(in crate::executor) fn parameter_array_storage(&self, name: &str) -> Option<String> {
         let name = self.resolved_variable_name(name)?;
         let name = name.as_str();
+        if name == "GROUPS" {
+            return Some(format_indexed_array_storage(
+                self.groups_words().into_iter().enumerate().collect(),
+            ));
+        }
         if name == "DIRSTACK" {
             return Some(self.dirstack_storage());
         }
