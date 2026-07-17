@@ -246,6 +246,76 @@ impl Executor {
                     delimiter = word[3..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-rsn" | "-srn" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = false;
+                    index += 2;
+                }
+                word if (word.starts_with("-rsn") || word.starts_with("-srn"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    let value = &word[4..];
+                    char_limit = match read_char_limit_argument(Some(value)) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = false;
+                    index += 1;
+                }
+                "-rsN" | "-srN" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = true;
+                    index += 2;
+                }
+                word if (word.starts_with("-rsN") || word.starts_with("-srN"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    let value = &word[4..];
+                    char_limit = match read_char_limit_argument(Some(value)) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = true;
+                    index += 1;
+                }
                 "-rn" => {
                     raw = true;
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
