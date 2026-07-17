@@ -88,7 +88,7 @@ impl Executor {
                 Some('s') => output.push_str("bash"),
                 Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
                 Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
-                Some('$') => output.push('$'),
+                Some('$') => output.push(prompt_dollar(&self.env_vars)),
                 Some('\\') => output.push('\\'),
                 Some('[') | Some(']') => {}
                 Some('0') => {
@@ -297,5 +297,13 @@ fn prompt_short_version(env_vars: &HashMap<String, String>) -> String {
     match (parts.next(), parts.next()) {
         (Some(major), Some(minor)) => format!("{major}.{minor}"),
         _ => release,
+    }
+}
+
+fn prompt_dollar(env_vars: &HashMap<String, String>) -> char {
+    if env_vars.get("EUID").map(String::as_str) == Some("0") {
+        '#'
+    } else {
+        '$'
     }
 }

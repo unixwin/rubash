@@ -71,4 +71,19 @@ mod unit_tests {
             " ab "
         );
     }
+
+    #[test]
+    fn prompt_dollar_escape_uses_effective_uid() {
+        let mut executor = Executor::new();
+
+        executor
+            .env_vars
+            .insert("EUID".to_string(), "0".to_string());
+        assert_eq!(executor.decode_prompt_string("\\$"), "#");
+
+        executor
+            .env_vars
+            .insert("EUID".to_string(), "1000".to_string());
+        assert_eq!(executor.decode_prompt_string("\\$"), "$");
+    }
 }
