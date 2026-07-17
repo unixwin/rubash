@@ -381,6 +381,40 @@ fn test_read_combined_en_compact_limit() {
 }
 
 #[test]
+fn test_read_combined_ren_consumes_limit_and_reads_raw() {
+    let output_path = "target/rubash-read-ren-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -ren 4 value <<< 'a\\bcd'; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\bc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_ern_compact_limit_reads_raw() {
+    let output_path = "target/rubash-read-ern-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -ern4 value <<< 'a\\bcd'; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\bc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_s_upper_n_compact_limits_characters() {
     let output_path = "target/rubash-read-s-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
