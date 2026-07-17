@@ -338,6 +338,44 @@ impl Executor {
                 word if word.starts_with("-si") && word.len() > 3 => {
                     index += 1;
                 }
+                "-st" => {
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -st: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    match parse_read_timeout(word) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-st") && word.len() > 3 => {
+                    let value = &word[3..];
+                    match parse_read_timeout(value) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 1;
+                }
                 word if word.starts_with('-')
                     && word.len() > 2
                     && word[1..].chars().all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
