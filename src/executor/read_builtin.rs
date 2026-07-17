@@ -430,6 +430,18 @@ impl Executor {
                     prompt = Some(word[3..].to_string());
                     index += 1;
                 }
+                "-rsp" | "-srp" => {
+                    raw = true;
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if (word.starts_with("-rsp") || word.starts_with("-srp"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    prompt = Some(word[4..].to_string());
+                    index += 1;
+                }
                 "-ri" => {
                     raw = true;
                     index += 2;
