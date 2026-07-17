@@ -71,6 +71,30 @@ fn test_bind_option_requires_argument() {
 }
 
 #[test]
+fn test_bind_compact_argument_option_consumes_rest_of_word() {
+    let error_path = "target/rubash-bind-compact-arg-error.txt";
+    let status_path = "target/rubash-bind-compact-arg-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("bind '-x\"\\C-x\":echo bound' 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("bind: warning: line editing not enabled"));
+    assert!(!error.contains("invalid option"));
+    assert!(!error.contains("option requires an argument"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_fc_without_history_returns_success() {
     let output_path = "target/rubash-fc-empty-output.txt";
     let status_path = "target/rubash-fc-empty-status.txt";

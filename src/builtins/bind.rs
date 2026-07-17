@@ -30,12 +30,13 @@ where
             break;
         }
 
-        for option in arg[1..].chars() {
+        for (offset, option) in arg[1..].char_indices() {
             match option {
                 'l' | 'p' | 's' | 'v' | 'P' | 'S' | 'V' | 'X' => {}
                 'm' | 'f' | 'q' | 'u' | 'r' | 'x' => {
-                    if arg.len() > 2 {
-                        continue;
+                    let value_start = 1 + offset + option.len_utf8();
+                    if value_start < arg.len() {
+                        break;
                     }
                     index += 1;
                     if args.get(index).is_none() {
