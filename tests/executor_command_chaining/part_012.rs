@@ -297,6 +297,40 @@ fn test_readarray_compact_d_keeps_delimiter_without_t() {
 }
 
 #[test]
+fn test_readarray_combined_td_uses_delimiter_and_trims_records() {
+    let input = "readarray -td: arr <<< 'alpha:beta'";
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        executor.get_env("arr"),
+        Some("\x1d([0]=\"alpha\" [1]=$'beta\\n')")
+    );
+}
+
+#[test]
+fn test_mapfile_combined_td_consumes_separate_delimiter() {
+    let input = "mapfile -td : arr <<< 'alpha:beta'";
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        executor.get_env("arr"),
+        Some("\x1d([0]=\"alpha\" [1]=$'beta\\n')")
+    );
+}
+
+#[test]
 fn test_mapfile_u_reads_numbered_fd_here_string() {
     let output_path = "target/rubash-mapfile-u-fd-output.txt";
     let _ = fs::remove_file(output_path);

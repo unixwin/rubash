@@ -78,6 +78,24 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-td" => {
+                    trim_newline = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "d",
+                            &mut stderr,
+                        );
+                    };
+                    delimiter = Some(word.chars().next().unwrap_or('\0'));
+                    index += 2;
+                }
+                word if word.starts_with("-td") && word.len() > 3 => {
+                    trim_newline = true;
+                    delimiter = Some(word[3..].chars().next().unwrap_or('\0'));
+                    index += 1;
+                }
                 "-d" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         return self.mapfile_missing_option_argument(
