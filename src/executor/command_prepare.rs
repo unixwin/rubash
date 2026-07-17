@@ -114,7 +114,13 @@ impl Executor {
             .words
             .iter()
             .enumerate()
-            .flat_map(|(index, word)| self.expand_command_word(cmd, index, word))
+            .flat_map(|(index, word)| {
+                let raw = cmd
+                    .word_metadata
+                    .get(index)
+                    .map(|metadata| metadata.raw.as_str());
+                self.expand_command_word(cmd, index, word, raw)
+            })
             .collect();
         variable_expanded.word_kinds = Vec::new();
 
@@ -136,7 +142,13 @@ impl Executor {
         Ok(variable_expanded)
     }
 
-    fn expand_command_word(&mut self, cmd: &CommandNode, index: usize, word: &str) -> Vec<String> {
+    fn expand_command_word(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Vec<String> {
         if cmd
             .process_substitutions
             .iter()
@@ -158,7 +170,7 @@ impl Executor {
             return values;
         }
         if self.is_brace_expand_enabled() && !word.contains("${") {
-            let braced = crate::expand::braces::expand_braces(word);
+            let braced = expand_braces_with_optional_raw(word, raw);
             if braced.len() > 1 {
                 return braced;
             }
@@ -245,4 +257,23 @@ impl Executor {
         eprintln!("{}no match: {pattern}", self.diagnostic_prefix());
         self.exit_code = 1;
     }
+}
+
+pub(in crate::executor) fn expand_braces_with_optional_raw(
+    word: &str,
+    raw: Option<&str>,
+) -> Vec<String> {
+    if let Some(raw) = raw {
+        if raw != word && !raw.contains("${") {
+            let braced = crate::expand::braces::expand_braces(raw);
+            if braced.len() > 1 {
+                return braced
+                    .into_iter()
+                    .map(|word| crate::lexer::remove_shell_quotes(&word))
+                    .collect();
+            }
+        }
+    }
+
+    crate::expand::braces::expand_braces(word)
 }

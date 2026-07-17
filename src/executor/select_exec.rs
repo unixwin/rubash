@@ -32,8 +32,12 @@ impl Executor {
             self.positional_params.clone()
         } else {
             let mut values = Vec::new();
-            for word in &select_command.words {
-                match self.expand_for_word_values_result(word) {
+            for (index, word) in select_command.words.iter().enumerate() {
+                let raw = select_command
+                    .word_metadata
+                    .get(index)
+                    .map(|metadata| metadata.raw.as_str());
+                match self.expand_for_word_values_result(word, raw) {
                     Ok(expanded) => values.extend(expanded),
                     Err(pattern) => {
                         self.report_failglob(&pattern);

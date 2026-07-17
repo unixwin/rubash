@@ -1,6 +1,6 @@
 use super::ansi::decode_ansi_c_quoted;
 
-pub(super) fn remove_shell_quotes(raw: &str) -> String {
+pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
 

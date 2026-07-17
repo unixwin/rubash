@@ -407,6 +407,9 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
     if command.word_kinds.len() == old_word_len {
         command.word_kinds = command.word_kinds[index..].to_vec();
     }
+    if command.word_metadata.len() == old_word_len {
+        command.word_metadata = command.word_metadata[index..].to_vec();
+    }
     Some(TimePipelinePrefix {
         keyword,
         keyword_metadata,

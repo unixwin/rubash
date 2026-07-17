@@ -78,6 +78,10 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
 
         while j < bytes.len() && depth > 0 {
             match bytes[j] {
+                b'\\' => {
+                    j += 2;
+                    continue;
+                }
                 b'{' => depth += 1,
                 b'}' => {
                     depth -= 1;
@@ -88,9 +92,6 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
                 b',' if depth == 1 => has_comma = true,
                 b'.' if depth == 1 && j + 1 < bytes.len() && bytes[j + 1] == b'.' => {
                     has_double_dot = true;
-                }
-                b'\\' => {
-                    j += 1;
                 }
                 _ => {}
             }
@@ -134,17 +135,22 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
     let mut depth = 0u32;
     let mut start = 0;
     let bytes = s.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        match b {
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
             b'{' => depth += 1,
             b'}' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => {
                 parts.push(&s[start..i]);
                 start = i + 1;
             }
-            b'\\' => {} // skip escaped
             _ => {}
         }
+        i += 1;
     }
     parts.push(&s[start..]);
     parts
@@ -258,5 +264,17 @@ mod tests {
     #[test]
     fn test_no_brace() {
         assert_eq!(expand_braces("hello"), vec!["hello"]);
+    }
+
+    #[test]
+    fn test_escaped_commas_do_not_split_brace_items() {
+        assert_eq!(expand_braces(r"a{b\,c,d}"), vec![r"ab\,c", "ad"]);
+        assert_eq!(expand_braces(r"{x\,y,z}"), vec![r"x\,y", "z"]);
+    }
+
+    #[test]
+    fn test_escaped_braces_do_not_start_or_end_nested_groups() {
+        assert_eq!(expand_braces(r"{a\{b,c}"), vec![r"a\{b", "c"]);
+        assert_eq!(expand_braces(r"{a\}b,c}"), vec![r"a\}b", "c"]);
     }
 }

@@ -25,6 +25,7 @@ use continuation::{
 use heredoc::heredoc_delimiters;
 use scanner::Lexer;
 
+pub(crate) use quotes::remove_shell_quotes;
 pub use token::{Token, TokenKind};
 
 pub fn tokenize(input: &str) -> Vec<Token> {

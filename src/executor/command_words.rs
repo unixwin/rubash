@@ -50,6 +50,7 @@ impl Executor {
     pub(in crate::executor) fn expand_for_word_values_result(
         &self,
         word: &str,
+        raw: Option<&str>,
     ) -> Result<Vec<String>, String> {
         if let Some(values) = self.array_at_word_values(word) {
             if word_is_unquoted_array_list_expansion(word) {
@@ -61,7 +62,7 @@ impl Executor {
             return Ok(values);
         }
         if self.is_brace_expand_enabled() && !word.contains("${") {
-            let braced = crate::expand::braces::expand_braces(word);
+            let braced = super::command_prepare::expand_braces_with_optional_raw(word, raw);
             if braced.len() > 1 {
                 let values = braced
                     .into_iter()

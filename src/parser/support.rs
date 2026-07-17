@@ -8,15 +8,18 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
 }
 
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
-    record_command_substitutions_for_word(cmd, cmd.words.len(), &token.value);
-    record_arithmetic_expansions_for_word(cmd, cmd.words.len(), &token.value);
-    record_parameter_expansions_for_word(cmd, cmd.words.len(), &token.value);
-    record_brace_expansions_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
-    record_extglob_patterns_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
-    record_tilde_expansions_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
-    record_pathname_patterns_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
-    record_word_quotes_for_word(cmd, cmd.words.len(), &token.raw);
-    record_array_element_assignment_for_word(cmd, cmd.words.len(), &token.value, &token.raw);
+    let word_index = cmd.words.len();
+    record_command_substitutions_for_word(cmd, word_index, &token.value);
+    record_arithmetic_expansions_for_word(cmd, word_index, &token.value);
+    record_parameter_expansions_for_word(cmd, word_index, &token.value);
+    record_brace_expansions_for_word(cmd, word_index, &token.value, &token.raw);
+    record_extglob_patterns_for_word(cmd, word_index, &token.value, &token.raw);
+    record_tilde_expansions_for_word(cmd, word_index, &token.value, &token.raw);
+    record_pathname_patterns_for_word(cmd, word_index, &token.value, &token.raw);
+    record_word_quotes_for_word(cmd, word_index, &token.raw);
+    record_array_element_assignment_for_word(cmd, word_index, &token.value, &token.raw);
+    cmd.word_metadata
+        .push(build_word_metadata(word_index, &token.value, &token.raw));
     cmd.words.push(token.value.clone());
     cmd.word_kinds.push(token.kind.clone());
 }

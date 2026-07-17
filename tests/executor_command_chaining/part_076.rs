@@ -85,6 +85,42 @@ fn test_for_command_expands_brace_list_words() {
 }
 
 #[test]
+fn test_simple_command_brace_expansion_keeps_escaped_commas() {
+    let output_path = "target/rubash-brace-escaped-comma-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '<%s>\\n' a{{b\\,c,d}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab,c>\n<ad>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_for_command_brace_expansion_keeps_escaped_commas() {
+    let output_path = "target/rubash-for-brace-escaped-comma-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("for item in a{{b\\,c,d}}; do printf '<%s>\\n' \"$item\" >> {output_path}; done");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    assert!(ast.commands[0].for_command.is_some());
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab,c>\n<ad>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_for_command_accepts_brace_group_body() {
     let output_path = "target/rubash-for-brace-body-output.txt";
     let _ = fs::remove_file(output_path);

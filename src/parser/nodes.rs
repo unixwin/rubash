@@ -984,6 +984,7 @@ pub enum CoprocBodyKind {
 pub struct CommandNode {
     /// The command words (first is the command name)
     pub words: Vec<String>,
+    pub word_metadata: Vec<WordMetadata>,
     /// Lexer kind for each command word, used for quote-sensitive expansion
     /// decisions while the parser still stores words as strings.
     pub word_kinds: Vec<TokenKind>,
@@ -1082,6 +1083,7 @@ impl CommandNode {
     pub fn new() -> Self {
         Self {
             words: Vec::new(),
+            word_metadata: Vec::new(),
             word_kinds: Vec::new(),
             assignments: std::collections::HashMap::new(),
             compound_assignments: Vec::new(),
