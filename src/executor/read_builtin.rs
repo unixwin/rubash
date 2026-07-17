@@ -246,6 +246,22 @@ impl Executor {
                     delimiter = word[3..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-rn" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = false;
+                    index += 2;
+                }
                 word if word.starts_with("-rn") && word.len() > 3 => {
                     raw = true;
                     char_limit = match read_char_limit_argument(Some(&word[3..])) {
@@ -261,6 +277,22 @@ impl Executor {
                     };
                     exact_char_limit = false;
                     index += 1;
+                }
+                "-rN" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = true;
+                    index += 2;
                 }
                 word if word.starts_with("-rN") && word.len() > 3 => {
                     raw = true;
