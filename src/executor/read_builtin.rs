@@ -450,6 +450,16 @@ impl Executor {
                     raw = true;
                     index += 1;
                 }
+                "-rsi" | "-sri" => {
+                    raw = true;
+                    index += 2;
+                }
+                word if (word.starts_with("-rsi") || word.starts_with("-sri"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    index += 1;
+                }
                 "-rt" => {
                     raw = true;
                     let Some(word) = cmd.words.get(index + 1) else {
