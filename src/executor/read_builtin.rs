@@ -635,6 +635,21 @@ impl Executor {
                     raw = true;
                     index += 1;
                 }
+                "-ersi" | "-esri" | "-resi" | "-rsei" | "-seri" | "-srei" => {
+                    raw = true;
+                    index += 2;
+                }
+                word if (word.starts_with("-ersi")
+                    || word.starts_with("-esri")
+                    || word.starts_with("-resi")
+                    || word.starts_with("-rsei")
+                    || word.starts_with("-seri")
+                    || word.starts_with("-srei"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    index += 1;
+                }
                 "-et" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         let _ = writeln!(
