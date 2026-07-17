@@ -119,7 +119,18 @@ pub(super) fn append_array_value(
         .map(|index| index + 1)
         .unwrap_or(0);
     let scalar_append = integer && !value.starts_with('(');
-    for token in array_assignment_tokens(value) {
+    let brace_expand = crate::builtins::set::shell_option_enabled(env_vars, "braceexpand");
+    let tokens = array_assignment_tokens(value)
+        .into_iter()
+        .flat_map(|token| {
+            if brace_expand && !token.contains("${") && !token.contains('=') {
+                crate::expand::braces::expand_braces(&token)
+            } else {
+                vec![token]
+            }
+        })
+        .collect::<Vec<_>>();
+    for token in tokens {
         if let Some(matches) = pathname_expand_array_token(&token) {
             for value in matches {
                 entries.insert(next_index, value);

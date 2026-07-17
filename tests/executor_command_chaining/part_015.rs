@@ -33,6 +33,40 @@ fn test_compound_array_assignment_expands_glob_matches_as_values() {
 }
 
 #[test]
+fn test_compound_array_assignment_expands_brace_elements() {
+    let dir_path = target_test_path("rubash-array-brace-values");
+    let output_path = target_test_path("rubash-array-brace-values-output.txt");
+    let shell_dir_path = shell_test_path(&dir_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_dir_all(&dir_path);
+    let _ = fs::remove_file(&output_path);
+    fs::create_dir_all(&dir_path).unwrap();
+    let old_cwd = std::env::current_dir().unwrap();
+    let input = format!(
+        "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
+         arr=(pre{{a,b}} {{a,b}}.rs); \
+         printf '%s:<%s>:<%s>:<%s>:<%s>\\n' \
+         \"${{#arr[@]}}\" \"${{arr[0]}}\" \"${{arr[1]}}\" \"${{arr[2]}}\" \"${{arr[3]}}\" > {shell_output_path}; \
+         set +B; literal=({{x,y}}); printf '<%s>\\n' \"${{literal[0]}}\" >> {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    std::env::set_current_dir(old_cwd).unwrap();
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "4:<prea>:<preb>:<a.rs>:<b.rs>\n<{x,y}>\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
 fn test_quoted_expansions_suppress_pathname_expansion() {
     let dir_path = target_test_path("rubash-quoted-expansion-glob");
     let output_path = target_test_path("rubash-quoted-expansion-glob-output.txt");
