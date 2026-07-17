@@ -1,6 +1,15 @@
 use super::*;
 use std::collections::HashMap;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
+fn make_fifo(path: &str) {
+    let path = std::ffi::CString::new(path).unwrap();
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
+}
 
 fn run(args: &[&str], bracket: bool) -> (i32, String) {
     let env_vars = HashMap::new();
@@ -99,6 +108,60 @@ fn ownership_unary_operators_check_existing_file() {
     assert_eq!(run(&["-G", path], false).0, expected);
     assert_eq!(run(&["-O", missing], false).0, EXECUTION_FAILURE);
     assert_eq!(run(&["-G", missing], false).0, EXECUTION_FAILURE);
+
+    let _ = fs::remove_file(path);
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_file_unary_operators_check_file_types_and_mode_bits() {
+    let fifo_path = "target/rubash-test-file-kind-fifo";
+    let socket_path = "target/rubash-test-file-kind-socket";
+    let mode_path = "target/rubash-test-file-kind-mode.txt";
+    let sticky_dir = "target/rubash-test-file-kind-sticky-dir";
+    let _ = fs::remove_file(fifo_path);
+    let _ = fs::remove_file(socket_path);
+    let _ = fs::remove_file(mode_path);
+    let _ = fs::remove_dir_all(sticky_dir);
+
+    make_fifo(fifo_path);
+    let _socket = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
+    fs::write(mode_path, "data").unwrap();
+    let mut permissions = fs::metadata(mode_path).unwrap().permissions();
+    permissions.set_mode(0o7600);
+    fs::set_permissions(mode_path, permissions).unwrap();
+    fs::create_dir_all(sticky_dir).unwrap();
+    let mut permissions = fs::metadata(sticky_dir).unwrap().permissions();
+    permissions.set_mode(0o1700);
+    fs::set_permissions(sticky_dir, permissions).unwrap();
+
+    assert_eq!(run(&["-p", fifo_path], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-S", socket_path], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-u", mode_path], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-g", mode_path], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-k", sticky_dir], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-b", mode_path], false).0, EXECUTION_FAILURE);
+    assert_eq!(run(&["-c", mode_path], false).0, EXECUTION_FAILURE);
+    assert_eq!(run(&["-p", mode_path], false).0, EXECUTION_FAILURE);
+    assert_eq!(run(&["-S", mode_path], false).0, EXECUTION_FAILURE);
+
+    let _ = fs::remove_file(fifo_path);
+    let _ = fs::remove_file(socket_path);
+    let _ = fs::remove_file(mode_path);
+    let _ = fs::remove_dir_all(sticky_dir);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn unix_file_unary_operators_default_false_on_non_unix() {
+    let path = "target/rubash-test-file-kind-non-unix.txt";
+    let _ = fs::create_dir_all("target");
+    let _ = fs::remove_file(path);
+    fs::write(path, "data").unwrap();
+
+    for op in ["-b", "-c", "-g", "-k", "-p", "-S", "-u"] {
+        assert_eq!(run(&[op, path], false).0, EXECUTION_FAILURE);
+    }
 
     let _ = fs::remove_file(path);
 }

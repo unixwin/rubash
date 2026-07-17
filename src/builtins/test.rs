@@ -198,7 +198,22 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-O" => Ok(file_owned_by_effective_user(operand, env_vars)),
         "-G" => Ok(file_owned_by_effective_group(operand, env_vars)),
         "-N" => Ok(modified_since_last_read(operand, env_vars)),
-        "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" => Ok(false),
+        "-b" => Ok(file_type_matches(
+            operand,
+            env_vars,
+            UnixFileKind::BlockDevice,
+        )),
+        "-c" => Ok(file_type_matches(
+            operand,
+            env_vars,
+            UnixFileKind::CharDevice,
+        )),
+        "-p" => Ok(file_type_matches(operand, env_vars, UnixFileKind::Fifo)),
+        "-S" => Ok(file_type_matches(operand, env_vars, UnixFileKind::Socket)),
+        "-u" => Ok(file_mode_has_bit(operand, env_vars, 0o4000)),
+        "-g" => Ok(file_mode_has_bit(operand, env_vars, 0o2000)),
+        "-k" => Ok(file_mode_has_bit(operand, env_vars, 0o1000)),
+        "-t" => Ok(false),
         _ => Err(format!("{}: unary operator expected", op)),
     }
 }
@@ -286,6 +301,54 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
         return true;
     };
     modified >= accessed
+}
+
+#[derive(Clone, Copy)]
+enum UnixFileKind {
+    BlockDevice,
+    CharDevice,
+    Fifo,
+    Socket,
+}
+
+#[cfg(unix)]
+fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixFileKind) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
+        return false;
+    };
+    let file_type = metadata.file_type();
+    match kind {
+        UnixFileKind::BlockDevice => file_type.is_block_device(),
+        UnixFileKind::CharDevice => file_type.is_char_device(),
+        UnixFileKind::Fifo => file_type.is_fifo(),
+        UnixFileKind::Socket => file_type.is_socket(),
+    }
+}
+
+#[cfg(not(unix))]
+fn file_type_matches(
+    _path: &str,
+    _env_vars: &HashMap<String, String>,
+    _kind: UnixFileKind,
+) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn file_mode_has_bit(path: &str, env_vars: &HashMap<String, String>, bit: u32) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
+        return false;
+    };
+    metadata.permissions().mode() & bit != 0
+}
+
+#[cfg(not(unix))]
+fn file_mode_has_bit(_path: &str, _env_vars: &HashMap<String, String>, _bit: u32) -> bool {
+    false
 }
 
 #[cfg(unix)]

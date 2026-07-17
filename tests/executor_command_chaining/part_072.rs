@@ -1,5 +1,14 @@
 use super::super::*;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
+fn make_fifo(path: &str) {
+    let path = std::ffi::CString::new(path).unwrap();
+    let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+    assert_eq!(result, 0);
+}
 
 #[test]
 fn test_conditional_string_order_operators_are_not_redirects() {
@@ -504,6 +513,58 @@ fn test_conditional_ownership_unary_checks_paths() {
     );
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(file_path);
+}
+
+#[cfg(unix)]
+#[test]
+fn test_conditional_unix_file_unary_checks_paths() {
+    let output_path = "target/rubash-conditional-file-kind-output.txt";
+    let fifo_path = "target/rubash-conditional-file-kind-fifo";
+    let socket_path = "target/rubash-conditional-file-kind-socket";
+    let mode_path = "target/rubash-conditional-file-kind-mode.txt";
+    let sticky_dir = "target/rubash-conditional-file-kind-sticky-dir";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(fifo_path);
+    let _ = fs::remove_file(socket_path);
+    let _ = fs::remove_file(mode_path);
+    let _ = fs::remove_dir_all(sticky_dir);
+
+    make_fifo(fifo_path);
+    let _socket = std::os::unix::net::UnixListener::bind(socket_path).unwrap();
+    fs::write(mode_path, "data").unwrap();
+    let mut permissions = fs::metadata(mode_path).unwrap().permissions();
+    permissions.set_mode(0o7600);
+    fs::set_permissions(mode_path, permissions).unwrap();
+    fs::create_dir_all(sticky_dir).unwrap();
+    let mut permissions = fs::metadata(sticky_dir).unwrap().permissions();
+    permissions.set_mode(0o1700);
+    fs::set_permissions(sticky_dir, permissions).unwrap();
+    let input = format!(
+        "[[ -p {fifo_path} ]]; echo $? > {output_path}; \
+         [[ -S {socket_path} ]]; echo $? >> {output_path}; \
+         [[ -u {mode_path} ]]; echo $? >> {output_path}; \
+         [[ -g {mode_path} ]]; echo $? >> {output_path}; \
+         [[ -k {sticky_dir} ]]; echo $? >> {output_path}; \
+         test -p {mode_path}; echo $? >> {output_path}; \
+         test -S {mode_path}; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0\n0\n0\n0\n0\n1\n1\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(fifo_path);
+    let _ = fs::remove_file(socket_path);
+    let _ = fs::remove_file(mode_path);
+    let _ = fs::remove_dir_all(sticky_dir);
 }
 
 #[test]
