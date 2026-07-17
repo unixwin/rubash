@@ -251,6 +251,26 @@ fn test_time_pipeline_modifier_preserves_pipeline_status() {
 }
 
 #[test]
+fn test_time_pipeline_modifier_keeps_raw_word_metadata() {
+    let output_path = "target/rubash-time-pipeline-raw-metadata-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("time -p printf '<%s>\\n' a{{b\\,c,d}} | cat > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let time_command = ast.commands[0].time_command.as_ref().unwrap();
+    let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+    assert_eq!(pipeline.stages[0].words[0], "printf");
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab,c>\n<ad>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_command_redirects_timed_command_stdout() {
     let output_path = "target/rubash-time-command-redirect-output.txt";
     let _ = fs::remove_file(output_path);

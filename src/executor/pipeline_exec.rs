@@ -285,6 +285,8 @@ impl Executor {
                 .map(Some);
         }
 
+        let expanded = self.brace_expanded_pipeline_stage(command);
+        let command = &expanded;
         let Some(name) = command.words.first().map(String::as_str) else {
             return self
                 .execute_compound_pipeline_stage(command, input)
@@ -383,6 +385,27 @@ impl Executor {
             }
         }
     }
+
+    fn brace_expanded_pipeline_stage(&self, command: &CommandNode) -> CommandNode {
+        if !self.is_brace_expand_enabled() {
+            return command.clone();
+        }
+
+        let mut expanded = command.clone();
+        expanded.words = command
+            .words
+            .iter()
+            .enumerate()
+            .flat_map(|(index, word)| {
+                let raw = command
+                    .word_metadata
+                    .get(index)
+                    .map(|metadata| metadata.raw.as_str());
+                crate::executor::command_prepare::expand_braces_with_optional_raw(word, raw)
+            })
+            .collect();
+        expanded
+    }
 }
 
 fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
@@ -431,6 +454,9 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
     stripped.words = command.words[index..].to_vec();
     if command.word_kinds.len() == command.words.len() {
         stripped.word_kinds = command.word_kinds[index..].to_vec();
+    }
+    if command.word_metadata.len() == command.words.len() {
+        stripped.word_metadata = command.word_metadata[index..].to_vec();
     }
     Some(TimePipelinePrefix {
         command: stripped,
