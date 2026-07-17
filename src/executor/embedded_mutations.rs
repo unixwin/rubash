@@ -1,11 +1,21 @@
 use super::*;
+use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
 impl Executor {
     pub(in crate::executor) fn expand_embedded_parameters_mut(&mut self, word: &str) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
+        let saved_parameter_env =
+            word_contains_current_shell_command_substitution(word).then(|| self.env_vars.clone());
         let word = self.expand_embedded_arithmetic_mut(word);
         let word = self.expand_embedded_command_substitutions_mut(&word);
-        let expanded = self.expand_embedded_parameters(&word);
+        let expanded = if let Some(saved_parameter_env) = saved_parameter_env {
+            let current_env = std::mem::replace(&mut self.env_vars, saved_parameter_env);
+            let expanded = self.expand_embedded_parameters(&word);
+            self.env_vars = current_env;
+            expanded
+        } else {
+            self.expand_embedded_parameters(&word)
+        };
         let expanded = if word.contains("$(") || word.contains('`') {
             unescape_remaining_shell_escapes(&expanded)
                 .replace("\\\\'", "'")

@@ -93,6 +93,10 @@ impl Executor {
             return self.expand_embedded_parameters_mut(word);
         }
 
+        if word_contains_current_shell_command_substitution(word) {
+            return self.expand_embedded_parameters_mut(word);
+        }
+
         if let Some(source) = word
             .strip_prefix("$(")
             .and_then(|rest| rest.strip_suffix(')'))
@@ -194,4 +198,20 @@ impl Executor {
         let evaluated = eval_conditional_arith_value(&expression, &self.env_vars)?;
         isize::try_from(evaluated).ok()
     }
+}
+
+pub(in crate::executor) fn word_contains_current_shell_command_substitution(word: &str) -> bool {
+    let mut rest = word;
+    while let Some(index) = rest.find("${") {
+        let after_open = &rest[index + 2..];
+        if after_open
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '|' || ch.is_whitespace())
+        {
+            return true;
+        }
+        rest = after_open;
+    }
+    false
 }

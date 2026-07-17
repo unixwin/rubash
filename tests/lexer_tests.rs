@@ -197,6 +197,18 @@ mod command_substitution {
         assert_eq!(tokens[0].kind, TokenKind::Word);
         assert_eq!(tokens[0].value, "$(echo left):$(echo right)");
     }
+
+    #[test]
+    fn test_adjacent_pipe_braced_command_substitutions_stay_in_one_word() {
+        let input = "${| REPLY=left; }-${| REPLY=right; }-$REPLY";
+        let tokens = tokenize(input);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, TokenKind::Word);
+        assert_eq!(
+            tokens[0].value,
+            "${| REPLY=left; }-${| REPLY=right; }-$REPLY"
+        );
+    }
 }
 
 // ============================================================================
