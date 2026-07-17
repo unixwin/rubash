@@ -165,6 +165,7 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         let mut stages = vec![command];
         let mut operators = Vec::new();
         index += 1;
+        skip_empty_pipeline_separators(&commands, &mut index);
         while let Some(command) = commands.get(index) {
             if let Some(pipe) = stages.last().and_then(|stage| stage.pipe) {
                 operators.push(if pipe == 2 { "|&" } else { "|" }.to_string());
@@ -174,6 +175,7 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             if command.pipe.is_none() {
                 break;
             }
+            skip_empty_pipeline_separators(&commands, &mut index);
         }
 
         if stages.len() == 1
@@ -204,6 +206,12 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         folded.push(pipeline);
     }
     folded
+}
+
+fn skip_empty_pipeline_separators(commands: &[CommandNode], index: &mut usize) {
+    while commands.get(*index).is_some_and(command_is_empty) {
+        *index += 1;
+    }
 }
 
 fn operators_metadata(operators: &[String]) -> Vec<WordMetadata> {
@@ -682,6 +690,16 @@ fn time_prefixed_shell_command_end(tokens: &[Token], mut index: usize) -> usize 
         if stack.is_empty()
             && paren_depth == 0
             && brace_depth == 0
+            && token.kind == TokenKind::Semicolon
+            && previous_significant_token_is_pipe(tokens, index)
+        {
+            index += 1;
+            continue;
+        }
+
+        if stack.is_empty()
+            && paren_depth == 0
+            && brace_depth == 0
             && matches!(
                 token.kind,
                 TokenKind::Semicolon | TokenKind::And | TokenKind::Or | TokenKind::Background
@@ -708,6 +726,19 @@ fn time_prefixed_shell_command_end(tokens: &[Token], mut index: usize) -> usize 
     }
 
     index
+}
+
+fn previous_significant_token_is_pipe(tokens: &[Token], index: usize) -> bool {
+    let mut previous = index;
+    while let Some(next) = previous.checked_sub(1) {
+        previous = next;
+        let token = &tokens[previous];
+        if token.kind == TokenKind::Semicolon {
+            continue;
+        }
+        return matches!(token.kind, TokenKind::Pipe | TokenKind::PipeErr);
+    }
+    false
 }
 
 pub(super) fn time_prefixed_shell_command_allows_simple_pipeline(

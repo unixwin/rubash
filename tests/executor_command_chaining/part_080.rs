@@ -1170,6 +1170,23 @@ fn test_pipeline_feeds_while_command_stage() {
 }
 
 #[test]
+fn test_pipeline_allows_newline_after_operator() {
+    let output_path = "target/rubash-pipeline-newline-after-operator-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf 'alpha\\nbeta\\n' |\n grep beta > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_pipe_stderr_operator_feeds_next_stage() {
     let output_path = "target/rubash-pipe-stderr-output.txt";
     let _ = fs::remove_file(output_path);

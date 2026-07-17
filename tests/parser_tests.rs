@@ -66,6 +66,34 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn test_pipeline_allows_newline_after_operator() {
+        let input = "printf alpha |\n grep alpha";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.stages[0].words, ["printf", "alpha"]);
+        assert_eq!(pipeline.stages[1].words, ["grep", "alpha"]);
+    }
+
+    #[test]
+    fn test_stderr_pipeline_allows_newline_after_operator() {
+        let input = "cmd |&\n grep err";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 1);
+        let pipeline = ast.commands[0].pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|&"]);
+        assert_eq!(pipeline.stages.len(), 2);
+        assert_eq!(pipeline.stages[0].pipe, Some(2));
+        assert_eq!(pipeline.stages[1].words, ["grep", "err"]);
+    }
+
+    #[test]
     fn test_stderr_pipeline_operator() {
         let input = "cmd |& grep err";
         let tokens = tokenize(input);
@@ -105,6 +133,20 @@ mod pipeline_tests {
         assert_eq!(pipeline.operators, ["|"]);
         assert_eq!(pipeline.stages[0].words, ["echo", "alpha"]);
         assert_eq!(pipeline.stages[1].words, ["wc", "-l"]);
+    }
+
+    #[test]
+    fn test_time_prefix_allows_pipeline_operator_newline() {
+        let input = "time printf alpha |\n wc -c";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 1);
+        let time_command = ast.commands[0].time_command.as_ref().unwrap();
+        let pipeline = time_command.command.pipeline_command.as_ref().unwrap();
+        assert_eq!(pipeline.operators, ["|"]);
+        assert_eq!(pipeline.stages[0].words, ["printf", "alpha"]);
+        assert_eq!(pipeline.stages[1].words, ["wc", "-c"]);
     }
 
     #[test]
