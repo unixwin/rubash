@@ -82,6 +82,28 @@ fn modified_since_read_unary_operator_checks_existing_file() {
 }
 
 #[test]
+fn ownership_unary_operators_check_existing_file() {
+    let path = "target/rubash-test-owner-unary.txt";
+    let missing = "target/rubash-test-owner-unary-missing.txt";
+    let _ = fs::create_dir_all("target");
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(missing);
+    fs::write(path, "data").unwrap();
+
+    let expected = if cfg!(unix) {
+        EXECUTION_SUCCESS
+    } else {
+        EXECUTION_FAILURE
+    };
+    assert_eq!(run(&["-O", path], false).0, expected);
+    assert_eq!(run(&["-G", path], false).0, expected);
+    assert_eq!(run(&["-O", missing], false).0, EXECUTION_FAILURE);
+    assert_eq!(run(&["-G", missing], false).0, EXECUTION_FAILURE);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn supports_parenthesized_logical_expressions() {
     assert_eq!(
         run(&["(", "", "-o", "x", ")", "-a", ""], false).0,

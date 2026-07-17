@@ -195,8 +195,10 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)),
         "-r" | "-w" | "-x" => Ok(test_path(operand, env_vars).exists()),
+        "-O" => Ok(file_owned_by_effective_user(operand, env_vars)),
+        "-G" => Ok(file_owned_by_effective_group(operand, env_vars)),
         "-N" => Ok(modified_since_last_read(operand, env_vars)),
-        "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" | "-O" | "-G" => Ok(false),
+        "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" => Ok(false),
         _ => Err(format!("{}: unary operator expected", op)),
     }
 }
@@ -284,6 +286,36 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
         return true;
     };
     modified >= accessed
+}
+
+#[cfg(unix)]
+fn file_owned_by_effective_user(path: &str, env_vars: &HashMap<String, String>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
+        return false;
+    };
+    metadata.uid() == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn file_owned_by_effective_user(_path: &str, _env_vars: &HashMap<String, String>) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn file_owned_by_effective_group(path: &str, env_vars: &HashMap<String, String>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
+        return false;
+    };
+    metadata.gid() == unsafe { libc::getegid() }
+}
+
+#[cfg(not(unix))]
+fn file_owned_by_effective_group(_path: &str, _env_vars: &HashMap<String, String>) -> bool {
+    false
 }
 
 fn same_file(left: &str, right: &str, env_vars: &HashMap<String, String>) -> bool {
