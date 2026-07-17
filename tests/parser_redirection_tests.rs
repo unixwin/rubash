@@ -438,6 +438,23 @@ fn test_input_process_substitution_word_records_structured_ast() {
 }
 
 #[test]
+fn test_embedded_process_substitution_stays_in_single_word() {
+    let input = "printf '%s\\n' x<(printf a)y";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands[0].words, ["printf", "%s\\n", "x<(printf a)y"]);
+    assert_eq!(
+        ast.commands[0].word_metadata[2].process_substitutions.len(),
+        1
+    );
+    assert_eq!(
+        ast.commands[0].word_metadata[2].process_substitutions[0].target,
+        "<(printf a)"
+    );
+}
+
+#[test]
 fn test_process_substitution_source_preserves_quotes() {
     let input = "cat <(printf \"x\\n\")";
     let tokens = tokenize(input);

@@ -18,7 +18,14 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         | TokenKind::BraceExpand => {
             state.current_cmd.subshell |= state.in_subshell;
             note_command_line(&mut state.current_cmd, token);
-            push_command_word(&mut state.current_cmd, token);
+            if let Some((value, raw, next_i)) =
+                collect_adjacent_process_substitution_word(tokens, *i)
+            {
+                push_synthetic_process_substitution_word(&mut state.current_cmd, &value, &raw);
+                *i = next_i;
+            } else {
+                push_command_word(&mut state.current_cmd, token);
+            }
         }
         TokenKind::Assignment => {
             state.current_cmd.subshell |= state.in_subshell;
@@ -231,15 +238,59 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
                 {
-                    process_substitution.word_index = Some(state.current_cmd.words.len());
-                    let target = process_substitution.target.clone();
-                    state
-                        .current_cmd
-                        .process_substitutions
-                        .push(process_substitution);
-                    state.current_cmd.words.push(target);
-                    state.current_cmd.word_kinds.push(TokenKind::Word);
-                    *i = next_i;
+                    let (suffix, suffix_raw, joined_i) =
+                        collect_process_substitution_suffix(tokens, next_i);
+                    if process_substitution_is_adjacent_to_previous_word(tokens, *i)
+                        && !state.current_cmd.words.is_empty()
+                    {
+                        let value = format!(
+                            "{}{}{}",
+                            state.current_cmd.words.last().cloned().unwrap_or_default(),
+                            process_substitution.target,
+                            suffix
+                        );
+                        let raw = format!(
+                            "{}{}{}",
+                            state
+                                .current_cmd
+                                .word_metadata
+                                .last()
+                                .map(|metadata| metadata.raw.as_str())
+                                .unwrap_or_else(|| state
+                                    .current_cmd
+                                    .words
+                                    .last()
+                                    .map(String::as_str)
+                                    .unwrap_or_default()),
+                            process_substitution.target,
+                            suffix_raw
+                        );
+                        replace_last_process_substitution_word(
+                            &mut state.current_cmd,
+                            &value,
+                            &raw,
+                        );
+                        *i = joined_i;
+                    } else if let Some((value, raw, joined_i)) =
+                        collect_adjacent_process_substitution_word(tokens, *i)
+                    {
+                        push_synthetic_process_substitution_word(
+                            &mut state.current_cmd,
+                            &value,
+                            &raw,
+                        );
+                        *i = joined_i;
+                    } else {
+                        process_substitution.word_index = Some(state.current_cmd.words.len());
+                        let target = process_substitution.target.clone();
+                        state
+                            .current_cmd
+                            .process_substitutions
+                            .push(process_substitution);
+                        state.current_cmd.words.push(target);
+                        state.current_cmd.word_kinds.push(TokenKind::Word);
+                        *i = next_i;
+                    }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     let redirect = redirect_node_with_fd_var_raw(
                         &token.value,
@@ -475,4 +526,114 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         }
     }
     TokenAction::Advance
+}
+
+fn collect_adjacent_process_substitution_word(
+    tokens: &[Token],
+    start: usize,
+) -> Option<(String, String, usize)> {
+    let mut index = start;
+    let mut end = tokens.get(start)?.column;
+    let mut value = String::new();
+    let mut raw = String::new();
+    let mut saw_process_substitution = false;
+
+    while let Some(token) = tokens.get(index) {
+        if !value.is_empty() && token.column != end {
+            break;
+        }
+
+        if let Some((process_substitution, next_i)) =
+            any_process_substitution_word_target(tokens, index)
+        {
+            value.push_str(&process_substitution.target);
+            raw.push_str(&process_substitution.target);
+            saw_process_substitution = true;
+            let close = tokens.get(next_i)?;
+            end = close.column + close.raw.len();
+            index = next_i + 1;
+            continue;
+        }
+
+        if adjacent_word_token(token) {
+            value.push_str(&token.value);
+            raw.push_str(&token.raw);
+            end = token.column + token.raw.len();
+            index += 1;
+            continue;
+        }
+
+        break;
+    }
+
+    (saw_process_substitution && index > start).then_some((value, raw, index - 1))
+}
+
+fn adjacent_word_token(token: &Token) -> bool {
+    matches!(
+        token.kind,
+        TokenKind::Word | TokenKind::Variable | TokenKind::CommandSubst | TokenKind::BraceExpand
+    )
+}
+
+fn push_synthetic_process_substitution_word(cmd: &mut CommandNode, value: &str, raw: &str) {
+    let token = Token::new_with_raw(TokenKind::Word, value, raw, 0);
+    push_command_word(cmd, &token);
+    if let Some(metadata) = cmd.word_metadata.last() {
+        cmd.process_substitutions
+            .extend(metadata.process_substitutions.iter().cloned());
+    }
+}
+
+fn replace_last_process_substitution_word(cmd: &mut CommandNode, value: &str, raw: &str) {
+    let Some(word_index) = cmd.words.len().checked_sub(1) else {
+        return;
+    };
+    cmd.words[word_index] = value.to_string();
+    if let Some(kind) = cmd.word_kinds.get_mut(word_index) {
+        *kind = TokenKind::Word;
+    }
+    let metadata = build_word_metadata(word_index, value, raw);
+    cmd.process_substitutions
+        .extend(metadata.process_substitutions.iter().cloned());
+    if let Some(slot) = cmd.word_metadata.get_mut(word_index) {
+        *slot = metadata;
+    } else {
+        cmd.word_metadata.push(metadata);
+    }
+}
+
+fn process_substitution_is_adjacent_to_previous_word(tokens: &[Token], index: usize) -> bool {
+    let Some(previous) = index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+    else {
+        return false;
+    };
+    adjacent_word_token(previous) && tokens[index].column == previous.column + previous.raw.len()
+}
+
+fn collect_process_substitution_suffix(
+    tokens: &[Token],
+    close_index: usize,
+) -> (String, String, usize) {
+    let Some(close) = tokens.get(close_index) else {
+        return (String::new(), String::new(), close_index);
+    };
+    let mut value = String::new();
+    let mut raw = String::new();
+    let mut end = close.column + close.raw.len();
+    let mut index = close_index + 1;
+
+    while let Some(token) = tokens.get(index) {
+        if token.column != end || !adjacent_word_token(token) {
+            break;
+        }
+        value.push_str(&token.value);
+        raw.push_str(&token.raw);
+        end = token.column + token.raw.len();
+        index += 1;
+    }
+
+    (value, raw, index.saturating_sub(1))
 }

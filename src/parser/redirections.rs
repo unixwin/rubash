@@ -310,7 +310,7 @@ pub(super) fn take_adjacent_redirect_fd_prefix(
         .checked_sub(1)
         .and_then(|index| tokens.get(index))?;
     let redirect = tokens.get(redirect_index)?;
-    if previous.position + previous.value.len() != redirect.position {
+    if previous.column + previous.value.len() != redirect.column {
         return None;
     }
     take_redirect_fd_prefix(cmd)

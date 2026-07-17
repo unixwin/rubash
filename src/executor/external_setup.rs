@@ -109,27 +109,23 @@ impl Executor {
     ) -> Result<(CommandNode, ProcessSubstitutionFiles), ExecuteError> {
         let mut rewritten = cmd.clone();
         let mut files = ProcessSubstitutionFiles::default();
-        for word in &mut rewritten.words {
-            if let Some(source) = word
-                .strip_prefix("<(")
-                .and_then(|word| word.strip_suffix(')'))
-            {
-                let Some(output) = self.process_substitution_output(source) else {
-                    continue;
-                };
-                let path = self.write_process_substitution_temp(&output)?;
-                *word = shell_display_path(&path.to_string_lossy());
-                files.inputs.push(path);
-            } else if let Some(source) = word
-                .strip_prefix(">(")
-                .and_then(|word| word.strip_suffix(')'))
-            {
-                let source = source.to_string();
-                let path = self.empty_process_substitution_temp()?;
-                *word = shell_display_path(&path.to_string_lossy());
-                files
-                    .outputs
-                    .push(OutputProcessSubstitution { path, source });
+        for word_index in 0..rewritten.words.len() {
+            let substitutions = rewritten
+                .word_metadata
+                .get(word_index)
+                .map(|metadata| metadata.process_substitutions.clone())
+                .unwrap_or_default();
+            if substitutions.is_empty() {
+                self.materialize_standalone_process_substitution_word(
+                    &mut rewritten.words[word_index],
+                    &mut files,
+                )?;
+            } else {
+                self.materialize_process_substitution_word(
+                    &mut rewritten.words[word_index],
+                    substitutions,
+                    &mut files,
+                )?;
             }
         }
         if let Some(redirect) = &mut rewritten.redirect_in {
@@ -261,6 +257,63 @@ impl Executor {
             }
         }
         Ok((rewritten, files))
+    }
+
+    fn materialize_standalone_process_substitution_word(
+        &mut self,
+        word: &mut String,
+        files: &mut ProcessSubstitutionFiles,
+    ) -> Result<(), ExecuteError> {
+        if let Some(source) = word
+            .strip_prefix("<(")
+            .and_then(|word| word.strip_suffix(')'))
+        {
+            let Some(output) = self.process_substitution_output(source) else {
+                return Ok(());
+            };
+            let path = self.write_process_substitution_temp(&output)?;
+            *word = shell_display_path(&path.to_string_lossy());
+            files.inputs.push(path);
+        } else if let Some(source) = word
+            .strip_prefix(">(")
+            .and_then(|word| word.strip_suffix(')'))
+        {
+            let source = source.to_string();
+            let path = self.empty_process_substitution_temp()?;
+            *word = shell_display_path(&path.to_string_lossy());
+            files
+                .outputs
+                .push(OutputProcessSubstitution { path, source });
+        }
+        Ok(())
+    }
+
+    fn materialize_process_substitution_word(
+        &mut self,
+        word: &mut String,
+        substitutions: Vec<crate::parser::ProcessSubstitution>,
+        files: &mut ProcessSubstitutionFiles,
+    ) -> Result<(), ExecuteError> {
+        for substitution in substitutions {
+            let path = if substitution.output {
+                let path = self.empty_process_substitution_temp()?;
+                files.outputs.push(OutputProcessSubstitution {
+                    path: path.clone(),
+                    source: substitution.source,
+                });
+                path
+            } else {
+                let Some(output) = self.process_substitution_output(&substitution.source) else {
+                    continue;
+                };
+                let path = self.write_process_substitution_temp(&output)?;
+                files.inputs.push(path.clone());
+                path
+            };
+            let display_path = shell_display_path(&path.to_string_lossy());
+            *word = word.replacen(&substitution.target, &display_path, 1);
+        }
+        Ok(())
     }
 
     fn apply_default_external_stdin_file(

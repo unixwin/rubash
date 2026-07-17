@@ -1008,6 +1008,59 @@ fn test_exec_dynamic_fd_process_substitution_persists_for_external_command() {
 }
 
 #[test]
+fn test_embedded_input_process_substitution_rewrites_external_argument() {
+    let output_path = "target/rubash-embedded-process-substitution-output.txt";
+    let side_path = "target/rubash-embedded-process-substitution-side.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(side_path);
+    let input = format!(
+        "sh -c 'printf \"%s\\n\" \"$1\"' _ x<(printf alpha > {side_path})y > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.starts_with('x'));
+    assert!(output.ends_with("y\n"));
+    assert_eq!(fs::read_to_string(side_path).unwrap(), "alpha");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(side_path);
+}
+
+#[test]
+fn test_multiple_embedded_input_process_substitutions_rewrite_one_word() {
+    let output_path = "target/rubash-multiple-embedded-process-substitution-output.txt";
+    let first_side_path = "target/rubash-multiple-embedded-process-substitution-first.txt";
+    let second_side_path = "target/rubash-multiple-embedded-process-substitution-second.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(first_side_path);
+    let _ = fs::remove_file(second_side_path);
+    let input = format!(
+        "sh -c 'printf \"%s\\n\" \"$1\"' _ <(printf first > {first_side_path})middle<(printf second > {second_side_path}) > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.contains("middle"));
+    assert_eq!(fs::read_to_string(first_side_path).unwrap(), "first");
+    assert_eq!(fs::read_to_string(second_side_path).unwrap(), "second");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(first_side_path);
+    let _ = fs::remove_file(second_side_path);
+}
+
+#[test]
 fn test_exec_fd_output_process_substitution_runs_on_close() {
     let output_path = "target/rubash-exec-fd-output-process-substitution.txt";
     let _ = fs::remove_file(output_path);

@@ -31,6 +31,7 @@ pub struct Token {
     pub value: String,
     pub raw: String,
     pub position: usize,
+    pub column: usize,
 }
 
 impl Token {
@@ -40,6 +41,7 @@ impl Token {
             value: value.to_string(),
             raw: value.to_string(),
             position,
+            column: position,
         }
     }
 
@@ -49,6 +51,7 @@ impl Token {
             value: value.to_string(),
             raw: raw.to_string(),
             position,
+            column: position,
         }
     }
 }
