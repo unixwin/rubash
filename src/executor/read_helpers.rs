@@ -21,16 +21,19 @@ pub(in crate::executor) fn print_time(env_vars: &HashMap<String, String>, posix_
         return;
     }
 
-    eprintln!("{}", expand_time_format(format));
+    match expand_time_format(format) {
+        Ok(output) => eprintln!("{output}"),
+        Err(invalid) => eprintln!("rubash: TIMEFORMAT: `{invalid}': invalid format character"),
+    }
 }
 
-fn expand_time_format(format: &str) -> String {
+fn expand_time_format(format: &str) -> Result<String, char> {
     let mut output = String::new();
     let mut chars = format.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
-            '%' => expand_time_format_percent(&mut output, &mut chars),
+            '%' => expand_time_format_percent(&mut output, &mut chars)?,
             '\\' => match chars.next() {
                 Some('n') => output.push('\n'),
                 Some('t') => output.push('\t'),
@@ -45,10 +48,13 @@ fn expand_time_format(format: &str) -> String {
         }
     }
 
-    output
+    Ok(output)
 }
 
-fn expand_time_format_percent<I>(output: &mut String, chars: &mut std::iter::Peekable<I>)
+fn expand_time_format_percent<I>(
+    output: &mut String,
+    chars: &mut std::iter::Peekable<I>,
+) -> Result<(), char>
 where
     I: Iterator<Item = char>,
 {
@@ -66,21 +72,21 @@ where
     }
 
     match chars.next() {
-        Some('%') if precision.is_none() && !long => output.push('%'),
-        Some('R' | 'U' | 'S') => output.push_str(&format_time_seconds(precision, long)),
-        Some('P') => output.push_str("0.00"),
-        Some(other) => {
+        Some('%') if precision.is_none() && !long => {
             output.push('%');
-            if let Some(precision) = precision {
-                output.push(char::from_digit(precision as u32, 10).unwrap_or('0'));
-            }
-            if long {
-                output.push('l');
-            }
-            output.push(other);
         }
-        None => output.push('%'),
+        Some('%') => return Err('%'),
+        Some('R' | 'U' | 'S') => output.push_str(&format_time_seconds(precision, long)),
+        Some('P') if precision.is_none() && !long => output.push_str("0.00"),
+        Some('P') => return Err('P'),
+        Some(other) => return Err(other),
+        None => {
+            output.push('%');
+            return Ok(());
+        }
     }
+
+    Ok(())
 }
 
 fn format_time_seconds(precision: Option<usize>, long: bool) -> String {

@@ -118,6 +118,38 @@ fn timeformat_supports_precision_and_long_modifiers() {
 }
 
 #[test]
+fn timeformat_reports_invalid_format_character() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("TIMEFORMAT='bad:%Z'; time true; echo status:$?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rubash: TIMEFORMAT: `Z': invalid format character\n"
+    );
+}
+
+#[test]
+fn timeformat_rejects_precision_on_percent_cpu() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("TIMEFORMAT='bad:%3P'; time true; echo status:$?")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "rubash: TIMEFORMAT: `P': invalid format character\n"
+    );
+}
+
+#[test]
 fn c_command_redirects_stdout_to_stderr_fd() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
