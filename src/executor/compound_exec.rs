@@ -127,6 +127,9 @@ impl Executor {
             if command.word_kinds.len() == command.words.len() {
                 first.word_kinds = command.word_kinds[prefix.command_index..].to_vec();
             }
+            if command.word_metadata.len() == command.words.len() {
+                first.word_metadata = command.word_metadata[prefix.command_index..].to_vec();
+            }
         }
 
         let next_index = match timed_ast.commands[0].words.first().map(String::as_str) {
