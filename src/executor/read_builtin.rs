@@ -1031,6 +1031,46 @@ impl Executor {
                     exact_char_limit = false;
                     index += 1;
                 }
+                "-ersn" | "-esrn" | "-resn" | "-rsen" | "-sern" | "-sren" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = false;
+                    index += 2;
+                }
+                word if (word.starts_with("-ersn")
+                    || word.starts_with("-esrn")
+                    || word.starts_with("-resn")
+                    || word.starts_with("-rsen")
+                    || word.starts_with("-sern")
+                    || word.starts_with("-sren"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    let value = &word[5..];
+                    char_limit = match read_char_limit_argument(Some(value)) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = false;
+                    index += 1;
+                }
                 "-rsN" | "-srN" => {
                     raw = true;
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
