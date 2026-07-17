@@ -189,6 +189,44 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-ea" => {
+                    let Some(name) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -ea: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    if is_shell_name(name) {
+                        array_name = Some(name.clone());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        scalar_field_count += 1;
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-ea") && word.len() > 3 => {
+                    let name = &word[3..];
+                    if is_shell_name(name) {
+                        array_name = Some(name.to_string());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        stop_scalar_names = true;
+                    }
+                    index += 1;
+                }
                 word if word.starts_with("-a") && word.len() > 2 => {
                     let name = &word[2..];
                     if is_shell_name(name) {
