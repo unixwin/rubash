@@ -86,7 +86,7 @@ where
     // TODO(builtins/kill.def/siglist.c): Implement the full signal table,
     // option parser, and process signalling. Upstream builtins.tests only uses
     // `kill -l` name/number translation.
-    if args.first().map(String::as_str) != Some("-l") {
+    if !matches!(args.first().map(String::as_str), Some("-l" | "-L")) {
         return Ok(0);
     }
 

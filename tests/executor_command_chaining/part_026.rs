@@ -126,6 +126,26 @@ fn test_kill_lists_common_signals() {
 }
 
 #[test]
+fn test_kill_capital_l_translates_and_lists_signals() {
+    let output_path = "target/rubash-kill-capital-l-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("kill -L HUP > {output_path}; kill -L >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    assert!(output.starts_with("1\n"));
+    assert!(output.contains("1) SIGHUP"));
+    assert!(output.contains("15) SIGTERM"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_kill_redirects_stderr() {
     let error_path = "target/rubash-kill-stderr-output.txt";
     let status_path = "target/rubash-kill-stderr-status.txt";
