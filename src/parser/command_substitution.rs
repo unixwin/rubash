@@ -107,6 +107,16 @@ fn dollar_command_substitution(
             index += 2;
             continue;
         }
+        if ch == '#' && !single && !double && word_boundary {
+            while index + 1 < chars.len() && chars[index + 1] != '\n' {
+                index += 1;
+            }
+            word.clear();
+            word_boundary = true;
+            current_word_boundary = true;
+            index += 1;
+            continue;
+        }
         update_command_substitution_case_depth(
             &chars,
             index,

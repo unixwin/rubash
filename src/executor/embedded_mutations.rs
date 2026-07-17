@@ -125,6 +125,20 @@ impl Executor {
                         escaped = true;
                         continue;
                     }
+                    if source_ch == '#' && !single && !double && word_boundary {
+                        source.push(source_ch);
+                        while let Some(comment_ch) = chars.peek().copied() {
+                            if comment_ch == '\n' {
+                                break;
+                            }
+                            source.push(comment_ch);
+                            chars.next();
+                        }
+                        word.clear();
+                        word_boundary = true;
+                        current_word_boundary = true;
+                        continue;
+                    }
                     let rest = chars.clone().collect::<String>();
                     update_command_substitution_case_depth(
                         source_ch,

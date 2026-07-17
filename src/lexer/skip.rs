@@ -10,6 +10,15 @@ impl<'a> Lexer<'a> {
         let mut word_boundary = true;
         let mut current_word_boundary = true;
         while let Some(c) = self.advance() {
+            if c == '#' && word_boundary {
+                while self.peek().is_some_and(|ch| ch != '\n') {
+                    self.advance();
+                }
+                word.clear();
+                word_boundary = true;
+                current_word_boundary = true;
+                continue;
+            }
             let rest = from_utf8(&self.input[self.position..]).unwrap_or("");
             update_command_substitution_case_depth(
                 c,
