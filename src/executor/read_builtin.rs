@@ -373,6 +373,14 @@ impl Executor {
                     prompt = Some(word[3..].to_string());
                     index += 1;
                 }
+                "-ep" => {
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if word.starts_with("-ep") && word.len() > 3 => {
+                    prompt = Some(word[3..].to_string());
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
