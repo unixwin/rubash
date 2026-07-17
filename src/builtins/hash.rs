@@ -36,21 +36,27 @@ where
     let mut index = 0;
 
     while let Some(arg) = args.get(index) {
-        if arg == "-p" {
-            let Some(value) = args.get(index + 1).map(String::as_str) else {
-                writeln!(
-                    stderr,
-                    "{}hash: -p: option requires an argument",
-                    script_prefix()
-                )?;
-                writeln!(
-                    stderr,
-                    "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
-                )?;
-                return Ok(EX_USAGE);
+        if arg == "-p" || arg.starts_with("-p") {
+            let value = if arg == "-p" {
+                let Some(value) = args.get(index + 1).map(String::as_str) else {
+                    writeln!(
+                        stderr,
+                        "{}hash: -p: option requires an argument",
+                        script_prefix()
+                    )?;
+                    writeln!(
+                        stderr,
+                        "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
+                    )?;
+                    return Ok(EX_USAGE);
+                };
+                index += 1;
+                value
+            } else {
+                &arg[2..]
             };
             pathname = Some(value);
-            if let Some(name) = args.get(index + 2) {
+            if let Some(name) = args.get(index + 1) {
                 names.push(name.as_str());
             }
             break;

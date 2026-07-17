@@ -45,6 +45,26 @@ fn test_hash_p_without_name_prints_table() {
 }
 
 #[test]
+fn test_hash_p_compact_pathname_sets_entry() {
+    let output_path = "target/rubash-hash-p-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("hash -p/tmp/rubash-compact-cat cat; hash -t cat > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "/tmp/rubash-compact-cat\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_hash_redirects_stderr() {
     let error_path = "target/rubash-hash-stderr-output.txt";
     let status_path = "target/rubash-hash-stderr-status.txt";
