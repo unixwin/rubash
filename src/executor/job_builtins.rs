@@ -115,13 +115,24 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        if cmd.words.len() == 2
-            && self
-                .last_background_pid
-                .is_some_and(|pid| cmd.words[1] == pid.to_string())
-        {
+        if cmd.words.len() == 1 && !self.background_children.is_empty() {
+            let mut status = 0;
+            for (_, mut child) in std::mem::take(&mut self.background_children) {
+                let wait_status = child.wait()?;
+                status = wait_status.code().unwrap_or(1);
+            }
             self.write_buffered_builtin_output(cmd, &[], &[])?;
-            return Ok(0);
+            return Ok(status);
+        }
+
+        if cmd.words.len() == 2 {
+            if let Ok(pid) = cmd.words[1].parse::<u32>() {
+                if let Some(mut child) = self.background_children.remove(&pid) {
+                    let status = child.wait()?.code().unwrap_or(1);
+                    self.write_buffered_builtin_output(cmd, &[], &[])?;
+                    return Ok(status);
+                }
+            }
         }
 
         let mut stderr = Vec::new();

@@ -2,7 +2,7 @@ use super::super::*;
 use std::fs;
 
 #[test]
-fn test_wait_for_last_background_pid_returns_success() {
+fn test_wait_for_last_background_pid_returns_child_status() {
     let status_path = "target/rubash-wait-last-background-status.txt";
     let error_path = "target/rubash-wait-last-background-error.txt";
     let _ = fs::remove_file(status_path);
@@ -16,7 +16,7 @@ fn test_wait_for_last_background_pid_returns_success() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     assert_eq!(fs::read_to_string(error_path).unwrap(), "");
     let _ = fs::remove_file(status_path);
     let _ = fs::remove_file(error_path);

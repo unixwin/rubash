@@ -17,13 +17,41 @@ impl Executor {
         &mut self,
         background_command: &BackgroundCommand,
     ) -> Result<(), ExecuteError> {
-        let ast = Ast {
-            commands: vec![(*background_command.command).clone()],
-        };
-        self.execute_ast(&ast)?;
-        self.last_background_pid = Some(std::process::id());
+        let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
+            .map(std::path::PathBuf::from)
+            .or_else(test_rubash_binary_from_current_exe)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_else(|| "rubash".into());
+        let source = self.background_command_source(&background_command.command);
+        let mut child = Command::new(&exe);
+        child.arg("--").arg("-c").arg(source);
+        child.stdin(Stdio::null());
+        for (key, value) in &self.env_vars {
+            if !key.starts_with("__RUBASH_") {
+                child.env(key, value);
+            }
+        }
+
+        let child = child.spawn()?;
+        let pid = child.id();
+        self.background_children.insert(pid, child);
+        self.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())
+    }
+
+    fn background_command_source(&self, command: &CommandNode) -> String {
+        let mut source = String::new();
+        for (name, body) in &self.functions {
+            if is_exportable_function_name(name) {
+                source.push_str(name);
+                source.push_str("() { ");
+                source.push_str(&bash_command_sequence_text(body));
+                source.push_str("; }; ");
+            }
+        }
+        source.push_str(&bash_command_source_text(command));
+        source
     }
 
     pub(in crate::executor) fn execute_time_ast_command(

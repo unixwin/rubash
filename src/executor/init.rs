@@ -109,6 +109,7 @@ impl Executor {
             random_state: Cell::new(current_epoch_micros() as u32),
             subshell_depth: Cell::new(0),
             last_background_pid: None,
+            background_children: HashMap::new(),
             suppress_errexit: 0,
             last_command_substitution_status: Cell::new(None),
             stdout_capture: None,

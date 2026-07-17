@@ -1,6 +1,16 @@
 use super::super::*;
 use std::fs;
 
+fn assert_pid_text(value: &str) {
+    let pid = value.parse::<u32>().expect("background pid is numeric");
+    assert!(pid > 0);
+}
+
+fn assert_status_bang_line(line: &str, prefix: &str) {
+    let pid = line.strip_prefix(prefix).expect("status/bang prefix");
+    assert_pid_text(pid);
+}
+
 #[test]
 fn test_brace_group_redirects_combined_stdout() {
     let output_path = target_test_path("rubash-brace-group-redirect-output.txt");
@@ -230,10 +240,10 @@ fn test_last_background_pid_parameter_tracks_background_command() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("<>\nstatus:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "<>");
+    assert_status_bang_line(lines[1], "status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -242,7 +252,7 @@ fn test_last_background_pid_parameter_tracks_background_compound_command() {
     let output_path = "target/rubash-last-background-compound-pid-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "{{ echo grouped > {output_path}; }} & printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+        "{{ echo grouped > {output_path}; }} & pid=$!; launch=$?; wait \"$pid\"; printf 'status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -253,10 +263,10 @@ fn test_last_background_pid_parameter_tracks_background_compound_command() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("grouped\nstatus:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "grouped");
+    assert_status_bang_line(lines[1], "status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -266,7 +276,7 @@ fn test_background_if_command_executes_and_updates_bang_pid() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "if true; then echo if-body > {output_path}; fi & \
-         printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; printf 'status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -284,10 +294,10 @@ fn test_background_if_command_executes_and_updates_bang_pid() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("if-body\nstatus:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "if-body");
+    assert_status_bang_line(lines[1], "status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -330,12 +340,13 @@ fn test_bash_subshell_tracks_parenthesized_subshell() {
 }
 
 #[test]
-fn test_background_function_definition_remains_callable() {
+fn test_background_function_definition_does_not_leak_to_parent() {
     let output_path = "target/rubash-background-function-definition-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
         "bgf() {{ echo function-call > {output_path}; }} & \
-         bgf; printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; bgf 2>/dev/null; \
+         printf 'status:%s call:%s bang:%s\\n' \"$launch\" \"$?\" \"$pid\" > {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -353,10 +364,14 @@ fn test_background_function_definition_remains_callable() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("function-call\nstatus:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let line = output.trim_end();
+    let rest = line
+        .strip_prefix("status:0 call:")
+        .expect("function definition status line");
+    let (call_status, pid) = rest.split_once(" bang:").unwrap();
+    assert_ne!(call_status, "0");
+    assert_pid_text(pid);
     let _ = fs::remove_file(output_path);
 }
 
@@ -376,10 +391,8 @@ fn test_background_time_prefix_updates_bang_pid() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("status:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    assert_status_bang_line(output.trim_end(), "status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -389,7 +402,7 @@ fn test_background_case_command_executes_and_updates_bang_pid() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "case yes in yes) echo yes > {output_path} ;; *) echo no > {output_path} ;; esac & \
-         printf 'status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; printf 'status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -401,10 +414,10 @@ fn test_background_case_command_executes_and_updates_bang_pid() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!("yes\nstatus:0 bang:{}\n", std::process::id())
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "yes");
+    assert_status_bang_line(lines[1], "status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -414,40 +427,33 @@ fn test_background_loop_commands_execute_and_update_bang_pid() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "i=0; while (( i < 1 )); do echo while >> {output_path}; ((i++)); done & \
-         printf 'while-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}; \
+         pid=$!; launch=$?; wait \"$pid\"; printf 'while-status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}; \
          until true; do echo never >> {output_path}; done & \
-         printf 'until-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; printf 'until-status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert!(ast.commands[1]
-        .background_command
-        .as_ref()
-        .unwrap()
-        .command
-        .loop_command
-        .is_some());
-    assert!(ast.commands[3]
-        .background_command
-        .as_ref()
-        .unwrap()
-        .command
-        .loop_command
-        .is_some());
+    assert_eq!(
+        ast.commands
+            .iter()
+            .filter(|command| command
+                .background_command
+                .as_ref()
+                .is_some_and(|background| background.command.loop_command.is_some()))
+            .count(),
+        2
+    );
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!(
-            "while\nwhile-status:0 bang:{}\nuntil-status:0 bang:{}\n",
-            std::process::id(),
-            std::process::id()
-        )
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "while");
+    assert_status_bang_line(lines[1], "while-status:0 bang:");
+    assert_status_bang_line(lines[2], "until-status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -457,40 +463,33 @@ fn test_background_iteration_commands_execute_and_update_bang_pid() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "for value in one two; do echo for:$value >> {output_path}; done & \
-         printf 'for-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}; \
+         pid=$!; launch=$?; wait \"$pid\"; printf 'for-status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}; \
          select value in one two; do echo select:$value >> {output_path}; break; done <<< 2 & \
-         printf 'select-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; printf 'select-status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert!(ast.commands[0]
+    assert!(ast.commands.iter().any(|command| command
         .background_command
         .as_ref()
-        .unwrap()
-        .command
-        .for_command
-        .is_some());
-    assert!(ast.commands[2]
+        .is_some_and(|background| background.command.for_command.is_some())));
+    assert!(ast.commands.iter().any(|command| command
         .background_command
         .as_ref()
-        .unwrap()
-        .command
-        .select_command
-        .is_some());
+        .is_some_and(|background| background.command.select_command.is_some())));
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!(
-            "for:one\nfor:two\nfor-status:0 bang:{}\nselect:two\nselect-status:0 bang:{}\n",
-            std::process::id(),
-            std::process::id()
-        )
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "for:one");
+    assert_eq!(lines[1], "for:two");
+    assert_status_bang_line(lines[2], "for-status:0 bang:");
+    assert_eq!(lines[3], "select:two");
+    assert_status_bang_line(lines[4], "select-status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 
@@ -500,40 +499,30 @@ fn test_background_test_commands_execute_and_update_bang_pid() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "count=0; (( count += 1 )) & \
-         printf 'arith-status:%s count:%s bang:%s\\n' \"$?\" \"$count\" \"$!\" > {output_path}; \
+         pid=$!; launch=$?; wait \"$pid\"; printf 'arith-status:%s count:%s bang:%s\\n' \"$launch\" \"$count\" \"$pid\" > {output_path}; \
          value=yes; [[ $value == yes ]] & \
-         printf 'cond-status:%s bang:%s\\n' \"$?\" \"$!\" >> {output_path}"
+         pid=$!; launch=$?; wait \"$pid\"; printf 'cond-status:%s bang:%s\\n' \"$launch\" \"$pid\" >> {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
-    assert!(ast.commands[1]
+    assert!(ast.commands.iter().any(|command| command
         .background_command
         .as_ref()
-        .unwrap()
-        .command
-        .arithmetic_command
-        .is_some());
-    assert!(ast.commands[4]
+        .is_some_and(|background| background.command.arithmetic_command.is_some())));
+    assert!(ast.commands.iter().any(|command| command
         .background_command
         .as_ref()
-        .unwrap()
-        .command
-        .conditional_command
-        .is_some());
+        .is_some_and(|background| background.command.conditional_command.is_some())));
     let mut executor = Executor::new();
 
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        format!(
-            "arith-status:0 count:1 bang:{}\ncond-status:0 bang:{}\n",
-            std::process::id(),
-            std::process::id()
-        )
-    );
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_status_bang_line(lines[0], "arith-status:0 count:0 bang:");
+    assert_status_bang_line(lines[1], "cond-status:0 bang:");
     let _ = fs::remove_file(output_path);
 }
 

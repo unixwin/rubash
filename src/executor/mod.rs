@@ -302,6 +302,7 @@ pub struct Executor {
     random_state: Cell<u32>,
     subshell_depth: Cell<usize>,
     last_background_pid: Option<u32>,
+    background_children: HashMap<u32, std::process::Child>,
     suppress_errexit: usize,
     last_command_substitution_status: Cell<Option<i32>>,
     stdout_capture: Option<Vec<u8>>,
