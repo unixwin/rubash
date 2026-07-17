@@ -271,13 +271,107 @@ impl Executor {
         builtin: crate::builtins::fg_bg::JobControlBuiltin,
     ) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
-        let status = crate::builtins::fg_bg::execute_with_io(
+        let action = crate::builtins::fg_bg::execute_with_io(
             builtin,
+            &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
+        let status = match action {
+            crate::builtins::fg_bg::FgBgAction::Complete(status) => status,
+            crate::builtins::fg_bg::FgBgAction::Jobs(jobs) => {
+                if self.background_jobs.is_empty() && self.background_children.is_empty() {
+                    crate::builtins::fg_bg::write_no_job_control(
+                        builtin,
+                        &self.diagnostic_prefix(),
+                        &mut stderr,
+                    )?
+                } else {
+                    match builtin {
+                        crate::builtins::fg_bg::JobControlBuiltin::Fg => {
+                            self.execute_fg_jobs(jobs, &mut stderr)?
+                        }
+                        crate::builtins::fg_bg::JobControlBuiltin::Bg => {
+                            self.execute_bg_jobs(jobs, &mut stderr)?
+                        }
+                    }
+                }
+            }
+        };
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn execute_fg_jobs(
+        &mut self,
+        jobs: Vec<String>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        let job = jobs.first().map(String::as_str);
+        let Some(pid) = self.resolve_requested_background_job(job) else {
+            self.write_job_not_found("fg", job, stderr)?;
+            return Ok(1);
+        };
+
+        let Some(mut child) = self.background_children.remove(&pid) else {
+            self.background_jobs.remove(&pid);
+            self.write_job_not_found("fg", job, stderr)?;
+            return Ok(1);
+        };
+        self.background_jobs.remove(&pid);
+        let status = child.wait()?.code().unwrap_or(1);
+        Ok(status)
+    }
+
+    fn execute_bg_jobs(
+        &mut self,
+        jobs: Vec<String>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<i32, ExecuteError> {
+        let requested = if jobs.is_empty() {
+            vec![None]
+        } else {
+            jobs.iter()
+                .map(|job| Some(job.as_str()))
+                .collect::<Vec<_>>()
+        };
+
+        let mut status = 0;
+        for job in requested {
+            if self.resolve_requested_background_job(job).is_none() {
+                self.write_job_not_found("bg", job, stderr)?;
+                status = 1;
+            }
+        }
+        Ok(status)
+    }
+
+    fn resolve_requested_background_job(&self, job: Option<&str>) -> Option<u32> {
+        match job {
+            Some(job) => self.resolve_background_job(job),
+            None => self.current_background_pid(),
+        }
+    }
+
+    fn current_background_pid(&self) -> Option<u32> {
+        let pid = self.last_background_pid?;
+        (self.background_children.contains_key(&pid) || self.background_jobs.contains_key(&pid))
+            .then_some(pid)
+    }
+
+    fn write_job_not_found(
+        &self,
+        builtin: &str,
+        job: Option<&str>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<(), ExecuteError> {
+        let job = job.unwrap_or("current");
+        writeln!(
+            stderr,
+            "{}{builtin}: {job}: no such job",
+            self.diagnostic_prefix()
+        )?;
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_suspend(

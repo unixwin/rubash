@@ -134,6 +134,46 @@ fn test_bg_without_job_control_returns_failure() {
 }
 
 #[test]
+fn test_fg_background_pid_waits_and_removes_job() {
+    let output_path = "target/rubash-fg-pid-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "false & pid=$!; fg \"$pid\"; printf 'fg:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "fg:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_bg_background_pid_succeeds_and_keeps_job() {
+    let output_path = "target/rubash-bg-pid-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("true & pid=$!; bg \"$pid\"; echo bg:$? > {output_path}; jobs >> {output_path}; disown \"$pid\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "bg:0");
+    assert_eq!(lines.len(), 2);
+    assert!(lines[1].contains("true &"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_suspend_without_job_control_returns_failure() {
     let error_path = "target/rubash-suspend-error.txt";
     let status_path = "target/rubash-suspend-status.txt";
