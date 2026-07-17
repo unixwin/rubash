@@ -86,6 +86,8 @@ impl Executor {
                 Some('w') => output.push_str(&self.prompt_working_directory(false)),
                 Some('W') => output.push_str(&self.prompt_working_directory(true)),
                 Some('s') => output.push_str("bash"),
+                Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
+                Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
                 Some('$') => output.push('$'),
                 Some('\\') => output.push('\\'),
                 Some('[') | Some(']') => {}
@@ -275,5 +277,25 @@ impl Executor {
     pub(in crate::executor) fn xtrace_enabled(&self) -> bool {
         self.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
             || crate::builtins::set::shell_option_enabled(&self.env_vars, "xtrace")
+    }
+}
+
+fn prompt_release_version(env_vars: &HashMap<String, String>) -> String {
+    let version = env_vars
+        .get("BASH_VERSION")
+        .cloned()
+        .unwrap_or_else(bash_version_value);
+    version
+        .split_once('(')
+        .map(|(release, _)| release.to_string())
+        .unwrap_or(version)
+}
+
+fn prompt_short_version(env_vars: &HashMap<String, String>) -> String {
+    let release = prompt_release_version(env_vars);
+    let mut parts = release.split('.');
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        _ => release,
     }
 }
