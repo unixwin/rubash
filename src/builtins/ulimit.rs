@@ -27,7 +27,10 @@ where
 {
     // TODO(builtins/ulimit.def): Replace this with real getrlimit/setrlimit
     // plumbing. This implements the resource forms exercised by builtins11.sub.
-    if args.iter().any(|arg| arg == "-g") {
+    if args
+        .iter()
+        .any(|arg| arg.starts_with('-') && arg.contains('g'))
+    {
         writeln!(stderr, "{}ulimit: -g: invalid option", diagnostic_prefix())?;
         writeln!(
             stderr,

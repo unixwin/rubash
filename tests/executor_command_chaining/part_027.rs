@@ -23,6 +23,29 @@ fn test_ulimit_appends_stderr() {
 }
 
 #[test]
+fn test_ulimit_combined_invalid_resource_option() {
+    let error_path = "target/rubash-ulimit-combined-invalid-error.txt";
+    let status_path = "target/rubash-ulimit-combined-invalid-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("ulimit -Hg 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("ulimit: -g: invalid option"));
+    assert!(error.contains("ulimit: usage:"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_alias_redirects_output() {
     let output_path = "target/rubash-alias-redirect-output.txt";
     let _ = fs::remove_file(output_path);
