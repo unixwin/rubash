@@ -9,34 +9,34 @@
 
 ## 概述
 
-Rubash 是一个正在开发中的 POSIX 兼容 Shell，使用 Rust 语言从零编写。它旨在提供一个安全、快速的 Bash 替代方案，同时保持与现有 bash 脚本的兼容性。
+Rubash 是一个正在开发中的 GNU Bash 兼容 Shell，使用 Rust 语言从零编写。项目目标是逐步复刻 Bash 的解析、展开、执行和内建命令行为，并用 GNU Bash 上游测试和本仓库回归测试持续校验兼容性。
 
-**注意**: 此项目目前处于 alpha 阶段，不建议用于生产环境。
+**注意**: Rubash 已经超过早期骨架阶段，但仍处于活跃兼容性补齐期。它适合用于测试、研究和兼容性验证，暂不建议作为生产登录 shell 或关键脚本运行时。
 
 ## 特性
 
-- ✅ **词法分析器**: 支持引号、变量、命令替换、花括号展开
-- ✅ **解析器**: AST 生成、管道、重定向、命令分隔
-- ✅ **执行器**: 内建命令、外部命令、重定向、管道和 shebangless 脚本回退执行
-- ✅ **变量展开**: 环境变量、位置参数、数组、命令替换和常见参数展开
-- ✅ **控制流**: if/while/until/for/case/select 等语句的主体执行路径
-- ✅ **函数定义**: `name() { ...; }` 和 `function name { ...; }`
-- 🚧 **Bash 兼容细节**: `declare`/`local`、`read`/`mapfile`、`time`、`coproc`、case 模式等正在持续补齐
-- 🚧 **作业控制**: job control
-- 🚧 **命令历史**: readline 集成
+- ✅ **词法分析器**: 支持 Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string 和常见重定向 token。
+- ✅ **解析器**: 生成结构化 AST，覆盖简单命令、管道、AND/OR 列表、重定向、函数、brace/subshell、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc` 和 `time` 前缀。
+- ✅ **执行器**: 支持外部命令、管道、重定向、临时赋值、函数调用、source/eval、shebangless 脚本回退执行，以及 Windows/Git Bash 路径桥接。
+- ✅ **展开系统**: 覆盖变量/位置参数、数组和关联数组、命令替换、算术展开、花括号展开、tilde、pathname glob、常见 `${parameter...}` 操作和大小写/替换类参数变换。
+- ✅ **数组语义**: 支持 indexed/associative arrays、复合赋值、元素赋值/追加、负下标、数组切片、`${arr[@]}`/`${arr[*]}`、declare/local/export/readonly 交互中的常见数组行为。
+- ✅ **内建命令**: 已实现或接入常用 Bash builtins，包括 `alias`/`unalias`、`builtin`、`cd`、`command`、`declare`/`typeset`/`local`、`echo`、`enable`、`eval`、`exec`、`exit`、`export`/`readonly`、`getopts`、`hash`、`help`、`jobs`、`kill`、`let`、`mapfile`/`readarray`、`printf`、`pushd`/`popd`/`dirs`、`pwd`、`read`、`return`、`set`、`shift`、`shopt`、`source`/`.`、`test`/`[`、`times`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
+- ✅ **控制流和函数**: `if`/`while`/`until`/`for`/算术 `for`/`case`/`select` 主体执行路径、函数定义、局部变量、返回状态、break/continue/return 等常见控制语义正在回归测试覆盖中。
+- 🚧 **仍在补齐**: 完整 job control、交互式 readline/history、进程组/终端控制、信号边界、Bash 精细解析/别名重读细节、所有上游兼容角落案例。
 
-当前实现已经超过早期骨架阶段，重点转向补齐 Bash 行为细节、扩大 GNU Bash
-上游测试覆盖面，并保持跨平台执行语义一致。项目仍处于 alpha 阶段，暂不建议
-作为生产 shell 替代品使用。
+当前开发重点是继续补齐 Bash 行为细节、扩大 GNU Bash 上游测试覆盖面，并保持跨平台执行语义一致。
 
 ## 快速开始
 
 ### 安装
-从cargo
+
+从 crates.io 安装当前发布版:
+
 ```bash
 cargo install rubash
 ```
 
+从源码构建当前仓库版本:
 
 ```bash
 # 克隆仓库
@@ -90,6 +90,8 @@ cargo test --test executor_tests
 cargo test -- --nocapture
 ```
 
+当前本地 Rust 测试套件包含 1800+ 条可执行用例，覆盖 lexer、parser、executor、CLI、Bash 示例脚本和参数/数组/重定向等兼容性路径。
+
 ### GNU Bash 上游测试进度
 
 本仓库通过 `third_party/bash` submodule 固定 GNU Bash 上游源码，并用
@@ -128,16 +130,23 @@ Rubash 模块的对应关系见 [docs/bash-source-map.md](docs/bash-source-map.m
 
 ```
 src/
-├── lexer/mod.rs     # 词法分析器
-├── parser/mod.rs    # 解析器
-├── executor/mod.rs  # 命令执行器
+├── builtins/        # Bash builtin 实现
+├── executor/        # 展开、执行、变量状态、管道、函数和重定向
+├── expand/          # brace/glob/tilde/arithmetic 等展开组件
+├── input/           # 交互式输入/readline 相关骨架
+├── lexer/           # 词法分析器
+├── parser/          # 解析器和 AST 元数据
+├── shell/           # Bash 运行时数据结构映射
+├── sys/             # Bash 兼容辅助模块
 ├── lib.rs           # 库入口
 └── main.rs          # CLI 入口
 
 tests/
-├── lexer_tests.rs   # 词法分析器测试
-├── parser_tests.rs  # 解析器测试
-└── executor_tests.rs # 执行器测试
+├── cli_tests.rs                  # CLI 和脚本入口测试
+├── executor_command_chaining/    # 执行器兼容性回归测试
+├── lexer_*                       # 词法分析器测试
+├── parser_*                      # 解析器和结构化 AST 测试
+└── parameter_transform_tests/    # 参数变换测试
 ```
 
 ## TDD 开发方法
@@ -175,4 +184,4 @@ tests/
 
 ---
 
-*最后更新: 2026-07-12*
+*最后更新: 2026-07-17*
