@@ -184,7 +184,7 @@ pub(super) fn command_boundary_keyword_allowed(tokens: &[Token], index: usize) -
     ) || (previous.kind == TokenKind::Keyword
         && matches!(
             previous.value.as_str(),
-            "{" | "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "}"
+            "{" | "(" | ")" | "then" | "do" | "else" | "elif" | "fi" | "done" | "esac" | "}"
         ))
         || (previous.kind == TokenKind::Word
             && matches!(previous.raw.as_str(), ";;" | ";&" | ";;&"))

@@ -4083,6 +4083,44 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_nested_case_without_outer_terminator() {
+        let input = "echo $(case x in x) case y in y) printf a;; esac esac)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(
+            substitutions[0].source,
+            "case x in x) case y in y) printf a;; esac esac"
+        );
+        let case_command = substitutions[0].commands[0].case_command.as_ref().unwrap();
+        assert_eq!(case_command.clauses.len(), 1);
+        assert!(case_command.clauses[0].terminator_text.is_none());
+        assert!(case_command.clauses[0].body[0].case_command.is_some());
+    }
+
+    #[test]
+    fn test_command_substitution_keeps_reserved_case_patterns_before_for() {
+        let input = "echo $(case k in else|done|time|esac) for f in 1 2 3; do printf x; done esac)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(
+            substitutions[0].source,
+            "case k in else|done|time|esac) for f in 1 2 3; do printf x; done esac"
+        );
+        let case_command = substitutions[0].commands[0].case_command.as_ref().unwrap();
+        assert_eq!(
+            case_command.clauses[0].patterns,
+            ["else", "done", "time", "esac"]
+        );
+        assert!(case_command.clauses[0].body[0].for_command.is_some());
+    }
+
+    #[test]
     fn test_command_substitution_keeps_case_pattern_starting_with_esac() {
         let input = "echo $(case esac in\nesac) printf matched ;; esac)";
         let tokens = tokenize(input);

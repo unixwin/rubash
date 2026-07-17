@@ -157,10 +157,11 @@ fn update_brace_group_reserved_word_depth(
         }
         "esac" if !case_pattern_starts_with_esac_chars(chars, index) => {
             *case_depth = case_depth.saturating_sub(1);
-            false
+            true
         }
         "esac" => false,
-        "then" | "do" | "else" | "elif" | "in" => true,
+        "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
+        | "done" => true,
         _ => false,
     }
 }
@@ -198,16 +199,45 @@ fn case_pattern_starts_with_esac_chars(chars: &[char], delimiter_index: usize) -
         if word == "esac" && word_boundary {
             return true;
         }
+        if word.is_empty() {
+            if brace_group_separator_allows_reserved_word(ch) {
+                word_boundary = true;
+            } else if !ch.is_whitespace() {
+                word_boundary = false;
+            }
+            scan += 1;
+            continue;
+        }
+        let reserved_word_allows_next =
+            word_boundary && brace_group_reserved_word_allows_next(&word);
         word.clear();
-        word_boundary = brace_group_separator_allows_reserved_word(ch);
+        word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
         scan += 1;
     }
 
     word == "esac" && word_boundary
 }
 
+fn brace_group_reserved_word_allows_next(word: &str) -> bool {
+    matches!(
+        word,
+        "for"
+            | "select"
+            | "while"
+            | "until"
+            | "then"
+            | "do"
+            | "else"
+            | "elif"
+            | "in"
+            | "fi"
+            | "done"
+            | "esac"
+    )
+}
+
 fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
-    matches!(ch, ';' | '&' | '|' | '(' | '{' | '\n')
+    matches!(ch, ';' | '&' | '|' | '(' | ')' | '{' | '\n')
 }
 
 pub(super) fn skip_braced_parameter_in_chars(chars: &[char], mut index: usize) -> usize {

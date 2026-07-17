@@ -331,6 +331,46 @@ fn test_case_command_substitution_allows_clause_without_terminator_after_if() {
 }
 
 #[test]
+fn test_case_command_substitution_allows_nested_case_without_outer_terminator() {
+    let output_path = "target/rubash-case-command-subst-nested-case-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(case x in x) case y in y) printf a;; esac esac); \
+         printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<a> status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_case_command_substitution_keeps_reserved_patterns_before_for_body() {
+    let output_path = "target/rubash-case-command-subst-reserved-patterns-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "v=$(case k in else|done|time|esac) for f in 1 2 3; do printf x; done esac); \
+         printf 'v=<%s> status:%s\\n' \"$v\" \"$?\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "v=<> status:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_and_or_command_substitution_captures_stdout() {
     let output_path = "target/rubash-and-or-command-subst-output.txt";
     let _ = fs::remove_file(output_path);
