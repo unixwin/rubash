@@ -749,6 +749,22 @@ impl Executor {
                     delimiter = word[3..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-red" | "-erd" => {
+                    raw = true;
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if (word.starts_with("-red") || word.starts_with("-erd"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
