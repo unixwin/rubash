@@ -134,6 +134,72 @@ fn test_mapfile_callback_runs_at_quantum() {
 }
 
 #[test]
+fn test_mapfile_combined_tc_sets_callback_quantum_and_trims() {
+    let output_path = "target/rubash-mapfile-combined-tc-callback-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "cb() {{ echo \"$1:$2\" >> {output_path}; }}; mapfile -tc1 -C cb arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0:alpha\n1:beta\n2 alpha beta\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_readarray_combined_t_c_sets_callback_and_trims() {
+    let output_path = "target/rubash-readarray-combined-tc-callback-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "cb() {{ echo \"$1:$2\" >> {output_path}; }}; readarray -tCcb -c1 arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0:alpha\n1:beta\n2 alpha beta\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_mapfile_combined_t_c_consumes_separate_callback() {
+    let output_path = "target/rubash-mapfile-combined-tc-separate-callback-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "cb() {{ echo \"$1:$2\" >> {output_path}; }}; mapfile -tC cb -c1 arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "0:alpha\n1:beta\n2 alpha beta\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_readarray_compact_n_limits_read_lines() {
     let output_path = "target/rubash-readarray-compact-n-output.txt";
     let _ = fs::remove_file(output_path);
@@ -408,6 +474,44 @@ fn test_mapfile_u_reads_numbered_fd_here_string() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "mapfile -u 3 -t arr 3<<<$'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_readarray_combined_tu_reads_numbered_fd_here_string() {
+    let output_path = "target/rubash-readarray-combined-tu-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "readarray -tu3 arr 3<<<$'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_mapfile_combined_tu_consumes_separate_fd() {
+    let output_path = "target/rubash-mapfile-combined-tu-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "mapfile -tu 3 arr 3<<<$'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

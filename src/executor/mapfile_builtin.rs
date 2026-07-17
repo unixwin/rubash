@@ -164,6 +164,73 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-tC" => {
+                    trim_newline = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "C",
+                            &mut stderr,
+                        );
+                    };
+                    callback = Some(word.clone());
+                    index += 2;
+                }
+                word if word.starts_with("-tC") && word.len() > 3 => {
+                    trim_newline = true;
+                    callback = Some(word[3..].to_string());
+                    index += 1;
+                }
+                "-tu" => {
+                    trim_newline = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "u",
+                            &mut stderr,
+                        );
+                    };
+                    match self.parse_mapfile_fd(command_name, word, &mut stderr) {
+                        Ok(value) => read_fd = Some(value),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-tu") && word.len() > 3 => {
+                    trim_newline = true;
+                    match self.parse_mapfile_fd(command_name, &word[3..], &mut stderr) {
+                        Ok(value) => read_fd = Some(value),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 1;
+                }
+                "-tc" => {
+                    trim_newline = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "c",
+                            &mut stderr,
+                        );
+                    };
+                    match self.parse_mapfile_callback_quantum(command_name, word, &mut stderr) {
+                        Ok(value) => callback_quantum = value,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-tc") && word.len() > 3 => {
+                    trim_newline = true;
+                    match self.parse_mapfile_callback_quantum(command_name, &word[3..], &mut stderr)
+                    {
+                        Ok(value) => callback_quantum = value,
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 1;
+                }
                 "-d" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         return self.mapfile_missing_option_argument(
