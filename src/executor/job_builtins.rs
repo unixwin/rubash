@@ -121,6 +121,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        if let Some(pid) = self.wait_any_background_pid(cmd) {
+            if let Some(status) = self.wait_for_background_pid(pid)? {
+                self.write_buffered_builtin_output(cmd, &[], &[])?;
+                return Ok(status);
+            }
+        }
+
         if cmd.words.len() == 1 && !self.background_children.is_empty() {
             let mut status = 0;
             for (_, mut child) in std::mem::take(&mut self.background_children) {
@@ -155,6 +162,18 @@ impl Executor {
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn wait_any_background_pid(&self, cmd: &CommandNode) -> Option<u32> {
+        let operands = wait_any_operands(&cmd.words[1..])?;
+        if let Some(first) = operands.first() {
+            return self.resolve_background_job(first);
+        }
+
+        self.background_job_order
+            .iter()
+            .copied()
+            .find(|pid| self.background_children.contains_key(pid))
     }
 
     fn wait_for_background_pid(&mut self, pid: u32) -> Result<Option<i32>, ExecuteError> {
@@ -517,4 +536,38 @@ impl Executor {
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
+}
+
+fn wait_any_operands(words: &[String]) -> Option<Vec<String>> {
+    let mut index = 0;
+    let mut wait_any = false;
+    while let Some(word) = words.get(index) {
+        if word == "--" {
+            index += 1;
+            break;
+        }
+        if !word.starts_with('-') || word == "-" {
+            break;
+        }
+
+        let mut chars = word[1..].chars().peekable();
+        while let Some(option) = chars.next() {
+            match option {
+                'n' => wait_any = true,
+                'f' => {}
+                'p' => {
+                    if chars.peek().is_some() {
+                        break;
+                    }
+                    index += 1;
+                    words.get(index)?;
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+
+    wait_any.then(|| words[index..].to_vec())
 }
