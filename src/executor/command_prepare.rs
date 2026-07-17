@@ -110,7 +110,7 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<CommandNode, ExecuteError> {
         let mut variable_expanded = cmd.clone();
-        variable_expanded.words = cmd
+        let expanded_words = cmd
             .words
             .iter()
             .enumerate()
@@ -119,21 +119,33 @@ impl Executor {
                     .word_metadata
                     .get(index)
                     .map(|metadata| metadata.raw.as_str());
+                let suppress_glob =
+                    word.starts_with('\x1b') || word.starts_with('\x1d') || raw_word_is_quoted(raw);
                 self.expand_command_word(cmd, index, word, raw)
+                    .into_iter()
+                    .map(move |word| (word, suppress_glob))
             })
+            .collect::<Vec<_>>();
+        variable_expanded.words = expanded_words
+            .iter()
+            .map(|(word, _)| word.clone())
             .collect();
         variable_expanded.word_kinds = Vec::new();
 
         let is_test_cmd = cmd.words.first().is_some_and(|w| w == "[[" || w == "[");
         if !is_test_cmd {
             let mut words = Vec::new();
-            for word in variable_expanded.words {
-                match pathname_expand_word(&word, &self.env_vars) {
-                    PathnameExpansion::Matches(matches) => words.extend(matches),
-                    PathnameExpansion::NoMatch => words.push(word),
-                    PathnameExpansion::Fail(pattern) => {
-                        self.report_failglob(&pattern);
-                        return Err(ExecuteError::ExitCode(1));
+            for (word, suppress_glob) in expanded_words {
+                if suppress_glob {
+                    words.push(word);
+                } else {
+                    match pathname_expand_word(&word, &self.env_vars) {
+                        PathnameExpansion::Matches(matches) => words.extend(matches),
+                        PathnameExpansion::NoMatch => words.push(word),
+                        PathnameExpansion::Fail(pattern) => {
+                            self.report_failglob(&pattern);
+                            return Err(ExecuteError::ExitCode(1));
+                        }
                     }
                 }
             }
@@ -276,4 +288,86 @@ pub(in crate::executor) fn expand_braces_with_optional_raw(
     }
 
     crate::expand::braces::expand_braces(word)
+}
+
+fn raw_word_is_quoted(raw: Option<&str>) -> bool {
+    let Some(raw) = raw else {
+        return false;
+    };
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' => return true,
+            '$' if chars.get(index + 1) == Some(&'\'') || chars.get(index + 1) == Some(&'"') => {
+                return true;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = skip_raw_command_substitution(&chars, index + 2);
+                continue;
+            }
+            '`' => {
+                index = skip_raw_backtick(&chars, index + 1);
+                continue;
+            }
+            '\\' => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn skip_raw_command_substitution(chars: &[char], mut index: usize) -> usize {
+    let mut depth = 1usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' => index = skip_raw_quote(chars, index + 1, '\''),
+            '"' => index = skip_raw_quote(chars, index + 1, '"'),
+            '`' => index = skip_raw_backtick(chars, index + 1),
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                depth += 1;
+                index += 2;
+                continue;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            '\\' => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    index
+}
+
+fn skip_raw_quote(chars: &[char], mut index: usize, quote: char) -> usize {
+    while index < chars.len() {
+        if chars[index] == '\\' && quote != '\'' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn skip_raw_backtick(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() {
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '`' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    index
 }
