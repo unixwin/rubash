@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  github-release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify release tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tags must look like v1.2.3 or v1.2.3-pre. Got: $tag" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          cargo_pkgid="$(cargo pkgid)"
+          cargo_version="${cargo_pkgid##*@}"
+          if [[ "$version" != "$cargo_version" ]]; then
+            echo "Tag $tag does not match Cargo.toml version $cargo_version" >&2
+            exit 1
+          fi
+
+      - name: Run cargo tests
+        run: cargo test
+
+      - name: Verify package
+        run: cargo package
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package Linux binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp target/release/rubash dist/rubash
+          tar -C dist -czf "rubash-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" rubash
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            "rubash-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
