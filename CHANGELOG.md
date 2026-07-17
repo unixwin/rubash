@@ -4,9 +4,21 @@
 
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
-## [Unreleased] - 2026-07-12
+## [Unreleased]
+
+## [0.2.0] - 2026-07-17
+
+### 新增
+
+- 补齐复合数组赋值中的未引用命令替换拆词行为，并在拆出的字段上继续执行
+  pathname expansion。
+- 补齐 `arr=($var)` 这类未引用参数复合数组赋值字段的 pathname expansion。
+- 复合数组赋值普通元素支持 brace expansion，并遵守 `set +B` 对 brace expansion
+  的关闭状态。
 
 ### 修复
+
+- quoted parameter expansion 后不再误触发 pathname expansion，行为更接近 Bash。
 
 - Linux/Unix 上执行无 shebang 外部脚本时，遇到 exec format error 会通过 shell
   回退执行，行为更接近 Bash。
@@ -23,6 +35,7 @@
 
 ### 文档
 
+- 更新 README 中的当前实现状态、builtins 覆盖、测试规模和代码结构说明。
 - 更新 README 中的功能进度，说明当前实现已超过早期骨架阶段，重点转向 Bash
   兼容细节和上游测试覆盖。
 - 更新 README 和 GNU Bash upstream 测试文档中的测试进度、运行命令和更新时间。
