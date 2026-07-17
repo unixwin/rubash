@@ -477,9 +477,23 @@ fn test_process_substitution_keeps_heredoc_body() {
     let process = ast.commands[0].process_substitutions.as_slice();
 
     assert_eq!(process.len(), 1);
-    assert_eq!(process[0].source, "cat << EOF\nhi\nEOF");
+    assert_eq!(process[0].source, "cat << EOF\nhi\nEOF\n");
     assert_eq!(process[0].commands.len(), 1);
     assert_eq!(process[0].commands[0].heredoc.as_deref(), Some("hi\n"));
+}
+
+#[test]
+fn test_process_substitution_keeps_command_after_heredoc_body() {
+    let input = "cat <(cat <<EOF\nhi\nEOF\necho bye\n)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].source, "cat << EOF\nhi\nEOF\necho bye ;");
+    assert_eq!(process[0].commands.len(), 2);
+    assert_eq!(process[0].commands[0].heredoc.as_deref(), Some("hi\n"));
+    assert_eq!(process[0].commands[1].words, ["echo", "bye"]);
 }
 
 #[test]

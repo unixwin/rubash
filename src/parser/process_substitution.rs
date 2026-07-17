@@ -263,6 +263,7 @@ fn process_substitution_source(tokens: &[Token]) -> String {
             }
             if let Some(delimiter) = pending_heredoc_delimiter.take() {
                 source.push_str(&delimiter);
+                source.push('\n');
             }
             skip_next_semicolon = true;
             continue;

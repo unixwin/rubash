@@ -131,6 +131,24 @@ fn test_input_process_substitution_captures_heredoc_body() {
 }
 
 #[test]
+fn test_input_process_substitution_runs_command_after_heredoc_body() {
+    let output_path = target_test_path("rubash-process-substitution-heredoc-next-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!("cat <(cat <<EOF\nhi\nEOF\necho bye\n) > {shell_output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "hi\nbye\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_brace_group_combined_process_substitution_captures_whole_body() {
     let output_path = "target/rubash-brace-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
