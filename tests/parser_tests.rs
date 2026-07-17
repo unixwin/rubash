@@ -1051,6 +1051,15 @@ mod command_body_kind_tests {
     }
 
     #[test]
+    fn test_unclosed_arithmetic_subscript_does_not_leak_tail_command() {
+        let ast = parse(&tokenize("((X=([))]"));
+
+        assert_eq!(ast.commands.len(), 1);
+        let arithmetic = ast.commands[0].arithmetic_command.as_ref().unwrap();
+        assert_eq!(arithmetic.expression, "X= ( [ ) ) ]");
+    }
+
+    #[test]
     fn test_for_and_select_words_record_metadata() {
         let for_tokens = tokenize("for x in ${one:-1} pre{a,b} src/[ab]? \"*.rs\"; do :; done");
         let for_ast = parse(&for_tokens);

@@ -1852,6 +1852,18 @@ fn test_function_body_can_be_conditional_command() {
 }
 
 #[test]
+fn test_unclosed_arithmetic_subscript_does_not_execute_tail_bracket() {
+    let tokens = tokenize("((X=([))]");
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 1);
+}
+
+#[test]
 fn test_alias_introduced_function_defines_brace_body() {
     let output_path = "target/rubash-alias-function-brace-output.txt";
     let _ = fs::remove_file(output_path);

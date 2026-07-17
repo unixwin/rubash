@@ -20,6 +20,7 @@ pub(super) fn parse_arithmetic_command(
     let mut i;
     let mut parts = Vec::new();
     let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
     if first == "((" {
         i = start + 1;
     } else if is_keyword(tokens, start, "(") && is_keyword(tokens, start + 1, "(") {
@@ -29,28 +30,46 @@ pub(super) fn parse_arithmetic_command(
     }
 
     while i + 1 < tokens.len() {
-        if paren_depth == 0 && tokens[i].value == "))" {
+        if paren_depth == 0 && bracket_depth == 0 && tokens[i].value == "))" {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             set_arithmetic_command_words(&mut command, parts.join(" "));
             return Some(finish_arithmetic_command(command, tokens, i + 1));
         }
 
-        if paren_depth == 0 && is_keyword(tokens, i, ")") && is_keyword(tokens, i + 1, ")") {
+        if paren_depth == 0
+            && bracket_depth == 0
+            && is_keyword(tokens, i, ")")
+            && is_keyword(tokens, i + 1, ")")
+        {
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             set_arithmetic_command_words(&mut command, parts.join(" "));
             return Some(finish_arithmetic_command(command, tokens, i + 2));
         }
 
-        if is_keyword(tokens, i, "(") {
+        if tokens[i].value == "[" {
+            bracket_depth += 1;
+            parts.push(tokens[i].value.clone());
+            i += 1;
+            continue;
+        }
+
+        if tokens[i].value == "]" && bracket_depth > 0 {
+            bracket_depth -= 1;
+            parts.push(tokens[i].value.clone());
+            i += 1;
+            continue;
+        }
+
+        if bracket_depth == 0 && is_keyword(tokens, i, "(") {
             paren_depth += 1;
             parts.push(tokens[i].value.clone());
             i += 1;
             continue;
         }
 
-        if is_keyword(tokens, i, ")") && paren_depth > 0 {
+        if bracket_depth == 0 && is_keyword(tokens, i, ")") && paren_depth > 0 {
             paren_depth -= 1;
             parts.push(tokens[i].value.clone());
             i += 1;
@@ -72,7 +91,19 @@ pub(super) fn parse_arithmetic_command(
         i += 1;
     }
 
-    None
+    if parts.is_empty() {
+        return None;
+    }
+
+    while i < tokens.len() && tokens[i].kind != TokenKind::Semicolon {
+        parts.push(tokens[i].value.clone());
+        i += 1;
+    }
+
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    set_arithmetic_command_words(&mut command, parts.join(" "));
+    Some(finish_arithmetic_command(command, tokens, i))
 }
 
 fn set_arithmetic_command_words(command: &mut CommandNode, expression: String) {
