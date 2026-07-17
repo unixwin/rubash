@@ -324,6 +324,14 @@ impl Executor {
                     exact_char_limit = true;
                     index += 1;
                 }
+                "-sp" => {
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if word.starts_with("-sp") && word.len() > 3 => {
+                    prompt = Some(word[3..].to_string());
+                    index += 1;
+                }
                 word if word.starts_with('-')
                     && word.len() > 2
                     && word[1..].chars().all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
