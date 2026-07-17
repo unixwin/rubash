@@ -128,6 +128,70 @@ fn test_jobs_p_lists_background_pid_only() {
 }
 
 #[test]
+fn test_jobs_lists_requested_background_jobspec() {
+    let output_path = "target/rubash-jobs-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("true & first=$!; false & second=$!; jobs %1 > {output_path}; disown \"$first\"; disown \"$second\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("true &"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_jobs_p_lists_requested_current_jobspec_pid_only() {
+    let output_path = "target/rubash-jobs-current-p-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("true & pid=$!; jobs -p %% > {output_path}; disown \"$pid\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let pid = output
+        .trim_end()
+        .parse::<u32>()
+        .expect("jobs -p jobspec pid");
+    assert!(pid > 0);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_jobs_unknown_jobspec_reports_failure() {
+    let error_path = "target/rubash-jobs-unknown-error.txt";
+    let status_path = "target/rubash-jobs-unknown-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("jobs %1 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("jobs: %1: no such job"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_disown_without_jobs_reports_current_job_failure() {
     let error_path = "target/rubash-disown-empty-error.txt";
     let status_path = "target/rubash-disown-empty-status.txt";

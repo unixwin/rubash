@@ -37,6 +37,7 @@ impl Executor {
         let pid = child.id();
         self.background_children.insert(pid, child);
         self.background_jobs.insert(pid, display_source);
+        self.background_job_order.push(pid);
         self.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())

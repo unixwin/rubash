@@ -6,14 +6,16 @@
 use std::io::{self, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
-const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobsAction {
     Complete(i32),
     Execute(Vec<String>),
-    List(JobsListOptions),
+    List {
+        options: JobsListOptions,
+        jobs: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -66,10 +68,8 @@ where
         index += 1;
     }
 
-    if let Some(job) = args.get(index) {
-        writeln!(stderr, "{diagnostic_prefix}jobs: {job}: no such job")?;
-        return Ok(JobsAction::Complete(EXECUTION_FAILURE));
-    }
-
-    Ok(JobsAction::List(options))
+    Ok(JobsAction::List {
+        options,
+        jobs: args[index..].to_vec(),
+    })
 }

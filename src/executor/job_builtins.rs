@@ -99,10 +99,10 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 Ok(status)
             }
-            crate::builtins::jobs::JobsAction::List(options) => {
-                let stdout = self.background_jobs_output(options);
+            crate::builtins::jobs::JobsAction::List { options, jobs } => {
+                let (stdout, status) = self.background_jobs_output(options, &jobs, &mut stderr)?;
                 self.write_buffered_builtin_output(cmd, stdout.as_bytes(), &stderr)?;
-                Ok(0)
+                Ok(status)
             }
             crate::builtins::jobs::JobsAction::Execute(words) => {
                 if !stderr.is_empty() {
@@ -128,6 +128,7 @@ impl Executor {
                 status = wait_status.code().unwrap_or(1);
             }
             self.background_jobs.clear();
+            self.background_job_order.clear();
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             return Ok(status);
         }
@@ -162,26 +163,68 @@ impl Executor {
         };
         let status = child.wait()?.code().unwrap_or(1);
         self.background_jobs.remove(&pid);
+        self.background_job_order.retain(|job_pid| *job_pid != pid);
         Ok(Some(status))
     }
 
-    fn background_jobs_output(&self, options: crate::builtins::jobs::JobsListOptions) -> String {
-        let mut jobs = self.background_jobs.iter().collect::<Vec<_>>();
-        jobs.sort_by_key(|(pid, _)| *pid);
+    fn background_jobs_output(
+        &self,
+        options: crate::builtins::jobs::JobsListOptions,
+        requested_jobs: &[String],
+        stderr: &mut Vec<u8>,
+    ) -> Result<(String, i32), ExecuteError> {
+        let jobs = if requested_jobs.is_empty() {
+            self.ordered_background_jobs()
+        } else {
+            let mut selected = Vec::new();
+            let mut status = 0;
+            for job in requested_jobs {
+                if let Some(pid) = self.resolve_background_job(job) {
+                    if let Some(source) = self.background_jobs.get(&pid) {
+                        selected.push((self.background_job_number(pid), pid, source.clone()));
+                    }
+                } else {
+                    writeln!(
+                        stderr,
+                        "{}jobs: {job}: no such job",
+                        self.diagnostic_prefix()
+                    )?;
+                    status = 1;
+                }
+            }
+            return Ok((self.render_background_jobs(options, selected), status));
+        };
+        Ok((self.render_background_jobs(options, jobs), 0))
+    }
 
+    fn ordered_background_jobs(&self) -> Vec<(usize, u32, String)> {
+        self.background_job_order
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pid)| {
+                self.background_jobs
+                    .get(pid)
+                    .map(|source| (index + 1, *pid, source.clone()))
+            })
+            .collect()
+    }
+
+    fn render_background_jobs(
+        &self,
+        options: crate::builtins::jobs::JobsListOptions,
+        jobs: Vec<(usize, u32, String)>,
+    ) -> String {
         let mut output = String::new();
-        for (index, (pid, source)) in jobs.into_iter().enumerate() {
+        for (job_number, pid, source) in jobs {
             if options.pids_only {
                 output.push_str(&format!("{pid}\n"));
             } else if options.long {
                 output.push_str(&format!(
-                    "[{}]  {pid} Running                 {source} &\n",
-                    index + 1
+                    "[{job_number}]  {pid} Running                 {source} &\n"
                 ));
             } else {
                 output.push_str(&format!(
-                    "[{}]  Running                 {source} &\n",
-                    index + 1
+                    "[{job_number}]  Running                 {source} &\n"
                 ));
             }
         }
@@ -203,6 +246,7 @@ impl Executor {
             crate::builtins::disown::DisownAction::All => {
                 self.background_children.clear();
                 self.background_jobs.clear();
+                self.background_job_order.clear();
                 0
             }
             crate::builtins::disown::DisownAction::Current => {
@@ -223,6 +267,7 @@ impl Executor {
                     if let Some(pid) = self.resolve_background_job(&job) {
                         self.background_children.remove(&pid);
                         self.background_jobs.remove(&pid);
+                        self.background_job_order.retain(|job_pid| *job_pid != pid);
                     } else {
                         writeln!(
                             stderr,
@@ -250,6 +295,7 @@ impl Executor {
 
         self.background_children.remove(&pid);
         self.background_jobs.remove(&pid);
+        self.background_job_order.retain(|job_pid| *job_pid != pid);
         true
     }
 
@@ -265,16 +311,26 @@ impl Executor {
 
     fn resolve_background_job_number(&self, number: &str) -> Option<u32> {
         let index = match number {
-            "" | "+" => 1,
+            "" | "+" | "%" => 1,
             _ => number.parse::<usize>().ok()?,
         };
         if index == 0 {
             return None;
         }
 
-        let mut pids = self.background_jobs.keys().copied().collect::<Vec<_>>();
-        pids.sort_unstable();
-        pids.get(index - 1).copied()
+        self.background_job_order
+            .iter()
+            .copied()
+            .filter(|pid| self.background_jobs.contains_key(pid))
+            .nth(index - 1)
+    }
+
+    fn background_job_number(&self, pid: u32) -> usize {
+        self.background_job_order
+            .iter()
+            .position(|job_pid| *job_pid == pid)
+            .map(|index| index + 1)
+            .unwrap_or(1)
     }
 
     pub(in crate::executor) fn execute_fg_bg(
@@ -327,10 +383,12 @@ impl Executor {
 
         let Some(mut child) = self.background_children.remove(&pid) else {
             self.background_jobs.remove(&pid);
+            self.background_job_order.retain(|job_pid| *job_pid != pid);
             self.write_job_not_found("fg", job, stderr)?;
             return Ok(1);
         };
         self.background_jobs.remove(&pid);
+        self.background_job_order.retain(|job_pid| *job_pid != pid);
         let status = child.wait()?.code().unwrap_or(1);
         Ok(status)
     }
