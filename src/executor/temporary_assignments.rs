@@ -81,6 +81,9 @@ impl Executor {
             set_process_env(base_name, value);
             return true;
         }
+        if base_name == "SRANDOM" && !append {
+            return true;
+        }
         if base_name == "BASHPID" && !append {
             return true;
         }

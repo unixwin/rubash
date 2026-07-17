@@ -256,3 +256,48 @@ fn test_random_expands_to_15_bit_values_and_advances() {
     assert_ne!(values[0], values[1]);
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_srandom_expands_to_32_bit_values_and_advances() {
+    let output_path = "target/rubash-srandom-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '%s\\n' \"$SRANDOM\" \"$SRANDOM\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let values = fs::read_to_string(output_path)
+        .unwrap()
+        .lines()
+        .map(|line| line.parse::<u32>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_ne!(values[0], values[1]);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_srandom_assignment_keeps_dynamic_parameter() {
+    let output_path = "target/rubash-srandom-assignment-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("SRANDOM=1; printf '%s\\n' \"$SRANDOM\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let value = fs::read_to_string(output_path)
+        .unwrap()
+        .trim_end()
+        .parse::<u32>()
+        .unwrap();
+    assert_ne!(value, 1);
+    let _ = fs::remove_file(output_path);
+}

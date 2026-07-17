@@ -66,6 +66,29 @@ fn test_random_advances_inside_arithmetic_command() {
 }
 
 #[test]
+fn test_srandom_expands_inside_arithmetic_expressions() {
+    let output_path = "target/rubash-srandom-arithmetic-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '%s\\n' \"$((SRANDOM))\" \"$((SRANDOM))\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let values = fs::read_to_string(output_path)
+        .unwrap()
+        .lines()
+        .map(|line| line.parse::<u32>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    assert_ne!(values[0], values[1]);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_bashpid_expands_to_current_shell_pid() {
     let output_path = "target/rubash-bashpid-output.txt";
     let _ = fs::remove_file(output_path);

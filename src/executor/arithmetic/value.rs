@@ -3,8 +3,8 @@ use crate::executor::arithmetic::{bash_arith, checked_arithmetic_pow};
 use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, format_assoc_storage,
     format_indexed_array_storage, indexed_array_entries, is_noassign_bash_array, mark_env_name,
-    next_random_from_state, resolve_indexed_array_subscript, set_process_env, ARRAY_VARS,
-    ASSOC_VARS,
+    next_random_from_state, next_srandom_from_state, resolve_indexed_array_subscript,
+    set_process_env, ARRAY_VARS, ASSOC_VARS,
 };
 
 impl ConditionalArithParser<'_> {
@@ -38,6 +38,11 @@ impl ConditionalArithParser<'_> {
             return self
                 .random_state
                 .map(|state| i128::from(next_random_from_state(state)));
+        }
+        if name == "SRANDOM" {
+            return self
+                .random_state
+                .map(|state| i128::from(next_srandom_from_state(state)));
         }
         if name == "LINENO" {
             return self
@@ -155,6 +160,9 @@ impl ConditionalArithParser<'_> {
             if let Some(state) = self.random_state {
                 state.set(value.parse::<u32>().unwrap_or(0));
             }
+        }
+        if name == "SRANDOM" {
+            return;
         }
         self.env_vars.insert(name.to_string(), value.clone());
         set_process_env(name, value);

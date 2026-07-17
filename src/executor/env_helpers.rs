@@ -59,6 +59,7 @@ pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
             | "RANDOM"
             | "SECONDS"
             | "SHELLOPTS"
+            | "SRANDOM"
             | "UID"
             | "_"
     )

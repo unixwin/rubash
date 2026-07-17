@@ -26,6 +26,7 @@ impl Executor {
                 )
             }
             "RANDOM" => Some(self.next_random_value().to_string()),
+            "SRANDOM" => Some(self.next_srandom_value().to_string()),
             "BASHPID" => Some(self.bashpid_value().to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.get().to_string()),
             "BASH_ARGV0" => Some(self.script_name_value()),
@@ -67,6 +68,7 @@ impl Executor {
                 | "EPOCHREALTIME"
                 | "SECONDS"
                 | "RANDOM"
+                | "SRANDOM"
                 | "BASHPID"
                 | "BASH_SUBSHELL"
                 | "BASH_ARGV0"
@@ -174,6 +176,10 @@ impl Executor {
 
     pub(in crate::executor) fn next_random_value(&self) -> u32 {
         next_random_from_state(&self.random_state)
+    }
+
+    pub(in crate::executor) fn next_srandom_value(&self) -> u32 {
+        next_srandom_from_state(&self.random_state)
     }
 
     pub(in crate::executor) fn script_name_value(&self) -> String {

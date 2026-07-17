@@ -255,6 +255,12 @@ pub(in crate::executor) fn next_random_from_state(state: &Cell<u32>) -> u32 {
     (next / 65_536) % 32_768
 }
 
+pub(in crate::executor) fn next_srandom_from_state(state: &Cell<u32>) -> u32 {
+    let high = next_random_from_state(state);
+    let low = next_random_from_state(state);
+    (high << 17) ^ (low << 2) ^ (current_epoch_micros() as u32)
+}
+
 pub(in crate::executor) fn strip_shebang(source: &str) -> &str {
     source
         .strip_prefix("#!")
