@@ -95,6 +95,8 @@ impl Executor {
                 Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
                 Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
                 Some('j') => output.push_str(&self.prompt_job_count().to_string()),
+                Some('!') => output.push_str(&self.prompt_history_number().to_string()),
+                Some('#') => output.push_str(&self.prompt_command_number().to_string()),
                 Some('$') => output.push(prompt_dollar(&self.env_vars)),
                 Some('\\') => output.push('\\'),
                 Some('[') | Some(']') => {}
@@ -205,6 +207,14 @@ impl Executor {
     }
 
     pub(in crate::executor) fn prompt_job_count(&self) -> usize {
+        0
+    }
+
+    pub(in crate::executor) fn prompt_history_number(&self) -> usize {
+        0
+    }
+
+    pub(in crate::executor) fn prompt_command_number(&self) -> usize {
         0
     }
 
