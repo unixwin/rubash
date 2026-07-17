@@ -130,7 +130,7 @@ impl Executor {
             Some(_) => 0,
             None => 0,
         };
-        print_posix_time();
+        print_time(&self.env_vars, args.iter().any(|arg| arg == "-p"));
         self.exit_code = if inverted {
             invert_exit_status(status)
         } else {
@@ -156,7 +156,10 @@ impl Executor {
             }
         }
         if index >= cmd.words.len() {
-            print_posix_time();
+            print_time(
+                &self.env_vars,
+                cmd.words.iter().skip(1).any(|word| word == "-p"),
+            );
             self.exit_code = 0;
             return Ok(());
         }
@@ -167,7 +170,10 @@ impl Executor {
             timed.word_kinds = cmd.word_kinds[index..].to_vec();
         }
         self.execute_command(&timed)?;
-        print_posix_time();
+        print_time(
+            &self.env_vars,
+            cmd.words.iter().skip(1).any(|word| word == "-p"),
+        );
         if inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }

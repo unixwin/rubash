@@ -230,8 +230,8 @@ impl Executor {
 
         let final_command = commands.last().expect("pipeline has at least one stage");
         self.write_pipeline_output(final_command, &input)?;
-        if time_prefix.is_some() {
-            print_posix_time();
+        if let Some(prefix) = &time_prefix {
+            print_time(&self.env_vars, prefix.posix_format);
         }
         let mut status = self.pipeline_exit_status(&statuses);
         if time_prefix.as_ref().is_some_and(|prefix| prefix.inverted) {
@@ -270,7 +270,7 @@ impl Executor {
             else {
                 return Ok(None);
             };
-            print_posix_time();
+            print_time(&self.env_vars, time_command.posix_format);
             let status = if time_command.inverted {
                 invert_exit_status(status)
             } else {
@@ -427,6 +427,7 @@ fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {
 struct TimePipelinePrefix {
     command: CommandNode,
     inverted: bool,
+    posix_format: bool,
 }
 
 fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
@@ -436,9 +437,14 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
 
     let mut index = 1;
     let mut inverted = false;
+    let mut posix_format = false;
     while let Some(word) = command.words.get(index).map(String::as_str) {
         match word {
-            "-p" | "--" => index += 1,
+            "-p" => {
+                posix_format = true;
+                index += 1;
+            }
+            "--" => index += 1,
             "!" => {
                 inverted = !inverted;
                 index += 1;
@@ -461,5 +467,6 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
     Some(TimePipelinePrefix {
         command: stripped,
         inverted,
+        posix_format,
     })
 }

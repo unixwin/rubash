@@ -175,7 +175,14 @@ impl Executor {
         }
 
         let output = self.timed_command_substitution_inner(&words[index..])?;
-        print_posix_time();
+        print_time(
+            &self.env_vars,
+            words
+                .iter()
+                .skip(1)
+                .take_while(|word| word.as_str() != "!")
+                .any(|word| word == "-p"),
+        );
         let status = self.last_command_substitution_status.get().unwrap_or(0);
         self.last_command_substitution_status.set(Some(if inverted {
             invert_exit_status(status)

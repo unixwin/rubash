@@ -70,6 +70,38 @@ fn select_menu_uses_bash_stderr_format() {
 }
 
 #[test]
+fn time_uses_timeformat_variable() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("TIMEFORMAT='elapsed:%R cpu:%P percent:%%'; time true")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "elapsed:0.000 cpu:0.00 percent:%\n"
+    );
+}
+
+#[test]
+fn time_p_ignores_timeformat_variable() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("TIMEFORMAT='elapsed:%R'; time -p true")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "real 0.00\nuser 0.00\nsys 0.00\n"
+    );
+}
+
+#[test]
 fn c_command_redirects_stdout_to_stderr_fd() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

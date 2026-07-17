@@ -76,7 +76,7 @@ impl Executor {
         } else {
             self.execute_command(&time_command.command)?;
         }
-        print_posix_time();
+        print_time(&self.env_vars, time_command.posix_format);
         if time_command.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -124,7 +124,10 @@ impl Executor {
         } else {
             Ok(())
         };
-        print_posix_time();
+        print_time(
+            &self.env_vars,
+            time_prefix_parts(&cmd.words).is_some_and(|parts| parts.posix_format),
+        );
         result?;
         if inverted {
             self.exit_code = invert_exit_status(self.exit_code);
@@ -172,7 +175,7 @@ impl Executor {
             return Ok(None);
         };
 
-        print_posix_time();
+        print_time(&self.env_vars, prefix.posix_format);
         if prefix.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -894,6 +897,7 @@ fn command_with_words<const N: usize>(words: [&str; N]) -> CommandNode {
 struct TimePrefixParts {
     command_index: usize,
     inverted: bool,
+    posix_format: bool,
 }
 
 fn time_prefix_parts(words: &[String]) -> Option<TimePrefixParts> {
@@ -903,9 +907,14 @@ fn time_prefix_parts(words: &[String]) -> Option<TimePrefixParts> {
 
     let mut index = 1;
     let mut inverted = false;
+    let mut posix_format = false;
     while let Some(word) = words.get(index).map(String::as_str) {
         match word {
-            "-p" | "--" => index += 1,
+            "-p" => {
+                posix_format = true;
+                index += 1;
+            }
+            "--" => index += 1,
             "!" => {
                 inverted = !inverted;
                 index += 1;
@@ -916,6 +925,7 @@ fn time_prefix_parts(words: &[String]) -> Option<TimePrefixParts> {
     Some(TimePrefixParts {
         command_index: index,
         inverted,
+        posix_format,
     })
 }
 

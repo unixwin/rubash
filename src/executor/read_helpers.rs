@@ -6,6 +6,57 @@ pub(in crate::executor) fn print_posix_time() {
     eprintln!("sys 0.00");
 }
 
+pub(in crate::executor) fn print_time(env_vars: &HashMap<String, String>, posix_format: bool) {
+    if posix_format {
+        print_posix_time();
+        return;
+    }
+
+    let Some(format) = env_vars.get("TIMEFORMAT") else {
+        print_posix_time();
+        return;
+    };
+
+    if format.is_empty() {
+        return;
+    }
+
+    eprintln!("{}", expand_time_format(format));
+}
+
+fn expand_time_format(format: &str) -> String {
+    let mut output = String::new();
+    let mut chars = format.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '%' => match chars.next() {
+                Some('%') => output.push('%'),
+                Some('R' | 'U' | 'S') => output.push_str("0.000"),
+                Some('P') => output.push_str("0.00"),
+                Some(other) => {
+                    output.push('%');
+                    output.push(other);
+                }
+                None => output.push('%'),
+            },
+            '\\' => match chars.next() {
+                Some('n') => output.push('\n'),
+                Some('t') => output.push('\t'),
+                Some('\\') => output.push('\\'),
+                Some(other) => {
+                    output.push('\\');
+                    output.push(other);
+                }
+                None => output.push('\\'),
+            },
+            other => output.push(other),
+        }
+    }
+
+    output
+}
+
 pub(in crate::executor) fn read_char_limit_argument<S>(
     word: Option<&S>,
 ) -> Result<Option<usize>, String>
