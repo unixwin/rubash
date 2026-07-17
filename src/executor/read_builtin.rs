@@ -92,6 +92,22 @@ impl Executor {
                     }
                     index += 2;
                 }
+                word if word.starts_with("-ra") && word.len() > 3 => {
+                    raw = true;
+                    let name = &word[3..];
+                    if is_shell_name(name) {
+                        array_name = Some(name.to_string());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        stop_scalar_names = true;
+                    }
+                    index += 1;
+                }
                 word if word.starts_with("-a") && word.len() > 2 => {
                     let name = &word[2..];
                     if is_shell_name(name) {
