@@ -480,13 +480,13 @@ pub(super) fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
 }
 
 pub(super) fn assign_heredoc_body(current_cmd: &mut CommandNode, ast: &mut Ast, body: String) {
-    if fill_pending_heredoc_body(current_cmd, &body) {
-        return;
-    }
-    for command in ast.commands.iter_mut().rev() {
+    for command in ast.commands.iter_mut() {
         if fill_pending_heredoc_body(command, &body) {
             return;
         }
+    }
+    if fill_pending_heredoc_body(current_cmd, &body) {
+        return;
     }
     current_cmd.heredoc = Some(body);
 }

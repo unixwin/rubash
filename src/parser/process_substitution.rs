@@ -1,5 +1,6 @@
 use super::{command_boundary_keyword_allowed, is_case_end_keyword, parse, ProcessSubstitution};
 use crate::lexer::{Token, TokenKind};
+use std::collections::VecDeque;
 
 pub(super) fn process_substitution_redirect_target(
     tokens: &[Token],
@@ -243,7 +244,7 @@ fn collect_process_substitution_target_with_prefix(
 
 fn process_substitution_source(tokens: &[Token]) -> String {
     let mut source = String::new();
-    let mut pending_heredoc_delimiter: Option<String> = None;
+    let mut pending_heredoc_delimiters: VecDeque<String> = VecDeque::new();
     let mut skip_next_semicolon = false;
 
     for (index, token) in tokens.iter().enumerate() {
@@ -261,7 +262,7 @@ fn process_substitution_source(tokens: &[Token]) -> String {
             if !source.ends_with('\n') {
                 source.push('\n');
             }
-            if let Some(delimiter) = pending_heredoc_delimiter.take() {
+            if let Some(delimiter) = pending_heredoc_delimiters.pop_front() {
                 source.push_str(&delimiter);
                 source.push('\n');
             }
@@ -275,7 +276,9 @@ fn process_substitution_source(tokens: &[Token]) -> String {
         source.push_str(&token.raw);
 
         if token.kind == TokenKind::HereDoc {
-            pending_heredoc_delimiter = tokens.get(index + 1).map(|token| token.value.clone());
+            if let Some(delimiter) = tokens.get(index + 1) {
+                pending_heredoc_delimiters.push_back(delimiter.value.clone());
+            }
         }
     }
 

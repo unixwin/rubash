@@ -70,6 +70,23 @@ fn test_multiple_heredocs_use_last_stdin_redirect() {
 }
 
 #[test]
+fn test_sequential_commands_keep_heredoc_body_order() {
+    let output_path = "target/rubash-sequential-heredoc-order-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("cat <<A > {output_path}; cat <<B >> {output_path}\none\nA\ntwo\nB");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "one\ntwo\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_dash_heredoc_strips_leading_tabs() {
     let output_path = "target/rubash-dash-heredoc-output.txt";
     let _ = fs::remove_file(output_path);

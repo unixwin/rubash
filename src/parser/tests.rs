@@ -61,6 +61,16 @@ fn test_parse_multiple_heredoc_redirects_with_fd() {
 }
 
 #[test]
+fn test_parse_sequential_command_heredocs_keep_body_order() {
+    let tokens = tokenize("cat <<A; cat <<B\none\nA\ntwo\nB");
+    let ast = parse(&tokens);
+
+    assert_eq!(ast.commands.len(), 2);
+    assert_eq!(ast.commands[0].heredoc.as_deref(), Some("one\n"));
+    assert_eq!(ast.commands[1].heredoc.as_deref(), Some("two\n"));
+}
+
+#[test]
 fn test_parse_piped_heredoc_body_belongs_to_left_command() {
     let tokens = tokenize("cat <<EOF | sort -u\nbody\nEOF");
     let ast = parse(&tokens);

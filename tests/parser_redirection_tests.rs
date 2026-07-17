@@ -497,6 +497,41 @@ fn test_process_substitution_keeps_command_after_heredoc_body() {
 }
 
 #[test]
+fn test_process_substitution_keeps_multiple_heredoc_bodies() {
+    let input = "cat <(cat <<A <<B\none\nA\ntwo\nB\n)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].source, "cat << A << B\none\nA\ntwo\nB\n");
+    assert_eq!(process[0].commands.len(), 1);
+    assert_eq!(process[0].commands[0].heredoc_redirects.len(), 2);
+    assert_eq!(
+        process[0].commands[0].heredoc_redirects[0].body.as_deref(),
+        Some("one\n")
+    );
+    assert_eq!(
+        process[0].commands[0].heredoc_redirects[1].body.as_deref(),
+        Some("two\n")
+    );
+}
+
+#[test]
+fn test_process_substitution_keeps_sequential_heredoc_commands() {
+    let input = "cat <(cat <<A; cat <<B\none\nA\ntwo\nB\n)";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+    let process = ast.commands[0].process_substitutions.as_slice();
+
+    assert_eq!(process.len(), 1);
+    assert_eq!(process[0].source, "cat << A ; cat << B\none\nA\ntwo\nB\n");
+    assert_eq!(process[0].commands.len(), 2);
+    assert_eq!(process[0].commands[0].heredoc.as_deref(), Some("one\n"));
+    assert_eq!(process[0].commands[1].heredoc.as_deref(), Some("two\n"));
+}
+
+#[test]
 fn test_process_substitution_keeps_case_pattern_starting_with_esac() {
     let input = "cat <(case esac in\nesac) printf matched ;; esac)";
     let tokens = tokenize(input);

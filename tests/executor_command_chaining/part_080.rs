@@ -149,6 +149,42 @@ fn test_input_process_substitution_runs_command_after_heredoc_body() {
 }
 
 #[test]
+fn test_input_process_substitution_uses_last_of_multiple_heredocs() {
+    let output_path = target_test_path("rubash-process-substitution-multiple-heredoc-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!("cat <(cat <<A <<B\none\nA\ntwo\nB\n) > {shell_output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "two\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_input_process_substitution_runs_sequential_heredoc_commands() {
+    let output_path = target_test_path("rubash-process-substitution-sequential-heredoc-output.txt");
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_file(&output_path);
+    let input = format!("cat <(cat <<A; cat <<B\none\nA\ntwo\nB\n) > {shell_output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(&output_path).unwrap(), "one\ntwo\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_brace_group_combined_process_substitution_captures_whole_body() {
     let output_path = "target/rubash-brace-combined-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
