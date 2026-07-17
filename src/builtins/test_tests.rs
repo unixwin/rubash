@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::fs;
+use std::io::IsTerminal;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -164,6 +165,31 @@ fn unix_file_unary_operators_default_false_on_non_unix() {
     }
 
     let _ = fs::remove_file(path);
+}
+
+#[test]
+fn terminal_unary_operator_checks_standard_fds() {
+    let expected_stdin = if std::io::stdin().is_terminal() {
+        EXECUTION_SUCCESS
+    } else {
+        EXECUTION_FAILURE
+    };
+    let expected_stdout = if std::io::stdout().is_terminal() {
+        EXECUTION_SUCCESS
+    } else {
+        EXECUTION_FAILURE
+    };
+    let expected_stderr = if std::io::stderr().is_terminal() {
+        EXECUTION_SUCCESS
+    } else {
+        EXECUTION_FAILURE
+    };
+
+    assert_eq!(run(&["-t", "0"], false).0, expected_stdin);
+    assert_eq!(run(&["-t", "1"], false).0, expected_stdout);
+    assert_eq!(run(&["-t", "2"], false).0, expected_stderr);
+    assert_eq!(run(&["-t", "9999"], false).0, EXECUTION_FAILURE);
+    assert_eq!(run(&["-t", "nope"], false).0, EXECUTION_FAILURE);
 }
 
 #[test]

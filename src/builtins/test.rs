@@ -14,7 +14,7 @@ pub(crate) use variable::variable_is_set;
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -213,7 +213,7 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-u" => Ok(file_mode_has_bit(operand, env_vars, 0o4000)),
         "-g" => Ok(file_mode_has_bit(operand, env_vars, 0o2000)),
         "-k" => Ok(file_mode_has_bit(operand, env_vars, 0o1000)),
-        "-t" => Ok(false),
+        "-t" => Ok(fd_is_terminal(operand)),
         _ => Err(format!("{}: unary operator expected", op)),
     }
 }
@@ -301,6 +301,18 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
         return true;
     };
     modified >= accessed
+}
+
+fn fd_is_terminal(operand: &str) -> bool {
+    let Ok(fd) = operand.parse::<i32>() else {
+        return false;
+    };
+    match fd {
+        0 => io::stdin().is_terminal(),
+        1 => io::stdout().is_terminal(),
+        2 => io::stderr().is_terminal(),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Copy)]

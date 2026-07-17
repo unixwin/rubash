@@ -1,5 +1,6 @@
 use super::super::*;
 use std::fs;
+use std::io::IsTerminal;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -565,6 +566,47 @@ fn test_conditional_unix_file_unary_checks_paths() {
     let _ = fs::remove_file(socket_path);
     let _ = fs::remove_file(mode_path);
     let _ = fs::remove_dir_all(sticky_dir);
+}
+
+#[test]
+fn test_conditional_terminal_unary_checks_fds() {
+    let output_path = "target/rubash-conditional-terminal-unary-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "[[ -t 0 ]]; echo $? > {output_path}; \
+         test -t 1; echo $? >> {output_path}; \
+         [[ -t 2 ]]; echo $? >> {output_path}; \
+         [[ -t 9999 ]]; echo $? >> {output_path}; \
+         [[ -t nope ]]; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    let stdin_status = if std::io::stdin().is_terminal() {
+        "0"
+    } else {
+        "1"
+    };
+    let stdout_status = if std::io::stdout().is_terminal() {
+        "0"
+    } else {
+        "1"
+    };
+    let stderr_status = if std::io::stderr().is_terminal() {
+        "0"
+    } else {
+        "1"
+    };
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        format!("{stdin_status}\n{stdout_status}\n{stderr_status}\n1\n1\n")
+    );
+    let _ = fs::remove_file(output_path);
 }
 
 #[test]
