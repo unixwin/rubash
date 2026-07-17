@@ -133,10 +133,13 @@ impl Executor {
         }
 
         if cmd.words.len() == 2 {
-            if let Ok(pid) = cmd.words[1].parse::<u32>() {
-                if let Some(mut child) = self.background_children.remove(&pid) {
-                    let status = child.wait()?.code().unwrap_or(1);
-                    self.background_jobs.remove(&pid);
+            if let Some(pid) = self.resolve_background_job(&cmd.words[1]) {
+                if let Some(status) = self.wait_for_background_pid(pid)? {
+                    self.write_buffered_builtin_output(cmd, &[], &[])?;
+                    return Ok(status);
+                }
+            } else if let Ok(pid) = cmd.words[1].parse::<u32>() {
+                if let Some(status) = self.wait_for_background_pid(pid)? {
                     self.write_buffered_builtin_output(cmd, &[], &[])?;
                     return Ok(status);
                 }
@@ -151,6 +154,15 @@ impl Executor {
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn wait_for_background_pid(&mut self, pid: u32) -> Result<Option<i32>, ExecuteError> {
+        let Some(mut child) = self.background_children.remove(&pid) else {
+            return Ok(None);
+        };
+        let status = child.wait()?.code().unwrap_or(1);
+        self.background_jobs.remove(&pid);
+        Ok(Some(status))
     }
 
     fn background_jobs_output(&self, options: crate::builtins::jobs::JobsListOptions) -> String {

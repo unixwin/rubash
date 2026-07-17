@@ -23,6 +23,44 @@ fn test_wait_for_last_background_pid_returns_child_status() {
 }
 
 #[test]
+fn test_wait_for_background_jobspec_returns_child_status_and_removes_job() {
+    let output_path = "target/rubash-wait-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "false & wait %1; printf 'wait:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "wait:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_wait_for_current_jobspec_uses_last_background_job() {
+    let output_path = "target/rubash-wait-current-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & wait %+; printf 'wait:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "wait:0\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_wait_for_unknown_pid_returns_notfound() {
     let error_path = "target/rubash-wait-pid-error.txt";
     let status_path = "target/rubash-wait-pid-status.txt";
