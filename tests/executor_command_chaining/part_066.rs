@@ -425,6 +425,32 @@ fn test_indirect_array_star_pattern_and_case_use_ifs_first_char() {
 }
 
 #[test]
+fn test_indirect_array_reference_expands_target_words() {
+    let output_path = "target/rubash-param-indirect-array-reference-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(alpha beta); at='arr[@]'; star='arr[*]'; IFS=:; \
+         printf 'qat<%s>\\n' \"${{!at}}\" > {output_path}; \
+         printf 'qstar<%s>\\n' \"${{!star}}\" >> {output_path}; \
+         printf 'uat<%s>\\n' ${{!at}} >> {output_path}; \
+         printf 'ustar<%s>\\n' ${{!star}} >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "qat<alpha>\nqat<beta>\nqstar<alpha:beta>\nuat<alpha>\nuat<beta>\nustar<alpha>\nustar<beta>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_replacement_expands_target_values() {
     let output_path = "target/rubash-param-indirect-replacement-output.txt";
     let _ = fs::remove_file(output_path);

@@ -130,6 +130,9 @@ impl Executor {
                     });
                 }
             }
+            if let Some(values) = self.indirect_array_reference_word_values(word, true) {
+                return Some(values);
+            }
             if let Some(prefix) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("@}"))
@@ -183,6 +186,9 @@ impl Executor {
                 return Some(vec![keys.join(&self.ifs_first_char_separator())]);
             }
         }
+        if let Some(values) = self.indirect_array_reference_word_values(word, quoted_array_word) {
+            return Some(values);
+        }
         if quoted_array_word && word == "${GROUPS[*]}" {
             return Some(vec![self
                 .groups_words()
@@ -201,6 +207,31 @@ impl Executor {
         }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value))
+    }
+
+    fn indirect_array_reference_word_values(
+        &self,
+        word: &str,
+        quoted_array_word: bool,
+    ) -> Option<Vec<String>> {
+        let indirect_name = word
+            .strip_prefix("${!")
+            .and_then(|word| word.strip_suffix('}'))?;
+        if !is_shell_name(indirect_name) {
+            return None;
+        }
+        let target_expr = self.env_vars.get(indirect_name)?;
+        if target_expr.ends_with("[@]") {
+            return Some(self.indirect_target_values(target_expr));
+        }
+        if target_expr.ends_with("[*]") {
+            let values = self.indirect_target_values(target_expr);
+            if quoted_array_word {
+                return Some(vec![values.join(&self.ifs_first_char_separator())]);
+            }
+            return Some(values);
+        }
+        None
     }
 
     fn ifs_first_char_separator(&self) -> String {
