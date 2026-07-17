@@ -809,6 +809,42 @@ fn test_read_combined_srd_compact_uses_delimiter_and_raw_input() {
 }
 
 #[test]
+fn test_read_combined_rsed_uses_delimiter_and_raw_input() {
+    let output_path = "target/rubash-read-rsed-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("read -rsed / value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\ b>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_sred_compact_uses_delimiter_and_raw_input() {
+    let output_path = "target/rubash-read-sred-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("read -sred/ value <<< 'a\\ b/c'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\ b>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_a_splits_here_string_into_array() {
     let output_path = "target/rubash-read-a-output.txt";
     let _ = fs::remove_file(output_path);

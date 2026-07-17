@@ -975,6 +975,27 @@ impl Executor {
                     delimiter = word[4..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-ersd" | "-esrd" | "-resd" | "-rsed" | "-serd" | "-sred" => {
+                    raw = true;
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if (word.starts_with("-ersd")
+                    || word.starts_with("-esrd")
+                    || word.starts_with("-resd")
+                    || word.starts_with("-rsed")
+                    || word.starts_with("-serd")
+                    || word.starts_with("-sred"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    delimiter = word[5..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 "-rsn" | "-srn" => {
                     raw = true;
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
