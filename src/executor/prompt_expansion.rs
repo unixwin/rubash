@@ -80,6 +80,10 @@ impl Executor {
                 Some('e') | Some('E') => output.push('\x1b'),
                 Some('n') => output.push('\n'),
                 Some('r') => output.push('\r'),
+                Some('t') => output.push_str(&self.prompt_time("%H:%M:%S")),
+                Some('T') => output.push_str(&self.prompt_time("%I:%M:%S")),
+                Some('@') => output.push_str(&self.prompt_time("%I:%M %p")),
+                Some('A') => output.push_str(&self.prompt_time("%H:%M")),
                 Some('u') => output.push_str(&prompt_username(&self.env_vars)),
                 Some('h') => output.push_str(&prompt_hostname(&self.env_vars, false)),
                 Some('H') => output.push_str(&prompt_hostname(&self.env_vars, true)),
@@ -200,6 +204,10 @@ impl Executor {
 
     pub(in crate::executor) fn prompt_job_count(&self) -> usize {
         0
+    }
+
+    pub(in crate::executor) fn prompt_time(&self, format: &str) -> String {
+        crate::builtins::printf::time::format_current_time(format, &self.env_vars)
     }
 
     pub(in crate::executor) fn expand_assignment_tilde(&self, value: &str) -> String {

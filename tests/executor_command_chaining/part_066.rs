@@ -282,6 +282,28 @@ fn test_parameter_prompt_transform_expands_job_count_escape() {
 }
 
 #[test]
+fn test_parameter_prompt_transform_expands_time_escapes() {
+    let output_path = "target/rubash-param-prompt-transform-time-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("p='t=\\t T=\\T at=\\@ A=\\A'; echo \"${{p@P}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let pattern = regex::Regex::new(
+        r"^t=\d{2}:\d{2}:\d{2} T=\d{2}:\d{2}:\d{2} at=\d{2}:\d{2} (AM|PM) A=\d{2}:\d{2}\n$",
+    )
+    .unwrap();
+    assert!(pattern.is_match(&output), "{output:?}");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
     let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
     let _ = fs::remove_file(output_path);

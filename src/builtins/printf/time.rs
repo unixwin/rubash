@@ -41,6 +41,12 @@ pub(super) fn format_time_value(
     )
 }
 
+pub(crate) fn format_current_time(format: &str, env_vars: &HashMap<String, String>) -> String {
+    let timezone = TimeZoneRule::from_env(env_vars.get("TZ").map(String::as_str));
+    let local = timezone.local_time(current_epoch_seconds());
+    strftime_subset(format, &local)
+}
+
 fn current_epoch_seconds() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

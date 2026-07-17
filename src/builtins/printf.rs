@@ -11,7 +11,7 @@ mod float;
 mod identifier;
 mod number;
 mod spec;
-mod time;
+pub(crate) mod time;
 mod value;
 
 use escape::expand_format_escape;
