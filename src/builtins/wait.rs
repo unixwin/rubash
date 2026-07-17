@@ -29,13 +29,13 @@ where
             break;
         }
 
-        let mut chars = arg[1..].chars().peekable();
-        while let Some(option) = chars.next() {
+        for (offset, option) in arg[1..].char_indices() {
             match option {
                 'f' => {}
                 'n' => wait_any = true,
                 'p' => {
-                    if chars.peek().is_some() {
+                    let value_start = 1 + offset + option.len_utf8();
+                    if value_start < arg.len() {
                         break;
                     }
                     index += 1;

@@ -629,21 +629,25 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
             break;
         }
 
-        let mut chars = word[1..].chars().peekable();
-        while let Some(option) = chars.next() {
+        for (offset, option) in word[1..].char_indices() {
             match option {
                 'n' => wait_any = true,
                 'f' => {}
                 'p' => {
-                    if chars.peek().is_some() {
-                        break;
-                    }
-                    index += 1;
-                    let name = words.get(index)?;
+                    let value_start = 1 + offset + option.len_utf8();
+                    let name = if value_start < word.len() {
+                        &word[value_start..]
+                    } else {
+                        index += 1;
+                        words.get(index)?
+                    };
                     if !is_shell_name(name) {
                         return None;
                     }
-                    assign_var = Some(name.clone());
+                    assign_var = Some(name.to_string());
+                    if value_start < word.len() {
+                        break;
+                    }
                     break;
                 }
                 _ => return None,

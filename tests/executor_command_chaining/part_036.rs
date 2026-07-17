@@ -183,6 +183,29 @@ fn test_wait_np_assigns_requested_jobspec_pid() {
 }
 
 #[test]
+fn test_wait_np_compact_var_assigns_requested_jobspec_pid() {
+    let output_path = "target/rubash-wait-np-compact-var-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & launched=$!; wait -npdone_pid %1; printf 'wait:%s pid:%s launched:%s\\n' \"$?\" \"$done_pid\" \"$launched\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let rest = output.trim_end().strip_prefix("wait:0 pid:").unwrap();
+    let (pid, launched) = rest.split_once(" launched:").unwrap();
+    assert!(pid.parse::<u32>().is_ok());
+    assert_eq!(pid, launched);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_kill_background_jobspec_removes_job() {
     let output_path = "target/rubash-kill-jobspec-output.txt";
     let _ = fs::remove_file(output_path);
