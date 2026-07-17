@@ -262,6 +262,46 @@ impl Executor {
                     exact_char_limit = true;
                     index += 1;
                 }
+                "-ru" => {
+                    raw = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -ru: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    read_fd = match parse_read_fd(word) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 2;
+                }
+                word if word.starts_with("-ru") && word.len() > 3 => {
+                    raw = true;
+                    let value = &word[3..];
+                    read_fd = match parse_read_fd(value) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 1;
+                }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     char_limit = match read_char_limit_argument(Some(&word[2..])) {
                         Ok(limit) => limit,
