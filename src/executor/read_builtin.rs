@@ -613,6 +613,49 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-ret" | "-ert" => {
+                    raw = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let option = &cmd.words[index][1..];
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -{option}: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    match parse_read_timeout(word) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 2;
+                }
+                word if (word.starts_with("-ret") || word.starts_with("-ert"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    let value = &word[4..];
+                    match parse_read_timeout(value) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 1;
+                }
                 "-eu" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         let _ = writeln!(
