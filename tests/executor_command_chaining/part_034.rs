@@ -326,6 +326,37 @@ fn test_caller_zero_reports_parent_function_frame() {
 }
 
 #[test]
+fn test_caller_double_dash_ends_options() {
+    let output_path = "target/rubash-caller-double-dash-output.txt";
+    let status_path = "target/rubash-caller-double-dash-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "f() {{ caller -- > {output_path}; echo current:$? > {status_path}; \
+         caller -- 0 >> {output_path}; echo parent:$? >> {status_path}; }}; \
+         g() {{ f; }}; g"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "1 environment\n1 g environment\n"
+    );
+    assert_eq!(
+        fs::read_to_string(status_path).unwrap(),
+        "current:0\nparent:0\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_caller_invalid_argument_returns_usage() {
     let error_path = "target/rubash-caller-invalid-error.txt";
     let status_path = "target/rubash-caller-invalid-status.txt";

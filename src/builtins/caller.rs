@@ -22,6 +22,12 @@ where
     W: Write,
     E: Write,
 {
+    let args = if args.first().is_some_and(|arg| arg == "--") {
+        &args[1..]
+    } else {
+        args
+    };
+
     let level = match args.first() {
         Some(arg) if arg.starts_with('-') => {
             writeln!(stderr, "{diagnostic_prefix}caller: {arg}: invalid option")?;
