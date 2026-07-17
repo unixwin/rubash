@@ -326,3 +326,48 @@ fn test_compound_indexed_array_assignment_preserves_quoted_words() {
     );
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_compound_array_assignment_splits_unquoted_command_substitution() {
+    let output_path = "target/rubash-array-command-subst-split-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(a $(printf 'b c\\n') d); \
+         printf '<%s>\\n' \"${{arr[@]}}\" > {output_path}; \
+         arr=($(printf 'one two\\n')); \
+         printf 'len:%s:<%s>:<%s>\\n' \"${{#arr[@]}}\" \"${{arr[0]}}\" \"${{arr[1]}}\" >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<a>\n<b>\n<c>\n<d>\nlen:2:<one>:<two>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_compound_array_assignment_preserves_quoted_command_substitution() {
+    let output_path = "target/rubash-array-command-subst-quoted-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=(\"$(printf 'b c\\n')\"); \
+         printf 'len:%s:<%s>\\n' \"${{#arr[@]}}\" \"${{arr[0]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "len:1:<b c>\n");
+    let _ = fs::remove_file(output_path);
+}

@@ -14,11 +14,12 @@ pub(super) fn compound_assignment_from_word(
     let append = name.ends_with('+');
     let operator = if append { "+=" } else { "=" }.to_string();
     let name = name.strip_suffix('+').unwrap_or(name).to_string();
+    let ast_value = value.replace('\x1d', "");
     Some(CompoundAssignment {
         name: name.clone(),
         name_metadata: Box::new(build_word_metadata(0, &name, &name)),
-        elements: compound_assignment_elements(&value),
-        value,
+        elements: compound_assignment_elements(&ast_value),
+        value: ast_value,
         operator: operator.clone(),
         operator_metadata: Box::new(build_word_metadata(0, &operator, &operator)),
         append,
@@ -613,6 +614,10 @@ fn quote_compound_assignment_token_word(
     next_index: usize,
     word: &str,
 ) -> String {
+    if compound_assignment_word_has_unquoted_command_substitution(tokens, index, next_index) {
+        return quote_compound_assignment_word_forced(&format!("\x1d{word}"));
+    }
+
     if next_index == index + 1
         && tokens
             .get(index)
@@ -626,6 +631,23 @@ fn quote_compound_assignment_token_word(
 
 fn raw_contains_shell_quotes(raw: &str) -> bool {
     raw.contains('\'') || raw.contains('"')
+}
+
+fn compound_assignment_word_has_unquoted_command_substitution(
+    tokens: &[Token],
+    index: usize,
+    next_index: usize,
+) -> bool {
+    tokens[index..next_index].iter().any(|token| {
+        !raw_is_outer_quoted(&token.raw)
+            && (token.kind == crate::lexer::TokenKind::CommandSubst
+                || token.raw.contains("$(")
+                || token.raw.contains('`'))
+    })
+}
+
+fn raw_is_outer_quoted(raw: &str) -> bool {
+    (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
 }
 
 fn quote_compound_assignment_subscript(value: &str) -> String {
