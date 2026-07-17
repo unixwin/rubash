@@ -30,6 +30,29 @@ fn stdin_script_uses_s_positional_arguments() {
 }
 
 #[test]
+fn stdin_script_accepts_reserved_word_function_name() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"for() { echo function-for; }\necho after\n")
+        .unwrap();
+
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "after\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
 fn stdin_script_child_shell_inherits_unread_input() {
     let child_script = Path::new("target/rubash-cli-input-line-child.sh");
     let _ = fs::remove_file(child_script);

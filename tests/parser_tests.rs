@@ -1815,6 +1815,21 @@ mod function_tests {
     }
 
     #[test]
+    fn test_function_name_can_be_reserved_word_with_parentheses() {
+        let input = "for() { echo function-for; }; echo after";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+
+        assert_eq!(ast.commands.len(), 2);
+        let function = ast.commands[0].function_command.as_ref().unwrap();
+        assert_eq!(function.name, "for");
+        assert!(function.has_parentheses);
+        assert_eq!(function.body_kind, FunctionBodyKind::BraceGroup);
+        assert_eq!(function.body[0].words, ["echo", "function-for"]);
+        assert_eq!(ast.commands[1].words, ["echo", "after"]);
+    }
+
+    #[test]
     fn test_function_body_can_be_for_command() {
         let input = "foo() for x in a b; do echo $x; done";
         let tokens = tokenize(input);
