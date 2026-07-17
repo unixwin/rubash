@@ -162,8 +162,15 @@ pub(super) fn append_array_value(
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
-                entries.insert(next_index, value.to_string());
-                next_index += 1;
+                if let Some(matches) = pathname_expand_array_token(&value) {
+                    for value in matches {
+                        entries.insert(next_index, value);
+                        next_index += 1;
+                    }
+                } else {
+                    entries.insert(next_index, value.to_string());
+                    next_index += 1;
+                }
             }
             continue;
         }

@@ -353,6 +353,38 @@ fn test_compound_array_assignment_splits_unquoted_command_substitution() {
 }
 
 #[test]
+fn test_compound_array_assignment_globs_unquoted_command_substitution_fields() {
+    let dir_path = target_test_path("rubash-array-command-subst-glob");
+    let output_path = target_test_path("rubash-array-command-subst-glob-output.txt");
+    let shell_dir_path = shell_test_path(&dir_path);
+    let shell_output_path = shell_test_path(&output_path);
+    let _ = fs::remove_dir_all(&dir_path);
+    let _ = fs::remove_file(&output_path);
+    fs::create_dir_all(&dir_path).unwrap();
+    let old_cwd = std::env::current_dir().unwrap();
+    let input = format!(
+        "cd {shell_dir_path}; touch a.rs b.rs c.txt; \
+         arr=($(printf '%s\\n' '*.rs')); \
+         printf '%s:<%s>:<%s>\\n' \"${{#arr[@]}}\" \"${{arr[0]}}\" \"${{arr[1]}}\" > {shell_output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    std::env::set_current_dir(old_cwd).unwrap();
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(&output_path).unwrap(),
+        "2:<a.rs>:<b.rs>\n"
+    );
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_dir_all(dir_path);
+}
+
+#[test]
 fn test_compound_array_assignment_preserves_quoted_command_substitution() {
     let output_path = "target/rubash-array-command-subst-quoted-output.txt";
     let _ = fs::remove_file(output_path);
