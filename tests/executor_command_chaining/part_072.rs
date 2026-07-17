@@ -443,6 +443,34 @@ fn test_conditional_file_unary_checks_paths() {
 }
 
 #[test]
+fn test_conditional_modified_since_read_unary_checks_paths() {
+    let output_path = "target/rubash-conditional-n-unary-output.txt";
+    let file_path = "target/rubash-conditional-n-unary.txt";
+    let missing_path = "target/rubash-conditional-n-unary-missing.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(file_path);
+    let _ = fs::remove_file(missing_path);
+    fs::write(file_path, "data").unwrap();
+    let input = format!(
+        "[[ -N {file_path} ]]; echo $? > {output_path}; \
+         [[ -N {missing_path} ]]; echo $? >> {output_path}; \
+         test -N {file_path}; echo $? >> {output_path}; \
+         test -N {missing_path}; echo $? >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "0\n1\n0\n1\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(file_path);
+}
+
+#[test]
 fn test_conditional_file_binary_checks_paths() {
     let output_path = "target/rubash-conditional-file-binary-output.txt";
     let older_path = "target/rubash-conditional-file-binary-older.txt";

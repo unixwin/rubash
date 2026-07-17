@@ -195,7 +195,8 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)),
         "-r" | "-w" | "-x" => Ok(test_path(operand, env_vars).exists()),
-        "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" | "-O" | "-G" | "-N" => Ok(false),
+        "-N" => Ok(modified_since_last_read(operand, env_vars)),
+        "-b" | "-c" | "-g" | "-k" | "-p" | "-S" | "-t" | "-u" | "-O" | "-G" => Ok(false),
         _ => Err(format!("{}: unary operator expected", op)),
     }
 }
@@ -270,6 +271,19 @@ fn modified(path: &str, env_vars: &HashMap<String, String>) -> Option<std::time:
     fs::metadata(test_path(path, env_vars))
         .and_then(|metadata| metadata.modified())
         .ok()
+}
+
+fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> bool {
+    let Ok(metadata) = fs::metadata(test_path(path, env_vars)) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return true;
+    };
+    let Ok(accessed) = metadata.accessed() else {
+        return true;
+    };
+    modified >= accessed
 }
 
 fn same_file(left: &str, right: &str, env_vars: &HashMap<String, String>) -> bool {

@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::fs;
 
 fn run(args: &[&str], bracket: bool) -> (i32, String) {
     let env_vars = HashMap::new();
@@ -63,6 +64,21 @@ fn supports_shell_option_unary_operator() {
 #[test]
 fn leading_file_operator_is_unary_not_logical_and() {
     assert_eq!(run(&["-a", "Cargo.toml"], false).0, EXECUTION_SUCCESS);
+}
+
+#[test]
+fn modified_since_read_unary_operator_checks_existing_file() {
+    let path = "target/rubash-test-n-unary.txt";
+    let missing = "target/rubash-test-n-unary-missing.txt";
+    let _ = fs::create_dir_all("target");
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(missing);
+    fs::write(path, "data").unwrap();
+
+    assert_eq!(run(&["-N", path], false).0, EXECUTION_SUCCESS);
+    assert_eq!(run(&["-N", missing], false).0, EXECUTION_FAILURE);
+
+    let _ = fs::remove_file(path);
 }
 
 #[test]
