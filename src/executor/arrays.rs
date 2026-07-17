@@ -23,7 +23,7 @@ use super::{
     assoc_entries, assoc_value_at, case_pattern_matches, eval_arith_value,
     eval_conditional_arith_value, is_marked_var, is_shell_name, pattern_contains_glob,
     quote_assoc_key, split_storage_words, strip_matching_quotes, unquote_storage_value, Executor,
-    ASSOC_VARS,
+    ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
@@ -159,6 +159,19 @@ pub(super) fn append_array_value(
 
         let command_subst_token = token.starts_with("\"$(") && token.ends_with('"');
         let quoted_token = token.starts_with('"') && token.ends_with('"') && !command_subst_token;
+        if let Some(token) = token.strip_prefix(ARRAY_FIELD_SPLIT_MARKER) {
+            let token = unquote_storage_value(token);
+            if let Some(matches) = pathname_expand_array_token(&token) {
+                for value in matches {
+                    entries.insert(next_index, value);
+                    next_index += 1;
+                }
+            } else {
+                entries.insert(next_index, token);
+                next_index += 1;
+            }
+            continue;
+        }
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {

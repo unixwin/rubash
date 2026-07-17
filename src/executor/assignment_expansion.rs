@@ -155,7 +155,12 @@ impl Executor {
         let values =
             field_split_values_with_ifs(&value, self.env_vars.get("IFS").map(String::as_str))
                 .into_iter()
-                .map(|value| quote_compound_field_value(&value))
+                .map(|value| {
+                    format!(
+                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                        quote_compound_field_value(&value)
+                    )
+                })
                 .collect::<Vec<_>>();
         Some(format!("({})", values.join(" ")))
     }
