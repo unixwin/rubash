@@ -466,6 +466,40 @@ fn test_read_combined_e_upper_n_compact_limit() {
 }
 
 #[test]
+fn test_read_combined_re_upper_n_consumes_limit_and_reads_raw() {
+    let output_path = "target/rubash-read-re-upper-n-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -reN 4 value <<< 'a\\bcd'; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\bc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_er_upper_n_compact_limit_reads_raw() {
+    let output_path = "target/rubash-read-er-upper-n-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -erN4 value <<< 'a\\bcd'; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\bc\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_n_zero_succeeds_with_empty_value() {
     let output_path = "target/rubash-read-n-zero-output.txt";
     let _ = fs::remove_file(output_path);

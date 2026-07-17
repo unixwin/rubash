@@ -497,6 +497,40 @@ impl Executor {
                     exact_char_limit = true;
                     index += 1;
                 }
+                "-reN" | "-erN" => {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
+                        Ok(limit) => limit,
+                        Err(word) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = true;
+                    index += 2;
+                }
+                word if (word.starts_with("-reN") || word.starts_with("-erN"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    char_limit = match read_char_limit_argument(Some(&word[4..])) {
+                        Ok(limit) => limit,
+                        Err(value) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid number",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    exact_char_limit = true;
+                    index += 1;
+                }
                 "-sp" => {
                     prompt = cmd.words.get(index + 1).cloned();
                     index += 2;
