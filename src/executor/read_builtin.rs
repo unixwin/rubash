@@ -312,6 +312,14 @@ impl Executor {
                     prompt = Some(word[3..].to_string());
                     index += 1;
                 }
+                "-ri" => {
+                    raw = true;
+                    index += 2;
+                }
+                word if word.starts_with("-ri") && word.len() > 3 => {
+                    raw = true;
+                    index += 1;
+                }
                 "-rt" => {
                     raw = true;
                     let Some(word) = cmd.words.get(index + 1) else {
