@@ -295,6 +295,9 @@ impl Executor {
                     prompt = cmd.words.get(index + 1).cloned();
                     index += 2;
                 }
+                "-e" => {
+                    index += 1;
+                }
                 "-r" => {
                     raw = true;
                     index += 1;
