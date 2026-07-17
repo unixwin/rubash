@@ -102,6 +102,22 @@ fn time_p_ignores_timeformat_variable() {
 }
 
 #[test]
+fn timeformat_supports_precision_and_long_modifiers() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("TIMEFORMAT='r:%3R u:%2U s:%0S long:%2lR p:%P'; time true")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "r:0.000 u:0.00 s:0 long:0m0.00s p:0.00\n"
+    );
+}
+
+#[test]
 fn c_command_redirects_stdout_to_stderr_fd() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

@@ -30,16 +30,7 @@ fn expand_time_format(format: &str) -> String {
 
     while let Some(ch) = chars.next() {
         match ch {
-            '%' => match chars.next() {
-                Some('%') => output.push('%'),
-                Some('R' | 'U' | 'S') => output.push_str("0.000"),
-                Some('P') => output.push_str("0.00"),
-                Some(other) => {
-                    output.push('%');
-                    output.push(other);
-                }
-                None => output.push('%'),
-            },
+            '%' => expand_time_format_percent(&mut output, &mut chars),
             '\\' => match chars.next() {
                 Some('n') => output.push('\n'),
                 Some('t') => output.push('\t'),
@@ -55,6 +46,58 @@ fn expand_time_format(format: &str) -> String {
     }
 
     output
+}
+
+fn expand_time_format_percent<I>(output: &mut String, chars: &mut std::iter::Peekable<I>)
+where
+    I: Iterator<Item = char>,
+{
+    let precision = if chars.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        chars
+            .next()
+            .and_then(|ch| ch.to_digit(10))
+            .map(|value| value as usize)
+    } else {
+        None
+    };
+    let long = chars.peek().is_some_and(|ch| *ch == 'l');
+    if long {
+        chars.next();
+    }
+
+    match chars.next() {
+        Some('%') if precision.is_none() && !long => output.push('%'),
+        Some('R' | 'U' | 'S') => output.push_str(&format_time_seconds(precision, long)),
+        Some('P') => output.push_str("0.00"),
+        Some(other) => {
+            output.push('%');
+            if let Some(precision) = precision {
+                output.push(char::from_digit(precision as u32, 10).unwrap_or('0'));
+            }
+            if long {
+                output.push('l');
+            }
+            output.push(other);
+        }
+        None => output.push('%'),
+    }
+}
+
+fn format_time_seconds(precision: Option<usize>, long: bool) -> String {
+    let precision = precision.unwrap_or(3);
+    if precision == 0 {
+        if long {
+            return "0m0s".to_string();
+        }
+        return "0".to_string();
+    }
+
+    let fraction = "0".repeat(precision);
+    if long {
+        format!("0m0.{fraction}s")
+    } else {
+        format!("0.{fraction}")
+    }
 }
 
 pub(in crate::executor) fn read_char_limit_argument<S>(
