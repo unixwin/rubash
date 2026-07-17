@@ -482,7 +482,10 @@ impl Executor {
                     child.arg(word);
                 }
             } else {
-                child.arg("-c").arg(coproc_cmd.words.join(" "));
+                child.arg("-c").arg(command_words_source_text(
+                    &coproc_cmd.words,
+                    &coproc_cmd.word_metadata,
+                ));
             }
             child
         } else {

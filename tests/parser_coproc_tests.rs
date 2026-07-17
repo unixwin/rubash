@@ -133,6 +133,19 @@ fn test_coproc_simple_command_records_word_metadata() {
 }
 
 #[test]
+fn test_coproc_simple_command_keeps_raw_quoted_arguments() {
+    let input = "coproc printf '<%s>\\n' 'a b'";
+    let tokens = tokenize(input);
+    let ast = parse(&tokens);
+
+    let coproc = ast.commands[0].coproc_command.as_ref().unwrap();
+
+    assert_eq!(coproc.words, ["printf", "<%s>\\n", "a b"]);
+    assert_eq!(coproc.word_metadata[1].raw, "'<%s>\\n'");
+    assert_eq!(coproc.word_metadata[2].raw, "'a b'");
+}
+
+#[test]
 fn test_coproc_simple_command_keeps_reserved_word_arguments() {
     let input = "coproc echo alpha if done esac";
     let tokens = tokenize(input);

@@ -316,6 +316,24 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     parts.join(" ")
 }
 
+pub(in crate::executor) fn command_words_source_text(
+    words: &[String],
+    metadata: &[WordMetadata],
+) -> String {
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            metadata
+                .get(index)
+                .filter(|metadata| metadata.value == *word && !metadata.raw.is_empty())
+                .map(|metadata| metadata.raw.clone())
+                .unwrap_or_else(|| shell_single_quote_assignment_value(word))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) -> String {
     commands
         .iter()
@@ -554,7 +572,10 @@ fn coproc_command_source_text(coproc_command: &crate::parser::CoprocCommand) -> 
         text.push_str(&bash_command_sequence_text(body));
         text.push_str("; }");
     } else {
-        text.push_str(&coproc_command.words.join(" "));
+        text.push_str(&command_words_source_text(
+            &coproc_command.words,
+            &coproc_command.word_metadata,
+        ));
     }
     text
 }

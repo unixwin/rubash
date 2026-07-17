@@ -2167,6 +2167,41 @@ fn test_unnamed_coproc_executes_simple_command() {
 }
 
 #[test]
+fn test_unnamed_coproc_preserves_quoted_simple_arguments() {
+    let output_path = "target/rubash-coproc-quoted-simple-output.txt";
+    let status_path = "target/rubash-coproc-quoted-simple-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!(
+        "coproc printf '<%s>\\n' 'a b' > {output_path}; \
+         echo pid:${{COPROC_PID:+set}} > {status_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
+
+    let mut output = String::new();
+    for _ in 0..20 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "<a b>\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "<a b>\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_alias_introduced_coproc_preserves_simple_redirects() {
     let output_path = "target/rubash-alias-coproc-simple-redirect-output.txt";
     let status_path = "target/rubash-alias-coproc-simple-redirect-status.txt";
