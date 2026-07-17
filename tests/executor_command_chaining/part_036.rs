@@ -221,6 +221,31 @@ fn test_kill_current_jobspec_uses_last_background_job() {
 }
 
 #[test]
+fn test_kill_zero_checks_jobspec_without_removing_job() {
+    let output_path = "target/rubash-kill-zero-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "while true; do true; done & pid=$!; kill -0 %1; printf 'check:%s pid:%s\\n' \"$?\" \"$pid\" > {output_path}; jobs -p %1 >> {output_path}; kill %1"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let mut lines = output.lines();
+    let first = lines.next().unwrap();
+    let jobs_pid = lines.next().unwrap();
+    assert!(lines.next().is_none());
+    let launched = first.strip_prefix("check:0 pid:").unwrap();
+    assert_eq!(jobs_pid, launched);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_kill_unknown_jobspec_reports_failure() {
     let error_path = "target/rubash-kill-unknown-jobspec-error.txt";
     let status_path = "target/rubash-kill-unknown-jobspec-status.txt";

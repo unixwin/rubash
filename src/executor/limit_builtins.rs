@@ -69,14 +69,14 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Option<i32>, ExecuteError> {
-        let Some(operands) = kill_operands(&cmd.words[1..]) else {
+        let Some(request) = kill_request(&cmd.words[1..]) else {
             return Ok(None);
         };
-        if operands.is_empty() {
+        if request.operands.is_empty() {
             return Ok(None);
         }
 
-        let should_handle = operands.iter().any(|operand| {
+        let should_handle = request.operands.iter().any(|operand| {
             operand.starts_with('%')
                 || operand
                     .parse::<u32>()
@@ -89,7 +89,7 @@ impl Executor {
 
         let mut stderr = Vec::new();
         let mut status = 0;
-        for operand in operands {
+        for operand in request.operands {
             let Some(pid) = self.resolve_background_job(&operand) else {
                 writeln!(
                     stderr,
@@ -99,6 +99,10 @@ impl Executor {
                 status = 1;
                 continue;
             };
+
+            if request.check_only {
+                continue;
+            }
 
             if let Some(mut child) = self.background_children.remove(&pid) {
                 if child.kill().is_err() {
@@ -183,8 +187,14 @@ impl Executor {
     }
 }
 
-fn kill_operands(words: &[String]) -> Option<Vec<String>> {
+struct KillRequest {
+    operands: Vec<String>,
+    check_only: bool,
+}
+
+fn kill_request(words: &[String]) -> Option<KillRequest> {
     let mut index = 0;
+    let mut check_only = false;
     while let Some(word) = words.get(index) {
         if word == "--" {
             index += 1;
@@ -194,15 +204,20 @@ fn kill_operands(words: &[String]) -> Option<Vec<String>> {
             return None;
         }
         if word == "-s" || word == "-n" {
+            check_only |= words.get(index + 1).is_some_and(|signal| signal == "0");
             index += 2;
             continue;
         }
         if word.starts_with('-') && word != "-" {
+            check_only |= word == "-0";
             index += 1;
             continue;
         }
         break;
     }
 
-    Some(words[index..].to_vec())
+    Some(KillRequest {
+        operands: words[index..].to_vec(),
+        check_only,
+    })
 }
