@@ -106,6 +106,19 @@ impl Executor {
             self.report_command_substitution_heredoc_warning(&source, first);
         }
 
+        if first.pipe.is_none() && ast.commands.len() > 1 {
+            let mut output = String::new();
+            for command in &ast.commands {
+                if command.words.first().map(String::as_str) != Some("cat")
+                    || command.pipe.is_some()
+                {
+                    return None;
+                }
+                output.push_str(&self.stdin_string_for_command(command)?);
+            }
+            return Some(output.trim_end_matches('\n').to_string());
+        }
+
         let mut output = self.stdin_string_for_command(first)?;
         if first.pipe.is_some() {
             let next = piped_next?;

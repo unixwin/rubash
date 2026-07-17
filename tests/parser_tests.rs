@@ -4153,6 +4153,25 @@ mod command_substitution_tests {
     }
 
     #[test]
+    fn test_command_substitution_keeps_sequential_heredoc_commands() {
+        let input = "echo $(cat <<A; cat <<B\none\nA\ntwo\nB\n)";
+        let tokens = tokenize(input);
+        let ast = parse(&tokens);
+        let substitutions = ast.commands[0].command_substitutions.as_slice();
+
+        assert_eq!(substitutions.len(), 1);
+        assert_eq!(substitutions[0].commands.len(), 2);
+        assert_eq!(
+            substitutions[0].commands[0].heredoc.as_deref(),
+            Some("one\n")
+        );
+        assert_eq!(
+            substitutions[0].commands[1].heredoc.as_deref(),
+            Some("two\n")
+        );
+    }
+
+    #[test]
     fn test_command_substitution_keeps_case_pattern_starting_with_esac() {
         let input = "echo $(case esac in\nesac) printf matched ;; esac)";
         let tokens = tokenize(input);

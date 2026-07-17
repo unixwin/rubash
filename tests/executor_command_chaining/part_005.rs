@@ -576,3 +576,20 @@ fn test_command_substitution_heredoc_delimiter_closes_before_paren() {
     );
     let _ = fs::remove_file(output_path);
 }
+
+#[test]
+fn test_command_substitution_captures_sequential_heredocs() {
+    let output_path = "target/rubash-comsub-sequential-heredoc-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("echo $(cat <<A; cat <<B\none\nA\ntwo\nB\n) > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "one two\n");
+    let _ = fs::remove_file(output_path);
+}
