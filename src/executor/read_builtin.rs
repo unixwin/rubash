@@ -602,6 +602,23 @@ impl Executor {
                     prompt = Some(word[4..].to_string());
                     index += 1;
                 }
+                "-ersp" | "-esrp" | "-resp" | "-rsep" | "-serp" | "-srep" => {
+                    raw = true;
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if (word.starts_with("-ersp")
+                    || word.starts_with("-esrp")
+                    || word.starts_with("-resp")
+                    || word.starts_with("-rsep")
+                    || word.starts_with("-serp")
+                    || word.starts_with("-srep"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    prompt = Some(word[5..].to_string());
+                    index += 1;
+                }
                 "-ei" => {
                     index += 2;
                 }
