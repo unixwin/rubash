@@ -88,6 +88,7 @@ impl Executor {
                 Some('s') => output.push_str("bash"),
                 Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
                 Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
+                Some('j') => output.push_str(&self.prompt_job_count().to_string()),
                 Some('$') => output.push(prompt_dollar(&self.env_vars)),
                 Some('\\') => output.push('\\'),
                 Some('[') | Some(']') => {}
@@ -195,6 +196,10 @@ impl Executor {
         } else {
             rendered
         }
+    }
+
+    pub(in crate::executor) fn prompt_job_count(&self) -> usize {
+        0
     }
 
     pub(in crate::executor) fn expand_assignment_tilde(&self, value: &str) -> String {
