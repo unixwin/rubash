@@ -1,6 +1,6 @@
 pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
     let mut output = String::new();
-    let mut chars = value.chars();
+    let mut chars = value.chars().peekable();
 
     while let Some(ch) = chars.next() {
         if ch != '\\' {
@@ -22,106 +22,45 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
             Some('"') => output.push('"'),
             Some('?') => output.push('?'),
             Some('x') => {
-                // Hex escape: \xHH
-                let mut hex = String::new();
-                for _ in 0..2 {
-                    if let Some(c) = chars.next() {
-                        if c.is_ascii_hexdigit() {
-                            hex.push(c);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if let Ok(val) = u8::from_str_radix(&hex, 16) {
-                    output.push(val as char);
-                } else {
-                    output.push_str(&hex);
-                }
-            }
-            Some('0') => {
-                // Octal escape: \0NNN (up to 3 octal digits)
-                let mut octal = String::new();
-                for _ in 0..3 {
-                    if let Some(c) = chars.next() {
-                        if matches!(c, '0'..='7') {
-                            octal.push(c);
-                        } else {
-                            // Push back by not consuming
-                            break;
-                        }
-                    }
-                }
-                if !octal.is_empty() {
-                    if let Ok(val) = u8::from_str_radix(&octal, 8) {
-                        output.push(val as char);
-                    } else {
-                        output.push('\\');
-                        output.push('0');
-                        output.push_str(&octal);
-                    }
-                } else {
-                    output.push('\0');
-                }
-            }
-            Some(c) if c.is_ascii_digit() => {
-                // Octal escape: \NNN (up to 3 octal digits)
-                let mut octal = String::new();
-                octal.push(c);
-                for _ in 0..2 {
-                    if let Some(c) = chars.next() {
-                        if matches!(c, '0'..='7') {
-                            octal.push(c);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if let Ok(val) = u8::from_str_radix(&octal, 8) {
-                    output.push(val as char);
+                if let Some(value) = read_ansi_c_digits(&mut chars, 16, 2) {
+                    push_ansi_c_codepoint(&mut output, value);
                 } else {
                     output.push('\\');
-                    output.push_str(&octal);
+                    output.push('x');
                 }
             }
-            Some('u') => {
-                // Unicode escape: \uHHHH
-                let mut hex = String::new();
-                for _ in 0..4 {
-                    if let Some(c) = chars.next() {
-                        if c.is_ascii_hexdigit() {
-                            hex.push(c);
-                        } else {
-                            break;
-                        }
-                    }
+            Some(octal @ '0'..='7') => {
+                let mut value = octal.to_digit(8).unwrap_or(0);
+                for _ in 0..2 {
+                    let Some(next) = chars.peek().copied() else {
+                        break;
+                    };
+                    let Some(digit) = next.to_digit(8) else {
+                        break;
+                    };
+                    value = value * 8 + digit;
+                    chars.next();
                 }
-                if let Ok(val) = u32::from_str_radix(&hex, 16) {
-                    if let Some(c) = char::from_u32(val) {
-                        output.push(c);
-                    }
+                push_ansi_c_codepoint(&mut output, value);
+            }
+            Some(c) if c.is_ascii_digit() => {
+                output.push('\\');
+                output.push(c);
+            }
+            Some('u') => {
+                if let Some(value) = read_ansi_c_digits(&mut chars, 16, 4) {
+                    push_ansi_c_codepoint(&mut output, value);
                 } else {
-                    output.push_str(&hex);
+                    output.push('\\');
+                    output.push('u');
                 }
             }
             Some('U') => {
-                // Unicode escape: \UHHHHHHHH
-                let mut hex = String::new();
-                for _ in 0..8 {
-                    if let Some(c) = chars.next() {
-                        if c.is_ascii_hexdigit() {
-                            hex.push(c);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                if let Ok(val) = u32::from_str_radix(&hex, 16) {
-                    if let Some(c) = char::from_u32(val) {
-                        output.push(c);
-                    }
+                if let Some(value) = read_ansi_c_digits(&mut chars, 16, 8) {
+                    push_ansi_c_codepoint(&mut output, value);
                 } else {
-                    output.push_str(&hex);
+                    output.push('\\');
+                    output.push('U');
                 }
             }
             Some('c') => {
@@ -139,4 +78,33 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
     }
 
     output
+}
+
+fn read_ansi_c_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, max: usize) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = String::new();
+    while value.len() < max {
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+        if next.to_digit(radix).is_none() {
+            break;
+        }
+        value.push(next);
+        chars.next();
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        u32::from_str_radix(&value, radix).ok()
+    }
+}
+
+fn push_ansi_c_codepoint(output: &mut String, value: u32) {
+    if let Some(ch) = char::from_u32(value) {
+        output.push(ch);
+    }
 }

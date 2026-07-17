@@ -228,9 +228,21 @@ pub(in crate::executor) fn decode_ansi_c_escapes(value: &str) -> String {
             Some('\'') => output.push('\''),
             Some('"') => output.push('"'),
             Some('?') => output.push('?'),
-            Some('x') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 2)),
-            Some('u') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 4)),
-            Some('U') => push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 16, 8)),
+            Some('x') => push_ansi_c_escape_or_literal(
+                &mut output,
+                'x',
+                read_ansi_c_digits(&mut chars, 16, 2),
+            ),
+            Some('u') => push_ansi_c_escape_or_literal(
+                &mut output,
+                'u',
+                read_ansi_c_digits(&mut chars, 16, 4),
+            ),
+            Some('U') => push_ansi_c_escape_or_literal(
+                &mut output,
+                'U',
+                read_ansi_c_digits(&mut chars, 16, 8),
+            ),
             Some(octal @ '0'..='7') => {
                 let mut value = octal.to_digit(8).unwrap_or(0);
                 for _ in 0..2 {
@@ -288,6 +300,15 @@ pub(in crate::executor) fn push_ansi_c_codepoint(output: &mut String, value: Opt
     };
     if let Some(ch) = char::from_u32(value) {
         output.push(ch);
+    }
+}
+
+fn push_ansi_c_escape_or_literal(output: &mut String, escape: char, value: Option<u32>) {
+    if let Some(value) = value {
+        push_ansi_c_codepoint(output, Some(value));
+    } else {
+        output.push('\\');
+        output.push(escape);
     }
 }
 

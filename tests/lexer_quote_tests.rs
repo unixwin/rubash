@@ -77,6 +77,16 @@ fn test_multiline_ansi_c_quote_with_escaped_single_quote_is_one_word() {
 }
 
 #[test]
+fn test_ansi_c_numeric_escapes_keep_following_non_digits() {
+    let tokens = tokenize("printf $'\\x4Z' $'\\xZ' $'\\u0041Z'");
+
+    assert_eq!(tokens.len(), 4);
+    assert_eq!(tokens[1].value, "\x04Z");
+    assert_eq!(tokens[2].value, "\\xZ");
+    assert_eq!(tokens[3].value, "AZ");
+}
+
+#[test]
 fn test_command_substitution_preserves_inner_ansi_c_quotes() {
     let tokens = tokenize("echo \"$(printf $'foo\\'\nbar')\"");
     assert_eq!(tokens.len(), 2);
