@@ -302,6 +302,16 @@ impl Executor {
                     };
                     index += 1;
                 }
+                "-rp" => {
+                    raw = true;
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if word.starts_with("-rp") && word.len() > 3 => {
+                    raw = true;
+                    prompt = Some(word[3..].to_string());
+                    index += 1;
+                }
                 word if word.starts_with("-n") && word.len() > 2 => {
                     char_limit = match read_char_limit_argument(Some(&word[2..])) {
                         Ok(limit) => limit,
