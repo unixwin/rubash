@@ -91,6 +91,7 @@ impl Executor {
                 Some('H') => output.push_str(&prompt_hostname(&self.env_vars, true)),
                 Some('w') => output.push_str(&self.prompt_working_directory(false)),
                 Some('W') => output.push_str(&self.prompt_working_directory(true)),
+                Some('l') => output.push_str(&prompt_terminal_basename(&self.env_vars)),
                 Some('s') => output.push_str("bash"),
                 Some('v') => output.push_str(&prompt_short_version(&self.env_vars)),
                 Some('V') => output.push_str(&prompt_release_version(&self.env_vars)),
@@ -343,6 +344,20 @@ fn prompt_short_version(env_vars: &HashMap<String, String>) -> String {
         (Some(major), Some(minor)) => format!("{major}.{minor}"),
         _ => release,
     }
+}
+
+fn prompt_terminal_basename(env_vars: &HashMap<String, String>) -> String {
+    env_vars
+        .get("TTY")
+        .or_else(|| env_vars.get("SSH_TTY"))
+        .map(|tty| {
+            tty.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(tty)
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 fn prompt_dollar(env_vars: &HashMap<String, String>) -> char {
