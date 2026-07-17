@@ -61,6 +61,44 @@ fn test_wait_for_current_jobspec_uses_last_background_job() {
 }
 
 #[test]
+fn test_wait_for_multiple_background_operands_returns_last_status() {
+    let output_path = "target/rubash-wait-multiple-background-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & first=$!; false & wait \"$first\" %2; printf 'wait:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "wait:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_wait_f_accepts_multiple_background_jobspecs() {
+    let output_path = "target/rubash-wait-f-multiple-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & false & wait -f -- %1 %2; printf 'wait:%s\\n' \"$?\" > {output_path}; jobs >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "wait:1\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_wait_n_waits_one_background_job() {
     let output_path = "target/rubash-wait-n-output.txt";
     let _ = fs::remove_file(output_path);

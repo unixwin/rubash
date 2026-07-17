@@ -143,6 +143,17 @@ impl Executor {
             return Ok(status);
         }
 
+        if let Some(operands) = wait_background_operands(&cmd.words[1..]) {
+            if !operands.is_empty()
+                && operands
+                    .iter()
+                    .any(|operand| self.resolve_background_job(operand).is_some())
+            {
+                let status = self.wait_for_background_operands(&operands, cmd)?;
+                return Ok(status);
+            }
+        }
+
         if cmd.words.len() == 2 {
             if let Some(pid) = self.resolve_background_job(&cmd.words[1]) {
                 if let Some(status) = self.wait_for_background_pid(pid)? {
@@ -163,6 +174,36 @@ impl Executor {
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
+        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        Ok(status)
+    }
+
+    fn wait_for_background_operands(
+        &mut self,
+        operands: &[String],
+        cmd: &CommandNode,
+    ) -> Result<i32, ExecuteError> {
+        let resolved = operands
+            .iter()
+            .map(|operand| (operand.clone(), self.resolve_background_job(operand)))
+            .collect::<Vec<_>>();
+        let mut stderr = Vec::new();
+        let mut status = 0;
+
+        for (operand, pid) in resolved {
+            let Some(pid) = pid else {
+                status =
+                    write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
+                continue;
+            };
+            if let Some(wait_status) = self.wait_for_background_pid(pid)? {
+                status = wait_status;
+            } else {
+                status =
+                    write_wait_operand_error(&operand, &self.diagnostic_prefix(), &mut stderr)?;
+            }
+        }
+
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
@@ -587,4 +628,57 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
         operands: words[index..].to_vec(),
         assign_var,
     })
+}
+
+fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
+    let mut index = 0;
+    while let Some(word) = words.get(index) {
+        if word == "--" {
+            index += 1;
+            break;
+        }
+        if !word.starts_with('-') || word == "-" {
+            break;
+        }
+
+        let mut chars = word[1..].chars().peekable();
+        while let Some(option) = chars.next() {
+            match option {
+                'f' => {}
+                'n' | 'p' => return None,
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+
+    Some(words[index..].to_vec())
+}
+
+fn write_wait_operand_error<E>(
+    operand: &str,
+    diagnostic_prefix: &str,
+    stderr: &mut E,
+) -> Result<i32, ExecuteError>
+where
+    E: Write,
+{
+    if operand.starts_with('%') {
+        writeln!(stderr, "{diagnostic_prefix}wait: {operand}: no such job")?;
+        return Ok(127);
+    }
+
+    if operand.chars().all(|ch| ch.is_ascii_digit()) {
+        writeln!(
+            stderr,
+            "{diagnostic_prefix}wait: pid {operand} is not a child of this shell"
+        )?;
+        return Ok(127);
+    }
+
+    writeln!(
+        stderr,
+        "{diagnostic_prefix}wait: `{operand}': not a pid or valid job spec"
+    )?;
+    Ok(1)
 }
