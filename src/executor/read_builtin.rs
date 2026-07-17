@@ -414,6 +414,18 @@ impl Executor {
                     };
                     index += 1;
                 }
+                "-sd" => {
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if word.starts_with("-sd") && word.len() > 3 => {
+                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 word if word.starts_with('-')
                     && word.len() > 2
                     && word[1..].chars().all(|ch| matches!(ch, 'e' | 'r' | 's')) =>
