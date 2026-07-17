@@ -619,6 +619,42 @@ fn test_read_combined_sr_upper_n_compact_limit_reads_raw_through_newline() {
 }
 
 #[test]
+fn test_read_combined_rse_upper_n_consumes_limit_and_reads_raw_through_newline() {
+    let output_path = "target/rubash-read-rse-upper-n-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("read -rseN 4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab\nc>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_sre_upper_n_compact_limit_reads_raw_through_newline() {
+    let output_path = "target/rubash-read-sre-upper-n-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("read -sreN4 value <<< $'ab\\ncd'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<ab\nc>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_upper_n_ignores_delimiter() {
     let output_path = "target/rubash-read-upper-n-delim-output.txt";
     let _ = fs::remove_file(output_path);
