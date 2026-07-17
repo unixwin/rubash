@@ -733,6 +733,40 @@ fn test_read_combined_eu_reads_numbered_fd() {
 }
 
 #[test]
+fn test_read_combined_reu_consumes_separate_fd_raw() {
+    let output_path = "target/rubash-read-reu-separate-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -reu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\b");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_eru_reads_numbered_fd_raw() {
+    let output_path = "target/rubash-read-eru-numbered-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -eru3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "a\\b");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_rsu_consumes_separate_fd_raw() {
     let output_path = "target/rubash-read-rsu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);
