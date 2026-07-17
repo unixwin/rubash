@@ -123,6 +123,29 @@ fn test_enable_redirects_stderr() {
 }
 
 #[test]
+fn test_enable_f_consumes_load_filename() {
+    let error_path = "target/rubash-enable-f-error.txt";
+    let status_path = "target/rubash-enable-f-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("enable -f ./missing.so loaded 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    let error = fs::read_to_string(error_path).unwrap();
+    assert!(error.contains("enable: loaded: dynamic loading from ./missing.so not supported"));
+    assert!(!error.contains("invalid option"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_enable_appends_stderr() {
     let error_path = "target/rubash-enable-stderr-append-output.txt";
     let _ = fs::remove_file(error_path);

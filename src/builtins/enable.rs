@@ -101,17 +101,35 @@ where
     let mut reusable = false;
     let mut special_only = false;
     let mut delete = false;
+    let mut load_file = None;
     let mut operands = Vec::new();
 
-    for arg in args {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
         if arg.starts_with('-') && arg != "-" {
-            for option in arg[1..].chars() {
+            let mut options = arg[1..].char_indices().peekable();
+            while let Some((offset, option)) = options.next() {
                 match option {
                     'a' => list_all = true,
                     'n' => disable = true,
                     'p' => reusable = true,
                     's' => special_only = true,
                     'd' => delete = true,
+                    'f' => {
+                        let value_start = 1 + offset + option.len_utf8();
+                        if value_start < arg.len() {
+                            load_file = Some(arg[value_start..].to_string());
+                            break;
+                        }
+                        let Some(value) = args.get(index + 1) else {
+                            writeln!(stderr, "rubash: enable: -f: option requires an argument")?;
+                            return Ok(EXECUTION_FAILURE);
+                        };
+                        load_file = Some(value.clone());
+                        index += 1;
+                        break;
+                    }
                     _ => {
                         writeln!(stderr, "rubash: enable: -{option}: invalid option")?;
                         return Ok(EXECUTION_FAILURE);
@@ -121,6 +139,26 @@ where
         } else {
             operands.push(arg.as_str());
         }
+        index += 1;
+    }
+
+    if let Some(file) = load_file {
+        if operands.is_empty() {
+            writeln!(
+                stderr,
+                "{}enable: {file}: dynamic loading not supported",
+                diagnostic_prefix(env_vars)
+            )?;
+            return Ok(EXECUTION_FAILURE);
+        }
+        for name in operands {
+            writeln!(
+                stderr,
+                "{}enable: {name}: dynamic loading from {file} not supported",
+                diagnostic_prefix(env_vars)
+            )?;
+        }
+        return Ok(EXECUTION_FAILURE);
     }
 
     if delete {
