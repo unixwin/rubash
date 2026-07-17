@@ -463,6 +463,18 @@ impl Executor {
                     };
                     index += 1;
                 }
+                "-ed" => {
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if word.starts_with("-ed") && word.len() > 3 => {
+                    delimiter = word[3..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
