@@ -547,6 +547,18 @@ impl Executor {
                     prompt = Some(word[3..].to_string());
                     index += 1;
                 }
+                "-rep" | "-erp" => {
+                    raw = true;
+                    prompt = cmd.words.get(index + 1).cloned();
+                    index += 2;
+                }
+                word if (word.starts_with("-rep") || word.starts_with("-erp"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    prompt = Some(word[4..].to_string());
+                    index += 1;
+                }
                 "-ei" => {
                     index += 2;
                 }
