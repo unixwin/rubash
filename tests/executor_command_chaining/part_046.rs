@@ -297,6 +297,40 @@ fn test_read_combined_si_compact_initial_text() {
 }
 
 #[test]
+fn test_read_combined_ei_consumes_initial_text() {
+    let output_path = "target/rubash-read-ei-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -ei seed value <<< alpha; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_ei_compact_initial_text() {
+    let output_path = "target/rubash-read-ei-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -eiseed value <<< alpha; echo $value > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_ri_consumes_initial_text_and_reads_raw() {
     let output_path = "target/rubash-read-ri-output.txt";
     let _ = fs::remove_file(output_path);

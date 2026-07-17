@@ -381,6 +381,12 @@ impl Executor {
                     prompt = Some(word[3..].to_string());
                     index += 1;
                 }
+                "-ei" => {
+                    index += 2;
+                }
+                word if word.starts_with("-ei") && word.len() > 3 => {
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
