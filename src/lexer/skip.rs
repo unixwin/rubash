@@ -417,7 +417,7 @@ fn update_brace_group_reserved_word_depth(
             false
         }
         "esac" => false,
-        "then" | "do" | "else" | "elif" | "in" => true,
+        "then" | "do" | "else" | "elif" | "in" | "fi" | "done" => true,
         _ => false,
     }
 }
@@ -468,7 +468,7 @@ fn update_command_substitution_case_depth(
             *case_depth = case_depth.saturating_sub(1);
             false
         }
-        "then" | "do" | "else" | "elif" | "in" if *current_word_boundary => true,
+        "then" | "do" | "else" | "elif" | "in" | "fi" | "done" if *current_word_boundary => true,
         _ => false,
     };
     word.clear();
