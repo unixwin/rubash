@@ -287,7 +287,10 @@ fn test_funcname_tracks_nested_function_stack() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "outer() {{ inner; }}; \
-         inner() {{ printf '%s|%s|%s|%s|%s\\n' \"$FUNCNAME\" \"${{FUNCNAME[0]}}\" \"${{FUNCNAME[1]}}\" \"${{FUNCNAME[@]}}\" \"${{#FUNCNAME[@]}}\" > {output_path}; }}; \
+         inner() {{ \
+             printf 'scalar:%s first:%s second:%s len:%s\\n' \"$FUNCNAME\" \"${{FUNCNAME[0]}}\" \"${{FUNCNAME[1]}}\" \"${{#FUNCNAME[@]}}\" > {output_path}; \
+             printf '<%s>\\n' \"${{FUNCNAME[@]}}\" >> {output_path}; \
+         }}; \
          outer"
     );
     let tokens = tokenize(&input);
@@ -300,7 +303,7 @@ fn test_funcname_tracks_nested_function_stack() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "inner|inner|outer|inner outer|2\n"
+        "scalar:inner first:inner second:outer len:2\n<inner>\n<outer>\n"
     );
     let _ = fs::remove_file(output_path);
 }

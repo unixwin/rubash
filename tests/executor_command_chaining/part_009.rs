@@ -32,7 +32,10 @@ fn test_bash_argc_and_argv_track_function_arguments() {
     let _ = fs::remove_file(output_path);
     let input = format!(
         "outer() {{ inner c; }}; \
-         inner() {{ printf '%s|%s|%s|%s|%s\\n' \"${{BASH_ARGC[0]}}\" \"${{BASH_ARGC[1]}}\" \"${{BASH_ARGV[0]}}\" \"${{BASH_ARGV[1]}}\" \"${{BASH_ARGV[@]}}\" > {output_path}; }}; \
+         inner() {{ \
+             printf 'argc:%s:%s argv:%s:%s\\n' \"${{BASH_ARGC[0]}}\" \"${{BASH_ARGC[1]}}\" \"${{BASH_ARGV[0]}}\" \"${{BASH_ARGV[1]}}\" > {output_path}; \
+             printf '<%s>\\n' \"${{BASH_ARGV[@]}}\" >> {output_path}; \
+         }}; \
          outer a b"
     );
     let tokens = tokenize(&input);
@@ -43,7 +46,10 @@ fn test_bash_argc_and_argv_track_function_arguments() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "1|2|c|b|c b a\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "argc:1:2 argv:c:b\n<c>\n<b>\n<a>\n"
+    );
     let _ = fs::remove_file(output_path);
 }
 

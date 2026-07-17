@@ -148,9 +148,6 @@ impl Executor {
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("[@]}"))
             {
-                if is_noassign_bash_array(name) || matches!(name, "BASH_ALIASES" | "BASH_CMDS") {
-                    return None;
-                }
                 let storage_name = self.resolved_variable_name(name)?;
                 let storage = self.parameter_array_storage(name)?;
                 if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
@@ -176,9 +173,6 @@ impl Executor {
                     .or_else(|| word.strip_suffix("[*]}"))
             }
         })?;
-        if is_noassign_bash_array(name) || matches!(name, "BASH_ALIASES" | "BASH_CMDS") {
-            return None;
-        }
         if name == "GROUPS" {
             return Some(self.groups_words());
         }

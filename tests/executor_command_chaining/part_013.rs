@@ -248,7 +248,9 @@ fn test_bash_cmds_reflects_hash_table() {
         "hash -r; \
          hash -p /usr/sbin/foo foo; \
          BASH_CMDS[bar]=/usr/bin/bar; \
-         printf '%s\\n' \"${{!BASH_CMDS[@]}}\" \"${{BASH_CMDS[@]}}\" \"${{BASH_CMDS[foo]}}\" > {output_path}; \
+         printf 'key:<%s>\\n' \"${{!BASH_CMDS[@]}}\" > {output_path}; \
+         printf 'value:<%s>\\n' \"${{BASH_CMDS[@]}}\" >> {output_path}; \
+         printf 'foo:<%s>\\n' \"${{BASH_CMDS[foo]}}\" >> {output_path}; \
          hash -t bar >> {output_path}; \
          unset 'BASH_CMDS[foo]'; hash -t foo 2>/dev/null; echo $? >> {output_path}; \
          declare -p BASH_CMDS >> {output_path}"
@@ -263,7 +265,7 @@ fn test_bash_cmds_reflects_hash_table() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n/usr/bin/bar\n1\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" )\n"
+        "key:<bar>\nkey:<foo>\nvalue:</usr/bin/bar>\nvalue:</usr/sbin/foo>\nfoo:</usr/sbin/foo>\n/usr/bin/bar\n1\ndeclare -A BASH_CMDS=([bar]=\"/usr/bin/bar\" )\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -275,7 +277,9 @@ fn test_bash_aliases_reflects_alias_table() {
     let input = format!(
         "alias foo=/usr/sbin/foo; \
          BASH_ALIASES[bar]=/usr/bin/bar; \
-         printf '%s\\n' \"${{!BASH_ALIASES[@]}}\" \"${{BASH_ALIASES[@]}}\" \"${{BASH_ALIASES[foo]}}\" > {output_path}; \
+         printf 'key:<%s>\\n' \"${{!BASH_ALIASES[@]}}\" > {output_path}; \
+         printf 'value:<%s>\\n' \"${{BASH_ALIASES[@]}}\" >> {output_path}; \
+         printf 'foo:<%s>\\n' \"${{BASH_ALIASES[foo]}}\" >> {output_path}; \
          unset 'BASH_ALIASES[foo]'; \
          alias foo 2>/dev/null; echo $? >> {output_path}; \
          declare -p BASH_ALIASES >> {output_path}"
@@ -290,7 +294,7 @@ fn test_bash_aliases_reflects_alias_table() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "bar foo\n/usr/bin/bar /usr/sbin/foo\n/usr/sbin/foo\n1\ndeclare -A BASH_ALIASES=([bar]=\"/usr/bin/bar\" )\n"
+        "key:<bar>\nkey:<foo>\nvalue:</usr/bin/bar>\nvalue:</usr/sbin/foo>\nfoo:</usr/sbin/foo>\n1\ndeclare -A BASH_ALIASES=([bar]=\"/usr/bin/bar\" )\n"
     );
     let _ = fs::remove_file(output_path);
 }
