@@ -151,6 +151,54 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-ersa" | "-esra" | "-resa" | "-rsea" | "-sera" | "-srea" => {
+                    raw = true;
+                    let Some(name) = cmd.words.get(index + 1) else {
+                        let option = &cmd.words[index][1..];
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -{option}: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    if is_shell_name(name) {
+                        array_name = Some(name.clone());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        scalar_field_count += 1;
+                    }
+                    index += 2;
+                }
+                word if (word.starts_with("-ersa")
+                    || word.starts_with("-esra")
+                    || word.starts_with("-resa")
+                    || word.starts_with("-rsea")
+                    || word.starts_with("-sera")
+                    || word.starts_with("-srea"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    let name = &word[5..];
+                    if is_shell_name(name) {
+                        array_name = Some(name.to_string());
+                    } else {
+                        report_read_invalid_identifier(
+                            &mut stderr,
+                            &self.diagnostic_prefix(),
+                            name,
+                        );
+                        invalid_name = true;
+                        stop_scalar_names = true;
+                    }
+                    index += 1;
+                }
                 "-sa" => {
                     let Some(name) = cmd.words.get(index + 1) else {
                         let _ = writeln!(
