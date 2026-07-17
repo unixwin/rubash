@@ -324,6 +324,27 @@ fn test_parameter_prompt_transform_expands_date_escapes() {
 }
 
 #[test]
+fn test_parameter_prompt_transform_expands_octal_escapes() {
+    let output_path = "target/rubash-param-prompt-transform-octal-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("p='x=\\141 y=\\060 end=\\0123'; printf '<%s>\\n' \"${{p@P}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<x=a y=0 end=\n3>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
     let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
     let _ = fs::remove_file(output_path);

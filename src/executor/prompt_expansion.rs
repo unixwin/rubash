@@ -98,8 +98,8 @@ impl Executor {
                 Some('$') => output.push(prompt_dollar(&self.env_vars)),
                 Some('\\') => output.push('\\'),
                 Some('[') | Some(']') => {}
-                Some('0') => {
-                    push_ansi_c_codepoint(&mut output, read_ansi_c_digits(&mut chars, 8, 3))
+                Some(octal @ '0'..='7') => {
+                    push_ansi_c_codepoint(&mut output, read_prompt_octal(octal, &mut chars))
                 }
                 Some(other) => {
                     output.push('\\');
@@ -341,4 +341,22 @@ fn prompt_dollar(env_vars: &HashMap<String, String>) -> char {
     } else {
         '$'
     }
+}
+
+fn read_prompt_octal<I>(first: char, chars: &mut std::iter::Peekable<I>) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = first.to_string();
+    while value.len() < 3 {
+        let Some(next) = chars.peek().copied() else {
+            break;
+        };
+        if next.to_digit(8).is_none() {
+            break;
+        }
+        value.push(next);
+        chars.next();
+    }
+    u32::from_str_radix(&value, 8).ok()
 }
