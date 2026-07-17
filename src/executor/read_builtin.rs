@@ -1275,6 +1275,54 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-erst" | "-esrt" | "-rest" | "-rset" | "-sert" | "-sret" => {
+                    raw = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let option = &cmd.words[index][1..];
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -{option}: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    match parse_read_timeout(word) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 2;
+                }
+                word if (word.starts_with("-erst")
+                    || word.starts_with("-esrt")
+                    || word.starts_with("-rest")
+                    || word.starts_with("-rset")
+                    || word.starts_with("-sert")
+                    || word.starts_with("-sret"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    let value = &word[5..];
+                    match parse_read_timeout(value) {
+                        Ok(is_zero) => timeout_zero = is_zero,
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid timeout specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    }
+                    index += 1;
+                }
                 "-rt" => {
                     raw = true;
                     let Some(word) = cmd.words.get(index + 1) else {
