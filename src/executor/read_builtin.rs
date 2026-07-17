@@ -1192,6 +1192,54 @@ impl Executor {
                     };
                     index += 1;
                 }
+                "-ersu" | "-esru" | "-resu" | "-rseu" | "-seru" | "-sreu" => {
+                    raw = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let option = &cmd.words[index][1..];
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -{option}: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    read_fd = match parse_read_fd(word) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 2;
+                }
+                word if (word.starts_with("-ersu")
+                    || word.starts_with("-esru")
+                    || word.starts_with("-resu")
+                    || word.starts_with("-rseu")
+                    || word.starts_with("-seru")
+                    || word.starts_with("-sreu"))
+                    && word.len() > 5 =>
+                {
+                    raw = true;
+                    let value = &word[5..];
+                    read_fd = match parse_read_fd(value) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 1;
+                }
                 "-rp" => {
                     raw = true;
                     prompt = cmd.words.get(index + 1).cloned();
