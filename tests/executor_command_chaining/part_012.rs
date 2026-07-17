@@ -229,6 +229,44 @@ fn test_readarray_compact_s_combines_with_n() {
 }
 
 #[test]
+fn test_readarray_combined_ts_skips_and_trims_lines() {
+    let output_path = "target/rubash-readarray-combined-ts-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "readarray -ts1 -n1 arr <<< $'alpha\\nbeta\\ngamma'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1 beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_mapfile_combined_ts_consumes_separate_skip_count() {
+    let output_path = "target/rubash-mapfile-combined-ts-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "mapfile -ts 1 -n1 arr <<< $'alpha\\nbeta\\ngamma'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1 beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_mapfile_o_sets_origin_index() {
     let input = "unset arr; mapfile -O 2 -t arr <<< $'alpha\\nbeta'";
     let tokens = tokenize(&input);
@@ -248,6 +286,40 @@ fn test_mapfile_o_sets_origin_index() {
 #[test]
 fn test_readarray_compact_o_preserves_existing_elements() {
     let input = "arr=(zero one two); readarray -O2 -n1 -t arr <<< $'new\\nmore'";
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        executor.get_env("arr"),
+        Some("\x1d([0]=\"zero\" [1]=\"one\" [2]=\"new\")")
+    );
+}
+
+#[test]
+fn test_readarray_combined_to_preserves_existing_elements() {
+    let input = "arr=(zero one two); readarray -tO2 -n1 arr <<< $'new\\nmore'";
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        executor.get_env("arr"),
+        Some("\x1d([0]=\"zero\" [1]=\"one\" [2]=\"new\")")
+    );
+}
+
+#[test]
+fn test_mapfile_combined_to_consumes_separate_origin() {
+    let input = "arr=(zero one two); mapfile -tO 2 -n1 arr <<< $'new\\nmore'";
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
     let mut executor = Executor::new();
