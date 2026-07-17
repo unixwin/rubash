@@ -44,6 +44,40 @@ impl Executor {
                     trim_newline = true;
                     index += 1;
                 }
+                "-tn" => {
+                    trim_newline = true;
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        return self.mapfile_missing_option_argument(
+                            cmd,
+                            command_name,
+                            "n",
+                            &mut stderr,
+                        );
+                    };
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        word,
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
+                        Ok(value) => count = Some(value),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 2;
+                }
+                word if word.starts_with("-tn") && word.len() > 3 => {
+                    trim_newline = true;
+                    match self.parse_mapfile_usize(
+                        command_name,
+                        &word[3..],
+                        "invalid line count",
+                        &mut stderr,
+                    ) {
+                        Ok(value) => count = Some(value),
+                        Err(status) => return self.finish_mapfile_error(cmd, &stderr, status),
+                    }
+                    index += 1;
+                }
                 "-d" => {
                     let Some(word) = cmd.words.get(index + 1) else {
                         return self.mapfile_missing_option_argument(

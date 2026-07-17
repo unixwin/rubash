@@ -153,6 +153,44 @@ fn test_readarray_compact_n_limits_read_lines() {
 }
 
 #[test]
+fn test_readarray_combined_tn_limits_and_trims_lines() {
+    let output_path = "target/rubash-readarray-combined-tn-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "readarray -tn1 arr <<< $'alpha\\nbeta'; echo ${{#arr[@]}} ${{arr[0]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "1 alpha\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_mapfile_combined_tn_consumes_separate_count() {
+    let output_path = "target/rubash-mapfile-combined-tn-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "mapfile -tn 2 arr <<< $'alpha\\nbeta\\ngamma'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "2 alpha beta\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_mapfile_s_skips_initial_lines() {
     let output_path = "target/rubash-mapfile-s-output.txt";
     let _ = fs::remove_file(output_path);
