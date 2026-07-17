@@ -420,15 +420,6 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
 fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) -> Option<usize> {
     let token = &tokens[i];
 
-    if command_allows_compound_start(&state.current_cmd)
-        && looks_like_parenthesized_function_signature(tokens, i)
-    {
-        if let Some((function_cmd, next_i)) = parse_function_command(tokens, i) {
-            push_compound_command(state, function_cmd);
-            return Some(next_i);
-        }
-    }
-
     if token.kind == TokenKind::Keyword
         && token.value == "time"
         && command_allows_compound_start(&state.current_cmd)
@@ -560,15 +551,6 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     None
-}
-
-fn looks_like_parenthesized_function_signature(tokens: &[Token], index: usize) -> bool {
-    tokens
-        .get(index + 1)
-        .is_some_and(|token| token.value == "(")
-        && tokens
-            .get(index + 2)
-            .is_some_and(|token| token.value == ")")
 }
 
 fn command_allows_compound_start(command: &CommandNode) -> bool {
