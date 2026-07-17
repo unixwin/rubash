@@ -55,6 +55,41 @@ fn test_read_combined_ra_compact_array_name_reads_raw_array() {
 }
 
 #[test]
+fn test_read_combined_sa_reads_array() {
+    let output_path = "target/rubash-read-sa-array-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input =
+        format!("read -sa arr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "3 a b c\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_sa_compact_array_name() {
+    let output_path = "target/rubash-read-sa-compact-array-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -saarr <<< 'a\\ b c'; echo ${{#arr[@]}} ${{arr[@]}} > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "3 a b c\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_rsa_reads_raw_array() {
     let output_path = "target/rubash-read-rsa-array-output.txt";
     let _ = fs::remove_file(output_path);
