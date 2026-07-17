@@ -289,7 +289,10 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     for (name, value) in &cmd.assignments {
         parts.push(format!("{name}={value}"));
     }
-    parts.extend(cmd.words.iter().cloned());
+    let words = command_words_source_text(&cmd.words, &cmd.word_metadata);
+    if !words.is_empty() {
+        parts.push(words);
+    }
 
     if let Some(redirect) = &cmd.redirect_in {
         parts.push(format_redirect("<", redirect));
