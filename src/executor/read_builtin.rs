@@ -289,6 +289,22 @@ impl Executor {
                     delimiter = word[3..].chars().next().unwrap_or('\0');
                     index += 1;
                 }
+                "-rsd" | "-srd" => {
+                    raw = true;
+                    delimiter = cmd
+                        .words
+                        .get(index + 1)
+                        .and_then(|word| word.chars().next())
+                        .unwrap_or('\0');
+                    index += 2;
+                }
+                word if (word.starts_with("-rsd") || word.starts_with("-srd"))
+                    && word.len() > 4 =>
+                {
+                    raw = true;
+                    delimiter = word[4..].chars().next().unwrap_or('\0');
+                    index += 1;
+                }
                 "-rsn" | "-srn" => {
                     raw = true;
                     char_limit = match read_char_limit_argument(cmd.words.get(index + 1)) {
