@@ -5,15 +5,21 @@
 
 use std::io::{self, Write};
 
-const EXECUTION_SUCCESS: i32 = 0;
-const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisownAction {
+    Complete(i32),
+    Current,
+    All,
+    Jobs(Vec<String>),
+}
 
 pub fn execute_with_io<E>(
     args: &[String],
     diagnostic_prefix: &str,
     stderr: &mut E,
-) -> io::Result<i32>
+) -> io::Result<DisownAction>
 where
     E: Write,
 {
@@ -38,7 +44,7 @@ where
                         "{diagnostic_prefix}disown: -{other}: invalid option"
                     )?;
                     write_usage(stderr)?;
-                    return Ok(EX_USAGE);
+                    return Ok(DisownAction::Complete(EX_USAGE));
                 }
             }
         }
@@ -46,15 +52,14 @@ where
     }
 
     if all_jobs && args.get(index).is_none() {
-        return Ok(EXECUTION_SUCCESS);
+        return Ok(DisownAction::All);
     }
 
-    if let Some(job) = args.get(index) {
-        writeln!(stderr, "{diagnostic_prefix}disown: {job}: no such job")?;
+    if index < args.len() {
+        Ok(DisownAction::Jobs(args[index..].to_vec()))
     } else {
-        writeln!(stderr, "{diagnostic_prefix}disown: current: no such job")?;
+        Ok(DisownAction::Current)
     }
-    Ok(EXECUTION_FAILURE)
 }
 
 fn write_usage<E>(stderr: &mut E) -> io::Result<()>

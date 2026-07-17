@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 impl Executor {
     pub(in crate::executor) fn execute_times(
@@ -180,13 +181,88 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
-        let status = crate::builtins::disown::execute_with_io(
+        let action = crate::builtins::disown::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
             &mut stderr,
         )?;
+        let status = match action {
+            crate::builtins::disown::DisownAction::Complete(status) => status,
+            crate::builtins::disown::DisownAction::All => {
+                self.background_children.clear();
+                self.background_jobs.clear();
+                0
+            }
+            crate::builtins::disown::DisownAction::Current => {
+                if self.disown_current_job() {
+                    0
+                } else {
+                    writeln!(
+                        stderr,
+                        "{}disown: current: no such job",
+                        self.diagnostic_prefix()
+                    )?;
+                    1
+                }
+            }
+            crate::builtins::disown::DisownAction::Jobs(jobs) => {
+                let mut status = 0;
+                for job in jobs {
+                    if let Some(pid) = self.resolve_background_job(&job) {
+                        self.background_children.remove(&pid);
+                        self.background_jobs.remove(&pid);
+                    } else {
+                        writeln!(
+                            stderr,
+                            "{}disown: {job}: no such job",
+                            self.diagnostic_prefix()
+                        )?;
+                        status = 1;
+                    }
+                }
+                status
+            }
+        };
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn disown_current_job(&mut self) -> bool {
+        let Some(pid) = self.last_background_pid else {
+            return false;
+        };
+        if !self.background_children.contains_key(&pid) && !self.background_jobs.contains_key(&pid)
+        {
+            return false;
+        }
+
+        self.background_children.remove(&pid);
+        self.background_jobs.remove(&pid);
+        true
+    }
+
+    fn resolve_background_job(&self, job: &str) -> Option<u32> {
+        if let Some(number) = job.strip_prefix('%') {
+            return self.resolve_background_job_number(number);
+        }
+
+        job.parse::<u32>().ok().filter(|pid| {
+            self.background_children.contains_key(pid) || self.background_jobs.contains_key(pid)
+        })
+    }
+
+    fn resolve_background_job_number(&self, number: &str) -> Option<u32> {
+        let index = match number {
+            "" | "+" => 1,
+            _ => number.parse::<usize>().ok()?,
+        };
+        if index == 0 {
+            return None;
+        }
+
+        let mut pids = self.background_jobs.keys().copied().collect::<Vec<_>>();
+        pids.sort_unstable();
+        pids.get(index - 1).copied()
     }
 
     pub(in crate::executor) fn execute_fg_bg(

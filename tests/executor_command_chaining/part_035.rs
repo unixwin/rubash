@@ -168,6 +168,73 @@ fn test_disown_all_or_running_without_jobs_succeeds() {
 }
 
 #[test]
+fn test_disown_current_background_job_removes_it_from_jobs() {
+    let output_path = "target/rubash-disown-current-output.txt";
+    let status_path = "target/rubash-disown-current-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("true & disown; echo $? > {status_path}; jobs > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
+fn test_disown_background_pid_removes_only_that_job() {
+    let output_path = "target/rubash-disown-pid-output.txt";
+    let status_path = "target/rubash-disown-pid-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input =
+        format!("true & first=$!; false & second=$!; disown \"$first\"; echo $? > {status_path}; jobs > {output_path}; disown \"$second\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("false &"));
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
+fn test_disown_all_background_jobs_clears_jobs() {
+    let output_path = "target/rubash-disown-all-output.txt";
+    let status_path = "target/rubash-disown-all-jobs-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("true & false & disown -a; echo $? > {status_path}; jobs > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_disown_invalid_option_returns_usage() {
     let error_path = "target/rubash-disown-invalid-error.txt";
     let status_path = "target/rubash-disown-invalid-status.txt";
