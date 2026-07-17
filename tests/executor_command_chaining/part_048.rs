@@ -273,6 +273,40 @@ fn test_read_combined_rn_reads_raw_limited_characters() {
 }
 
 #[test]
+fn test_read_combined_rt_consumes_timeout_and_reads_raw() {
+    let output_path = "target/rubash-read-rt-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -rt 1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\b>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_rt_compact_timeout_reads_raw() {
+    let output_path = "target/rubash-read-rt-compact-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -rt1 value <<< 'a\\b'; printf '<%s>' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<a\\b>");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_upper_n_reads_through_newline() {
     let output_path = "target/rubash-read-upper-n-output.txt";
     let _ = fs::remove_file(output_path);
