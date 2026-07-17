@@ -106,6 +106,23 @@ fn test_groups_expands_as_dynamic_array() {
 }
 
 #[test]
+fn test_groups_at_expands_as_dynamic_array_words() {
+    let output_path = "target/rubash-groups-at-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("printf '<%s>\\n' \"${{GROUPS[@]}}\" \"${{GROUPS[*]}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "<0>\n<0>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_groups_assignment_does_not_override_dynamic_array() {
     let output_path = "target/rubash-groups-assignment-output.txt";
     let _ = fs::remove_file(output_path);

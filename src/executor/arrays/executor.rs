@@ -114,6 +114,13 @@ impl Executor {
                     }
                 }
                 if let Some(array_name) = name.strip_suffix("[@]") {
+                    if array_name == "GROUPS" {
+                        return Some(slice_array_values(
+                            self.groups_words(),
+                            offset,
+                            length.and_then(|length| usize::try_from(length).ok()),
+                        ));
+                    }
                     return self.parameter_array_storage(array_name).map(|value| {
                         array_parameter_slice(
                             &value,
@@ -154,6 +161,15 @@ impl Executor {
                 return Some(array_indices(&storage));
             }
         }
+        if quoted_array_word && word == "${GROUPS[*]}" {
+            let separator = self
+                .env_vars
+                .get("IFS")
+                .and_then(|ifs| ifs.chars().next())
+                .unwrap_or(' ')
+                .to_string();
+            return Some(vec![self.groups_words().join(&separator)]);
+        }
         let name = word.strip_prefix("${").and_then(|word| {
             if quoted_array_word {
                 word.strip_suffix("[@]}")
@@ -166,6 +182,9 @@ impl Executor {
             || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
         {
             return None;
+        }
+        if name == "GROUPS" {
+            return Some(self.groups_words());
         }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value))
