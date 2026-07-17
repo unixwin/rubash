@@ -148,9 +148,7 @@ impl Executor {
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("[@]}"))
             {
-                if is_noassign_bash_array(name)
-                    || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
-                {
+                if is_noassign_bash_array(name) || matches!(name, "BASH_ALIASES" | "BASH_CMDS") {
                     return None;
                 }
                 let storage_name = self.resolved_variable_name(name)?;
@@ -178,9 +176,7 @@ impl Executor {
                     .or_else(|| word.strip_suffix("[*]}"))
             }
         })?;
-        if is_noassign_bash_array(name)
-            || matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "BASH_VERSINFO")
-        {
+        if is_noassign_bash_array(name) || matches!(name, "BASH_ALIASES" | "BASH_CMDS") {
             return None;
         }
         if name == "GROUPS" {

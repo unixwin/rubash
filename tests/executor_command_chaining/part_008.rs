@@ -46,7 +46,7 @@ fn test_bash_version_and_versinfo_are_initialized() {
     let output_path = "target/rubash-bash-version-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "printf '%s\\n%s\\n%s\\n%s\\n%s:%s:%s\\n' \"$BASH\" \"$BASH_VERSION\" \"${{BASH_VERSINFO[@]}}\" \"$HOSTNAME\" \"$HOSTTYPE\" \"$OSTYPE\" \"$MACHTYPE\" > {output_path}"
+        "printf '%s\\n%s\\n%s\\n%s\\n%s:%s:%s\\n' \"$BASH\" \"$BASH_VERSION\" \"${{BASH_VERSINFO[*]}}\" \"$HOSTNAME\" \"$HOSTTYPE\" \"$OSTYPE\" \"$MACHTYPE\" > {output_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);
@@ -67,6 +67,53 @@ fn test_bash_version_and_versinfo_are_initialized() {
     assert!(!lines[3].is_empty());
     assert_eq!(lines[4].split(':').count(), 3);
     assert!(!lines[4].contains("::"));
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_quoted_bash_versinfo_at_expands_to_words() {
+    let output_path = "target/rubash-bash-versinfo-at-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "IFS=:; printf '<%s>\\n' \"${{BASH_VERSINFO[@]}}\" \"${{BASH_VERSINFO[*]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    let parts: Vec<&str> = env!("CARGO_PKG_VERSION").split('.').collect();
+    assert_eq!(lines.len(), 7);
+    assert_eq!(
+        lines[0],
+        format!("<{}>", parts.first().copied().unwrap_or("0"))
+    );
+    assert_eq!(
+        lines[1],
+        format!("<{}>", parts.get(1).copied().unwrap_or("0"))
+    );
+    assert_eq!(
+        lines[2],
+        format!("<{}>", parts.get(2).copied().unwrap_or("0"))
+    );
+    assert_eq!(lines[3], "<1>");
+    assert_eq!(lines[4], "<release>");
+    assert!(!lines[5].is_empty());
+    assert_eq!(
+        lines[6],
+        format!(
+            "<{}:{}:{}:1:release:{}>",
+            parts.first().copied().unwrap_or("0"),
+            parts.get(1).copied().unwrap_or("0"),
+            parts.get(2).copied().unwrap_or("0"),
+            lines[5].trim_start_matches('<').trim_end_matches('>')
+        )
+    );
     let _ = fs::remove_file(output_path);
 }
 
