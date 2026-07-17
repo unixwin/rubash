@@ -99,6 +99,52 @@ fn test_wait_n_accepts_requested_jobspec() {
 }
 
 #[test]
+fn test_wait_n_p_assigns_completed_pid() {
+    let output_path = "target/rubash-wait-n-p-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & launched=$!; wait -n -p done_pid; printf 'wait:%s pid:%s launched:%s\\n' \"$?\" \"$done_pid\" \"$launched\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let rest = output.trim_end().strip_prefix("wait:0 pid:").unwrap();
+    let (pid, launched) = rest.split_once(" launched:").unwrap();
+    assert!(pid.parse::<u32>().is_ok());
+    assert_eq!(pid, launched);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_wait_np_assigns_requested_jobspec_pid() {
+    let output_path = "target/rubash-wait-np-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true & launched=$!; wait -np done_pid %1; printf 'wait:%s pid:%s launched:%s\\n' \"$?\" \"$done_pid\" \"$launched\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let rest = output.trim_end().strip_prefix("wait:0 pid:").unwrap();
+    let (pid, launched) = rest.split_once(" launched:").unwrap();
+    assert!(pid.parse::<u32>().is_ok());
+    assert_eq!(pid, launched);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_wait_for_unknown_pid_returns_notfound() {
     let error_path = "target/rubash-wait-pid-error.txt";
     let status_path = "target/rubash-wait-pid-status.txt";

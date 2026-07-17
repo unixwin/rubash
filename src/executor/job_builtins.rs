@@ -121,8 +121,11 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        if let Some(pid) = self.wait_any_background_pid(cmd) {
+        if let Some((pid, wait_var)) = self.wait_any_background_request(cmd) {
             if let Some(status) = self.wait_for_background_pid(pid)? {
+                if let Some(wait_var) = wait_var {
+                    self.apply_shell_assignment(&wait_var, pid.to_string());
+                }
                 self.write_buffered_builtin_output(cmd, &[], &[])?;
                 return Ok(status);
             }
@@ -164,16 +167,17 @@ impl Executor {
         Ok(status)
     }
 
-    fn wait_any_background_pid(&self, cmd: &CommandNode) -> Option<u32> {
-        let operands = wait_any_operands(&cmd.words[1..])?;
-        if let Some(first) = operands.first() {
-            return self.resolve_background_job(first);
-        }
-
-        self.background_job_order
-            .iter()
-            .copied()
-            .find(|pid| self.background_children.contains_key(pid))
+    fn wait_any_background_request(&self, cmd: &CommandNode) -> Option<(u32, Option<String>)> {
+        let request = wait_any_request(&cmd.words[1..])?;
+        let pid = if let Some(first) = request.operands.first() {
+            self.resolve_background_job(first)?
+        } else {
+            self.background_job_order
+                .iter()
+                .copied()
+                .find(|pid| self.background_children.contains_key(pid))?
+        };
+        Some((pid, request.assign_var))
     }
 
     fn wait_for_background_pid(&mut self, pid: u32) -> Result<Option<i32>, ExecuteError> {
@@ -538,9 +542,15 @@ impl Executor {
     }
 }
 
-fn wait_any_operands(words: &[String]) -> Option<Vec<String>> {
+struct WaitAnyRequest {
+    operands: Vec<String>,
+    assign_var: Option<String>,
+}
+
+fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
     let mut index = 0;
     let mut wait_any = false;
+    let mut assign_var = None;
     while let Some(word) = words.get(index) {
         if word == "--" {
             index += 1;
@@ -560,7 +570,11 @@ fn wait_any_operands(words: &[String]) -> Option<Vec<String>> {
                         break;
                     }
                     index += 1;
-                    words.get(index)?;
+                    let name = words.get(index)?;
+                    if !is_shell_name(name) {
+                        return None;
+                    }
+                    assign_var = Some(name.clone());
                     break;
                 }
                 _ => return None,
@@ -569,5 +583,8 @@ fn wait_any_operands(words: &[String]) -> Option<Vec<String>> {
         index += 1;
     }
 
-    wait_any.then(|| words[index..].to_vec())
+    wait_any.then(|| WaitAnyRequest {
+        operands: words[index..].to_vec(),
+        assign_var,
+    })
 }
