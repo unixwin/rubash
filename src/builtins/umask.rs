@@ -34,8 +34,18 @@ where
 
     for arg in args {
         match arg.as_str() {
-            "-S" => symbolic = true,
-            "-p" => reusable = true,
+            value if value.starts_with('-') && value != "-" => {
+                for option in value[1..].chars() {
+                    match option {
+                        'S' => symbolic = true,
+                        'p' => reusable = true,
+                        _ => {
+                            writeln!(stderr, "rubash: umask: {value}: invalid option")?;
+                            return Ok(EXECUTION_FAILURE);
+                        }
+                    }
+                }
+            }
             value if value.starts_with('-') => {
                 writeln!(stderr, "rubash: umask: {value}: invalid option")?;
                 return Ok(EXECUTION_FAILURE);

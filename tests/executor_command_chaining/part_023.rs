@@ -214,6 +214,26 @@ fn test_umask_symbolic_modes_copy_permissions() {
 }
 
 #[test]
+fn test_umask_combined_symbolic_reusable_options() {
+    let output_path = "target/rubash-umask-combined-options-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("umask 022; umask -Sp > {output_path}; umask -pS >> {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "umask -S u=rwx,g=rx,o=rx\numask -S u=rwx,g=rx,o=rx\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_umask_redirects_stderr() {
     let error_path = "target/rubash-umask-stderr-output.txt";
     let status_path = "target/rubash-umask-stderr-status.txt";
