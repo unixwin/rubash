@@ -110,6 +110,7 @@ impl Executor {
             subshell_depth: Cell::new(0),
             last_background_pid: None,
             background_children: HashMap::new(),
+            background_jobs: HashMap::new(),
             suppress_errexit: 0,
             last_command_substitution_status: Cell::new(None),
             stdout_capture: None,

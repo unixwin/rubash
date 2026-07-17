@@ -13,6 +13,13 @@ const EX_USAGE: i32 = 2;
 pub enum JobsAction {
     Complete(i32),
     Execute(Vec<String>),
+    List(JobsListOptions),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobsListOptions {
+    pub long: bool,
+    pub pids_only: bool,
 }
 
 pub fn execute_with_io<E>(
@@ -24,6 +31,7 @@ where
     E: Write,
 {
     let mut index = 0;
+    let mut options = JobsListOptions::default();
     while let Some(arg) = args.get(index) {
         if arg == "--" {
             index += 1;
@@ -34,7 +42,9 @@ where
         }
         for option in arg[1..].chars() {
             match option {
-                'l' | 'n' | 'p' | 'r' | 's' => {}
+                'l' => options.long = true,
+                'p' => options.pids_only = true,
+                'n' | 'r' | 's' => {}
                 'x' => {
                     let command = args[index + 1..].to_vec();
                     return Ok(if command.is_empty() {
@@ -61,5 +71,5 @@ where
         return Ok(JobsAction::Complete(EXECUTION_FAILURE));
     }
 
-    Ok(JobsAction::Complete(EXECUTION_SUCCESS))
+    Ok(JobsAction::List(options))
 }

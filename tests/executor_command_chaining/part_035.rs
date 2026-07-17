@@ -84,6 +84,50 @@ fn test_jobs_x_uses_command_status() {
 }
 
 #[test]
+fn test_jobs_lists_background_command() {
+    let output_path = "target/rubash-jobs-list-output.txt";
+    let status_path = "target/rubash-jobs-list-status.txt";
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("true & pid=$!; jobs > {output_path}; wait \"$pid\"; jobs >> {output_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let lines = output.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("Running"));
+    assert!(lines[0].ends_with("true &"));
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "0\n");
+    let _ = fs::remove_file(output_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
+fn test_jobs_p_lists_background_pid_only() {
+    let output_path = "target/rubash-jobs-p-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("true & pid=$!; jobs -p > {output_path}; wait \"$pid\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let pid = output.trim_end().parse::<u32>().expect("jobs -p pid");
+    assert!(pid > 0);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_disown_without_jobs_reports_current_job_failure() {
     let error_path = "target/rubash-disown-empty-error.txt";
     let status_path = "target/rubash-disown-empty-status.txt";

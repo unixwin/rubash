@@ -98,6 +98,11 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 Ok(status)
             }
+            crate::builtins::jobs::JobsAction::List(options) => {
+                let stdout = self.background_jobs_output(options);
+                self.write_buffered_builtin_output(cmd, stdout.as_bytes(), &stderr)?;
+                Ok(0)
+            }
             crate::builtins::jobs::JobsAction::Execute(words) => {
                 if !stderr.is_empty() {
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
@@ -121,6 +126,7 @@ impl Executor {
                 let wait_status = child.wait()?;
                 status = wait_status.code().unwrap_or(1);
             }
+            self.background_jobs.clear();
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             return Ok(status);
         }
@@ -129,6 +135,7 @@ impl Executor {
             if let Ok(pid) = cmd.words[1].parse::<u32>() {
                 if let Some(mut child) = self.background_children.remove(&pid) {
                     let status = child.wait()?.code().unwrap_or(1);
+                    self.background_jobs.remove(&pid);
                     self.write_buffered_builtin_output(cmd, &[], &[])?;
                     return Ok(status);
                 }
@@ -143,6 +150,29 @@ impl Executor {
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
+    }
+
+    fn background_jobs_output(&self, options: crate::builtins::jobs::JobsListOptions) -> String {
+        let mut jobs = self.background_jobs.iter().collect::<Vec<_>>();
+        jobs.sort_by_key(|(pid, _)| *pid);
+
+        let mut output = String::new();
+        for (index, (pid, source)) in jobs.into_iter().enumerate() {
+            if options.pids_only {
+                output.push_str(&format!("{pid}\n"));
+            } else if options.long {
+                output.push_str(&format!(
+                    "[{}]  {pid} Running                 {source} &\n",
+                    index + 1
+                ));
+            } else {
+                output.push_str(&format!(
+                    "[{}]  Running                 {source} &\n",
+                    index + 1
+                ));
+            }
+        }
+        output
     }
 
     pub(in crate::executor) fn execute_disown(

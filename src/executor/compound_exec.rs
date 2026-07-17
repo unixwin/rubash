@@ -23,8 +23,9 @@ impl Executor {
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
         let source = self.background_command_source(&background_command.command);
+        let display_source = bash_command_source_text(&background_command.command);
         let mut child = Command::new(&exe);
-        child.arg("--").arg("-c").arg(source);
+        child.arg("--").arg("-c").arg(&source);
         child.stdin(Stdio::null());
         for (key, value) in &self.env_vars {
             if !key.starts_with("__RUBASH_") {
@@ -35,6 +36,7 @@ impl Executor {
         let child = child.spawn()?;
         let pid = child.id();
         self.background_children.insert(pid, child);
+        self.background_jobs.insert(pid, display_source);
         self.last_background_pid = Some(pid);
         self.exit_code = 0;
         Ok(())
