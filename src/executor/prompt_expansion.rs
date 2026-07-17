@@ -84,6 +84,8 @@ impl Executor {
                 Some('T') => output.push_str(&self.prompt_time("%I:%M:%S")),
                 Some('@') => output.push_str(&self.prompt_time("%I:%M %p")),
                 Some('A') => output.push_str(&self.prompt_time("%H:%M")),
+                Some('d') => output.push_str(&self.prompt_time("%a %b %d")),
+                Some('D') => output.push_str(&self.decode_prompt_date_escape(&mut chars)),
                 Some('u') => output.push_str(&prompt_username(&self.env_vars)),
                 Some('h') => output.push_str(&prompt_hostname(&self.env_vars, false)),
                 Some('H') => output.push_str(&prompt_hostname(&self.env_vars, true)),
@@ -208,6 +210,26 @@ impl Executor {
 
     pub(in crate::executor) fn prompt_time(&self, format: &str) -> String {
         crate::builtins::printf::time::format_current_time(format, &self.env_vars)
+    }
+
+    fn decode_prompt_date_escape<I>(&self, chars: &mut std::iter::Peekable<I>) -> String
+    where
+        I: Iterator<Item = char>,
+    {
+        if chars.peek() != Some(&'{') {
+            return "\\D".to_string();
+        }
+        chars.next();
+
+        let mut format = String::new();
+        for ch in chars.by_ref() {
+            if ch == '}' {
+                return self.prompt_time(&format);
+            }
+            format.push(ch);
+        }
+
+        format!("\\D{{{format}")
     }
 
     pub(in crate::executor) fn expand_assignment_tilde(&self, value: &str) -> String {

@@ -304,6 +304,26 @@ fn test_parameter_prompt_transform_expands_time_escapes() {
 }
 
 #[test]
+fn test_parameter_prompt_transform_expands_date_escapes() {
+    let output_path = "target/rubash-param-prompt-transform-date-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("p='d=\\d D=\\D{{%Y-%m}}'; echo \"${{p@P}}\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let pattern =
+        regex::Regex::new(r"^d=[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] D=\d{4}-\d{2}\n$").unwrap();
+    assert!(pattern.is_match(&output), "{output:?}");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_indirect_array_pattern_removes_prefixes_and_suffixes() {
     let output_path = "target/rubash-param-indirect-array-pattern-output.txt";
     let _ = fs::remove_file(output_path);

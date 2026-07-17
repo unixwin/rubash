@@ -22,6 +22,7 @@ pub(super) fn strftime_subset(format: &str, time: &LocalTimeParts) -> String {
             'e' => output.push_str(&format!("{:2}", time.day)),
             'H' => output.push_str(&format!("{:02}", time.hour)),
             'I' => output.push_str(&format!("{:02}", twelve_hour(time.hour))),
+            'm' => output.push_str(&format!("{:02}", time.month)),
             'M' => output.push_str(&format!("{:02}", time.minute)),
             'S' => output.push_str(&format!("{:02}", time.second)),
             'Y' => output.push_str(&format!("{:04}", time.year)),
