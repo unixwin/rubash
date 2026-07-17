@@ -144,6 +144,20 @@ impl Executor {
                 names.sort_unstable();
                 return Some(names);
             }
+            if let Some(prefix) = word
+                .strip_prefix("${!")
+                .and_then(|word| word.strip_suffix("*}"))
+            {
+                let mut names = self
+                    .env_vars
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| name.starts_with(prefix))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                names.sort_unstable();
+                return Some(vec![names.join(&self.ifs_first_char_separator())]);
+            }
             if let Some(name) = word
                 .strip_prefix("${!")
                 .and_then(|word| word.strip_suffix("[@]}"))
@@ -155,15 +169,24 @@ impl Executor {
                 }
                 return Some(array_indices(&storage));
             }
+            if let Some(name) = word
+                .strip_prefix("${!")
+                .and_then(|word| word.strip_suffix("[*]}"))
+            {
+                let storage_name = self.resolved_variable_name(name)?;
+                let storage = self.parameter_array_storage(name)?;
+                let keys = if is_marked_var(&self.env_vars, ASSOC_VARS, &storage_name) {
+                    assoc_keys(&storage)
+                } else {
+                    array_indices(&storage)
+                };
+                return Some(vec![keys.join(&self.ifs_first_char_separator())]);
+            }
         }
         if quoted_array_word && word == "${GROUPS[*]}" {
-            let separator = self
-                .env_vars
-                .get("IFS")
-                .and_then(|ifs| ifs.chars().next())
-                .unwrap_or(' ')
-                .to_string();
-            return Some(vec![self.groups_words().join(&separator)]);
+            return Some(vec![self
+                .groups_words()
+                .join(&self.ifs_first_char_separator())]);
         }
         let name = word.strip_prefix("${").and_then(|word| {
             if quoted_array_word {
@@ -178,5 +201,13 @@ impl Executor {
         }
         self.parameter_array_storage(name)
             .map(|value| array_values(&value))
+    }
+
+    fn ifs_first_char_separator(&self) -> String {
+        self.env_vars
+            .get("IFS")
+            .and_then(|ifs| ifs.chars().next())
+            .unwrap_or(' ')
+            .to_string()
     }
 }

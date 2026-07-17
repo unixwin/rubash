@@ -43,6 +43,50 @@ fn test_quoted_array_at_indices_expand_as_loop_words() {
 }
 
 #[test]
+fn test_quoted_array_star_indices_use_ifs_first_char() {
+    let output_path = "target/rubash-quoted-array-star-indices-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "arr=([2]=two [4]=four); IFS=:; printf '<%s>\\n' \"${{!arr[@]}}\" \"${{!arr[*]}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<2>\n<4>\n<2:4>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_quoted_prefix_star_names_use_ifs_first_char() {
+    let output_path = "target/rubash-quoted-prefix-star-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "rubash_ix_b=2; rubash_ix_a=1; IFS=:; printf '<%s>\\n' \"${{!rubash_ix_@}}\" \"${{!rubash_ix_*}}\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "<rubash_ix_a>\n<rubash_ix_b>\n<rubash_ix_a:rubash_ix_b>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_quoted_assoc_at_indices_expand_as_loop_words() {
     let output_path = "target/rubash-quoted-assoc-indices-loop-output.txt";
     let _ = fs::remove_file(output_path);
