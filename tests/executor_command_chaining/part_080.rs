@@ -699,6 +699,40 @@ fn test_read_combined_su_reads_numbered_fd() {
 }
 
 #[test]
+fn test_read_combined_eu_consumes_separate_fd() {
+    let output_path = "target/rubash-read-eu-separate-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -eu 3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "ab");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_read_combined_eu_reads_numbered_fd() {
+    let output_path = "target/rubash-read-eu-numbered-fd-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("read -eu3 value 3<<< 'a\\b'; printf '%s' \"$value\" > {output_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "ab");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_read_combined_rsu_consumes_separate_fd_raw() {
     let output_path = "target/rubash-read-rsu-separate-fd-output.txt";
     let _ = fs::remove_file(output_path);

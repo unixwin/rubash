@@ -425,6 +425,44 @@ impl Executor {
                     }
                     index += 1;
                 }
+                "-eu" => {
+                    let Some(word) = cmd.words.get(index + 1) else {
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}read: -eu: option requires an argument",
+                            self.diagnostic_prefix()
+                        );
+                        let _ = writeln!(&mut stderr, "{READ_USAGE}");
+                        return self.finish_read_error(cmd, &stderr, 2);
+                    };
+                    read_fd = match parse_read_fd(word) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {word}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 2;
+                }
+                word if word.starts_with("-eu") && word.len() > 3 => {
+                    let value = &word[3..];
+                    read_fd = match parse_read_fd(value) {
+                        Ok(fd) => Some(fd),
+                        Err(()) => {
+                            let _ = writeln!(
+                                &mut stderr,
+                                "{}read: {value}: invalid file descriptor specification",
+                                self.diagnostic_prefix()
+                            );
+                            return self.finish_read_error(cmd, &stderr, 1);
+                        }
+                    };
+                    index += 1;
+                }
                 "-si" => {
                     index += 2;
                 }
