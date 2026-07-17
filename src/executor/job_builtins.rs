@@ -109,12 +109,40 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(1);
                 }
+                let Some(words) = self.expand_jobs_x_words(words, &mut stderr)? else {
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(1);
+                };
                 let mut command = cmd.clone();
                 command.words = words;
                 self.execute_command(&command)?;
                 Ok(self.exit_code)
             }
         }
+    }
+
+    fn expand_jobs_x_words(
+        &self,
+        words: Vec<String>,
+        stderr: &mut Vec<u8>,
+    ) -> Result<Option<Vec<String>>, ExecuteError> {
+        let mut expanded = Vec::with_capacity(words.len());
+        for word in words {
+            if word.starts_with('%') {
+                let Some(pid) = self.resolve_background_job(&word) else {
+                    writeln!(
+                        stderr,
+                        "{}jobs: {word}: no such job",
+                        self.diagnostic_prefix()
+                    )?;
+                    return Ok(None);
+                };
+                expanded.push(pid.to_string());
+            } else {
+                expanded.push(word);
+            }
+        }
+        Ok(Some(expanded))
     }
 
     pub(in crate::executor) fn execute_wait(

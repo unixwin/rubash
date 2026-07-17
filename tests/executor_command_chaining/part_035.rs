@@ -84,6 +84,52 @@ fn test_jobs_x_uses_command_status() {
 }
 
 #[test]
+fn test_jobs_x_replaces_jobspec_with_background_pid() {
+    let output_path = "target/rubash-jobs-x-jobspec-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!("true & pid=$!; jobs -x echo %1 \"$pid\" > {output_path}; disown \"$pid\"");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    let output = fs::read_to_string(output_path).unwrap();
+    let mut parts = output.split_whitespace();
+    let expanded = parts.next().unwrap();
+    let launched = parts.next().unwrap();
+    assert!(parts.next().is_none());
+    assert!(expanded.parse::<u32>().is_ok());
+    assert_eq!(expanded, launched);
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_jobs_x_unknown_jobspec_reports_failure() {
+    let error_path = "target/rubash-jobs-x-unknown-error.txt";
+    let status_path = "target/rubash-jobs-x-unknown-status.txt";
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+    let input = format!("jobs -x echo %1 2> {error_path}; echo $? > {status_path}");
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    assert!(fs::read_to_string(error_path)
+        .unwrap()
+        .contains("jobs: %1: no such job"));
+    let _ = fs::remove_file(error_path);
+    let _ = fs::remove_file(status_path);
+}
+
+#[test]
 fn test_jobs_lists_background_command() {
     let output_path = "target/rubash-jobs-list-output.txt";
     let status_path = "target/rubash-jobs-list-status.txt";
