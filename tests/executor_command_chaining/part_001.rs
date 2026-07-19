@@ -102,6 +102,33 @@ fn test_or_operator() {
 }
 
 #[test]
+fn test_mixed_and_or_lists_short_circuit_left_to_right() {
+    let output_path = "target/rubash-mixed-and-or-list-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "true && echo yes >> {output_path} || echo no >> {output_path}; \
+         false && echo bad1 >> {output_path} || echo fallback >> {output_path}; \
+         true || echo bad2 >> {output_path}; \
+         false || echo recovered >> {output_path}; \
+         false && echo bad3 >> {output_path} && echo also_bad >> {output_path}; \
+         true || echo bad4 >> {output_path} && echo after_true >> {output_path}; \
+         [ 1 -eq 2 ] && echo bad5 >> {output_path} || echo test_false >> {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "yes\nfallback\nrecovered\nafter_true\ntest_false\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+#[test]
 fn test_ansi_c_quoted_words_decode_as_single_arguments() {
     let output_path = "target/rubash-ansi-c-quoted-word-output.txt";
     let _ = fs::remove_file(output_path);

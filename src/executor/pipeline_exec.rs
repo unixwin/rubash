@@ -6,10 +6,31 @@ impl Executor {
         &mut self,
         and_or_list: &AndOrListCommand,
     ) -> Result<(), ExecuteError> {
-        let ast = Ast {
-            commands: and_or_list.commands.clone(),
-        };
-        self.execute_ast(&ast)
+        for (index, command) in and_or_list.commands.iter().enumerate() {
+            if index > 0 {
+                let connector = and_or_list.connectors.get(index - 1).copied();
+                let should_execute = match connector {
+                    Some(true) => self.exit_code == 0,
+                    Some(false) => self.exit_code != 0,
+                    None => true,
+                };
+                if !should_execute {
+                    continue;
+                }
+            }
+
+            let mut command = command.clone();
+            command.and_or = None;
+            let ast = Ast {
+                commands: vec![command],
+            };
+            if index < and_or_list.connectors.len() {
+                self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))?;
+            } else {
+                self.execute_ast(&ast)?;
+            }
+        }
+        Ok(())
     }
 
     pub(in crate::executor) fn execute_pipeline_command(
