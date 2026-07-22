@@ -462,6 +462,27 @@ fn test_multi_command_substitution_keeps_assignments_local() {
 }
 
 #[test]
+fn test_function_pipeline_command_substitution_captures_stdout() {
+    let output_path = "target/rubash-function-pipeline-command-subst-output.txt";
+    let _ = fs::remove_file(output_path);
+    let input = format!(
+        "inner() {{ echo 123 | grep 123; }}; \
+         outer=\"$(inner)\"; \
+         printf 'outer=<%s>\\n' \"$outer\" > {output_path}"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "outer=<123>\n");
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
 fn test_time_command_substitution_captures_timed_stdout() {
     let output_path = "target/rubash-time-command-substitution-output.txt";
     let _ = fs::remove_file(output_path);
