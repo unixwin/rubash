@@ -142,7 +142,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn write_pipeline_output(
-        &self,
+        &mut self,
         command: &CommandNode,
         output: &str,
     ) -> Result<(), ExecuteError> {
@@ -157,6 +157,8 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.env_vars))?;
             file.write_all(output.as_bytes())?;
+        } else if let Some(capture) = &mut self.stdout_capture {
+            capture.write_all(output.as_bytes())?;
         } else {
             print!("{output}");
         }
