@@ -73,6 +73,44 @@ mod unit_tests {
     }
 
     #[test]
+    fn quoted_command_substitution_preserves_internal_newlines() {
+        let tokens = tokenize("echo \"$(printf 'echo foo\\necho bar\\n')\"");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let expanded = executor
+            .expand_command_words(&ast.commands[0])
+            .expect("expand command words");
+
+        assert_eq!(
+            expanded.words,
+            vec!["echo".to_string(), "echo foo\necho bar".to_string()]
+        );
+    }
+
+    #[test]
+    fn unquoted_command_substitution_still_splits_internal_newlines() {
+        let tokens = tokenize("echo $(printf 'echo foo\\necho bar\\n')");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+
+        let expanded = executor
+            .expand_command_words(&ast.commands[0])
+            .expect("expand command words");
+
+        assert_eq!(
+            expanded.words,
+            vec![
+                "echo".to_string(),
+                "echo".to_string(),
+                "foo".to_string(),
+                "echo".to_string(),
+                "bar".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn prompt_dollar_escape_uses_effective_uid() {
         let mut executor = Executor::new();
 

@@ -33,9 +33,11 @@ impl Executor {
             .get(index)
             .is_some_and(|kind| *kind == TokenKind::Variable);
         let unquoted_command_substitution = cmd
-            .words
+            .word_metadata
             .get(index)
-            .is_some_and(|word| word_has_unquoted_command_substitution(word));
+            .map(|metadata| metadata.raw.as_str())
+            .or_else(|| cmd.words.get(index).map(String::as_str))
+            .is_some_and(word_has_unquoted_command_substitution);
         let unquoted_indirect_name_list = cmd
             .words
             .get(index)
