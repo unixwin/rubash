@@ -294,7 +294,10 @@ impl Executor {
         if name.is_empty() {
             return true;
         }
-        if matches!(name, "@" | "*" | "?" | "$" | "-" | "0") {
+        // `${##}` is the length of `$#` (exp.tests:376 -> 1 with $#=5) and
+        // `${#!}` the length of `$!` (more-exp.tests -> 0 while unset), so
+        // both special names are valid length parameters in GNU.
+        if matches!(name, "@" | "*" | "?" | "$" | "-" | "0" | "#" | "!") {
             return true;
         }
         if name.parse::<usize>().is_ok() {
@@ -361,6 +364,15 @@ impl Executor {
     /// variable-name listing suffix. `${!}` itself is the $! parameter.
     fn is_valid_indirect_expression(expr: &str) -> bool {
         if expr.is_empty() {
+            return true;
+        }
+        // GNU param_expand (subst.c): a `!` whose next character is an
+        // operator (`-` `=` `+` `:`) is the `$!` parameter WITH that
+        // operator (`${!-ok 27}` substitutes `ok 27` while `$!` is unset;
+        // `${!:-posparams}`), not an indirect expansion through a variable
+        // named by the body. The body is valid and the operator family
+        // expands it; only `?` `$` `#` etc. stay indirect (special params).
+        if matches!(expr.chars().next(), Some('-' | '=' | '+' | ':')) {
             return true;
         }
         let base = match expr.rfind('[') {
@@ -927,9 +939,18 @@ impl Executor {
     pub(in crate::executor) fn parameter_error_value(&self, name: &str) -> Option<String> {
         match name {
             "#" => Some(self.positional_params.len().to_string()),
+            // GNU chk_atstar (subst.c): `$@`/`$*` are UNSET with zero
+            // positional parameters, so `-` substitutes the default word
+            // (more-exp.tests `${*-x}` with no args prints x) instead of
+            // keeping a null value.
+            "@" | "*" if self.positional_params.is_empty() => None,
             "@" | "*" => Some(self.positional_params.join(" ")),
             "?" => Some(self.exit_code.to_string()),
             "$" => Some(self.shell_pid_value().to_string()),
+            // `$!` is unset until the first background job (variables.c), so
+            // `${!-ok 27}` substitutes `ok 27` and `${@-x}`/`${*-x}` with no
+            // positionals substitute their default word.
+            "!" if self.last_background_pid.is_none() => None,
             "!" => Some(self.last_background_pid_value()),
             "-" => Some(self.shell_option_flags()),
             "0" => Some(self.script_name_value()),

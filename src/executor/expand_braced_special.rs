@@ -37,6 +37,14 @@ impl Executor {
         }
 
         let indirect_name = name.strip_prefix('!')?;
+        // GNU param_expand (subst.c): a `!` immediately followed by an
+        // operator character is the `$!` parameter with that operator
+        // applied (`${!-ok 27}` -> "ok 27", `${!:-posparams}`), not an
+        // indirect expansion. Fall through to the operator family, which
+        // resolves the base `!` through parameter_operator_value.
+        if matches!(indirect_name.chars().next(), Some('-' | '=' | '+' | ':')) {
+            return None;
+        }
         if has_indirect_parameter_word_operator(name) {
             return None;
         }

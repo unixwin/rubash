@@ -356,11 +356,16 @@ impl Executor {
             // uses dollar_star (IFS[0]) except when IFS is set empty, where
             // Posix interp 888 falls back to dollar_at (space separator); the
             // joined word is then field-split like any unquoted expansion
-            // (W_SPLITSPACE).
+            // (W_SPLITSPACE). The split runs over list_quote_escapes-protected
+            // elements (subst.c:3014), so each element survives verbatim: one
+            // word per positional (exp10.sub `${*@Q}` with `set -- ' A ' ' B '`).
             let ifs_set_empty = self
                 .env_vars
                 .get("IFS")
                 .is_some_and(|value| value.is_empty());
+            if ifs_set_empty && !quoted {
+                return Some(values);
+            }
             let separator = if ifs_set_empty {
                 " ".to_string()
             } else {

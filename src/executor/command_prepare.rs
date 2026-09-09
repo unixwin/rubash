@@ -617,17 +617,22 @@ impl Executor {
                 self.env_vars.get("IFS").map(String::as_str),
             );
         }
-        // Unquoted `$*` with a set-empty IFS: Posix interp 888 expands it
-        // like $@ (space-joined) and the result splits on the join spaces
-        // despite the null IFS (subst.c string_list_pos_params:3047-3048
-        // dispatches to string_list_dollar_at; param_expand marks the
-        // result W_SPLITSPACE at subst.c:10202-10207). The plain IFS[0]
-        // join concatenated `1` and `2` into `12` (posixexp3).
+        // Unquoted `$*` with a set-empty IFS: Posix interp 888 dispatches
+        // to the dollar_at word list (subst.c string_list_pos_params:3047-
+        // 3048). The W_SPLITSPACE join at subst.c:10664-10668 runs over
+        // list_quote_escapes-protected elements, so each element's internal
+        // spaces survive the re-split: the net result is one word per
+        // positional parameter, preserved verbatim (exp10.sub `${*}` with
+        // `set -- ' A ' ' B '`).
+        if word == "${*}" && !raw_word_is_quoted(raw)
+            && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+        {
+            return self.positional_params.clone();
+        }
         if word == "$*" && !raw_word_is_quoted(raw)
             && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
         {
-            let joined = self.positional_params.join(" ");
-            return field_split_values_with_ifs(&joined, Some(" "));
+            return self.positional_params.clone();
         }
         if let Some(values) =
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
@@ -890,8 +895,11 @@ impl Executor {
             match self.env_vars.get("IFS").map(String::as_str) {
                 Some("") => {
                     if alternate == "$*" || alternate == "${*}" {
-                        let joined = self.positional_params.join(" ");
-                        return Some(field_split_values_with_ifs(&joined, Some(" ")));
+                        // subst.c param_expand routes the operator word
+                        // through expand_string_for_rhs -> W_SPLITSPACE over
+                        // escaped elements: one preserved word per positional
+                        // (exp9.sub `${var-$*}` with `set -- abc 'def ghi' jkl`).
+                        return Some(self.positional_params.clone());
                     }
                 }
                 Some(ifs) => {
@@ -958,7 +966,11 @@ impl Executor {
             return None;
         }
         let inner = &braced[2..braced.len() - 1];
-        if !inner.contains("$@") && !inner.contains("${@}") {
+        if !inner.contains("$@")
+            && !inner.contains("${@}")
+            && !inner.contains("$*")
+            && !inner.contains("${*}")
+        {
             return None;
         }
         let (var_name, alternate, use_when_set, require_non_empty) =
@@ -984,6 +996,18 @@ impl Executor {
             // Alternate unused: quoted-empty/quoted-null handling belongs to
             // the existing paths, which already match GNU for those forms.
             return None;
+        }
+
+        // GNU string_list_pos_params (subst.c:3035-3040): a quoted `$*` joins
+        // the positionals with IFS[0] into ONE word (concatenation when IFS
+        // is set empty). The outer double quotes carry into the operator
+        // word, so `"${var-$*}"` never field-splits (exp9.sub `${var-$*}`
+        // under IFS=':' stays `abc:def ghi:jkl`).
+        if alternate == "$*" || alternate == "${*}" {
+            return Some(vec![
+                self.positional_params
+                    .join(&self.ifs_first_char_separator()),
+            ]);
         }
 
         let synthetic_raw = format!("\"{alternate}\"");
