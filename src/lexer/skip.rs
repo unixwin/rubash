@@ -135,6 +135,12 @@ impl<'a> Lexer<'a> {
             .peek()
             .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
         {
+            // A backslash quotes the next delimiter byte (`<<\)` uses a
+            // literal `)` delimiter); consume the escape pair as one unit so
+            // the quoted `)` is not mistaken for the substitution closer.
+            if self.peek() == Some('\\') && self.peek_after(1).is_some() {
+                self.advance();
+            }
             self.advance();
         }
         let mut delimiter =
@@ -184,6 +190,18 @@ impl<'a> Lexer<'a> {
                     self.advance();
                 }
                 break;
+            }
+            // GNU make_cmd.c:602-611 (PST_EOFTOKEN): a body line that starts
+            // with the delimiter and carries `)` later on the line ends the
+            // heredoc as if it hit EOF; the rest of the line is pushed back
+            // into the parser input, where the `)` then closes the command
+            // substitution (`foo=$(cat <<EOF / hi / EOF )`). Resume the span
+            // scan at that first `)`.
+            if comparable.starts_with(delimiter.as_str()) {
+                if let Some(paren) = comparable[delimiter.len()..].find(')') {
+                    self.position = line_start + delimiter.len() + paren;
+                    break;
+                }
             }
             if self.peek() == Some('\n') {
                 self.advance();

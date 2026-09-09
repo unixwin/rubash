@@ -440,6 +440,12 @@ pub struct Executor {
     /// command can abandon itself entirely (GNU probe f4).
     pub(crate) inside_compound_condition: Cell<bool>,
     last_command_substitution_status: Cell<Option<i32>>,
+    /// A current-shell (`${ ...; }` / `${| ...; }`) body that ran `exit N`
+    /// aborts the enclosing (sub)shell with status N (GNU subst.c: the
+    /// nofork body shares the shell's exit path). The walker records the
+    /// status here; command_execute converts it into ExecuteError::ExitCode
+    /// after word expansion so the enclosing context unwinds.
+    current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,

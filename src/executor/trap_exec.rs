@@ -57,6 +57,11 @@ impl Executor {
                 }
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 let source = eval_source_for_reparse(&source);
+                // GNU parse.y re-reads the eval string as parser input, so
+                // alias expansion applies at command position
+                // (parse.y alias_expand_token / push_string; comsub21.sub
+                // `eval my_alias` inside a substitution body expands here).
+                let source = self.comsub_body_alias_splice(&source);
                 let mut tokens = crate::lexer::tokenize(&source);
                 // GNU eval reports errors with the caller line numbering:
                 // the string lines continue the script line counter

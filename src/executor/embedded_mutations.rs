@@ -599,7 +599,7 @@ impl Executor {
         expanded
     }
 
-    fn expand_current_shell_braced_substitution(
+    pub(in crate::executor) fn expand_current_shell_braced_substitution(
         &mut self,
         chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     ) -> Option<String> {
@@ -682,37 +682,79 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+        let source = &self.comsub_body_alias_splice(source);
+        let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
             body_start_line,
+            true,
         );
         let ast = crate::parser::parse(&tokens);
-        let saved_exit_code = self.exit_code;
 
-        let (status, output) = if pipe_output {
-            let result = self.execute_current_shell_body(&ast);
-            let status = command_substitution_status(result, self.exit_code);
-            (status, String::new())
+        // GNU subst.c nofork substitution: the body's stdout is captured by
+        // the walker itself (a valsub `${| ...; }` discards it — it never
+        // reaches the enclosing output — while a funsub `${ ...; }` returns
+        // it as the expansion value).
+        let saved_capture = self.stdout_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        // GNU subst.c valsub: REPLY is the value channel and the body's own
+        // REPLY state is scoped to the body — the caller's value comes back
+        // afterwards (comsub26.sub: `inside1-inside2-outside`).
+        let saved_reply = self.env_vars.get("REPLY").cloned();
+        if pipe_output {
+            // Seed every frame store so restore_function_locals puts the
+            // caller's REPLY back in env_vars, the typed variable table, and
+            // the attribute set (assignments inside the body touch all three).
+            self.local_var_scopes.push(HashMap::new());
+            self.local_attr_scopes.push(HashMap::new());
+            self.local_typed_scopes.push(HashMap::new());
+            if let Some(scope) = self.local_var_scopes.last_mut() {
+                scope.insert("REPLY".to_string(), saved_reply.clone());
+            }
+            if let Some(typed) = self.local_typed_scopes.last_mut() {
+                typed.insert("REPLY".to_string(), self.shell_state.variables.get("REPLY").cloned());
+            }
+        }
+        let result = if pipe_output {
+            // The seeded frame is already on the stack; run the body without
+            // pushing another one.
+            self.execute_ast(&ast)
         } else {
-            let saved_capture = self.stdout_capture.take();
-            self.stdout_capture = Some(Vec::new());
-            let result = self.execute_current_shell_body(&ast);
-            let status = command_substitution_status(result, self.exit_code);
-            let output = bytes_to_shell_text(&self.stdout_capture.take().unwrap_or_default())
-                .trim_end_matches('\n')
-                .to_string();
-            self.stdout_capture = saved_capture;
-            (status, output)
+            self.execute_current_shell_body(&ast)
         };
+        let body_reply = self.env_vars.get("REPLY").cloned();
+        match saved_reply {
+            Some(value) => {
+                self.env_vars.insert("REPLY".to_string(), value);
+            }
+            None => {
+                self.env_vars.remove("REPLY");
+            }
+        }
+        let captured = self.stdout_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_capture;
 
-        self.exit_code = saved_exit_code;
+        // `exit N` inside the body aborts the enclosing (sub)shell with N
+        // (comsub26.sub line 32: the subshell never prints and $? = 42).
+        if let Err(crate::executor::ExecuteError::ExitCode(code)) = &result {
+            self.current_shell_substitution_exit.set(Some(*code));
+        }
+        let status = command_substitution_status(result, self.exit_code);
+
+        // The body's own exit status is $? for expansions later on the same
+        // command line (comsub26.sub line 35: `echo ${ ...; return 42; } $?`
+        // prints `var=inside 42`); the finished command then overwrites $?
+        // with its own status as usual.
+        self.exit_code = status;
         self.last_command_substitution_status.set(Some(status));
 
         if pipe_output {
-            self.env_vars.get("REPLY").cloned().unwrap_or_default()
+            // GNU subst.c valsub: the expansion value is the body-final
+            // REPLY, while the caller's REPLY is restored afterwards
+            // (comsub26.sub: `inside1-inside2-outside`).
+            body_reply.unwrap_or_default()
         } else {
-            output
+            bytes_to_shell_text(&captured).trim_end_matches('\n').to_string()
         }
     }
 
@@ -826,10 +868,12 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+        let source = &self.comsub_body_alias_splice(source);
+        let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
             body_start_line,
+            true,
         );
         let ast = crate::parser::parse(&tokens);
         if !command_substitution_needs_ast_execution(&ast) {

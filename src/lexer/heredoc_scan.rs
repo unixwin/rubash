@@ -17,6 +17,12 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
         .get(index)
         .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
     {
+        // A backslash quotes the next delimiter byte (`<<\)` uses a literal
+        // `)` delimiter); consume the escape pair as one unit so the quoted
+        // `)` is not mistaken for the substitution closer.
+        if chars.get(index) == Some(&'\\') && chars.get(index + 1).is_some() {
+            index += 1;
+        }
         index += 1;
     }
     let mut delimiter = chars[delimiter_start..index]
@@ -70,6 +76,17 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
                 index += 1;
             }
             break;
+        }
+        // GNU make_cmd.c:602-611 (PST_EOFTOKEN): a body line that starts with
+        // the delimiter and carries `)` later on ends the heredoc as if it hit
+        // EOF; the remainder is pushed back into the parser input, where the
+        // `)` then closes the command substitution (`foo=$(cat <<EOF\nhi\nEOF`).
+        // Resume at that first `)` so the paren-balance scan sees the closer.
+        if comparable.starts_with(delimiter.as_str()) {
+            if let Some(paren) = comparable[delimiter.len()..].find(')') {
+                index = line_start + delimiter.chars().count() + paren;
+                break;
+            }
         }
         if chars.get(index) == Some(&'\n') {
             index += 1;

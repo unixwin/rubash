@@ -534,10 +534,12 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let tokens = crate::lexer::tokenize_with_initial_posix_and_line(
+        let source = &self.comsub_body_alias_splice(source);
+        let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
             body_start_line,
+            true,
         );
         let ast = crate::parser::parse(&tokens);
 
@@ -647,6 +649,7 @@ impl Executor {
             debug_trap_command: std::cell::RefCell::new(None),
             debug_trap_function_line: None,
             last_command_substitution_status: Cell::new(None),
+            current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
             last_command_substitution_parse_error: Cell::new(false),
             stdout_capture: None,
             stderr_capture: None,

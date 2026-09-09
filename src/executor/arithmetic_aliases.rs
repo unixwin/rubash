@@ -271,6 +271,58 @@ impl Executor {
         expanded
     }
 
+    /// GNU parse.y:4529-4534 (parse_command_substitution): the substitution
+    /// body is parsed with alias expansion active (posix mode forces it on;
+    /// with `shopt expand_aliases` the net behavior still expands the body's
+    /// command-word aliases). Bash implements this with alias_expand_token's
+    /// push_string/RE_READ_TOKEN loop; splicing the alias value into the
+    /// body text before the body parse gives the same token stream — the
+    /// alias value becomes real parser words whose `$` expansions happen at
+    /// execution (comsub21.sub: `echo ${ my_alias; }` prints $DATE's value,
+    /// not the literal word).
+    pub(in crate::executor) fn comsub_body_alias_splice(&self, source: &str) -> String {
+        if !(self.alias_expansion_enabled() || self.posix_mode_enabled()) {
+            return source.to_string();
+        }
+        let trimmed = source.trim_start_matches([' ', '\t', '\n']);
+        let first_end = trimmed
+            .find(|ch: char| ch.is_whitespace() || ch == ';' || ch == '\n')
+            .unwrap_or(trimmed.len());
+        if first_end == 0 {
+            return source.to_string();
+        }
+        let first = &trimmed[..first_end];
+        // Only a plain word can be an alias invocation; quoted or expanded
+        // words never are (parse.y alias_expand_token).
+        if first.contains('$')
+            || first.contains('`')
+            || first.contains('\\')
+            || first.starts_with('\'')
+            || first.starts_with('"')
+        {
+            return source.to_string();
+        }
+        let Some(alias) = self.aliases.get(first) else {
+            return source.to_string();
+        };
+        // AL_BEINGEXPANDED: a body already expanding this alias does not
+        // recurse (parse.y alias_expand_token cycle guard).
+        if self.expanding_aliases.iter().any(|seen| seen == first) {
+            return source.to_string();
+        }
+        let mut spliced = alias.value.replace('\x1f', "$");
+        let rest = &trimmed[first_end..];
+        if !rest.is_empty()
+            && !spliced.ends_with(' ')
+            && !spliced.ends_with('\t')
+            && !spliced.ends_with('\n')
+        {
+            spliced.push(' ');
+        }
+        spliced.push_str(rest);
+        spliced
+    }
+
     pub(in crate::executor) fn execute_parser_level_alias(
         &mut self,
         cmd: &CommandNode,

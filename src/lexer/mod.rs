@@ -44,6 +44,10 @@ pub enum InputOrigin {
 pub struct TokenizeOptions {
     pub initial_posix: bool,
     pub input_origin: InputOrigin,
+    /// True when the input is a command-substitution body: heredoc body
+    /// lines then end at delimiter-prefixed `)` lines (GNU make_cmd.c:602-611
+    /// with PST_EOFTOKEN set), not only at exact delimiter matches.
+    pub in_command_substitution: bool,
 }
 
 pub fn tokenize(input: &str) -> Vec<Token> {
@@ -73,11 +77,38 @@ pub fn tokenize_with_initial_posix_and_line(
     posix: bool,
     start_line: usize,
 ) -> Vec<Token> {
+    tokenize_comsub_body(input, posix, start_line, false)
+}
+
+/// Tokenize a command-substitution body with the in-substitution heredoc
+/// rules enabled (GNU parses these with PST_EOFTOKEN set).
+pub fn tokenize_comsub_body(
+    input: &str,
+    posix: bool,
+    start_line: usize,
+    in_comsub: bool,
+) -> Vec<Token> {
+    tokenize_comsub_body_with_origin(input, posix, start_line, InputOrigin::Direct, in_comsub)
+}
+
+pub fn tokenize_comsub_body_with_origin(
+    input: &str,
+    posix: bool,
+    start_line: usize,
+    input_origin: InputOrigin,
+    in_comsub: bool,
+) -> Vec<Token> {
     if input.trim().is_empty() {
         return Vec::new();
     }
 
-    let mut tokens = tokenize_with_heredocs(input, posix, InputOrigin::Direct, start_line);
+    let mut tokens = tokenize_with_heredocs(
+        input,
+        posix,
+        input_origin,
+        start_line,
+        in_comsub,
+    );
     if tokens
         .last()
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
@@ -92,18 +123,7 @@ pub fn tokenize_with_initial_posix_and_origin(
     posix: bool,
     input_origin: InputOrigin,
 ) -> Vec<Token> {
-    if input.trim().is_empty() {
-        return Vec::new();
-    }
-
-    let mut tokens = tokenize_with_heredocs(input, posix, input_origin, 1);
-    if tokens
-        .last()
-        .is_some_and(|token| token.kind == TokenKind::Semicolon)
-    {
-        tokens.pop();
-    }
-    tokens
+    tokenize_comsub_body_with_origin(input, posix, 1, input_origin, false)
 }
 
 fn tokenize_with_heredocs(
@@ -111,6 +131,7 @@ fn tokenize_with_heredocs(
     initial_posix: bool,
     input_origin: InputOrigin,
     start_line: usize,
+    in_comsub: bool,
 ) -> Vec<Token> {
     // TODO(parse.y/redir.c): Bash parses here-documents after reading the
     // complete command and performs delimiter-specific expansion rules. This
@@ -124,6 +145,14 @@ fn tokenize_with_heredocs(
     let mut logical_line = String::new();
     let mut continued_line = false;
     let mut parse_posix = initial_posix;
+    // GNU reader state for heredocs opened inside an unclosed command
+    // substitution (parse.y PST_CMDSUBST): body lines stay verbatim in the
+    // accumulated input — the backslash-newline join must not consume them
+    // (make_cmd.c read_secondary_line, comsub4.sub quoted delimiters) — and
+    // a body line starting with the delimiter with `)` later on ends the
+    // heredoc (make_cmd.c:602-611).
+    let mut comsub_heredocs: Vec<ComsubHeredocHeader> = Vec::new();
+    let mut header_scan_from = 0usize;
 
     while let Some(line) = lines.next() {
         if logical_line.is_empty() {
@@ -138,10 +167,53 @@ fn tokenize_with_heredocs(
         let line_had_terminator = position <= input.len();
         line_number += 1;
 
-        if line_had_terminator && ends_with_unquoted_backslash(&logical_line) {
+        let comsub_open = has_unclosed_command_substitution(&logical_line);
+        if !comsub_open {
+            comsub_heredocs.clear();
+        } else if let Some(front) = comsub_heredocs.first().cloned() {
+            // The appended line is a heredoc body line inside the open
+            // substitution: close the heredoc on an exact delimiter line or
+            // on a delimiter-prefixed `)` line (GNU make_cmd.c:602-611).
+            let comparable = if front.strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            if comparable == front.delimiter
+                || (comparable.starts_with(front.delimiter.as_str())
+                    && comparable[front.delimiter.len()..].contains(')'))
+            {
+                comsub_heredocs.remove(0);
+            }
+        }
+        let in_comsub_heredoc_body = comsub_open && !comsub_heredocs.is_empty();
+
+        if line_had_terminator
+            && ends_with_unquoted_backslash(&logical_line)
+            && !in_comsub_heredoc_body
+        {
             logical_line.pop();
             continued_line = true;
             continue;
+        }
+
+        // Fresh header scan once the accumulated text is stable (after the
+        // join decision): a header whose delimiter is completed by the next
+        // physical line (`cat <<\EOT\` + `4` = delimiter `EOT4`) is only
+        // complete after the join, so the scan resumes from the last `<<`.
+        if comsub_open && comsub_heredocs.is_empty() {
+            let slice = &logical_line[header_scan_from.min(logical_line.len())..];
+            let (mut headers, consumed) = scan_line_for_comsub_heredoc_headers(slice);
+            if consumed == slice.len() || headers.is_empty() {
+                header_scan_from = logical_line.len();
+            } else {
+                header_scan_from = logical_line.len() - slice.len() + consumed;
+            }
+            comsub_heredocs.append(&mut headers);
+        } else if !comsub_open {
+            // Keep pace with consumed text: earlier substitutions' headers are
+            // already gathered and must not be rediscovered on the next scan.
+            header_scan_from = logical_line.len();
         }
 
         if has_unclosed_quotes(&logical_line) {
@@ -193,6 +265,7 @@ fn tokenize_with_heredocs(
         let delimiters = heredoc_delimiters(&line_tokens, &logical_line);
         output.append(&mut line_tokens);
         logical_line.clear();
+        header_scan_from = 0;
 
         for delimiter in delimiters {
             // Alias reparsing must leave the caller's physical input available:
@@ -243,6 +316,17 @@ fn tokenize_with_heredocs(
                     found_delimiter = true;
                     break;
                 }
+                // GNU make_cmd.c:602-611 (PST_EOFTOKEN): inside a command
+                // substitution a body line that starts with the delimiter and
+                // ends the substitution (`EOF )`) terminates the heredoc as if
+                // it hit EOF; the body keeps only the lines before it.
+                if in_comsub
+                    && comparable.starts_with(delimiter.value.as_str())
+                    && comparable[delimiter.value.len()..].trim().is_empty()
+                {
+                    found_delimiter = true;
+                    break;
+                }
                 body.push_str(&comparable);
                 body.push('\n');
             }
@@ -271,6 +355,116 @@ fn tokenize_with_heredocs(
     }
 
     output
+}
+
+/// A heredoc opened inside an unclosed command substitution, tracked while
+/// the tokenizer accumulates physical lines.
+#[derive(Clone)]
+struct ComsubHeredocHeader {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+/// Scan accumulated text for `<<` heredoc headers (skipping quoted text and
+/// `$(( ))` arithmetic regions) so the comsub heredoc state machine can keep
+/// their body lines verbatim. Returns the headers found plus the consumed
+/// byte offset: an incomplete delimiter (one whose raw spelling ends with an
+/// unquoted backslash, completed by the next physical line) leaves the scan
+/// point at its `<<` so it is re-read after the join.
+fn scan_line_for_comsub_heredoc_headers(
+    line: &str,
+) -> (Vec<ComsubHeredocHeader>, usize) {
+    let bytes = line.as_bytes();
+    let mut headers = Vec::new();
+    let mut consumed = 0usize;
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        match ch {
+            '\'' if !double => {
+                single = !single;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '\\' if !single => {
+                index += 2;
+            }
+            '$' if !single
+                && bytes.get(index + 1) == Some(&b'(')
+                && bytes.get(index + 2) == Some(&b'(') =>
+            {
+                // Arithmetic region: `<<` there is a shift, not a heredoc.
+                index += 2;
+                let mut depth = 2usize;
+                while index < bytes.len() && depth > 0 {
+                    match bytes[index] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
+                    }
+                    index += 1;
+                }
+            }
+            '<' if !single
+                && bytes.get(index + 1) == Some(&b'<')
+                && bytes.get(index + 2) != Some(&b'<') =>
+            {
+                index += 2;
+                let strip_tabs = bytes.get(index) == Some(&b'-');
+                if strip_tabs {
+                    index += 1;
+                }
+                while matches!(bytes.get(index), Some(b' ') | Some(b'\t')) {
+                    index += 1;
+                }
+                let start = index;
+                while index < bytes.len() {
+                    let current = bytes[index] as char;
+                    if current.is_whitespace() || matches!(current, ';' | '|' | '&' | ')') {
+                        break;
+                    }
+                    if current == '\\' && index + 1 < bytes.len() {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                }
+                let raw = &line[start..index.min(line.len())];
+                let value: String = raw
+                    .chars()
+                    .filter(|current| !matches!(current, '\'' | '"' | '\\'))
+                    .collect();
+                let value = if strip_tabs {
+                    value.trim_start_matches('\t').to_string()
+                } else {
+                    value
+                };
+                let raw = &line[start..index.min(line.len())];
+                if index >= bytes.len() && raw.ends_with('\\') && !raw.ends_with("\\\\") {
+                    // The delimiter continues on the next physical line
+                    // (`<<\EOT\` + `4`): resume this scan after the join.
+                    return (headers, consumed);
+                }
+                if !value.is_empty() {
+                    headers.push(ComsubHeredocHeader {
+                        delimiter: value,
+                        strip_tabs,
+                    });
+                }
+                consumed = index;
+            }
+            _ => {
+                index += 1;
+                consumed = index;
+            }
+        }
+    }
+    (headers, consumed)
 }
 
 pub fn has_unclosed_input_syntax(input: &str) -> bool {

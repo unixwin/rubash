@@ -169,6 +169,12 @@ impl Executor {
         }
 
         let expanded = self.expand_command_words(cmd)?;
+        if let Some(code) = self.current_shell_substitution_exit.take() {
+            // A `${ ...; exit N; }` body aborts the enclosing (sub)shell with
+            // N (GNU subst.c nofork exit propagation; comsub26.sub line 32).
+            self.exit_code = code;
+            return Err(ExecuteError::ExitCode(code));
+        }
         if self.last_command_substitution_status.get() == Some(2)
             && self.last_command_substitution_parse_error.get()
         {

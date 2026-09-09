@@ -52,12 +52,64 @@ impl Executor {
         nounset_hit
     }
 
+    /// GNU eval.c expands the `$(( ))` expression text like a double-quoted
+    /// word before expr.c evaluates it, so current-shell `${ ...; }`
+    /// substitutions run during that expansion (comsub21.sub:
+    /// `$(( ${ number; } ))` is 123, not 0). The payload escapes the embedded
+    /// walker leaves behind are decoded before evaluation.
+    pub(crate) fn expand_arithmetic_expression_mut(&mut self, expression: &str) -> String {
+        let routed = self.route_current_shell_substitutions(expression);
+        let expanded = self.expand_arithmetic_special_parameters(&routed);
+        crate::executor::execution_misc::restore_command_substitution_output(
+            &crate::executor::execution_misc::decode_command_substitution_payload(
+                &expanded,
+            ),
+        )
+    }
+
+    /// Splice current-shell `${ ...; }` / `${| ...; }` substitution values
+    /// into an arithmetic expression before evaluation (subst.c: the
+    /// expression undergoes normal expansion first).
+    fn route_current_shell_substitutions(&mut self, expression: &str) -> String {
+        if !expression.contains("${") {
+            return expression.to_string();
+        }
+        let bytes = expression.as_bytes();
+        let mut output = String::new();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let ch = expression[index..].chars().next().unwrap();
+            if ch == '$' && bytes.get(index + 1) == Some(&b'{') {
+                let after = &expression[index + 2..];
+                let is_funsub = after.starts_with('|')
+                    || after.starts_with(|c: char| c.is_whitespace());
+                if is_funsub {
+                    let mut inner = after.chars().peekable();
+                    if let Some(value) =
+                        self.expand_current_shell_braced_substitution(&mut inner)
+                    {
+                        output.push_str(&value);
+                        let remainder: String = inner.collect();
+                        index = expression.len() - remainder.len();
+                        continue;
+                    }
+                }
+                output.push_str("${");
+                index += 2;
+                continue;
+            }
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+        output
+    }
+
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
         let expression = if self.has_associative_parameter_subscript(expression) {
             normalize_arithmetic_quotes(expression)
         } else {
-            normalize_arithmetic_quotes(&self.expand_arithmetic_special_parameters(expression))
+            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(expression))
         };
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
@@ -113,7 +165,7 @@ impl Executor {
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
         let expression =
-            normalize_arithmetic_quotes(&self.expand_arithmetic_special_parameters(expression));
+            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(expression));
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
