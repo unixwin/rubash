@@ -254,11 +254,23 @@ impl Executor {
                         // unescape pass runs, an unprotected $ has already
                         // opened a parameter expansion (esc6/esc7 probes:
                         // "${v-\$x}" must yield a$x, not drop the $x).
-                        '$' | '"' => {
+                        '$' => {
                             chars.next();
                             output.push(next);
                             continue;
                         }
+                        '"' if !matches!(context, SubstitutionQuoteContext::HereDocument) => {
+                            chars.next();
+                            output.push(next);
+                            continue;
+                        }
+                        // Here-document bodies expand with Q_HERE_DOCUMENT,
+                        // where the escape set is CBSHDOC and not CBSDQUOTE
+                        // (subst.c:11628; syntax.h slashify_in_here_document
+                        // = backslash, backtick, dollar). The double quote is
+                        // not special inside an unquoted heredoc body, so a
+                        // backslash before one is literal data (heredoc.tests
+                        // "echo \""). Fall through to the literal copy.
                         _ => {}
                     }
                 }

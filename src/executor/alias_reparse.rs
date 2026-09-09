@@ -560,13 +560,17 @@ impl Executor {
         }
 
         self.expanding_aliases.push(first_word.clone());
-        let tokens = crate::lexer::tokenize_with_options(
-            &source,
-            crate::lexer::TokenizeOptions {
-                input_origin: crate::lexer::InputOrigin::AliasReplacementDeferredHeredoc,
-                ..Default::default()
-            },
-        );
+        // parse.y gather_here_documents (parse.y:3120) reads the
+        // here-document body from the same input stream the replacement
+        // text is parsed from: by the time this reparse runs,
+        // execute_alias_heredoc has already assembled the body lines
+        // (from the alias value itself or the outer AST, lines 549-560)
+        // into "source", so the body is self-contained. Tokenize with the
+        // Direct origin: the deferred-heredoc origin would make the lexer
+        // emit an empty HereDocBody (lexer/mod.rs:200) and the body lines
+        // would execute as commands (heredoc10.sub "hello: command not
+        // found").
+        let tokens = crate::lexer::tokenize(&source);
         let ast = crate::parser::parse(&tokens);
         let result = self.execute_ast(&ast);
         self.expanding_aliases.pop();

@@ -143,6 +143,55 @@ mod unit_tests {
     }
 
     #[test]
+    fn heredoc_body_keeps_backslash_before_double_quote() {
+        // heredoc.tests: an unquoted heredoc body expands with Q_HERE_DOCUMENT
+        // whose escape set is CBSHDOC (subst.c:11628; syntax.h
+        // slashify_in_here_document = backslash, backtick, dollar). A double
+        // quote is not special in a heredoc body, so a backslash before one is
+        // literal data, while double-backslash and backslash-dollar collapse.
+        let mut executor = Executor::new();
+        let expanded =
+            executor.expand_heredoc_body_mut("echo \\\"\nnext\\\\\nlast\\$v\n");
+        assert_eq!(expanded, "echo \\\"\nnext\\\nlast$v\n");
+    }
+
+    #[test]
+    fn alias_value_heredoc_body_is_not_executed_as_commands() {
+        // heredoc10.sub case 1: the alias value itself contains the complete
+        // here-document. The deferred-heredoc reparse origin used to drop the
+        // body (lexer/mod.rs AliasReplacementDeferredHeredoc) and execute the
+        // body lines as commands (exit 127).
+        let tokens = tokenize(
+            "shopt -s expand_aliases\nalias h='cat <<E\nhello\nworld\nE'\nh\n",
+        );
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.stdout_capture = Some(Vec::new());
+        executor.execute_ast(&ast).expect("alias value heredoc");
+        let captured = executor.stdout_capture.take().unwrap_or_default();
+        let text = String::from_utf8_lossy(&captured);
+        assert_eq!(text, "hello\nworld\n");
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn alias_invocation_heredoc_body_comes_from_following_commands() {
+        // heredoc10.sub case 3: the alias value opens the heredoc and the
+        // body follows in the outer input.
+        let tokens = tokenize(
+            "shopt -s expand_aliases\nalias h='cat <<E'\nh\nbody1\nbody2\nE\n",
+        );
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        executor.stdout_capture = Some(Vec::new());
+        executor.execute_ast(&ast).expect("alias heredoc body");
+        let captured = executor.stdout_capture.take().unwrap_or_default();
+        let text = String::from_utf8_lossy(&captured);
+        assert_eq!(text, "body1\nbody2\n");
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
     fn command_substitution_operator_words_are_detected() {
         use crate::executor::command_subst_helpers::command_substitution_words_have_operators;
 
