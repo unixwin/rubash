@@ -162,6 +162,11 @@ fn is_case_clause_terminator_token(token: &Token) -> bool {
     token.kind == TokenKind::Word && matches!(token.raw.as_str(), ";;" | ";&" | ";;&")
 }
 
+/// GNU parse.y for_command/select_command/while_command/until_command all
+/// accept either "do list done" or the brace-group form ("{ list }") as the
+/// loop body, so the matching terminator may be "done" or "}".
+const LOOP_BODY_TERMINATOR: &str = "done-or-brace";
+
 pub(super) fn update_compound_boundary_stack(
     tokens: &[Token],
     index: usize,
@@ -170,6 +175,8 @@ pub(super) fn update_compound_boundary_stack(
     if let Some(expected) = stack.last().copied() {
         let expected_matches = if expected == "esac" {
             is_case_end_keyword(tokens, index)
+        } else if expected == LOOP_BODY_TERMINATOR {
+            is_keyword(tokens, index, "done") || is_boundary_keyword(tokens, index, "}")
         } else {
             is_keyword(tokens, index, expected)
         };
@@ -189,7 +196,7 @@ pub(super) fn update_compound_boundary_stack(
         tokens.get(index).map(|token| token.value.as_str()),
         Some("for" | "select" | "while" | "until")
     ) {
-        stack.push("done");
+        stack.push(LOOP_BODY_TERMINATOR);
     } else if is_keyword(tokens, index, "case") {
         stack.push("esac");
     }

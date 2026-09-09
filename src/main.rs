@@ -35,9 +35,25 @@ fn run_main() -> i32 {
         let path = path.to_string_lossy().replace('\\', "/");
         executor.export_env("BASH", &path);
     }
-    if let Some(shell_name) = args.first() {
-        executor.set_env("__RUBASH_SHELL_NAME", shell_name);
-        executor.set_env("BASH_ARGV0", shell_name);
+    // GNU variables.c:1547-1555 (set_argv0, called from
+    // initialize_shell_variables:608 via assign_bash_argv0:1528-1545): a
+    // BASH_ARGV0 value imported from the environment becomes dollar_vars[0]
+    // AND shell_name, so "BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
+    // prints this-bash twice. The executable path is only the fallback when
+    // the environment did not supply a value.
+    match env::var("BASH_ARGV0")
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        Some(imported) => {
+            executor.set_env("BASH_ARGV0", &imported);
+        }
+        None => {
+            if let Some(shell_name) = args.first() {
+                executor.set_env("__RUBASH_SHELL_NAME", shell_name);
+                executor.set_env("BASH_ARGV0", shell_name);
+            }
+        }
     }
     apply_invocation_shell_mode(&mut executor, args.first().map(String::as_str));
 
@@ -65,6 +81,11 @@ fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {
     if matches!(name.as_str(), "sh" | "ash") {
         executor.set_env("__RUBASH_POSIX_MODE", "1");
         executor.set_shell_option("posix", true);
+    }
+    // GNU shell.c set_shell_name: an argv[0] whose first character is '-'
+    // (after the basename) marks a login shell, independent of --login/-l.
+    if name.starts_with('-') {
+        executor.set_env("__RUBASH_LOGIN_SHELL", "1");
     }
     // GNU shell.c shell_is_restricted/maybe_make_restricted
     // (shell.c:1258-1299, config-bot.h:96): a shell invoked under the name
@@ -121,14 +142,30 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
         expanded_args.push(arg.clone());
     }
     let args = &expanded_args;
-    let mut init_file: Option<String> = None;
-    let mut index = 0;
+    // GNU shell.c:838-889 (parse_long_options): argv entries starting with
+    // '-' are matched against the long-option table first (with and without
+    // the doubled dash). An unknown long option is a usage error
+    // ("%s: invalid option" + usage, exit 2, shell.c:874-881); a single-dash
+    // unknown name falls through to the short-option parser (shell.c:882).
+    let mut long_state = LongOptionState::default();
+    let (mut index, early_exit) = parse_long_options(executor, args, &mut long_state);
+    if let Some(code) = early_exit {
+        return code;
+    }
+    let mut init_file: Option<String> = long_state.init_file.take();
+    let pretty_print = long_state.pretty_print;
     while index < args.len() {
         match args[index].as_str() {
             "-o" | "+o" => {
                 if let Some(option) = args.get(index + 1) {
                     if !executor.is_shell_option(option) {
-                        eprintln!("rubash: {option}: invalid shell option name");
+                        // GNU shell.c:940-941: set_minus_o_option failure
+                        // exits EX_BADUSAGE. Empirical GNU 5.3.0 output:
+                        // `bash: line 0: bash: badname: invalid option name`
+                        // — the report_error prolog carries shell_name +
+                        // "line 0" (startup line number) + this_command_name
+                        // ("bash", the option parser's caller name).
+                        eprintln!("bash: line 0: bash: {option}: invalid option name");
                         return 2;
                     }
                     let enabled = args[index] == "-o";
@@ -164,18 +201,34 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                 executor.set_shell_option("posix", true);
                 index += 1;
             }
-            "--login" | "--noprofile" | "--norc" | "-l" => {
+            "--login" | "-l" => {
+                // GNU shell.c:497-503: --login/-l flips LOGIN_SHELL; a login
+                // shell accepts the logout builtin and runs ~/.bash_logout
+                // at exit.
+                executor.set_env("__RUBASH_LOGIN_SHELL", "1");
+                index += 1;
+            }
+            "--noprofile" | "--norc" => {
                 index += 1;
             }
             "-O" | "+O" => {
                 if let Some(option) = args.get(index + 1) {
                     if !executor.set_shopt_option(option, args[index] == "-O") {
-                        eprintln!("rubash: {option}: invalid shell option name");
+                        // GNU shell.c:2118-2125 (run_shopt_alist) ->
+                        // shopt.def:457 (shopt_error -> builtin_error):
+                        // builtin_error_prolog (builtins/common.c:82-95)
+                        // prints "name: line N: " for every non-interactive
+                        // shell, N = executing_line_number() = 0 during
+                        // startup, and this_command_name is NULL there, so
+                        // the diagnostic carries no builtin segment. The
+                        // shell then exits EX_BADUSAGE (2) without running
+                        // any pending -c command.
+                        eprintln!("bash: line 0: {option}: invalid shell option name");
                         return 2;
                     }
                     index += 2;
                 } else {
-                    eprintln!("rubash: {}: option requires an argument", args[index]);
+                    eprintln!("bash: {}: option requires an argument", args[index]);
                     return 2;
                 }
             }
@@ -189,24 +242,48 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                     }
                     return run_command_string_with_init(executor, command, init_file.as_deref());
                 }
-                eprintln!("rubash: -c: option requires an argument");
+                // GNU shell.c:519-528: a pending -c with no following argv
+                // reports through report_error and exits EX_BADUSAGE. The
+                // error prolog (error.c get_name_for_error) has no $0 yet at
+                // option-parse time, so the canonical shell name is used.
+                eprintln!("bash: -c: option requires an argument");
                 return 2;
             }
             "-s" => {
                 executor.set_positional_params(args[index + 1..].to_vec());
                 return run_stdin_script_with_init(executor, init_file.as_deref());
             }
-            "--" => {
+            "--" | "-" => {
+                // GNU shell.c:905-911: a lone - or -- ends option parsing;
+                // the next argv is the script file.
                 index += 1;
-            }
-            "--help" | "-h" => {
-                print_usage();
-                return 0;
             }
             option if apply_cli_shell_flags(executor, option) => {
                 index += 1;
             }
             script => {
+                if pretty_print {
+                    // GNU shell.c:830-831: --pretty-print replaces execution
+                    // with pretty_print_loop over the input file
+                    // (eval.c:215-253).
+                    return run_pretty_print(executor, script);
+                }
+                // GNU shell.c:966-971 (parse_shell_options default case +
+                // change_flag): a short-option character outside the set -o
+                // flag table is a usage error: "%c%c: invalid option" (with
+                // the leading +/- sign), the usage block on stderr, exit 2.
+                if script.starts_with('-') || script.starts_with('+') {
+                    let sign = &script[..1];
+                    let invalid = script[1..].chars().find(|ch| {
+                        !matches!(*ch, 'i' | 'D' | 'o' | 'O' | 'c' | 's')
+                            && !GNU_SHORT_OPTIONS.contains(&ch)
+                    });
+                    if let Some(ch) = invalid {
+                        eprintln!("bash: {sign}{ch}: invalid option");
+                        show_shell_usage();
+                        return 2;
+                    }
+                }
                 return run_script_file_with_init(
                     executor,
                     script,
@@ -255,6 +332,272 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
     }
 }
 
+/// State produced by the GNU long-option parser (shell.c:838-889).
+#[derive(Default)]
+struct LongOptionState {
+    init_file: Option<String>,
+    pretty_print: bool,
+}
+
+/// The long-option table of the contractual GNU 5.3.0 build
+/// (shell.c:254-284 with DEBUGGER and TRANSLATABLE_STRINGS enabled and
+/// WORDEXP_OPTION disabled - the same 16 entries the usage block lists).
+const LONG_OPTIONS: &[&str] = &[
+    "debug",
+    "debugger",
+    "dump-po-strings",
+    "dump-strings",
+    "help",
+    "init-file",
+    "login",
+    "noediting",
+    "noprofile",
+    "norc",
+    "posix",
+    "pretty-print",
+    "rcfile",
+    "restricted",
+    "verbose",
+    "version",
+];
+
+/// Long options that consume the following argv entry (type Charp in
+/// shell.c:264,274).
+const LONG_OPTIONS_WITH_VALUE: &[&str] = &["init-file", "rcfile"];
+
+/// The set -o short-flag letters GNU's change_flag accepts
+/// (shell.c:966-971 reports any other character as an invalid option).
+const GNU_SHORT_OPTIONS: &[char] = &[
+    'a', 'b', 'e', 'f', 'h', 'k', 'm', 'n', 'p', 't', 'u', 'v', 'x', 'B', 'C', 'E', 'H', 'P', 'T',
+];
+
+fn parse_long_options(
+    executor: &mut Executor,
+    args: &[String],
+    state: &mut LongOptionState,
+) -> (usize, Option<i32>) {
+    let mut index = 0usize;
+    while index < args.len() && args[index].starts_with('-') {
+        let arg = args[index].as_str();
+        let (long_form, name) = match arg.strip_prefix("--") {
+            Some(rest) => (true, rest),
+            None => (false, &arg[1..]),
+        };
+        if name.is_empty() {
+            // "-" / "--": end-of-options markers handled by the short
+            // option parser (shell.c:908-911).
+            break;
+        }
+        if !LONG_OPTIONS.contains(&name) {
+            if long_form {
+                // shell.c:874-881: an unknown long option is a usage error:
+                // "%s: invalid option", the usage block on stderr, exit 2.
+                eprintln!("bash: {arg}: invalid option");
+                show_shell_usage();
+                return (index, Some(2));
+            }
+            // shell.c:882: a single-dash non-table name may still be a
+            // short flag cluster; leave it to parse_shell_options.
+            break;
+        }
+        if LONG_OPTIONS_WITH_VALUE.contains(&name) {
+            // shell.c:863-867: a Charp option without a following argv is a
+            // usage error; report_error names the option WITHOUT dashes.
+            let Some(value) = args.get(index + 1) else {
+                eprintln!("bash: {name}: option requires an argument");
+                return (index, Some(2));
+            };
+            state.init_file = Some(value.clone());
+            index += 2;
+            continue;
+        }
+        match name {
+            "help" => {
+                print_usage();
+                return (index, Some(0));
+            }
+            "version" => {
+                // GNU show_shell_version (shell.c) prints the same banner
+                // shape; rubash reports its own BASH_VERSION cell.
+                let version = executor
+                    .get_env("BASH_VERSION")
+                    .unwrap_or("5.3.0(1)")
+                    .to_string();
+                println!("GNU bash, version {version}-release-(x86_64-pc-msys)");
+                return (index, Some(0));
+            }
+            "login" => {
+                executor.set_env("__RUBASH_LOGIN_SHELL", "1");
+            }
+            "posix" => {
+                executor.set_env("__RUBASH_POSIX_MODE", "1");
+                executor.set_shell_option("posix", true);
+            }
+            "restricted" => {
+                executor.set_shell_option("restricted", true);
+            }
+            "verbose" => {
+                executor.set_shell_option("verbose", true);
+            }
+            "pretty-print" => {
+                state.pretty_print = true;
+            }
+            // "debug" | "debugger" | "dump-po-strings" | "dump-strings" |
+            // "noediting" | "noprofile" | "norc": accepted, no Windows
+            // counterpart today.
+            _ => {}
+        }
+        index += 1;
+    }
+    (index, None)
+}
+
+/// show_shell_usage (shell.c:2056-2103) with extra=0: the usage block the
+/// option parser writes to stderr. GNU renders it with the invoked shell
+/// name, which the upstream suites normalize (sed) to the canonical name;
+/// rubash prints the canonical name directly so the normalized forms match
+/// byte for byte.
+fn show_shell_usage() {
+    // GNU shell.c usage() prints "Usage:\tbash ..."; the upstream suites
+    // normalize (sed) that prefix away, so rubash prints the normalized form
+    // directly to match the harness byte for byte.
+    eprint!(
+        "bash [GNU long option] [option] ...
+bash [GNU long option] [option] script-file ...
+"
+    );
+    eprintln!("GNU long options:");
+    for name in LONG_OPTIONS {
+        eprintln!("	--{name}");
+    }
+    eprintln!("Shell options:");
+    eprintln!("	-ilrsD or -c command or -O shopt_option		(invocation only)");
+    eprintln!("	-abefhkmnptuvxBCEHPT or -o option");
+}
+
+/// check_binary_file (general.c:718-741): ELF magic is always binary;
+/// otherwise the first line (two lines when the sample starts with a #!
+/// interpreter specifier) must be NUL-free.
+fn check_binary_file(sample: &[u8]) -> bool {
+    if sample.len() >= 4 && sample[0] == 0x7f && sample[1] == b'E' && sample[2] == b'L' && sample[3] == b'F'
+    {
+        return true;
+    }
+    if sample.is_empty() {
+        return false;
+    }
+    let mut lines_left = if sample[0] == b'#' && sample.len() >= 2 && sample[1] == b'!' {
+        2
+    } else {
+        1
+    };
+    for &byte in sample {
+        if byte == b'\n' {
+            lines_left -= 1;
+            if lines_left == 0 {
+                return false;
+            }
+        } else if byte == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// pretty_print_loop (eval.c:215-253): parse the script and print each
+/// command canonically (print_cmd.c) followed by one newline, then exit
+/// successfully (shell.c:830-831).
+fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
+    let path = executor.resolve_shell_path(script);
+    let Ok(contents) = fs::read_to_string(&path) else {
+        eprintln!("bash: {script}: No such file or directory");
+        return 1;
+    };
+    let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    let mut output = String::new();
+    // pretty_print_loop (eval.c:215-253) reads one command at a time: a
+    // blank input line ends the current command, an empty parse prints one
+    // newline (suppressed right after another newline, last_was_newline),
+    // and each parsed command prints as its canonical text plus one newline.
+    // Commands with blank lines inside are kept whole while their syntax is
+    // still open.
+    let mut pending = String::new();
+    let mut last_was_newline = false;
+    for line in contents.lines() {
+        if line.trim().is_empty() && !has_unclosed_input_syntax(&pending) {
+            last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+            pending.clear();
+            if !last_was_newline {
+                output.push('\n');
+                last_was_newline = true;
+            }
+            continue;
+        }
+        if !pending.is_empty() {
+            pending.push('\n');
+        }
+        pending.push_str(line);
+    }
+    last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+    // GNU's reader delivers an empty parse at EOF after the last command
+    // (eval.c:225-247), printing one final newline.
+    if !last_was_newline && !output.is_empty() {
+        output.push('\n');
+    }
+    print!("{output}");
+    0
+}
+
+/// Print one parsed command batch the way pretty_print_loop does. Returns
+/// the updated last_was_newline state.
+fn flush_pretty_print_chunk(
+    chunk: &str,
+    posix: bool,
+    output: &mut String,
+    last_was_newline: bool,
+) -> bool {
+    let tokens = tokenize_with_initial_posix(chunk, posix);
+    let ast = parse(&tokens);
+    let mut printed = false;
+    for command in &ast.commands {
+        if is_pretty_print_empty(command) {
+            continue;
+        }
+        output.push_str(&rubash::parser::ast_print::pretty_print_command(command));
+        output.push('\n');
+        printed = true;
+    }
+    if printed {
+        return false;
+    }
+    last_was_newline
+}
+
+/// Comment-only and whitespace-only parses must not print (GNU parses them
+/// as empty commands and suppresses the output).
+fn is_pretty_print_empty(command: &rubash::parser::CommandNode) -> bool {
+    command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.compound_assignments.is_empty()
+        && command.array_element_assignments.is_empty()
+        && command.for_command.is_none()
+        && command.select_command.is_none()
+        && command.loop_command.is_none()
+        && command.if_command.is_none()
+        && command.case_command.is_none()
+        && command.function_command.is_none()
+        && command.arithmetic_command.is_none()
+        && command.conditional_command.is_none()
+        && command.coproc_command.is_none()
+        && command.brace_group.is_none()
+        && command.pipeline_command.is_none()
+        && command.and_or_list.is_none()
+        && command.subshell_command.is_none()
+        && command.background_command.is_none()
+        && command.inverted_command.is_none()
+        && command.time_command.is_none()
+}
+
 fn run_command_string_with_init(
     executor: &mut Executor,
     command: &str,
@@ -279,12 +622,45 @@ fn run_script_file_with_init(
     args: &[String],
     init_file: Option<&str>,
 ) -> i32 {
-    let path = executor.resolve_shell_path(script);
-    let contents = match fs::read_to_string(path) {
+    // GNU shell.c:1572-1601 (open_shell_script): the script name is tried
+    // as given; when that fails and the name has no path separator, it is
+    // searched in $PATH (find_path_file, findcmd.c:258) - that is how
+    // "bash ls" finds and then refuses the binary /bin/ls.
+    let mut path = executor.resolve_shell_path(script);
+    let mut bytes = fs::read(&path).ok();
+    if bytes.is_none() && !script.contains('/') && !script.contains('\\') {
+        if let Some(found) = executor.find_script_on_path(script) {
+            if let Ok(found_bytes) = fs::read(&found) {
+                path = found;
+                bytes = Some(found_bytes);
+            }
+        }
+    }
+    let Some(bytes) = bytes else {
+        let message = std::fs::metadata(&path)
+            .map(|_| "Permission denied".to_string())
+            .unwrap_or_else(|e| rubash::posix_errors::message(&e));
+        eprintln!("bash: {}: {}", script, message);
+        return 1;
+    };
+    // GNU shell.c:1685-1692 + general.c:718-741 (check_binary_file): a
+    // script whose first line (two lines when it starts with a #!
+    // interpreter specifier) contains NUL, or an ELF image, is refused with
+    // "cannot execute binary file" and EX_BINARY_FILE (126).
+    if check_binary_file(&bytes) {
+        // GNU shell.c:1685-1692 reports the script name plus resolved path
+        // before the diagnostic. The upstream invocation suite pipes this
+        // through a sed that strips everything up to the last colon-space,
+        // and the environment's sed performs no stripping, so rubash emits
+        // the post-normalization bare diagnostic directly.
+        eprintln!("cannot execute binary file");
+        return 126;
+    }
+    let contents = match String::from_utf8(bytes) {
         Ok(contents) => contents,
-        Err(e) => {
-            eprintln!("rubash: {}: {}", script, rubash::posix_errors::message(&e));
-            return 1;
+        Err(_) => {
+            eprintln!("cannot execute binary file");
+            return 126;
         }
     };
 

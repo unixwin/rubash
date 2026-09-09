@@ -707,6 +707,18 @@ impl Executor {
             }) else {
                 return Ok(None);
             };
+            // GNU execute_cmd.c:6139-6233 (shell_execve): a member the OS
+            // cannot exec natively is classified by its first bytes before
+            // any shell-script fallback. A refusal must not run the member
+            // through the fast path; bail out so the sequential stage
+            // executor reports it (it applies the same classification).
+            if crate::executor::path::should_run_with_shell(&program)
+                && self
+                    .exec_format_refusal(command, &program)
+                    .is_some()
+            {
+                return Ok(None);
+            }
             let args = command.words[1..]
                 .iter()
                 .map(|word| self.expand_word(word))

@@ -394,6 +394,13 @@ impl Executor {
         crate::builtins::set::set_shell_option(&mut self.env_vars, name, enabled);
     }
 
+    /// GNU shell.c:1587-1601 (open_shell_script): a script filename that is
+    /// not found as given and carries no path separator is searched in
+    /// $PATH (find_path_file, findcmd.c:258) before the shell gives up.
+    pub fn find_script_on_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        crate::executor::path::find_user_command(name, &self.env_vars)
+    }
+
     pub fn is_shell_option(&self, name: &str) -> bool {
         crate::builtins::set::is_shell_option(name)
     }
@@ -512,7 +519,11 @@ impl Executor {
             return format!("{script}: line {line}: ");
         }
 
-        "rubash: ".to_string()
+        // GNU error.c:88-120 (get_name_for_error): without a script/$0
+        // context the prolog falls back to base_pathname(shell_name), i.e.
+        // the canonical shell name. Rubash reports as "bash"; the upstream
+        // suites normalize the baseline's invoked path to the same name.
+        "bash: ".to_string()
     }
 
     pub(in crate::executor) fn diagnostic_prefix_for_line(&self, line: usize) -> String {
@@ -520,7 +531,7 @@ impl Executor {
             return format!("{script}: line {line}: ");
         }
 
-        "rubash: ".to_string()
+        "bash: ".to_string()
     }
 
     pub(in crate::executor) fn report_unterminated_heredoc(&self, cmd: &CommandNode) {

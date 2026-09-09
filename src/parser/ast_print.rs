@@ -162,6 +162,16 @@ fn is_assignment_word_name(name: &str) -> bool {
     false
 }
 
+/// print_cmd.c print_command for one parsed command: the canonical text the
+/// shell prints for --pretty-print (eval.c:215-253 pretty_print_loop prints
+/// this plus one newline per command).
+pub fn pretty_print_command(command: &CommandNode) -> String {
+    let mut printer = Printer::new();
+    printer.make_command_string(command);
+    printer.print_deferred_heredocs("");
+    printer.out
+}
+
 impl Printer {
     fn new() -> Self {
         Self {
@@ -483,11 +493,19 @@ impl Printer {
 
     fn print_for_command(&mut self, for_command: &ForCommand) {
         if let Some(arithmetic) = &for_command.arithmetic {
-            self.cprintf(&format!(
-                "for (( {}; {}; {} ))",
-                arithmetic.init, arithmetic.test, arithmetic.update
-            ));
-            self.print_loop_body(&for_command.body);
+            // print_cmd.c print_arith_for_command: cprintf ("for (("), each
+            // section's raw text with its leading blanks skipped (expr.c
+            // echoes the section text as written between the (( )) markers),
+            // "; " separators, cprintf ("))") and no semicolon before the
+            // do-line (newline ("do\n") follows directly).
+            self.cprintf("for ((");
+            self.cprintf(arithmetic.init_metadata.expression.trim_start());
+            self.cprintf("; ");
+            self.cprintf(arithmetic.test_metadata.expression.trim_start());
+            self.cprintf("; ");
+            self.cprintf(arithmetic.update_metadata.expression.trim_start());
+            self.cprintf("))");
+            self.print_do_done_body(&for_command.body);
             return;
         }
         self.cprintf(&format!("for {} in ", for_command.variable));
@@ -502,8 +520,15 @@ impl Printer {
     }
 
     /// Shared for/select tail: `;`, `do` on its own line, body, `done`.
+    /// Shared for/select tail: header semicolon, then the do/done body.
     fn print_loop_body(&mut self, body: &[CommandNode]) {
         self.cprintf(";");
+        self.print_do_done_body(body);
+    }
+
+    /// print_for_command tail after the header: do-line, body, semicolon,
+    /// done (print_cmd.c prints do, the body, a semicolon, then done).
+    fn print_do_done_body(&mut self, body: &[CommandNode]) {
         self.newline("do\n");
         self.indentation += INDENTATION_AMOUNT;
         self.print_command_list(body);

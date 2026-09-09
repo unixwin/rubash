@@ -405,6 +405,24 @@ impl Executor {
             return Ok(());
         };
 
+        // GNU execute_cmd.c:6139-6233 (shell_execve): the OS-level exec is
+        // attempted first, and only a file the OS refuses to exec is
+        // classified by its first bytes: an unresolvable #! interpreter is
+        // refused ("bad interpreter", EX_NOEXEC), a binary first line is
+        // refused ("cannot execute binary file", EX_BINARY_FILE), and plain
+        // text falls back to shell-script execution. Rubash's equivalent
+        // boundary is should_run_with_shell: files Windows cannot exec
+        // natively get the GNU first-bytes classification before the
+        // shell-script fallback wraps them.
+        if crate::executor::path::should_run_with_shell(&program) {
+            if let Some((diagnostic, status)) = self.exec_format_refusal(cmd, &program) {
+                let mut stderr = Vec::new();
+                let _ = writeln!(&mut stderr, "{diagnostic}");
+                self.finish_external_error(cmd, &stderr, status)?;
+                return Ok(());
+            }
+        }
+
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&cmd.words[0]),
@@ -616,6 +634,20 @@ impl Executor {
             }
             Err(error) => {
                 if !used_shell && is_exec_format_error(&error) {
+                    // GNU execute_cmd.c:6139-6233 (shell_execve): when the OS
+                    // refuses to exec a file, its first bytes decide. A #!
+                    // interpreter specifier whose interpreter cannot be
+                    // resolved is refused ("bad interpreter", EX_NOEXEC =
+                    // 126) instead of falling back to shell-script
+                    // execution; a binary file (NUL in the first line, ELF
+                    // magic) is refused as "cannot execute binary file"
+                    // (EX_BINARY_FILE = 126).
+                    if let Some((diagnostic, _)) = self.exec_format_refusal(cmd, program) {
+                        let mut stderr = Vec::new();
+                        let _ = writeln!(&mut stderr, "{diagnostic}");
+                        self.finish_external_error(cmd, &stderr, 126)?;
+                        return Ok(());
+                    }
                     if let Some(shell) = find_shell(&self.env_vars) {
                         let mut shell_process = Command::new(shell);
                         shell_process.arg(program);
@@ -632,6 +664,59 @@ impl Executor {
         Ok(())
     }
 
+    /// GNU execute_cmd.c:6139-6233 (shell_execve + execute_shell_script):
+    /// classify a file the OS refused to exec. Returns the refusal
+    /// diagnostic and exit status when the file must not fall back to
+    /// shell-script execution: an unresolvable #! interpreter ("bad
+    /// interpreter", EX_NOEXEC) or a binary first line ("cannot execute
+    /// binary file", EX_BINARY_FILE). None means the ENOEXEC fallback
+    /// (running the file as a shell script) may proceed.
+    pub(in crate::executor) fn exec_format_refusal(
+        &self,
+        cmd: &CommandNode,
+        program: &PathBuf,
+    ) -> Option<(String, i32)> {
+        let sample = std::fs::read(program).ok()?;
+        if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
+            let line_end = sample
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .unwrap_or(sample.len());
+            let line = String::from_utf8_lossy(&sample[2..line_end]);
+            if let Some(interp) = line.split_whitespace().next() {
+                // GNU execute_shell_script re-execs through the named
+                // interpreter; when it resolves, the shell-script fallback
+                // stands in for that exec here. The standard shells resolve
+                // through the fallback without a refusal.
+                let interp_resolves = matches!(interp, "sh" | "bash" | "dash" | "rubash")
+                    || interp.ends_with("/sh")
+                    || interp.ends_with("/bash")
+                    || crate::executor::path::find_user_command(interp, &self.env_vars).is_some();
+                if !interp_resolves {
+                    return Some((
+                        format!(
+                            "bash: {}: {}: bad interpreter",
+                            cmd.words.first().map(String::as_str).unwrap_or_default(),
+                            interp
+                        ),
+                        126,
+                    ));
+                }
+                return None;
+            }
+        }
+        if check_binary_file(&sample) {
+            return Some((
+                format!(
+                    "bash: {}: cannot execute binary file",
+                    cmd.words.first().map(String::as_str).unwrap_or_default()
+                ),
+                126,
+            ));
+        }
+        None
+    }
+
     fn report_external_spawn_error(
         &mut self,
         cmd: &CommandNode,
@@ -646,6 +731,35 @@ impl Executor {
         )?;
         self.finish_external_error(cmd, &stderr, 126)
     }
+}
+
+/// check_binary_file (general.c:718-741): ELF magic is always binary;
+/// otherwise the first line (two lines when the sample starts with a #!
+/// interpreter specifier) must be NUL-free.
+fn check_binary_file(sample: &[u8]) -> bool {
+    if sample.len() >= 4 && sample[0] == 0x7f && sample[1] == b'E' && sample[2] == b'L' && sample[3] == b'F'
+    {
+        return true;
+    }
+    if sample.is_empty() {
+        return false;
+    }
+    let mut lines_left = if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
+        2
+    } else {
+        1
+    };
+    for &byte in sample {
+        if byte == b'\n' {
+            lines_left -= 1;
+            if lines_left == 0 {
+                return false;
+            }
+        } else if byte == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Default)]

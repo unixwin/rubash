@@ -376,6 +376,9 @@ pub struct Executor {
     job_table: JobTable,
     exit_code: i32,
     parse_error_occurred: bool,
+    /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
+    /// per shell process (bash_logout, exit.def:156-166).
+    bash_logout_sourced: bool,
     env_vars: HashMap<String, String>,
     aliases: HashMap<String, Alias>,
     functions: HashMap<String, FunctionBody>,

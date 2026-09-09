@@ -272,6 +272,10 @@ pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, ena
         state.remove(name);
     }
     env_vars.insert(SHOPT_STATE.to_string(), serialize_state(&state));
+    // GNU shopt.def toggle_shopts -> set_bashopts: every shopt change
+    // rebinds the BASHOPTS variable, so an export of BASHOPTS carries the
+    // live state to child shells (invocation1.sub:28-31).
+    env_vars.insert("BASHOPTS".to_string(), bashopts_value(env_vars));
 }
 
 fn state(env_vars: &HashMap<String, String>) -> HashSet<String> {

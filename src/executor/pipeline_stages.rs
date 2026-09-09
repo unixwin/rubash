@@ -372,6 +372,18 @@ impl Executor {
                         )
                     })
             }));
+        // GNU execute_cmd.c:6139-6233 (shell_execve): a file the OS cannot
+        // exec natively is classified by its first bytes before the
+        // shell-script fallback: an unresolvable #! interpreter is refused
+        // ("bad interpreter", EX_NOEXEC) and a binary first line is refused
+        // ("cannot execute binary file", EX_BINARY_FILE), both with status
+        // 126. Plain text falls through to the shell-script execution.
+        if crate::executor::path::should_run_with_shell(&program) {
+            if let Some((diagnostic, status)) = self.exec_format_refusal(command, &program) {
+                return Ok(Some((String::new(), format!("{diagnostic}\n"), status)));
+            }
+        }
+
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&expanded_name),
@@ -417,6 +429,14 @@ impl Executor {
                     process.stderr(Stdio::from(file));
                 }
             }
+        } else if command.pipe == Some(2) {
+            // GNU pipe-and-ampersand is "2>&1 |" (redir.c): an external
+            // producer's stderr belongs to the pipe payload. Without the
+            // explicit pipe the child inherits the shell's stderr, so the
+            // invocation.tests option-error producers fed their consumers
+            // an empty stream.
+            stderr_merges_into_stdout = true;
+            process.stderr(Stdio::piped());
         }
 
         let mut child = process.spawn()?;

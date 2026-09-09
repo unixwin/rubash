@@ -120,6 +120,28 @@ impl Executor {
             SHELL_START_EPOCH.to_string(),
             current_epoch_seconds().to_string(),
         );
+        // GNU shell.c:1974-1986 (shell_initialize -> initialize_shell_options
+        // set.def:607-630 via parse_shellopts set.def:600-604, and
+        // initialize_bashopts shopt.def): a non-privileged shell applies the
+        // inherited $SHELLOPTS / $BASHOPTS ADDITIVELY - every colon-separated
+        // name is turned on, while options absent from the value keep their
+        // defaults. The rebuilds below overwrite the imported values, so the
+        // inherited names must be applied first (invocation1.sub/2.sub child
+        // inheritance).
+        if let Some(value) = env_vars.get("SHELLOPTS").cloned() {
+            for name in value.split(':').filter(|name| !name.is_empty()) {
+                if crate::builtins::set::is_shell_option(name) {
+                    crate::builtins::set::set_shell_option(&mut env_vars, name, true);
+                }
+            }
+        }
+        if let Some(value) = env_vars.get("BASHOPTS").cloned() {
+            for name in value.split(':').filter(|name| !name.is_empty()) {
+                if crate::builtins::shopt::is_supported_option(name) {
+                    crate::builtins::shopt::set_option(&mut env_vars, name, true);
+                }
+            }
+        }
         env_vars.insert(
             "SHELLOPTS".to_string(),
             crate::builtins::set::shellopts_value(&env_vars),
@@ -197,6 +219,7 @@ impl Executor {
             job_table: JobTable::default(),
             exit_code: 0,
             parse_error_occurred: false,
+            bash_logout_sourced: false,
             env_vars,
             aliases: HashMap::new(),
             functions: imported_functions,

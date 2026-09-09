@@ -64,6 +64,17 @@ impl Executor {
             if let Some(script_path) =
                 direct_windows_shell_script_path(&expanded_command_name, &self.env_vars)
             {
+                // GNU execute_cmd.c:6139-6233: a file the OS cannot exec
+                // directly is classified by its first bytes before the
+                // shell-script fallback runs; an unresolvable #! interpreter
+                // ("bad interpreter") or a binary first line ("cannot
+                // execute binary file") is refused with exit status 126.
+                if let Some((diagnostic, status)) = self.exec_format_refusal(cmd, &script_path) {
+                    let mut stderr = Vec::new();
+                    let _ = writeln!(&mut stderr, "{diagnostic}");
+                    self.finish_external_error(cmd, &stderr, status)?;
+                    return Ok(true);
+                }
                 self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path)?;
                 return Ok(true);
             }

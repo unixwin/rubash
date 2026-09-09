@@ -38,11 +38,45 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let mut stderr = Vec::new();
-        let status =
-            crate::builtins::logout::execute_with_io(&self.diagnostic_prefix(), &mut stderr)?;
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        Ok(status)
+        // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
+        // may logout; anything else reports and continues.
+        let login_shell = self
+            .env_vars
+            .get("__RUBASH_LOGIN_SHELL")
+            .map(String::as_str)
+            == Some("1");
+        if !login_shell {
+            let mut stderr = Vec::new();
+            let status =
+                crate::builtins::logout::execute_with_io(&self.diagnostic_prefix(), &mut stderr)?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            return Ok(status);
+        }
+
+        // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
+        // shell sources ~/.bash_logout once before exiting.
+        if let Some(home) = self.env_vars.get("HOME").cloned() {
+            let logout_file = format!("{home}/.bash_logout");
+            if !self.bash_logout_sourced
+                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.env_vars))
+                    .is_ok()
+            {
+                self.bash_logout_sourced = true;
+                let mut node = CommandNode::default();
+                node.words = vec![".".to_string(), logout_file];
+                self.execute_source_command(&node)?;
+            }
+        }
+
+        // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level(EXITBLTIN)
+        // - the shell exits with the logout status (an optional numeric
+        // argument overrides it), after the regular exit trap.
+        let status = match cmd.words.get(1) {
+            Some(word) => self.expand_word(word).trim().parse::<i32>().unwrap_or(0),
+            None => self.exit_code,
+        };
+        let status = self.run_exit_trap_for_status(status)?;
+        Err(ExecuteError::ExitCode(status))
     }
 
     pub(in crate::executor) fn try_execute_dirname_fast_path(
