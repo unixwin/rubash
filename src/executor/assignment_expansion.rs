@@ -298,7 +298,15 @@ impl Executor {
     }
 
     fn expand_mixed_command_substitution_assignment(&mut self, value: &str) -> Option<String> {
-        let spans = scan_substitution_spans(value);
+        // GNU parse.y:4096-4125 rewrites $"..." into an ordinary
+        // double-quoted string at parse time (locale_expand is the identity
+        // without a translation catalog), so every later expansion pass sees
+        // plain "..." (subst.c:1626-1649 re-decodes at quote removal). The
+        // mixed-substitution splitter runs on raw word text where the $"
+        // prefix would otherwise survive as a literal dollar plus a quoted
+        // span (y=$"A$(echo B)C" stored `$"ABC` instead of `ABC`).
+        let value = normalize_dollar_double_quotes(value);
+        let spans = scan_substitution_spans(&value);
         if spans.is_empty() {
             return None;
         }
@@ -791,4 +799,48 @@ fn preserve_prompt_escapes(value: &str) -> String {
         }
     }
     preserved.replace(PROTECTED_PROMPT_ESCAPE, "\\")
+}
+
+/// Quote-aware rewrite of $"..." into "..." for assignment expansion
+/// (GNU parse.y:4096). Only a `$` immediately followed by an opening double
+/// quote is rewritten: the scan tracks single- and double-quoted spans so a
+/// `$` inside them ("a$"x", '...$"...') keeps its literal meaning, and
+/// backslash escapes are passed through untouched.
+fn normalize_dollar_double_quotes(value: &str) -> std::borrow::Cow<'_, str> {
+    let needs_rewrite = value
+        .chars()
+        .zip(value.chars().skip(1))
+        .any(|(ch, next)| ch == '$' && next == '"');
+    if !needs_rewrite {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            output.push('\\');
+            output.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' if !in_double => {
+                in_single = !in_single;
+                output.push(ch);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                output.push(ch);
+            }
+            '$' if !in_single && !in_double && chars.peek() == Some(&'"') => {
+                // Drop the locale-quote dollar; the quote stays.
+            }
+            _ => output.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(output)
 }

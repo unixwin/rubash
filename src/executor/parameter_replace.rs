@@ -534,10 +534,72 @@ pub(in crate::executor) fn shell_reusable_quote(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
     }
+    // Raw-byte marker pairs carry bytes that never form printable
+    // characters; decode them to the byte view first so the ansic form
+    // quotes per GNU strtrans.c ansic_quote (one octal escape per
+    // non-printable byte, printable multibyte runs verbatim).
+    let sentinel =
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        let bytes =
+            crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
+        return ansic_quote_bytes(&bytes);
+    }
     if ansic_should_quote_value(value) {
         ansic_quote_value(value)
     } else {
         shell_single_quote_assignment_value(value)
+    }
+}
+
+/// GNU strtrans.c ansic_quote over the raw byte string: named C escapes,
+/// printable multibyte runs verbatim, one 3-digit octal escape per
+/// non-printable or invalid byte (utf8_mbstrlen walks one byte at a time).
+fn ansic_quote_bytes(bytes: &[u8]) -> String {
+    let mut output = String::from("$'");
+    let mut rest: &[u8] = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                push_ansic_escaped_chars(&mut output, text.chars());
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if let Ok(text) = std::str::from_utf8(&rest[..valid]) {
+                    push_ansic_escaped_chars(&mut output, text.chars());
+                }
+                output.push_str(&format!("\\{:03o}", rest[valid]));
+                rest = &rest[valid + 1..];
+            }
+        }
+    }
+    output.push('\'');
+    output
+}
+
+fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = char>) {
+    for ch in chars {
+        match ch {
+            '\x1b' => output.push_str("\\E"),
+            '\x07' => output.push_str("\\a"),
+            '\x08' => output.push_str("\\b"),
+            '\x0b' => output.push_str("\\v"),
+            '\x0c' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\\' => output.push_str("\\\\"),
+            '\'' => output.push_str("\\'"),
+            c if is_ansic_printable(c) => output.push(c),
+            c => {
+                let mut buffer = [0u8; 4];
+                for byte in c.encode_utf8(&mut buffer).as_bytes() {
+                    output.push_str(&format!("\\{byte:03o}"));
+                }
+            }
+        }
     }
 }
 

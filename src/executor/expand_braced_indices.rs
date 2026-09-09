@@ -87,7 +87,7 @@ impl Executor {
                     resolve_indexed_array_subscript(value, index)
                         .and_then(|index| array_value_at(value, index))
                 })
-                .map(|value| value.chars().count().to_string())
+                .map(|value| parameter_char_length(&value).to_string())
                 .unwrap_or_else(|| "0".to_string());
         }
         if let Some((array_name, index)) = parse_array_numeric_subscript(var_name) {
@@ -95,7 +95,7 @@ impl Executor {
                 .env_vars
                 .get(array_name)
                 .and_then(|value| array_value_at(value, index))
-                .map(|value| value.chars().count().to_string())
+                .map(|value| parameter_char_length(&value).to_string())
                 .unwrap_or_else(|| "0".to_string());
         }
         if let Some((array_name, key)) = parse_array_subscript(var_name) {
@@ -104,12 +104,12 @@ impl Executor {
                 return self
                     .parameter_array_storage(array_name)
                     .and_then(|value| assoc_value_at(&value, &key))
-                    .map(|value| value.chars().count().to_string())
+                    .map(|value| parameter_char_length(&value).to_string())
                     .unwrap_or_else(|| "0".to_string());
             }
         }
         if let Some(value) = self.dynamic_parameter_value(var_name) {
-            return value.chars().count().to_string();
+            return parameter_char_length(&value).to_string();
         }
         // GNU subst.c ${#name} over a nameref: the length of the value the
         // reference resolves to. A cell naming a variable resolves through
@@ -128,17 +128,17 @@ impl Executor {
                             array_value_at(target_value, 0)
                         };
                         return element_zero
-                            .map(|value| value.chars().count().to_string())
+                            .map(|value| parameter_char_length(&value).to_string())
                             .unwrap_or_else(|| "0".to_string());
                     }
-                    return target_value.chars().count().to_string();
+                    return parameter_char_length(&target_value).to_string();
                 }
                 if let Some(crate::shell::Variable {
                     value: crate::shell::ShellValue::Scalar(scalar),
                     ..
                 }) = self.shell_state.variables.get(&cell)
                 {
-                    return scalar.chars().count().to_string();
+                    return parameter_char_length(&scalar).to_string();
                 }
                 return "0".to_string();
             }
@@ -148,7 +148,7 @@ impl Executor {
                     return self
                         .parameter_array_storage(array_name)
                         .and_then(|value| assoc_value_at(&value, &key))
-                        .map(|value| value.chars().count().to_string())
+                        .map(|value| parameter_char_length(&value).to_string())
                         .unwrap_or_else(|| "0".to_string());
                 }
                 if let Some(index) = key.parse::<usize>().ok() {
@@ -156,12 +156,12 @@ impl Executor {
                         .env_vars
                         .get(array_name)
                         .and_then(|value| array_value_at(value, index))
-                        .map(|value| value.chars().count().to_string())
+                        .map(|value| parameter_char_length(&value).to_string())
                         .unwrap_or_else(|| "0".to_string());
                 }
                 return "0".to_string();
             }
-            return cell.chars().count().to_string();
+            return parameter_char_length(&cell).to_string();
         }
         self.env_vars
             .get(var_name)
@@ -173,10 +173,10 @@ impl Executor {
                         array_value_at(value, 0)
                     };
                     element_zero
-                        .map(|value| value.chars().count().to_string())
+                        .map(|value| parameter_char_length(&value).to_string())
                         .unwrap_or_else(|| "0".to_string())
                 } else {
-                    value.chars().count().to_string()
+                    parameter_char_length(&value).to_string()
                 }
             })
             .unwrap_or_else(|| "0".to_string())
@@ -264,3 +264,41 @@ impl Executor {
         Some(parameter_substring(&value, offset, length))
     }
 }
+
+/// GNU subst.c ${#name} length: MB_STRLEN over the value (subst.c:8308) with
+/// the UTF-8 locale byte walk of lib/sh/utf8.c:167-184 utf8_mbstrlen -- one
+/// character per valid multibyte sequence, one per byte of an invalid
+/// sequence (MB_INVALIDCH -> clen = 1). Raw bytes >= 0x80 travel inside
+/// rubash words as U+E000 marker pairs (substitution_metadata), so the value
+/// must be decoded to its byte view before counting
+/// (intl.tests: a=$'\303\251' is 1, not the 4 chars of two marker pairs).
+fn parameter_char_length(value: &str) -> usize {
+    let sentinel =
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("raw-byte sentinel is a valid char");
+    if !value.contains(sentinel) {
+        return value.chars().count();
+    }
+    let bytes =
+        crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
+    let mut count = 0usize;
+    let mut rest: &[u8] = &bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                count += text.chars().count();
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if let Ok(text) = std::str::from_utf8(&rest[..valid]) {
+                    count += text.chars().count();
+                }
+                count += 1; // utf8.c:177-178: an invalid byte counts as one
+                rest = &rest[valid + 1..];
+            }
+        }
+    }
+    count
+}
+

@@ -134,9 +134,13 @@ where
 }
 
 fn push_ansi_c_codepoint(output: &mut String, value: u32) {
-    if let Some(ch) = char::from_u32(value) {
-        output.push(ch);
-    }
+    // GNU strtrans.c:161-181 decodes $'\uNNNN'/'\UNNNNNNNN' through the same
+    // u32cconv as printf (lib/sh/unicode.c:239): wctomb on a 4-byte-wchar_t
+    // UTF-8 platform encodes every value <= 0x7fffffff, including surrogates
+    // (ED A0 80) and the 5/6-byte forms; larger values produce nothing.
+    output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(
+        value,
+    ));
 }
 
 /// GNU strtrans.c ansicstr: `\xHH` and octal escapes emit one RAW byte

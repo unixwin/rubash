@@ -31,6 +31,60 @@ pub(crate) fn encode_raw_byte_marker(byte: u8) -> String {
     output
 }
 
+/// GNU u32cconv (lib/sh/unicode.c:239-262): on a 4-byte-wchar_t platform the
+/// conversion is wctomb for every value <= 0x7fffffff, so UTF-8 output uses
+/// the mathematical UTF-8 form even for surrogate code points (wctomb
+/// encodes U+D800 as ED A0 80) and for the 5/6-byte forms above 0x10ffff
+/// (printf '\U00200000' -> F8 88 80 80 80, '\U7000002c' -> FD B0 80 80 80
+/// AC under GNU bash 5.3.0). Values above 0x7fffffff fail the conversion
+/// and produce no output. Bytes that cannot be carried as UTF-8 scalars
+/// (surrogate encodings, the 5/6-byte forms) travel as raw-byte marker
+/// pairs; printable scalar results stay as plain chars.
+pub(crate) fn u32cconv_utf8_text(value: u32) -> String {
+    // A representable Unicode scalar (everything except the surrogate
+    // range) travels as its own char: glob2.sub uses IFS=$'\u3b1' and the
+    // IFS splitter must see exactly one delimiter char, not a marker-pair
+    // byte sequence. Only values with no char form need the raw-byte
+    // marker carrier.
+    if let Some(ch) = char::from_u32(value) {
+        return String::from(ch);
+    }
+    if value > 0x7fff_ffff {
+        return String::new();
+    }
+    let length = if value < 0x800 {
+        2
+    } else if value < 0x1_0000 {
+        3
+    } else if value < 0x20_0000 {
+        4
+    } else if value < 0x400_0000 {
+        5
+    } else {
+        6
+    };
+    let first_mask: u32 = match length {
+        2 => 0xc0,
+        3 => 0xe0,
+        4 => 0xf0,
+        5 => 0xf8,
+        _ => 0xfc,
+    };
+    let first_shift = 6 * (length - 1);
+    let mut output = String::new();
+    push_u32cconv_byte(&mut output, first_mask | (value >> first_shift));
+    let mut shift = first_shift;
+    while shift >= 6 {
+        shift -= 6;
+        push_u32cconv_byte(&mut output, 0x80 | ((value >> shift) & 0x3f));
+    }
+    output
+}
+
+fn push_u32cconv_byte(output: &mut String, byte: u32) {
+    output.push_str(&encode_raw_byte_marker(byte as u8));
+}
+
 fn push_raw_byte_marker(output: &mut String, byte: u8) {
     output.push(char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid"));
     output.push(char::from_u32(RAW_BYTE_MARKER_FIRST + byte as u32).expect("marker char is valid"));

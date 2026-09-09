@@ -27,10 +27,14 @@ where
 }
 
 fn format_escape_codepoint(value: Option<u32>, fallback: &str) -> String {
-    value
-        .and_then(char::from_u32)
-        .map(|ch| ch.to_string())
-        .unwrap_or_else(|| fallback.to_string())
+    // GNU printf.def:1121-1140: \uNNNN/\UNNNNNNNN convert through u32cconv,
+    // which encodes every value <= 0x7fffffff (surrogates and the 5/6-byte
+    // UTF-8 forms included) and emits nothing for larger values. A missing
+    // digit run is the only fallback case.
+    match value {
+        Some(value) => crate::executor::substitution_metadata::u32cconv_utf8_text(value),
+        None => fallback.to_string(),
+    }
 }
 
 fn format_escape_byte(value: Option<u32>, fallback: &str) -> String {
@@ -150,8 +154,12 @@ where
 }
 
 fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str) {
-    match value.and_then(char::from_u32) {
-        Some(ch) => output.push(ch),
+    // Same GNU u32cconv table as the format-string path (printf.def uses one
+    // decode for \u/\U in both the format and %b argument expansion).
+    match value {
+        Some(value) => {
+            output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(value))
+        }
         None => output.push_str(fallback),
     }
 }
@@ -172,6 +180,21 @@ pub(super) fn shell_quote(value: &str) -> String {
         return "\\~".to_string();
     }
 
+    // Raw-byte marker pairs (U+E000 + U+E0xx payload) carry bytes that do
+    // not form printable characters. GNU printf %q renders such a value as
+    // $'...' with one octal escape per non-printable byte (strtrans.c
+    // ansic_quote over the byte string; unicode3.sub payload
+    // $'5\247@3\231+...'). The marker chars themselves are private-use and
+    // never is_control(), so they must be decoded before the quote decision.
+    let sentinel =
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+            .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        let bytes =
+            crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
+        return ansi_c_shell_quote_bytes(&bytes);
+    }
+
     if value.chars().any(|ch| ch.is_control()) {
         return ansi_c_shell_quote(value);
     }
@@ -186,6 +209,55 @@ pub(super) fn shell_quote(value: &str) -> String {
         }
     }
     quoted
+}
+
+/// GNU strtrans.c ansic_quote over the raw byte string (printf %q of a
+/// value whose bytes do not form printable characters): named escapes for
+/// the C0 specials, verbatim printable runs (valid multibyte sequences
+/// included), and one 3-digit octal escape per non-printable or invalid
+/// byte, walking one byte at a time exactly like utf8_mbstrlen.
+fn ansi_c_shell_quote_bytes(bytes: &[u8]) -> String {
+    let mut quoted = String::from("$'");
+    let mut rest: &[u8] = bytes;
+    while !rest.is_empty() {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                push_ansic_escaped_chars(&mut quoted, text.chars());
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if let Ok(text) = std::str::from_utf8(&rest[..valid]) {
+                    push_ansic_escaped_chars(&mut quoted, text.chars());
+                }
+                quoted.push_str(&format!("\\{:03o}", rest[valid]));
+                rest = &rest[valid + 1..];
+            }
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = char>) {
+    for ch in chars {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '\'' => quoted.push_str("\\'"),
+            '\x07' => quoted.push_str("\\a"),
+            '\x08' => quoted.push_str("\\b"),
+            '\x1b' => quoted.push_str("\\E"),
+            '\x0c' => quoted.push_str("\\f"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            '\x0b' => quoted.push_str("\\v"),
+            ch if ch.is_ascii_control() => {
+                quoted.push_str(&format!("\\{:03o}", ch as u32))
+            }
+            ch => quoted.push(ch),
+        }
+    }
 }
 
 fn ansi_c_shell_quote(value: &str) -> String {
