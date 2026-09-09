@@ -85,6 +85,7 @@ pub(in crate::executor) fn remove_matching_prefix(
     value: &str,
     pattern: &str,
     length: MatchLength,
+    extglob: bool,
 ) -> String {
     let indices: Vec<usize> = value
         .char_indices()
@@ -97,7 +98,7 @@ pub(in crate::executor) fn remove_matching_prefix(
     };
 
     for end in iter {
-        if case_pattern_matches(pattern, &value[..end]) {
+        if removal_pattern_matches(pattern, &value[..end], extglob) {
             return value[end..].to_string();
         }
     }
@@ -109,6 +110,7 @@ pub(in crate::executor) fn remove_matching_suffix(
     value: &str,
     pattern: &str,
     length: MatchLength,
+    extglob: bool,
 ) -> String {
     let indices: Vec<usize> = value
         .char_indices()
@@ -121,7 +123,7 @@ pub(in crate::executor) fn remove_matching_suffix(
     };
 
     for start in iter {
-        if case_pattern_matches(pattern, &value[start..]) {
+        if removal_pattern_matches(pattern, &value[start..], extglob) {
             return value[..start].to_string();
         }
     }
@@ -133,20 +135,54 @@ pub(in crate::executor) fn remove_parameter_pattern(
     value: &str,
     pattern: &str,
     operation: PatternRemoval,
+    extglob: bool,
 ) -> String {
     match operation {
         PatternRemoval::ShortestPrefix => {
-            remove_matching_prefix(value, pattern, MatchLength::Shortest)
+            remove_matching_prefix(value, pattern, MatchLength::Shortest, extglob)
         }
         PatternRemoval::LongestPrefix => {
-            remove_matching_prefix(value, pattern, MatchLength::Longest)
+            remove_matching_prefix(value, pattern, MatchLength::Longest, extglob)
         }
         PatternRemoval::ShortestSuffix => {
-            remove_matching_suffix(value, pattern, MatchLength::Shortest)
+            remove_matching_suffix(value, pattern, MatchLength::Shortest, extglob)
         }
         PatternRemoval::LongestSuffix => {
-            remove_matching_suffix(value, pattern, MatchLength::Longest)
+            remove_matching_suffix(value, pattern, MatchLength::Longest, extglob)
         }
+    }
+}
+
+/// True when the pattern contains an extglob operator `+(`/`*(`/`?(`/`@(`/
+/// `!(` outside a backslash escape.
+pub(in crate::executor) fn pattern_uses_extglob_syntax(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                index += 2;
+                continue;
+            }
+            '+' | '*' | '?' | '@' | '!' => {
+                if chars.get(index + 1) == Some(&'(') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// GNU subst.c matches removal patterns with FNM_EXTMATCH when extglob is
+/// enabled (match_upattern); otherwise the pattern is an ordinary glob.
+fn removal_pattern_matches(pattern: &str, word: &str, extglob: bool) -> bool {
+    if extglob && pattern_uses_extglob_syntax(pattern) {
+        super::conditional::extglob_case_pattern_matches(pattern, word)
+    } else {
+        case_pattern_matches(pattern, word)
     }
 }
 

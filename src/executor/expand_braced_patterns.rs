@@ -88,6 +88,7 @@ impl Executor {
                         value,
                         &self.expand_parameter_pattern_word(pattern),
                         match_length,
+                        self.extglob_enabled(),
                     )
                 })
                 .unwrap_or_default();
@@ -114,6 +115,7 @@ impl Executor {
                         value,
                         &self.expand_parameter_pattern_word(pattern),
                         match_length,
+                        self.extglob_enabled(),
                     )
                 })
                 .unwrap_or_default();

@@ -88,16 +88,24 @@ impl Executor {
     }
 
     fn external_touch(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        // GNU touch.c processes every operand independently: a failed create
+        // prints `touch: cannot touch 'FILE': ...` and continues with the
+        // remaining files, leaving exit status 1 (touch.c: do_touch loop).
+        let mut failed = false;
         for path in &cmd.words[1..] {
             let expanded = self.expand_word(path);
             let target = shell_path_to_windows(&expanded, &self.env_vars);
             if let Err(error) = File::create(target) {
-                if !(cfg!(windows) && contains_windows_forbidden_posix_filename_char(&expanded)) {
-                    return Err(error.into());
-                }
+                eprintln!(
+                    "{}touch: cannot touch '{}': {}",
+                    self.diagnostic_prefix(),
+                    expanded,
+                    error
+                );
+                failed = true;
             }
         }
-        self.exit_code = 0;
+        self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
 

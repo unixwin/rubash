@@ -76,7 +76,7 @@ impl Executor {
             return Some(
                 self.positional_params
                     .iter()
-                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                    .map(|value| remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled()))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -87,6 +87,7 @@ impl Executor {
                 &self.expand_parameter_named_value(var_name),
                 &pattern,
                 operation,
+                self.extglob_enabled(),
             ));
         }
 
@@ -94,13 +95,18 @@ impl Executor {
             return Some(
                 self.positional_params
                     .get(index.saturating_sub(1))
-                    .map(|value| remove_parameter_pattern(value, &pattern, operation))
+                    .map(|value| remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled()))
                     .unwrap_or_default(),
             );
         }
 
         if let Some(value) = self.array_element_parameter_value(var_name) {
-            return Some(remove_parameter_pattern(&value, &pattern, operation));
+            return Some(remove_parameter_pattern(
+                &value,
+                &pattern,
+                operation,
+                self.extglob_enabled(),
+            ));
         }
 
         if let Some(array_name) = var_name
@@ -112,7 +118,7 @@ impl Executor {
                     .map(|value| {
                         let values = array_values(&value)
                             .into_iter()
-                            .map(|value| remove_parameter_pattern(&value, &pattern, operation))
+                            .map(|value| remove_parameter_pattern(&value, &pattern, operation, self.extglob_enabled()))
                             .collect::<Vec<_>>();
                         self.join_expanded_array_values(values, var_name)
                     })
@@ -122,7 +128,12 @@ impl Executor {
 
         if is_shell_name(var_name) {
             let value = self.parameter_pattern_scalar_value(var_name).unwrap_or_default();
-            return Some(remove_parameter_pattern(&value, &pattern, operation));
+            return Some(remove_parameter_pattern(
+                &value,
+                &pattern,
+                operation,
+                self.extglob_enabled(),
+            ));
         }
 
         None
@@ -132,6 +143,12 @@ impl Executor {
     /// FNMATCH_IGNCASE in match_upattern when nocasematch is set).
     pub(in crate::executor) fn nocasematch_enabled(&self) -> bool {
         crate::builtins::shopt::option_enabled(&self.env_vars, "nocasematch")
+    }
+
+    /// extglob shopt state for pattern removal (GNU subst.c match_upattern
+    /// passes FNM_EXTMATCH when the extglob option is on).
+    pub(in crate::executor) fn extglob_enabled(&self) -> bool {
+        crate::builtins::shopt::option_enabled(&self.env_vars, "extglob")
     }
 
     pub(in crate::executor) fn parameter_pattern_scalar_value(&self, name: &str) -> Option<String> {

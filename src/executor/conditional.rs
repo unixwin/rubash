@@ -28,7 +28,9 @@ pub(super) use args::simple_grep_pattern_matches;
 pub(in crate::executor) use extglob::{
     extglob_case_pattern_matches, extglob_case_pattern_matches_nocase,
 };
-pub(super) use pattern::{case_pattern_matches, case_pattern_matches_nocase};
+pub(in crate::executor) use pattern::{
+    case_bracket_expression_matches_with_case, case_pattern_matches, case_pattern_matches_nocase,
+};
 
 pub(crate) fn shell_pattern_matches(pattern: &str, word: &str) -> bool {
     case_pattern_matches(pattern, word)

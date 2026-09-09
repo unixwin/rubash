@@ -22,16 +22,16 @@ impl Executor {
             .into_iter()
             .map(|value| match operation {
                 PatternRemoval::ShortestPrefix => {
-                    remove_matching_prefix(&value, &pattern, MatchLength::Shortest)
+                    remove_matching_prefix(&value, &pattern, MatchLength::Shortest, self.extglob_enabled())
                 }
                 PatternRemoval::LongestPrefix => {
-                    remove_matching_prefix(&value, &pattern, MatchLength::Longest)
+                    remove_matching_prefix(&value, &pattern, MatchLength::Longest, self.extglob_enabled())
                 }
                 PatternRemoval::ShortestSuffix => {
-                    remove_matching_suffix(&value, &pattern, MatchLength::Shortest)
+                    remove_matching_suffix(&value, &pattern, MatchLength::Shortest, self.extglob_enabled())
                 }
                 PatternRemoval::LongestSuffix => {
-                    remove_matching_suffix(&value, &pattern, MatchLength::Longest)
+                    remove_matching_suffix(&value, &pattern, MatchLength::Longest, self.extglob_enabled())
                 }
             })
             .collect::<Vec<_>>();

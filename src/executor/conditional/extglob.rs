@@ -159,9 +159,11 @@ pub(in crate::executor) fn extglob_split_alternatives(inner: &[char]) -> Vec<Vec
             }
         }
     }
-    if !current.is_empty() {
-        result.push(current);
-    }
+    // Keep empty alternatives: GNU PATSCAN splits `@(|foo)` into an empty
+    // first alternative and `foo`, and the empty alternative matches the empty
+    // string (extglob3.tests `@(|foo)*` matches plain files). Dropping it
+    // made the whole group unable to match zero characters.
+    result.push(current);
     if result.is_empty() {
         result.push(inner.to_vec());
     }

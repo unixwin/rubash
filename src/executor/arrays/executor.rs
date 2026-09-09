@@ -349,7 +349,7 @@ impl Executor {
         if let Some((var_name, pattern, operation)) = parse_indirect_pattern_removal(inner) {
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.array_modified_word_values(var_name, quoted_array_word, |value| {
-                remove_parameter_pattern(value, &pattern, operation)
+                remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
             });
         }
 

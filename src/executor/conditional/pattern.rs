@@ -168,7 +168,7 @@ fn extglob_match_literal_with_case(
     }
 }
 
-fn case_bracket_expression_matches_with_case(
+pub(in crate::executor) fn case_bracket_expression_matches_with_case(
     pattern: &[char],
     start: usize,
     candidate: Option<char>,
@@ -199,11 +199,34 @@ fn case_bracket_expression_matches_with_case(
         // pattern never closes and cannot match (posixpat.tests ok 21).
         // `\x18` is a legacy protected-literal-backslash marker that may still
         // reach this matcher; treat it exactly like a real backslash here.
-        if matches!(pattern[index], '\\' | '\x18') && index + 1 < pattern.len() {
-            if chars_match(pattern[index + 1], candidate, nocase) {
+        if matches!(pattern[index], '\\' | '\x18' | '\x11') && index + 1 < pattern.len() {
+            let lit = pattern[index + 1];
+            if chars_match(lit, candidate, nocase) {
                 matched = true;
             }
             saw_member = true;
+            // sm_loop.c BRACKET:527-534+568: the escaped member may anchor a
+            // range (`[\a-z]` is the range a-z); the range end may itself be
+            // escaped (`[\a-\z]`).
+            if index + 3 < pattern.len()
+                && pattern[index + 2] == '-'
+                && pattern[index + 3] != ']'
+            {
+                let mut end_index = index + 3;
+                if matches!(pattern[end_index], '\\' | '\x18' | '\x11')
+                    && end_index + 1 < pattern.len()
+                {
+                    end_index += 1;
+                }
+                let end = pattern[end_index];
+                let start_cmp = comparable_char(lit, nocase);
+                let end_cmp = comparable_char(end, nocase);
+                if start_cmp <= candidate_cmp && candidate_cmp <= end_cmp {
+                    matched = true;
+                }
+                index = end_index + 1;
+                continue;
+            }
             index += 2;
             continue;
         }
@@ -256,14 +279,22 @@ fn case_bracket_expression_matches_with_case(
             && pattern[index + 1] == '-'
             && pattern[index + 2] != ']'
         {
-            let end = pattern[index + 2];
+            // sm_loop.c BRACKET:568-572: the range end may be an escaped
+            // character (`[a-\z]` is the range a-z).
+            let mut end_index = index + 2;
+            if matches!(pattern[end_index], '\\' | '\x18' | '\x11')
+                && end_index + 1 < pattern.len()
+            {
+                end_index += 1;
+            }
+            let end = pattern[end_index];
             let current_cmp = comparable_char(current, nocase);
             let end_cmp = comparable_char(end, nocase);
             if current_cmp <= candidate_cmp && candidate_cmp <= end_cmp {
                 matched = true;
             }
             saw_member = true;
-            index += 3;
+            index = end_index + 1;
         } else {
             if chars_match(current, candidate, nocase) {
                 matched = true;

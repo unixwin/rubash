@@ -7,6 +7,7 @@ pub(in crate::executor) fn replace_parameter_pattern(
     global: bool,
     nocase: bool,
     patsub_replacement: bool,
+    extglob: bool,
 ) -> String {
     // GNU subst.c: parameter_brace_patsub:9440-9444 sets MATCH_EXPREP only
     // when the patsub_replacement shopt is on AND shouldexp_replacement
@@ -26,11 +27,11 @@ pub(in crate::executor) fn replace_parameter_pattern(
     // single-slash form anchors at the beginning (`#`) or end (`%`).
     if !global {
         if let Some(prefix_pattern) = pattern.strip_prefix('#') {
-            return replace_parameter_prefix(value, prefix_pattern, &amp);
+            return replace_parameter_prefix(value, prefix_pattern, &amp, extglob);
         }
 
         if let Some(suffix_pattern) = pattern.strip_prefix('%') {
-            return replace_parameter_suffix(value, suffix_pattern, &amp);
+            return replace_parameter_suffix(value, suffix_pattern, &amp, extglob);
         }
     }
 
@@ -58,7 +59,7 @@ pub(in crate::executor) fn replace_parameter_pattern(
     // GNU pat_subst:9230-9232: an empty string with a matching pattern
     // yields the replacement with `&` expanding to the empty match.
     if value.is_empty() {
-        if parameter_pattern_match(pattern, "", nocase) {
+        if parameter_pattern_match(pattern, "", nocase, extglob) {
             return amp("");
         }
         return String::new();
@@ -96,7 +97,7 @@ pub(in crate::executor) fn replace_parameter_pattern(
 
     while cursor <= value.len() {
         let Some((start, end)) =
-            find_parameter_pattern_match(value, pattern, cursor, &indices, nocase)
+            find_parameter_pattern_match(value, pattern, cursor, &indices, nocase, extglob)
         else {
             output.push_str(&value[cursor..]);
             return output;
@@ -130,7 +131,13 @@ pub(in crate::executor) fn replace_parameter_pattern(
 /// Case sensitivity wrapper for pattern-substitution matching. GNU applies
 /// FNMATCH_IGNCASE in match_upattern (subst.c:5382) whenever nocasematch is
 /// set, making ${var/pat/rep} case-insensitive (bash 4.3+; new-exp8.sub).
-fn parameter_pattern_match(pattern: &str, word: &str, nocase: bool) -> bool {
+fn parameter_pattern_match(pattern: &str, word: &str, nocase: bool, extglob: bool) -> bool {
+    if extglob && pattern_uses_extglob_syntax(pattern) {
+        if nocase {
+            return super::conditional::extglob_case_pattern_matches_nocase(pattern, word);
+        }
+        return super::conditional::extglob_case_pattern_matches(pattern, word);
+    }
     if nocase {
         case_pattern_matches_nocase(pattern, word)
     } else {
@@ -149,8 +156,9 @@ pub(in crate::executor) fn replace_parameter_prefix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    extglob: bool,
 ) -> String {
-    let Some(end) = find_parameter_prefix_match(value, pattern) else {
+    let Some(end) = find_parameter_prefix_match(value, pattern, extglob) else {
         return value.to_string();
     };
     format!("{}{}", amp(&value[..end]), &value[end..])
@@ -160,8 +168,9 @@ pub(in crate::executor) fn replace_parameter_suffix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    extglob: bool,
 ) -> String {
-    let Some(start) = find_parameter_suffix_match(value, pattern) else {
+    let Some(start) = find_parameter_suffix_match(value, pattern, extglob) else {
         return value.to_string();
     };
     format!("{}{}", &value[..start], amp(&value[start..]))
@@ -176,6 +185,7 @@ pub(super) fn pattern_contains_glob(pattern: &str) -> bool {
 pub(in crate::executor) fn find_parameter_prefix_match(
     value: &str,
     pattern: &str,
+    extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
         return Some(0);
@@ -186,12 +196,13 @@ pub(in crate::executor) fn find_parameter_prefix_match(
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
         .rev()
-        .find(|end| case_pattern_matches(pattern, &value[..*end]))
+        .find(|end| parameter_pattern_match(pattern, &value[..*end], false, extglob))
 }
 
 pub(in crate::executor) fn find_parameter_suffix_match(
     value: &str,
     pattern: &str,
+    extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
         return Some(value.len());
@@ -201,7 +212,7 @@ pub(in crate::executor) fn find_parameter_suffix_match(
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
-        .find(|start| case_pattern_matches(pattern, &value[*start..]))
+        .find(|start| parameter_pattern_match(pattern, &value[*start..], false, extglob))
 }
 
 pub(in crate::executor) fn find_parameter_pattern_match(
@@ -210,6 +221,7 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     cursor: usize,
     indices: &[usize],
     nocase: bool,
+    extglob: bool,
 ) -> Option<(usize, usize)> {
     let start_index = indices.iter().position(|index| *index >= cursor)?;
 
@@ -230,8 +242,20 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     //      byte offsets directly following an occurrence of the tail can
     //      be match ends. A tail that never occurs in the value means no
     //      match can exist anywhere.
-    let bound = pattern_match_length_bound(pattern);
-    let tail_ends = pattern_literal_tail_ends(pattern, value);
+    // The bound/tail prunes assume glob-shape atoms; extglob groups change
+    // both the match width and what follows the last `*` (which may be a
+    // group operator), so disable them for extglob patterns.
+    let extglob_pattern = extglob && pattern_uses_extglob_syntax(pattern);
+    let bound = if extglob_pattern {
+        None
+    } else {
+        pattern_match_length_bound(pattern)
+    };
+    let tail_ends = if extglob_pattern {
+        None
+    } else {
+        pattern_literal_tail_ends(pattern, value)
+    };
 
     for (start_pos, start) in indices[start_index..].iter().enumerate() {
         let ends = &indices[start_index + start_pos + 1..];
@@ -247,7 +271,7 @@ pub(in crate::executor) fn find_parameter_pattern_match(
                     continue;
                 }
             }
-            if parameter_pattern_match(pattern, &value[*start..*end], nocase) {
+            if parameter_pattern_match(pattern, &value[*start..*end], nocase, extglob) {
                 best = Some(*end);
             }
         }
@@ -686,43 +710,43 @@ mod tests {
 
     #[test]
     fn glob_replacement_matches_empty_value() {
-        assert_eq!(replace_parameter_pattern("", "*", "w", false, false, true), "w");
+        assert_eq!(replace_parameter_pattern("", "*", "w", false, false, true, false), "w");
     }
 
     #[test]
     fn ampersand_expansion_follows_shopt() {
         // shopt patsub_replacement on: & copies the match (subst.c:9252).
-        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, true), "axbycd");
+        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, true, false), "axbycd");
         // shopt off: & stays literal (no MATCH_EXPREP, subst.c:9430-9431).
-        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, false), "ax&ycd");
+        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, false, false), "ax&ycd");
     }
 
     #[test]
     fn escaped_ampersand_and_backslash_are_literal() {
         // strcreplace flags=2 (stringlib.c:223-226): \& -> &, \\ -> \.
-        assert_eq!(replace_parameter_pattern("abcd", "b", "\\&", false, false, true), "a&cd");
-        assert_eq!(replace_parameter_pattern("abcd", "b", "\\\\", false, false, true), "a\\cd");
+        assert_eq!(replace_parameter_pattern("abcd", "b", "\\&", false, false, true, false), "a&cd");
+        assert_eq!(replace_parameter_pattern("abcd", "b", "\\\\", false, false, true, false), "a\\cd");
     }
 
     #[test]
     fn global_substitution_treats_hash_anchor_as_literal() {
         // subst.c:9452-9453: MATCH_GLOBREP forces MATCH_ANY, so a leading
         // `#` in a `//` substitution is a literal pattern character.
-        assert_eq!(replace_parameter_pattern("abc", "#abc", "foo", true, false, true), "abc");
-        assert_eq!(replace_parameter_pattern("abc", "#a", "foo", false, false, true), "foobc");
+        assert_eq!(replace_parameter_pattern("abc", "#abc", "foo", true, false, true, false), "abc");
+        assert_eq!(replace_parameter_pattern("abc", "#a", "foo", false, false, true, false), "foobc");
     }
 
     #[test]
     fn anchored_empty_pattern_inserts_replacement() {
         // pat_subst:9197-9229: null pattern + MATCH_BEG prefixes REP with
         // `&` expanding to the empty match.
-        assert_eq!(replace_parameter_pattern("one", "#", "&two", false, false, true), "twoone");
-        assert_eq!(replace_parameter_pattern("one", "%", "&two", false, false, true), "onetwo");
+        assert_eq!(replace_parameter_pattern("one", "#", "&two", false, false, true, false), "twoone");
+        assert_eq!(replace_parameter_pattern("one", "%", "&two", false, false, true, false), "onetwo");
     }
 
     #[test]
     fn shortest_suffix_glob_preserves_quoted_value_apostrophe() {
-        assert_eq!(remove_matching_suffix("x'a'y", "*a*", MatchLength::Shortest), "x'");
+        assert_eq!(remove_matching_suffix("x'a'y", "*a*", MatchLength::Shortest, false), "x'");
     }
 }
 

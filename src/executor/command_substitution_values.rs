@@ -395,7 +395,7 @@ impl Executor {
         if let Some((var_name, pattern, operation)) = parse_indirect_pattern_removal(name) {
             let pattern = self.expand_parameter_pattern_word(pattern);
             return self.positional_modified_values(var_name, quoted, |value| {
-                remove_parameter_pattern(value, &pattern, operation)
+                remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
             });
         }
 

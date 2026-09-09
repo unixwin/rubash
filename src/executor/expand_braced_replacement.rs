@@ -108,6 +108,7 @@ impl Executor {
             global,
             self.nocasematch_enabled(),
             crate::builtins::shopt::option_enabled(&self.env_vars, "patsub_replacement"),
+            self.extglob_enabled(),
         )
     }
 
