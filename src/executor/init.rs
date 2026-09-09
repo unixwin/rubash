@@ -246,7 +246,7 @@ impl Executor {
             process_env_snapshot,
             history_provider: None,
             last_notified_job_ids: HashSet::new(),
-            completion_specs: HashMap::new(),
+            completion_specs: crate::builtins::complete::CompletionRegistry::new(),
         }
     }
 }

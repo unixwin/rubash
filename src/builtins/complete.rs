@@ -1,7 +1,9 @@
 //! complete module.
 //!
 //! GNU Bash source ownership:
-// - builtins/complete.def
+// - builtins/complete.def (complete/compgen/compopt, build_actions, print_*)
+// - pcomplib.c (COMPSPEC, progcomp_* registry, COMPLETE_HASH_BUCKETS=512)
+// - hashlib.c (FNV-1a hash_string, prepend-on-insert chains, hash_walk)
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -15,7 +17,6 @@ const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
-const READONLY_VARS: &str = "__RUBASH_READONLY_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 const SERVICE_NAMES: &str = "__RUBASH_SERVICE_NAMES";
@@ -84,7 +85,7 @@ const SHELL_BUILTINS: &[&str] = &[
 ];
 const SHELL_KEYWORDS: &[&str] = &[
     "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
-    "done", "in", "function", "time", "{", "}", "!",
+    "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc",
 ];
 const READLINE_BINDINGS: &[&str] = &[
     "abort",
@@ -231,6 +232,421 @@ const READLINE_BINDINGS: &[&str] = &[
     "yank-pop",
 ];
 
+// ---------------------------------------------------------------------------
+// Completion actions/options model (complete.def compacts[] / compopts[]).
+// ---------------------------------------------------------------------------
+
+const CA_ALIAS: u64 = 1 << 0;
+const CA_ARRAYVAR: u64 = 1 << 1;
+const CA_BINDING: u64 = 1 << 2;
+const CA_BUILTIN: u64 = 1 << 3;
+const CA_COMMAND: u64 = 1 << 4;
+const CA_DIRECTORY: u64 = 1 << 5;
+const CA_DISABLED: u64 = 1 << 6;
+const CA_ENABLED: u64 = 1 << 7;
+const CA_EXPORT: u64 = 1 << 8;
+const CA_FILE: u64 = 1 << 9;
+const CA_FUNCTION: u64 = 1 << 10;
+const CA_HELPTOPIC: u64 = 1 << 11;
+const CA_HOSTNAME: u64 = 1 << 12;
+const CA_GROUP: u64 = 1 << 13;
+const CA_JOB: u64 = 1 << 14;
+const CA_KEYWORD: u64 = 1 << 15;
+const CA_RUNNING: u64 = 1 << 16;
+const CA_SERVICE: u64 = 1 << 17;
+const CA_SETOPT: u64 = 1 << 18;
+const CA_SHOPT: u64 = 1 << 19;
+const CA_SIGNAL: u64 = 1 << 20;
+const CA_STOPPED: u64 = 1 << 21;
+const CA_USER: u64 = 1 << 22;
+const CA_VARIABLE: u64 = 1 << 23;
+
+/// (action name, action flag, short option letter) in complete.def compacts[]
+/// order. print_compactions prints the short forms first, then -A names, each
+/// pass in this order.
+const COMPACTS: &[(&str, u64, Option<char>)] = &[
+    ("alias", CA_ALIAS, Some('a')),
+    ("arrayvar", CA_ARRAYVAR, None),
+    ("binding", CA_BINDING, None),
+    ("builtin", CA_BUILTIN, Some('b')),
+    ("command", CA_COMMAND, Some('c')),
+    ("directory", CA_DIRECTORY, Some('d')),
+    ("disabled", CA_DISABLED, None),
+    ("enabled", CA_ENABLED, None),
+    ("export", CA_EXPORT, Some('e')),
+    ("file", CA_FILE, Some('f')),
+    ("function", CA_FUNCTION, None),
+    ("helptopic", CA_HELPTOPIC, None),
+    ("hostname", CA_HOSTNAME, None),
+    ("group", CA_GROUP, Some('g')),
+    ("job", CA_JOB, Some('j')),
+    ("keyword", CA_KEYWORD, Some('k')),
+    ("running", CA_RUNNING, None),
+    ("service", CA_SERVICE, Some('s')),
+    ("setopt", CA_SETOPT, None),
+    ("shopt", CA_SHOPT, None),
+    ("signal", CA_SIGNAL, None),
+    ("stopped", CA_STOPPED, None),
+    ("user", CA_USER, Some('u')),
+    ("variable", CA_VARIABLE, Some('v')),
+];
+
+const COPT_BASHDEFAULT: u64 = 1 << 0;
+const COPT_DEFAULT: u64 = 1 << 1;
+const COPT_DIRNAMES: u64 = 1 << 2;
+const COPT_FILENAMES: u64 = 1 << 3;
+const COPT_FULLQUOTE: u64 = 1 << 4;
+const COPT_NOQUOTE: u64 = 1 << 5;
+const COPT_NOSORT: u64 = 1 << 6;
+const COPT_NOSPACE: u64 = 1 << 7;
+const COPT_PLUSDIRS: u64 = 1 << 8;
+
+/// (option name, flag) in complete.def compopts[] order.
+const COMPOPTS: &[(&str, u64)] = &[
+    ("bashdefault", COPT_BASHDEFAULT),
+    ("default", COPT_DEFAULT),
+    ("dirnames", COPT_DIRNAMES),
+    ("filenames", COPT_FILENAMES),
+    ("fullquote", COPT_FULLQUOTE),
+    ("noquote", COPT_NOQUOTE),
+    ("nosort", COPT_NOSORT),
+    ("nospace", COPT_NOSPACE),
+    ("plusdirs", COPT_PLUSDIRS),
+];
+
+// Candidate lists for the actions whose GNU sources are fixed tables.
+// Helptopics are the live 5.3.0 help-topic table (includes the pseudo topics
+// %, (( ... )), [[ ... ]], for ((, { ... }) and "variables"; excludes the bare
+// reserved words do/done/elif/else/esac/fi/in/then). Setopt is the flags.c
+// set -o table; shopt is the 5.3.0 shopt_vars table.
+const HELP_TOPIC_COMPLETIONS: &[&str] = &[
+    "!",
+    "%",
+    "(( ... ))",
+    ".",
+    ":",
+    "[",
+    "[[ ... ]]",
+    "alias",
+    "bg",
+    "bind",
+    "break",
+    "builtin",
+    "caller",
+    "case",
+    "cd",
+    "command",
+    "compgen",
+    "complete",
+    "compopt",
+    "continue",
+    "coproc",
+    "declare",
+    "dirs",
+    "disown",
+    "echo",
+    "enable",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "false",
+    "fc",
+    "fg",
+    "for",
+    "for ((",
+    "function",
+    "getopts",
+    "hash",
+    "help",
+    "history",
+    "if",
+    "jobs",
+    "kill",
+    "let",
+    "local",
+    "logout",
+    "mapfile",
+    "popd",
+    "printf",
+    "pushd",
+    "pwd",
+    "read",
+    "readarray",
+    "readonly",
+    "return",
+    "select",
+    "set",
+    "shift",
+    "shopt",
+    "source",
+    "suspend",
+    "test",
+    "time",
+    "times",
+    "trap",
+    "true",
+    "type",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+    "until",
+    "variables",
+    "wait",
+    "while",
+    "{ ... }",
+];
+
+const SETOPT_COMPLETIONS: &[&str] = &[
+    "allexport",
+    "braceexpand",
+    "emacs",
+    "errexit",
+    "errtrace",
+    "functrace",
+    "hashall",
+    "histexpand",
+    "history",
+    "ignoreeof",
+    "interactive-comments",
+    "keyword",
+    "monitor",
+    "noclobber",
+    "noexec",
+    "noglob",
+    "nolog",
+    "notify",
+    "nounset",
+    "onecmd",
+    "physical",
+    "pipefail",
+    "posix",
+    "privileged",
+    "verbose",
+    "vi",
+    "xtrace",
+];
+
+const SHOPT_COMPLETIONS: &[&str] = &[
+    "array_expand_once",
+    "assoc_expand_once",
+    "autocd",
+    "bash_source_fullpath",
+    "cdable_vars",
+    "cdspell",
+    "checkhash",
+    "checkjobs",
+    "checkwinsize",
+    "cmdhist",
+    "compat31",
+    "compat32",
+    "compat40",
+    "compat41",
+    "compat42",
+    "compat43",
+    "compat44",
+    "complete_fullquote",
+    "direxpand",
+    "dirspell",
+    "dotglob",
+    "execfail",
+    "expand_aliases",
+    "extdebug",
+    "extglob",
+    "extquote",
+    "failglob",
+    "force_fignore",
+    "globasciiranges",
+    "globskipdots",
+    "globstar",
+    "gnu_errfmt",
+    "histappend",
+    "histreedit",
+    "histverify",
+    "hostcomplete",
+    "huponexit",
+    "inherit_errexit",
+    "interactive_comments",
+    "lastpipe",
+    "lithist",
+    "localvar_inherit",
+    "localvar_unset",
+    "login_shell",
+    "mailwarn",
+    "no_empty_cmd_completion",
+    "nocaseglob",
+    "nocasematch",
+    "noexpand_translation",
+    "nullglob",
+    "patsub_replacement",
+    "progcomp",
+    "progcomp_alias",
+    "promptvars",
+    "restricted_shell",
+    "shift_verbose",
+    "sourcepath",
+    "varredir_close",
+    "xpg_echo",
+];
+
+/// Parsed completion specification (pcomplib.c COMPSPEC; complete.def
+/// complete_builtin builds it at lines 468-478).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Compspec {
+    pub(crate) actions: u64,
+    pub(crate) options: u64,
+    pub(crate) globpat: Option<String>,
+    pub(crate) words: Option<String>,
+    pub(crate) prefix: Option<String>,
+    pub(crate) suffix: Option<String>,
+    pub(crate) filterpat: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) funcname: Option<String>,
+}
+
+impl Compspec {
+    pub(crate) fn from_parsed(p: &ParsedCompletionOptions) -> Self {
+        Compspec {
+            actions: p.actions,
+            options: p.options,
+            globpat: p.globpat.clone(),
+            words: p.words.clone(),
+            prefix: p.prefix.clone(),
+            suffix: p.suffix.clone(),
+            filterpat: p.filterpat.clone(),
+            command: p.command.clone(),
+            funcname: p.funcname.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Completion registry (pcomplib.c prog_completes over hashlib.c).
+// ---------------------------------------------------------------------------
+
+/// pcomplib.c: COMPLETE_HASH_BUCKETS 512 (must be power of two).
+const COMPLETE_HASH_BUCKETS: usize = 512;
+/// hashlib.c HASH_REHASH_MULTIPLIER / HASH_REHASH_FACTOR.
+const HASH_REHASH_MULTIPLIER: usize = 4;
+const HASH_REHASH_FACTOR: usize = 2;
+
+/// Registration table reproducing bash's hash table so iteration order
+/// (complete -p / bare complete) matches GNU exactly: buckets ascend
+/// 0..nbuckets, each chain runs head (most recently inserted) to tail, and
+/// re-registering an existing name replaces the value in place without moving
+/// it (hashlib.c hash_insert). The created flag models progcomp_remove
+/// succeeding while prog_completes is still NULL (before the first insertion,
+/// surviving progcomp_flush).
+#[derive(Debug)]
+pub(crate) struct CompletionRegistry {
+    buckets: Vec<Vec<(String, Compspec)>>,
+    nentries: usize,
+    created: bool,
+}
+
+impl CompletionRegistry {
+    pub(crate) fn new() -> Self {
+        CompletionRegistry {
+            buckets: vec![Vec::new(); COMPLETE_HASH_BUCKETS],
+            nentries: 0,
+            created: false,
+        }
+    }
+
+    /// hashlib.c hash_string: FNV-1a over the bytes; char is signed on the
+    /// reference platform so bytes >= 0x80 sign-extend.
+    fn hash_string(s: &str) -> u32 {
+        const FNV_OFFSET: u32 = 2166136261;
+        let mut i: u32 = FNV_OFFSET;
+        for b in s.bytes() {
+            i = i
+                .wrapping_add(i << 1)
+                .wrapping_add(i << 4)
+                .wrapping_add(i << 7)
+                .wrapping_add(i << 8)
+                .wrapping_add(i << 24);
+            i ^= (b as i8) as i32 as u32;
+        }
+        i
+    }
+
+    fn bucket_of(name: &str, nbuckets: usize) -> usize {
+        (Self::hash_string(name) as usize) & (nbuckets - 1)
+    }
+
+    /// hashlib.c hash_rehash: walk old buckets ascending, chain head to tail,
+    /// prepending each item into its new bucket.
+    fn grow(&mut self) {
+        let new_len = self.buckets.len() * HASH_REHASH_MULTIPLIER;
+        let old = std::mem::replace(&mut self.buckets, vec![Vec::new(); new_len]);
+        for chain in old {
+            for (name, spec) in chain {
+                let b = Self::bucket_of(&name, self.buckets.len());
+                self.buckets[b].insert(0, (name, spec));
+            }
+        }
+    }
+
+    pub(crate) fn insert(&mut self, name: &str, spec: Compspec) {
+        self.created = true;
+        if self.nentries >= self.buckets.len() * HASH_REHASH_FACTOR {
+            self.grow();
+        }
+        let b = Self::bucket_of(name, self.buckets.len());
+        let bucket = &mut self.buckets[b];
+        if let Some(slot) = bucket.iter_mut().find(|(k, _)| k == name) {
+            slot.1 = spec;
+            return;
+        }
+        bucket.insert(0, (name.to_string(), spec));
+        self.nentries += 1;
+    }
+
+    /// True when the name was removed (or the table was never created);
+    /// false means "no completion specification" for this name.
+    pub(crate) fn remove(&mut self, name: &str) -> bool {
+        if !self.created {
+            return true;
+        }
+        let b = Self::bucket_of(name, self.buckets.len());
+        let before = self.buckets[b].len();
+        self.buckets[b].retain(|(k, _)| k != name);
+        if self.buckets[b].len() != before {
+            self.nentries -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// pcomplib.c progcomp_flush (complete -r with no names): the entries go
+    /// away, the table itself stays allocated.
+    pub(crate) fn flush(&mut self) {
+        for chain in &mut self.buckets {
+            chain.clear();
+        }
+        self.nentries = 0;
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&Compspec> {
+        if !self.created {
+            return None;
+        }
+        let b = Self::bucket_of(name, self.buckets.len());
+        self.buckets[b]
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+    }
+
+    /// hashlib.c hash_walk order: bucket index ascending, chain head first.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &Compspec)> {
+        self.buckets.iter().flatten().map(|(k, v)| (k, v))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompletionBuiltin {
     Complete,
@@ -253,7 +669,10 @@ where
     E: Write,
 {
     match builtin {
-        CompletionBuiltin::Complete => execute_complete(args, diagnostic_prefix, stdout, stderr),
+        // complete is handled at the executor level (registration registry,
+        // -p print and -r remove need Executor state); this entry point only
+        // serves compgen/compopt.
+        CompletionBuiltin::Complete => Ok(EXECUTION_SUCCESS),
         CompletionBuiltin::Compgen => execute_compgen(
             args,
             env_vars,
@@ -268,40 +687,11 @@ where
     }
 }
 
-fn execute_complete<E>(
-    args: &[String],
-    diagnostic_prefix: &str,
-    _stdout: &mut E,
-    stderr: &mut E,
-) -> io::Result<i32>
-where
-    E: Write,
-{
-    let parsed = parse_options(
-        CompletionBuiltin::Complete,
-        args,
-        "abcdefgjksuvprDEI",
-        "oAGWFCXPS",
-        diagnostic_prefix,
-        stderr,
-    )?;
-    if parsed.status != EXECUTION_SUCCESS {
-        return Ok(parsed.status);
-    }
-    // GNU complete.def complete_builtin: valid spec options with no name
-    // operands and no -D/-E/-I default target print usage and fail
-    // (probe: `complete -b` -> usage, EX_USAGE; the test's `complete -b`
-    // at complete.tests line 153). -p/-r/-D are handled at the executor
-    // level and never reach this check.
-    let has_spec_options = args.iter().any(|a| a.starts_with('-') && a != "-" && a != "--");
-    let has_default_flag = args.iter().any(|a| a == "-D" || a == "-E" || a == "-I");
-    if has_spec_options && !has_default_flag && parsed.operands.is_empty() {
-        write_usage(CompletionBuiltin::Complete, stderr)?;
-        return Ok(EX_USAGE);
-    }
-    Ok(parsed.status)
-}
-
+/// compgen_builtin (complete.def:669): with no arguments, success and no
+/// output; otherwise generate candidates from every set action (plus the -G
+/// globpat and -W wordlist), filter by the word prefix and the -X filter
+/// pattern, then print them (or store them into the -V array at the executor
+/// level, which reads them from the stdout buffer).
 fn execute_compgen<E>(
     args: &[String],
     env_vars: &HashMap<String, String>,
@@ -315,208 +705,115 @@ fn execute_compgen<E>(
 where
     E: Write,
 {
-    let parsed = parse_options(
-        CompletionBuiltin::Compgen,
-        args,
-        "abcdefgjksuv",
-        "oAGWFCXPS",
-        diagnostic_prefix,
-        stderr,
-    )?;
-    if parsed.status != EXECUTION_SUCCESS {
-        return Ok(parsed.status);
+    if args.is_empty() {
+        return Ok(EXECUTION_SUCCESS);
     }
 
-    // GNU 5.2.21 has no -V option for compgen (it is rejected as an
-    // invalid option, matching complete); the -V feature added in the
-    // bash-5.3 source is not part of the WSL 5.2.21 baseline.
-
-    if let Some(wordlist) = parsed.wordlist.as_deref() {
-        return write_compgen_matches(wordlist.split_whitespace(), &parsed, stdout);
-    }
-
-    if let Some(glob_pattern) = parsed.glob_pattern.as_deref() {
-        return match crate::executor::glob::pathname_expand_word(glob_pattern, env_vars) {
-            crate::executor::glob::PathnameExpansion::Matches(matches) => {
-                write_compgen_matches(matches.iter().map(String::as_str), &parsed, stdout)
-            }
-            crate::executor::glob::PathnameExpansion::NoMatch
-            | crate::executor::glob::PathnameExpansion::Fail(_) => Ok(EXECUTION_FAILURE),
+    let parsed =
+        match parse_completion_options(CompletionBuiltin::Compgen, args, diagnostic_prefix, stderr)?
+        {
+            Err(status) => return Ok(status),
+            Ok(parsed) => parsed,
         };
-    }
 
-    if let Some(action) = parsed.action.as_deref() {
-        let candidates = match action {
-            "alias" => {
-                let candidates = alias_completion_candidates(aliases);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "arrayvar" => {
-                let candidates = array_variable_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "binding" => READLINE_BINDINGS,
-            "builtin" => SHELL_BUILTINS,
+    let mut candidates: Vec<String> = Vec::new();
+    for &(actname, actbit, _) in COMPACTS {
+        if parsed.actions & actbit == 0 {
+            continue;
+        }
+        match actname {
+            "alias" => candidates.extend(alias_completion_candidates(aliases)),
+            "arrayvar" => candidates.extend(array_variable_completion_candidates(env_vars)),
+            "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
+            "builtin" => candidates.extend(SHELL_BUILTINS.iter().map(|s| s.to_string())),
             "command" => {
-                let candidates = command_completion_candidates(env_vars, aliases, function_names);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
+                candidates.extend(command_completion_candidates(env_vars, aliases, function_names))
             }
             "directory" => {
-                let candidates = path_completion_candidates(
+                candidates.extend(path_completion_candidates(
                     parsed.word(),
                     PathCompletionKind::Directory,
                     env_vars,
-                );
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
+                ));
             }
             "file" => {
-                let candidates =
-                    path_completion_candidates(parsed.word(), PathCompletionKind::File, env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
+                candidates.extend(path_completion_candidates(
+                    parsed.word(),
+                    PathCompletionKind::File,
+                    env_vars,
+                ));
             }
-            "disabled" => {
-                let candidates = disabled_builtin_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "enabled" => {
-                let candidates = enabled_builtin_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "export" => {
-                let candidates = exported_variable_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "helptopic" => crate::builtins::help::HELP_TOPICS,
-            "hostname" => {
-                let candidates = hostname_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "function" => {
-                let candidates = function_completion_candidates(function_names);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "group" => {
-                let candidates = group_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "job" => {
-                let candidates = job_completion_candidates(job_names);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "keyword" => SHELL_KEYWORDS,
-            "readonly" => {
-                let candidates = readonly_variable_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "running" => {
-                let candidates = job_completion_candidates(job_names);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "service" => {
-                let candidates = service_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "signal" => crate::builtins::trap::SIGNALS.as_slice(),
-            "shopt" => crate::builtins::shopt::SHOPT_OPTIONS,
-            "setopt" => {
-                return write_compgen_matches(
-                    crate::builtins::set::shell_option_names(),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "stopped" => return Ok(EXECUTION_SUCCESS),
-            "user" => {
-                let candidates = user_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            "variable" => {
-                let candidates = variable_completion_candidates(env_vars);
-                return write_compgen_matches(
-                    candidates.iter().map(String::as_str),
-                    &parsed,
-                    stdout,
-                );
-            }
-            _ => {
-                writeln!(
-                    stderr,
-                    "{diagnostic_prefix}compgen: {action}: invalid action name"
-                )?;
-                // GNU 5.2.21: invalid action/option *name* errors print
-                // the message but NOT the usage line (unlike invalid -x
-                // options, which do print usage).
-                return Ok(EX_USAGE);
-            }
-        };
-        return write_compgen_matches(candidates.iter().copied(), &parsed, stdout);
+            "disabled" => candidates.extend(disabled_builtin_completion_candidates(env_vars)),
+            "enabled" => candidates.extend(enabled_builtin_completion_candidates(env_vars)),
+            "export" => candidates.extend(exported_variable_completion_candidates(env_vars)),
+            "helptopic" => candidates.extend(HELP_TOPIC_COMPLETIONS.iter().map(|s| s.to_string())),
+            "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
+            "function" => candidates.extend(function_completion_candidates(function_names)),
+            "group" => candidates.extend(group_completion_candidates(env_vars)),
+            "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
+            "keyword" => candidates.extend(SHELL_KEYWORDS.iter().map(|s| s.to_string())),
+            "service" => candidates.extend(service_completion_candidates(env_vars)),
+            "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
+            "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
+            "signal" => candidates.extend(crate::builtins::trap::SIGNALS.iter().map(|s| s.to_string())),
+            // CA_STOPPED has no modeled stopped-job table (matches the prior
+            // behavior of listing no candidates).
+            "stopped" => {}
+            "user" => candidates.extend(user_completion_candidates(env_vars)),
+            "variable" => candidates.extend(variable_completion_candidates(env_vars)),
+            _ => {}
+        }
     }
 
-    Ok(EXECUTION_SUCCESS)
+    if let Some(glob_pattern) = parsed.globpat.as_deref() {
+        if let crate::executor::glob::PathnameExpansion::Matches(matches) =
+            crate::executor::glob::pathname_expand_word(glob_pattern, env_vars)
+        {
+            candidates.extend(matches);
+        }
+    }
+
+    if let Some(wordlist) = parsed.words.as_deref() {
+        candidates.extend(wordlist.split_whitespace().map(str::to_string));
+    }
+
+    write_compgen_matches(candidates.iter().map(String::as_str), &parsed, stdout)
+}
+
+/// The -V varname of a compgen invocation, derived with the same option scan
+/// as parse_completion_options (the identifier itself is validated there).
+pub(crate) fn compgen_varname(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while let Some(arg) = args.get(index) {
+        if arg == "--" {
+            return None;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            return None;
+        }
+        let mut chars = arg[1..].chars().peekable();
+        while let Some(option) = chars.next() {
+            if CompletionBuiltin::Compgen.flag_options().contains(option) {
+                continue;
+            }
+            if CompletionBuiltin::Compgen.arg_options().contains(option) {
+                let inline = chars.peek().is_some();
+                let value = if inline {
+                    chars.collect::<String>()
+                } else {
+                    index += 1;
+                    args.get(index)?.clone()
+                };
+                if option == 'V' {
+                    return Some(value);
+                }
+                break;
+            }
+            return None;
+        }
+        index += 1;
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -652,12 +949,6 @@ fn exported_variable_completion_candidates(env_vars: &HashMap<String, String>) -
     candidates
 }
 
-fn readonly_variable_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
-    let mut candidates = marked_completion_names(env_vars, READONLY_VARS);
-    candidates.sort();
-    candidates.dedup();
-    candidates
-}
 
 fn marked_completion_names(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
     env_vars
@@ -735,13 +1026,13 @@ where
     E: Write,
 {
     let word = parsed.word();
-    let mut matched = false;
+    let mut kept = 0usize;
     for candidate in candidates {
         if candidate.starts_with(word) {
-            matched = true;
             if parsed.filter_excludes(candidate) {
                 continue;
             }
+            kept += 1;
             writeln!(
                 stdout,
                 "{}{}{}",
@@ -751,7 +1042,9 @@ where
             )?;
         }
     }
-    Ok(if matched {
+    // compgen_builtin: rval is EXECUTION_SUCCESS only when the final list is
+    // non-empty (complete.def:762-777).
+    Ok(if kept > 0 {
         EXECUTION_SUCCESS
     } else {
         EXECUTION_FAILURE
@@ -774,18 +1067,22 @@ where
     Ok(EXECUTION_FAILURE)
 }
 
-fn parse_options<E>(
+/// Parse complete/compgen arguments the way complete.def build_actions does
+/// (internal_getopt over "abcdefgjko:prsuvA:G:W:P:S:X:F:C:V:DEI" with the
+/// builtin-specific validity rules). Ok(parsed) on success; Err(status) with
+/// diagnostics already written to stderr on the EX_USAGE paths.
+pub(crate) fn parse_completion_options<E>(
     builtin: CompletionBuiltin,
     args: &[String],
-    flag_options: &str,
-    arg_options: &str,
     diagnostic_prefix: &str,
     stderr: &mut E,
-) -> io::Result<ParsedCompletionOptions>
+) -> io::Result<Result<ParsedCompletionOptions, i32>>
 where
     E: Write,
 {
     let name = builtin.name();
+    let flag_options = builtin.flag_options();
+    let arg_options = builtin.arg_options();
     let mut index = 0;
     let mut parsed = ParsedCompletionOptions::default();
     while let Some(arg) = args.get(index) {
@@ -800,10 +1097,26 @@ where
         let mut chars = arg[1..].chars().peekable();
         while let Some(option) = chars.next() {
             if flag_options.contains(option) {
-                parsed.set_flag_option(option);
+                parsed.opt_given = true;
+                match option {
+                    'p' => parsed.pflag = true,
+                    'r' => parsed.rflag = true,
+                    'D' => parsed.dflag = true,
+                    'E' => parsed.eflag = true,
+                    'I' => parsed.iflag = true,
+                    // Short action letter: OR the action bit in (build_actions
+                    // cases a/b/c/d/e/f/g/j/k/s/u/v).
+                    _ => {
+                        if let Some(bit) = COMPACTS.iter().find(|c| c.2 == Some(option)).map(|c| c.1)
+                        {
+                            parsed.actions |= bit;
+                        }
+                    }
+                }
                 continue;
             }
             if arg_options.contains(option) {
+                parsed.opt_given = true;
                 let inline_arg = chars.peek().is_some();
                 let value = if inline_arg {
                     chars.collect::<String>()
@@ -815,25 +1128,63 @@ where
                             "{diagnostic_prefix}{name}: -{option}: option requires an argument"
                         )?;
                         write_usage(builtin, stderr)?;
-                        return Ok(ParsedCompletionOptions::status(EX_USAGE));
+                        return Ok(Err(EX_USAGE));
                     };
                     value.clone()
                 };
-                if option == 'o' && !is_valid_completion_option_name(&value) {
-                    writeln!(
-                        stderr,
-                        "{diagnostic_prefix}{name}: {value}: invalid option name"
-                    )?;
-                    // GNU 5.2.21: complete prints usage after an invalid
-                    // -o name; compgen does not.
-                    if builtin == CompletionBuiltin::Complete {
-                        write_usage(builtin, stderr)?;
+                match option {
+                    'o' => match find_compopt(&value) {
+                        Some(bit) => parsed.options |= bit,
+                        // complete.def:276-278: sh_invalidoptname, no usage.
+                        None => {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}{name}: {value}: invalid option name"
+                            )?;
+                            return Ok(Err(EX_USAGE));
+                        }
+                    },
+                    'A' => match find_compact(&value) {
+                        Some(bit) => parsed.actions |= bit,
+                        // complete.def:285: builtin_error, no usage line.
+                        None => {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}{name}: {value}: invalid action name"
+                            )?;
+                            return Ok(Err(EX_USAGE));
+                        }
+                    },
+                    'G' => parsed.globpat = Some(value),
+                    'W' => parsed.words = Some(value),
+                    'P' => parsed.prefix = Some(value),
+                    'S' => parsed.suffix = Some(value),
+                    'X' => parsed.filterpat = Some(value),
+                    'C' => parsed.command = Some(value),
+                    // complete.def:329-337: -F argument must be an identifier.
+                    'F' => {
+                        if !valid_identifier(&value) {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}{name}: `{value}': not a valid identifier"
+                            )?;
+                            return Ok(Err(EX_USAGE));
+                        }
+                        parsed.funcname = Some(value);
                     }
-                    return Ok(ParsedCompletionOptions::status(EX_USAGE));
-                }
-                parsed.set_option_arg(option, value);
-                if inline_arg {
-                    break;
+                    // complete.def:347-365: -V only when a varname out-param
+                    // exists (compgen); the argument must be an identifier.
+                    'V' => {
+                        if !valid_identifier(&value) {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}{name}: `{value}': not a valid identifier"
+                            )?;
+                            return Ok(Err(EX_USAGE));
+                        }
+                        parsed.varname = Some(value);
+                    }
+                    _ => {}
                 }
                 break;
             }
@@ -843,65 +1194,56 @@ where
                 "{diagnostic_prefix}{name}: -{option}: invalid option"
             )?;
             write_usage(builtin, stderr)?;
-            return Ok(ParsedCompletionOptions::status(EX_USAGE));
+            return Ok(Err(EX_USAGE));
         }
         index += 1;
     }
 
     parsed.operands = args[index..].to_vec();
-    Ok(parsed)
+    Ok(Ok(parsed))
 }
 
+fn find_compact(name: &str) -> Option<u64> {
+    COMPACTS.iter().find(|c| c.0 == name).map(|c| c.1)
+}
+
+fn find_compopt(name: &str) -> Option<u64> {
+    COMPOPTS.iter().find(|c| c.0 == name).map(|c| c.1)
+}
+
+/// bash valid_identifier: [A-Za-z_][A-Za-z0-9_]*.
+fn valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Result of parsing complete/compgen words (complete.def build_actions).
 #[derive(Default)]
-struct ParsedCompletionOptions {
-    status: i32,
-    action: Option<String>,
-    glob_pattern: Option<String>,
-    wordlist: Option<String>,
-    filter_pattern: Option<String>,
-    prefix: Option<String>,
-    suffix: Option<String>,
-    operands: Vec<String>,
+pub(crate) struct ParsedCompletionOptions {
+    pub(crate) actions: u64,
+    pub(crate) options: u64,
+    pub(crate) globpat: Option<String>,
+    pub(crate) words: Option<String>,
+    pub(crate) prefix: Option<String>,
+    pub(crate) suffix: Option<String>,
+    pub(crate) filterpat: Option<String>,
+    pub(crate) command: Option<String>,
+    pub(crate) funcname: Option<String>,
+    pub(crate) varname: Option<String>,
+    pub(crate) pflag: bool,
+    pub(crate) rflag: bool,
+    pub(crate) dflag: bool,
+    pub(crate) eflag: bool,
+    pub(crate) iflag: bool,
+    pub(crate) opt_given: bool,
+    pub(crate) operands: Vec<String>,
 }
 
 impl ParsedCompletionOptions {
-    fn status(status: i32) -> Self {
-        Self {
-            status,
-            ..Self::default()
-        }
-    }
-
-    fn set_option_arg(&mut self, option: char, value: String) {
-        match option {
-            'A' => self.action = Some(value),
-            'G' => self.glob_pattern = Some(value),
-            'W' => self.wordlist = Some(value),
-            'X' => self.filter_pattern = Some(value),
-            'P' => self.prefix = Some(value),
-            'S' => self.suffix = Some(value),
-            _ => {}
-        }
-    }
-
-    fn set_flag_option(&mut self, option: char) {
-        match option {
-            'a' => self.action = Some("alias".to_string()),
-            'b' => self.action = Some("builtin".to_string()),
-            'c' => self.action = Some("command".to_string()),
-            'd' => self.action = Some("directory".to_string()),
-            'e' => self.action = Some("export".to_string()),
-            'f' => self.action = Some("file".to_string()),
-            'g' => self.action = Some("group".to_string()),
-            'j' => self.action = Some("job".to_string()),
-            'k' => self.action = Some("keyword".to_string()),
-            's' => self.action = Some("service".to_string()),
-            'u' => self.action = Some("user".to_string()),
-            'v' => self.action = Some("variable".to_string()),
-            _ => {}
-        }
-    }
-
     fn word(&self) -> &str {
         self.operands
             .first()
@@ -910,7 +1252,7 @@ impl ParsedCompletionOptions {
     }
 
     fn filter_excludes(&self, candidate: &str) -> bool {
-        let Some(filter_pattern) = self.filter_pattern.as_deref() else {
+        let Some(filter_pattern) = self.filterpat.as_deref() else {
             return false;
         };
         if let Some(pattern) = filter_pattern.strip_prefix('!') {
@@ -1009,6 +1351,140 @@ impl CompletionBuiltin {
             CompletionBuiltin::Compopt => "compopt",
         }
     }
+
+    /// build_actions internal_getopt option letters. -p/-r/-D/-E/-I exist
+    /// for complete only (complete.def:205 "abcdefgjko:prsuvA:G:W:P:S:X:F:C:
+    /// V:DEI" with p/r/D/E/I rejected when no optflags out-param exists, i.e.
+    /// for compgen); -V takes an argument and is only valid for compgen.
+    fn flag_options(self) -> &'static str {
+        match self {
+            CompletionBuiltin::Complete => "abcdefgjksuvprDEI",
+            CompletionBuiltin::Compgen => "abcdefgjksuv",
+            CompletionBuiltin::Compopt => "",
+        }
+    }
+
+    fn arg_options(self) -> &'static str {
+        match self {
+            CompletionBuiltin::Complete => "oAGWFCXPS",
+            CompletionBuiltin::Compgen => "oAGWFCXPSV",
+            CompletionBuiltin::Compopt => "",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical spec printing (complete.def print_one_completion:537-599).
+// ---------------------------------------------------------------------------
+
+/// print_compoptions: -o names in compopts[] order. print_compactions: short
+/// flags first, then -A names, in compacts[] order. Then the quoted args
+/// -G -W -P -S -X, -C, -F (quoted only when it contains shell metas), then
+/// the command name.
+pub(crate) fn print_compspec_line<E>(name: &str, cs: &Compspec, out: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    write!(out, "complete ")?;
+    for &(optname, bit) in COMPOPTS {
+        if cs.options & bit != 0 {
+            write!(out, "-o {optname} ")?;
+        }
+    }
+    for &(_, bit, short) in COMPACTS {
+        if let Some(c) = short {
+            if cs.actions & bit != 0 {
+                write!(out, "-{c} ")?;
+            }
+        }
+    }
+    for &(actname, bit, short) in COMPACTS {
+        if short.is_none() && cs.actions & bit != 0 {
+            write!(out, "-A {actname} ")?;
+        }
+    }
+    print_arg(cs.globpat.as_deref(), "-G", true, out)?;
+    print_arg(cs.words.as_deref(), "-W", true, out)?;
+    print_arg(cs.prefix.as_deref(), "-P", true, out)?;
+    print_arg(cs.suffix.as_deref(), "-S", true, out)?;
+    print_arg(cs.filterpat.as_deref(), "-X", true, out)?;
+    print_arg(cs.command.as_deref(), "-C", true, out)?;
+    if let Some(funcname) = cs.funcname.as_deref() {
+        print_arg(Some(funcname), "-F", sh_contains_shell_metas(funcname), out)?;
+    }
+    write!(out, "{}", print_cmd_name(name))?;
+    writeln!(out)
+}
+
+/// complete.def print_arg: print "FLAG ARG " with sh_single_quote when quote.
+fn print_arg<E>(arg: Option<&str>, flag: &str, quote: bool, out: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    if let Some(arg) = arg {
+        let rendered = if quote {
+            sh_single_quote(arg)
+        } else {
+            arg.to_string()
+        };
+        write!(out, "{flag} {rendered} ")?;
+    }
+    Ok(())
+}
+
+/// complete.def print_cmd_name: -D/-E/-I pseudo names pass through, the empty
+/// name prints as '', other names single-quote when they contain metas.
+fn print_cmd_name(cmd: &str) -> String {
+    match cmd {
+        "-D" | "-E" | "-I" => cmd.to_string(),
+        "" => "''".to_string(),
+        _ => {
+            if sh_contains_shell_metas(cmd) {
+                sh_single_quote(cmd)
+            } else {
+                cmd.to_string()
+            }
+        }
+    }
+}
+
+/// lib/sh/shquote.c sh_single_quote: wrap in single quotes, rendering each
+/// embedded quote as '\''.
+fn sh_single_quote(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 2);
+    result.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            result.push_str("'\\''");
+        } else {
+            result.push(c);
+        }
+    }
+    result.push('\'');
+    result
+}
+
+/// lib/sh/shquote.c sh_contains_shell_metas.
+fn sh_contains_shell_metas(s: &str) -> bool {
+    const METAS: &str = " \t\n'\"\\|&;()<>!{}*[]?]^$`";
+    for (index, c) in s.char_indices() {
+        if METAS.contains(c) {
+            return true;
+        }
+        if c == '~' {
+            if index == 0 {
+                return true;
+            }
+            let prev = s[..index].chars().last();
+            if prev == Some('=') || prev == Some(':') {
+                return true;
+            }
+        }
+        if c == '#' && index == 0 {
+            return true;
+        }
+    }
+    false
 }
 
 pub(crate) fn write_usage<E>(builtin: CompletionBuiltin, stderr: &mut E) -> io::Result<()>
@@ -1020,7 +1496,7 @@ where
             "complete: usage: complete [-abcdefgjksuv] [-pr] [-DEI] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [name ...]"
         }
         CompletionBuiltin::Compgen => {
-            "compgen: usage: compgen [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]"
+            "compgen: usage: compgen [-V varname] [-abcdefgjksuv] [-o option] [-A action] [-G globpat] [-W wordlist] [-F function] [-C command] [-X filterpat] [-P prefix] [-S suffix] [word]"
         }
         CompletionBuiltin::Compopt => {
             "compopt: usage: compopt [-o|+o option] [-DEI] [name ...]"
@@ -1029,12 +1505,4 @@ where
     writeln!(stderr, "{usage}")
 }
 
-/// GNU complete.def compopts[] (bash 5.2): valid `-o` completion option names.
-fn is_valid_completion_option_name(name: &str) -> bool {
-    matches!(
-        name,
-        "bashdefault" | "default" | "dirnames" | "filenames" | "fullquote"
-            | "noquote" | "nosort" | "nospace" | "plusdirs"
-    )
-}
 

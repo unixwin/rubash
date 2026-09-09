@@ -435,7 +435,7 @@ pub struct Executor {
     process_env_snapshot: HashMap<String, String>,
     history_provider: Option<crate::history::SharedHistoryProvider>,
     last_notified_job_ids: HashSet<usize>,
-    completion_specs: HashMap<String, String>,
+    completion_specs: crate::builtins::complete::CompletionRegistry,
 }
 
 #[cfg(test)]

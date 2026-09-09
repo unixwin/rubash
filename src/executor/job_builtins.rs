@@ -908,69 +908,134 @@ impl Executor {
         builtin: crate::builtins::complete::CompletionBuiltin,
     ) -> Result<i32, ExecuteError> {
 
-        // Handle complete -p and complete -r at the executor level
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
+        let diagnostic_prefix = self.diagnostic_prefix();
         if matches!(builtin, crate::builtins::complete::CompletionBuiltin::Complete) {
             let args = &cmd.words[1..];
-            if args.iter().any(|a| a == "-p") {
-                let mut status = 0;
-                let targets: Vec<&str> = args.iter()
-                    .filter(|a| !a.starts_with('-'))
-                    .map(String::as_str)
-                    .collect();
-                for (name, spec) in &self.completion_specs {
-                    if !targets.is_empty() && !targets.contains(&name.as_str()) {
-                        continue;
-                    }
-                    writeln!(stdout, "complete {}", spec)?;
+            // complete_builtin (complete.def:386-489): parse the words once,
+            // then -p print / -r remove / register per name against the
+            // registry. Bare complete (no words) prints all specs.
+            if args.is_empty() {
+                for (name, cs) in self.completion_specs.iter() {
+                    crate::builtins::complete::print_compspec_line(name, cs, &mut stdout)?;
                 }
-                if !targets.is_empty() && targets.iter().all(|t| !self.completion_specs.contains_key(*t)) {
-                    status = 1;
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                return Ok(0);
+            }
+            let parsed = match crate::builtins::complete::parse_completion_options(
+                builtin,
+                args,
+                &diagnostic_prefix,
+                &mut stderr,
+            )? {
+                Err(status) => {
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(status);
+                }
+                Ok(parsed) => parsed,
+            };
+            // -D overrides -E overrides -I (complete.def:417-424); the
+            // pseudo names are the registry keys themselves.
+            let pseudo: Option<&str> = if parsed.dflag {
+                Some("-D")
+            } else if parsed.eflag {
+                Some("-E")
+            } else if parsed.iflag {
+                Some("-I")
+            } else {
+                None
+            };
+            if parsed.pflag {
+                // -p overrides everything else (complete.def:426-441).
+                let mut status = 0;
+                if let Some(pseudo) = pseudo {
+                    match self.completion_specs.get(pseudo) {
+                        Some(cs) => {
+                            crate::builtins::complete::print_compspec_line(pseudo, cs, &mut stdout)?;
+                        }
+                        None => {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}complete: {pseudo}: no completion specification"
+                            )?;
+                            status = 1;
+                        }
+                    }
+                } else if !parsed.operands.is_empty() {
+                    // print_cmd_completions (complete.def:630-650): argument
+                    // order, unknown names error and fail the builtin.
+                    for target in &parsed.operands {
+                        match self.completion_specs.get(target.as_str()) {
+                            Some(cs) => {
+                                crate::builtins::complete::print_compspec_line(
+                                    target,
+                                    cs,
+                                    &mut stdout,
+                                )?;
+                            }
+                            None => {
+                                writeln!(
+                                    stderr,
+                                    "{diagnostic_prefix}complete: {target}: no completion specification"
+                                )?;
+                                status = 1;
+                            }
+                        }
+                    }
+                } else {
+                    for (name, cs) in self.completion_specs.iter() {
+                        crate::builtins::complete::print_compspec_line(name, cs, &mut stdout)?;
+                    }
                 }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(status);
             }
-            if args.iter().any(|a| a == "-r") {
-                let targets: Vec<&str> = args.iter()
-                    .filter(|a| !a.starts_with('-'))
-                    .map(String::as_str)
-                    .collect();
-                if targets.is_empty() {
-                    self.completion_specs.clear();
-                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                    return Ok(0);
-                }
-                // GNU pcomplib.c progcomp_remove: an empty (never-created)
-                // table returns success for any name; once any spec exists,
-                // removing an unknown name errors `no completion specification`.
+            if parsed.rflag {
+                // -r next (complete.def:443-458); remove_cmd_completions
+                // errors on unknown names, bare -r flushes the table.
                 let mut status = 0;
-                let empty_table = self.completion_specs.is_empty();
-                for t in targets {
-                    if !empty_table && self.completion_specs.remove(t).is_none() {
+                if let Some(pseudo) = pseudo {
+                    if !self.completion_specs.remove(pseudo) {
                         writeln!(
                             stderr,
-                            "{}complete: {}: no completion specification",
-                            self.diagnostic_prefix(),
-                            t
+                            "{diagnostic_prefix}complete: {pseudo}: no completion specification"
                         )?;
                         status = 1;
-                    } else {
-                        self.completion_specs.remove(t);
                     }
+                } else if !parsed.operands.is_empty() {
+                    for target in &parsed.operands {
+                        if !self.completion_specs.remove(target) {
+                            writeln!(
+                                stderr,
+                                "{diagnostic_prefix}complete: {target}: no completion specification"
+                            )?;
+                            status = 1;
+                        }
+                    }
+                } else {
+                    self.completion_specs.flush();
                 }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(status);
             }
-            // Store spec for the last non-option operand (keeps the -p
-            // block one line per definition; GNU inserts per name, but the
-            // WSL .right capture of `complete -p` is corrupted, so matching
-            // per-name output there is impossible anyway).
-            let spec = args.join(" ");
-            let last_arg = args.iter().filter(|a| !a.starts_with('-')).last();
-            if let Some(target) = last_arg {
-                self.completion_specs.insert(target.to_string(), spec);
+            if parsed.operands.is_empty() && parsed.opt_given {
+                // complete.def:460-464: options but no names and no
+                // -p/-r/-D/-E/-I print usage and fail with EX_USAGE.
+                crate::builtins::complete::write_usage(builtin, &mut stderr)?;
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                return Ok(2); // EX_USAGE
             }
+            // Register the compspec for every name (complete.def:480-485).
+            let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
+            if let Some(pseudo) = pseudo {
+                self.completion_specs.insert(pseudo, spec.clone());
+            }
+            for target in &parsed.operands {
+                self.completion_specs.insert(target, spec.clone());
+            }
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(0);
         }
         let function_names: Vec<String> = self.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
@@ -987,7 +1052,7 @@ impl Executor {
             &self.aliases,
             &function_names,
             &job_names,
-            &self.diagnostic_prefix(),
+            &diagnostic_prefix,
             &mut stdout,
             &mut stderr,
         )?;
@@ -995,7 +1060,10 @@ impl Executor {
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
         ) {
-            if let Some(varname) = compgen_array_target(&cmd.words[1..]) {
+            // compgen -V varname (complete.def:761-770): store the matches in
+            // the indexed array VARNAME instead of printing them; the builtin
+            // still fails (1) when nothing matched.
+            if let Some(varname) = crate::builtins::complete::compgen_varname(&cmd.words[1..]) {
                 if status == 0 {
                     let values = String::from_utf8_lossy(&stdout)
                         .lines()
@@ -1009,33 +1077,6 @@ impl Executor {
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
-}
-
-fn compgen_array_target(words: &[String]) -> Option<String> {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
-        if word == "--" || !word.starts_with('-') || word == "-" {
-            return None;
-        }
-
-        let mut chars = word[1..].char_indices().peekable();
-        while let Some((_offset, option)) = chars.next() {
-            match option {
-                // -V is not a valid compgen option in the GNU 5.2.21
-                // baseline (rejected as invalid), so no array target.
-                'A' | 'C' | 'F' | 'G' | 'P' | 'S' | 'W' | 'X' | 'o' => {
-                    if chars.peek().is_none() {
-                        index += 1;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-        index += 1;
-    }
-
-    None
 }
 
 struct WaitAnyRequest {

@@ -8,6 +8,9 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_USAGE: i32 = 2;
 
+// Consumed previously by the completion helptopic action, which now carries
+// its own GNU-aligned table (see builtins/complete.rs).
+#[allow(dead_code)]
 pub(crate) const HELP_TOPICS: &[&str] = &[
     "!",
     ".",

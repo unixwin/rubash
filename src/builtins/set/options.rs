@@ -223,6 +223,9 @@ pub(crate) fn is_shell_option(name: &str) -> bool {
     SHELL_OPTIONS.iter().any(|option| option.name == name)
 }
 
+// Consumed previously by the completion setopt action, which now carries its
+// own GNU-aligned table (see builtins/complete.rs).
+#[allow(dead_code)]
 pub(crate) fn shell_option_names() -> impl Iterator<Item = &'static str> {
     SHELL_OPTIONS.iter().map(|option| option.name)
 }

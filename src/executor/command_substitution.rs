@@ -655,7 +655,7 @@ impl Executor {
             process_env_snapshot: self.process_env_snapshot.clone(),
             history_provider: self.history_provider.clone(),
             last_notified_job_ids: HashSet::new(),
-            completion_specs: HashMap::new(),
+            completion_specs: crate::builtins::complete::CompletionRegistry::new(),
         }
     }
 

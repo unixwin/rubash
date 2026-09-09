@@ -8,7 +8,7 @@ mod unset;
 
 pub(crate) use options::{
     is_shell_option, print_shell_option, print_shell_options, print_shell_options_by_state,
-    set_shell_option, shell_option_enabled, shell_option_names, shellopts_value,
+    set_shell_option, shell_option_enabled, shellopts_value,
 };
 pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
