@@ -939,10 +939,12 @@ pub(in crate::executor) fn ensure_var_tmp_dir(env_vars: &HashMap<String, String>
 }
 
 fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    // Walk the chain and take the first NON-EMPTY value: an empty entry must
+    // not shadow later names (a host exporting an empty __RUBASH_SHELL_ROOT
+    // alongside WINUXSH_ROOT/RUBASH_ROOT used to disable root resolution).
     let value = ["__RUBASH_SHELL_ROOT", "WINUXSH_ROOT", "RUBASH_ROOT"]
         .into_iter()
-        .find_map(|name| env_vars.get(name))
-        .filter(|value| !value.is_empty())?;
+        .find_map(|name| env_vars.get(name).filter(|value| !value.is_empty()))?;
 
     let normalized = value.replace('\\', "/");
     if cfg!(windows)
