@@ -637,6 +637,15 @@ impl Executor {
         if let Some(values) =
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
         {
+            // GNU quoted-$@ + quoted-null retention (see
+            // raw_quoted_at_word_has_quoted_null): `"$@"''` with no
+            // positional parameters is one empty argument, not zero
+            // (subst.c 12026-12035 had_quoted_null beats the discard).
+            if values.is_empty()
+                && raw.is_some_and(|raw| raw_quoted_at_word_has_quoted_null(raw, self))
+            {
+                return vec![String::new()];
+            }
             if self.word_is_unquoted_positional_modified_list_expansion(word)
                 || self.word_is_unquoted_positional_list_expansion(word)
             {
@@ -656,6 +665,16 @@ impl Executor {
         if word.starts_with('\x1d') {
             if let Some(values) = self.quoted_braced_alternate_positional_at_values(word) {
                 return values;
+            }
+            // A whole-word ${op...} the lexer marked wholly quoted but whose
+            // raw word carries no outer quotes expands its alternate as an
+            // unquoted word: quoted-empty spans survive as empty fields
+            // through the quoted-null carrier (quote2.sub ${x:+"$e" "$e"} is
+            // two empty args; subst.c list_string:3181-3186).
+            if !raw_word_is_quoted(raw) {
+                if let Some(values) = self.unquoted_outer_braced_alternate_values(word) {
+                    return values;
+                }
             }
         }
         // GNU bash runs brace expansion once, on the original word, before
@@ -936,6 +955,16 @@ impl Executor {
             .unwrap_or(true);
         if !positional_at && !posix_literal_quotes && ifs_all_whitespace {
             let expanded = self.expand_alternate_parameter_word(alternate);
+            // Quoted-empty spans in the alternate carry the quoted-null
+            // marker: the splitter keeps each marker-only field as an empty
+            // argument (quote2.sub: ${x:+"$e" "$e"} -> two empty args,
+            // subst.c list_string:3181-3186 QUOTED_NULL branch).
+            if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+                return Some(field_split_values_with_quoted_nulls(
+                    &expanded,
+                    self.env_vars.get("IFS").map(String::as_str),
+                ));
+            }
             // A fully quoted empty alternate (foo:-quote-quote) is a
             // quoted null: GNU yields one empty field, not zero
             // (subst.c W_HASQUOTEDNULL).
@@ -1046,6 +1075,74 @@ impl Executor {
             values.extend(self.expand_command_word(cmd, index, &cmd.words[index], raw));
         }
         values
+    }
+
+    // Whole-word x1d-marked braced alternates whose raw word has no outer
+    // quotes: the alternate expands like an unquoted word (GNU param_expand
+    // carries quoted == 0 into the rhs when the braced form itself is
+    // unquoted). The quoted-null carrier keeps quoted-empty spans as empty
+    // fields (quote2.sub).
+    fn unquoted_outer_braced_alternate_values(&mut self, word: &str) -> Option<Vec<String>> {
+        let braced = word.strip_prefix('\x1d')?;
+        if !braced.starts_with("${") || !braced.ends_with('}') {
+            return None;
+        }
+        if !braced_parameter_spans_whole_word(braced) {
+            return None;
+        }
+        if !braced.contains(['"', '\'']) {
+            return None;
+        }
+        let inner = &braced[2..braced.len() - 1];
+        // Quoted-at alternates keep their dedicated word-boundary paths.
+        if inner.contains("$@")
+            || inner.contains("${@}")
+            || inner.contains("$*")
+            || inner.contains("${*}")
+        {
+            return None;
+        }
+        let (var_name, alternate, use_when_set, require_non_empty) =
+            if let Some((var_name, alternate)) = inner.split_once(":+") {
+                (var_name, alternate, true, true)
+            } else if let Some((var_name, alternate)) = inner.split_once('+') {
+                (var_name, alternate, true, false)
+            } else if let Some((var_name, alternate)) = inner.split_once(":-") {
+                (var_name, alternate, false, true)
+            } else if let Some((var_name, alternate)) = inner.split_once('-') {
+                (var_name, alternate, false, false)
+            } else {
+                return None;
+            };
+        if !is_parameter_error_name(var_name) {
+            return None;
+        }
+        let value = self.parameter_operator_value(var_name);
+        let word_used = if use_when_set {
+            value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
+        } else {
+            value.is_none() || (require_non_empty && value.unwrap_or_default().is_empty())
+        };
+        if !word_used {
+            // Fall through: the minus forms with the parameter set must
+            // yield the parameter value, and the plus forms with it unset
+            // are dropped by the caller's null-word rule on the existing
+            // path.
+            return None;
+        }
+        let expanded = self.expand_alternate_parameter_word(alternate);
+        if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+            return Some(field_split_values_with_quoted_nulls(
+                &expanded,
+                self.env_vars.get("IFS").map(String::as_str),
+            ));
+        }
+        if expanded.is_empty() {
+            // The alternate is quoted text that expands empty: a quoted
+            // null, one empty field (subst.c W_HASQUOTEDNULL).
+            return Some(vec![String::new()]);
+        }
+        Some(self.field_split_values(&expanded))
     }
 
     pub(in crate::executor) fn apply_alias_expansion_after_word_expansion(
@@ -1329,7 +1426,184 @@ pub(in crate::executor) fn raw_word_is_fully_single_quoted(raw: Option<&str>) ->
     let Some(raw) = raw else {
         return false;
     };
-    raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'')
+    // Quote-aware tiling: the raw word is fully single quoted only when
+    // single-quoted spans cover every character. A naive starts/ends check
+    // misread ''"$@"'' and ''$v'' (single spans around unquoted content) as
+    // literal data, so the word reached argv unexpanded (quote4.sub).
+    let chars: Vec<char> = raw.chars().collect();
+    if chars.len() < 2 || chars[0] != '\'' {
+        return false;
+    }
+    let mut in_single = false;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\'' => {
+                in_single = !in_single;
+                index += 1;
+            }
+            // A backslash escape outside quotes is lexer-resolved literal
+            // data (e.g. the '\'' splice inside eval bodies): it must not
+            // demote the word to the expansion path, or the eval reparse
+            // sees mangled text (bashdb_compat eval_reparse case).
+            '\\' if !in_single => {
+                if index + 1 >= chars.len() {
+                    return false;
+                }
+                index += 2;
+            }
+            _ if in_single => {
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    !in_single
+}
+
+/// A quoted `$@`/`$*` word whose expansion is empty still yields one
+/// empty argument when the raw word also contains a quoted-null source:
+/// an empty ''/"" span, or a quoted pure reference that expands empty
+/// (GNU expand_word_internal: the ''/"" cases add CTLNUL and set
+/// had_quoted_null at 11841-11847 / 11940-11944, and the final
+/// 12026-12035 keeps a had_quoted_null word as a QUOTED_NULL argument
+/// even when quoted_dollar_at discarded the "$@" half -- quote4.sub
+/// `n "$@"''` with no positional parameters is 1, not 0).
+fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut saw_quoted_at = false;
+    let mut saw_quoted_null = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '\'' => {
+                let start = index;
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index < chars.len() && index == start + 1 {
+                    saw_quoted_null = true;
+                }
+                index += 1;
+            }
+            '"' => {
+                index += 1;
+                let mut content = String::new();
+                while index < chars.len() && chars[index] != '"' {
+                    if chars[index] == '\\' && index + 1 < chars.len() {
+                        content.push(chars[index + 1]);
+                        index += 2;
+                        continue;
+                    }
+                    content.push(chars[index]);
+                    index += 1;
+                }
+                let closed = index < chars.len();
+                if closed {
+                    index += 1;
+                }
+                if !closed {
+                    continue;
+                }
+                if content.is_empty() {
+                    saw_quoted_null = true;
+                } else if matches!(
+                    content.as_str(),
+                    "$@" | "$*" | "${@}" | "${*}"
+                ) {
+                    saw_quoted_at = true;
+                } else if quoted_pure_reference_expands_empty(&content, executor) {
+                    saw_quoted_null = true;
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                // ANSI-C span: $'' is an empty quoted string; any other
+                // $'...' has content.
+                index += 2;
+                let start = index;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index == start {
+                    saw_quoted_null = true;
+                }
+                index += 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                // The braced body keeps its quotes: scan it verbatim so a
+                // ${x+"$@"''} alternate still exposes its spans.
+                index += 2;
+            }
+            '`' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    saw_quoted_at && saw_quoted_null
+}
+
+/// "$e" / "${e}" with a currently empty (or unset) value is a quoted null
+/// for the retention rule above. Only pure name references qualify;
+/// command/arithmetic substitutions stay out (they must not run twice).
+fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bool {
+    let Some(name) = content
+        .strip_prefix("${")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .or_else(|| content.strip_prefix('$'))
+    else {
+        return false;
+    };
+    if !(is_shell_name(name)
+        || name.chars().all(|ch| ch.is_ascii_digit())
+            && !name.is_empty()
+            || matches!(name, "?" | "!" | "#" | "-" | "$"))
+    {
+        return false;
+    }
+    if name.chars().all(|ch| ch.is_ascii_digit()) {
+        let position: usize = name.parse().unwrap_or(usize::MAX);
+        if position == 0 {
+            return executor.script_name_value().is_empty();
+        }
+        return executor
+            .positional_params
+            .get(position - 1)
+            .is_none_or(|value| value.is_empty());
+    }
+    executor
+        .dynamic_parameter_value(name)
+        .or_else(|| executor.shell_variable_value(name))
+        .or_else(|| std::env::var(name).ok())
+        .is_none_or(|value| value.is_empty())
+}
+
+/// Field split an alternate expansion that carries QUOTED_NULL_MARKER
+/// (empty quoted spans). The marker rides inside fields like ordinary
+/// data; after the split the markers are stripped, and a field that
+/// consisted only of quoted-null markers is kept as an empty argument
+/// (subst.c list_string:3181-3186 QUOTED_NULL branch + remove_quoted_nulls).
+fn field_split_values_with_quoted_nulls(value: &str, ifs: Option<&str>) -> Vec<String> {
+    field_split_values_with_ifs(value, ifs)
+        .into_iter()
+        .map(|field| {
+            let had_quoted_null = field.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER);
+            let stripped = field.replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "");
+            match stripped.is_empty() {
+                true if had_quoted_null => String::new(),
+                _ => stripped,
+            }
+        })
+        .collect()
 }
 
 pub(in crate::executor) fn raw_word_is_quoted(raw: Option<&str>) -> bool {

@@ -1,6 +1,15 @@
 use super::*;
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
+// The quoted-null carrier (GNU subst.c CTLNUL): an empty quoted span
+// ('', "", an unset "$e", a no-output "$( : )") in a ${var+word}
+// alternate leaves a marker in the expansion so the field splitter can
+// keep it as an empty argument (subst.c expand_word_internal adds CTLNUL
+// to the word text at 11940-11944 / 11841-11847, and list_string:3181-3186
+// keeps a QUOTED_NULL field as an empty argv entry). U+E000/U+E001 are
+// taken by the raw-byte and assignment data-quote sentinels; U+E002 free.
+pub(in crate::executor) const QUOTED_NULL_MARKER: char = '\u{E002}';
+
 // Whitespace that an expansion produced inside a quoted region of an
 // alternate word must survive field splitting (GNU carries CTLESC on
 // quoted expansion results); the \x1c prefix marks it for the splitter.
@@ -93,7 +102,15 @@ impl Executor {
             .replace('\x1a', "`")
             .replace('\x14', "\\")
             .replace(crate::lexer::PARAM_NAME_END_MARKER, "");
-        restored
+        // Quoted-null markers only matter to the alternate field splitter
+        // (unquoted_outer_braced_alternate_values); every other consumer
+        // (assignment rhs, quoted alternates) drops them like GNU's
+        // dequote_list.
+        if alternate {
+            restored
+        } else {
+            restored.replace(QUOTED_NULL_MARKER, "")
+        }
     }
 
     fn expand_embedded_parameters_ordered_mut(
@@ -107,6 +124,9 @@ impl Executor {
         let mut output = String::new();
         let mut chars = word.chars().peekable();
         let mut in_double = false;
+        // Output length when the current double-quoted span opened, for the
+        // quoted-null carrier below (alternate mode only).
+        let mut dquote_open_len: Option<usize> = None;
 
         while let Some(ch) = chars.next() {
             // Alternate rhs: whitespace inside a quoted region is quote
@@ -163,7 +183,22 @@ impl Executor {
                 && matches!(context, SubstitutionQuoteContext::Unquoted)
                 && ch == '"'
             {
+                let closing = in_double;
                 in_double = !in_double;
+                // A double-quoted span whose expansion produced nothing is a
+                // quoted null: "" and $xxx"" become CTLNUL (subst.c
+                // 11841-11847 "What we have is \"\""). Alternate mode only:
+                // the marker is consumed by the alternate field splitter.
+                if alternate {
+                    if closing {
+                        if dquote_open_len == Some(output.len()) {
+                            output.push(QUOTED_NULL_MARKER);
+                        }
+                        dquote_open_len = None;
+                    } else {
+                        dquote_open_len = Some(output.len());
+                    }
+                }
                 continue;
             }
 
@@ -172,14 +207,22 @@ impl Executor {
                 && ch == '\''
                 && !in_double
             {
+                let span_start = output.len();
+                let mut closed = false;
                 for quoted_ch in chars.by_ref() {
                     if quoted_ch == '\'' {
+                        closed = true;
                         break;
                     }
                     if alternate && matches!(quoted_ch, ' ' | '\t' | '\n') {
                         output.push('\x1c');
                     }
                     output.push(quoted_ch);
+                }
+                // An empty single-quoted span is a quoted null (subst.c
+                // 11940-11944: c = CTLNUL; goto add_character).
+                if alternate && closed && output.len() == span_start {
+                    output.push(QUOTED_NULL_MARKER);
                 }
                 continue;
             }

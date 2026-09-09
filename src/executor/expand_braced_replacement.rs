@@ -321,10 +321,14 @@ fn push_double_quoted_replacement_char(
             }
             Some(other) => {
                 marked.push(PATSUB_QUOTED_BACKSLASH);
-                if *other == '&' {
-                    marked.push(PATSUB_QUOTED_AMP);
-                } else {
-                    marked.push(*other);
+                match *other {
+                    // Quote data inside a double-quoted replacement span must
+                    // reach the expander protected (GNU subst.c
+                    // string_extract_double_quoted keeps \' literally; a bare
+                    // quote here would be eaten as a span delimiter).
+                    '\'' | '\x17' => marked.push('\x17'),
+                    '&' => marked.push(PATSUB_QUOTED_AMP),
+                    _ => marked.push(*other),
                 }
                 index + 2
             }
@@ -354,6 +358,13 @@ fn push_double_quoted_replacement_char(
         }
         '\x18' => {
             marked.push('\x18');
+            index + 1
+        }
+        '\'' | '\x17' => {
+            // Quote data inside a double-quoted replacement span: protect it
+            // from the expander, which drops a bare quote as a span
+            // delimiter (GNU keeps dquoted ' as literal data).
+            marked.push('\x17');
             index + 1
         }
         other => {
