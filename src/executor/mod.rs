@@ -281,6 +281,10 @@ pub(in crate::executor) struct FunctionDefInfo {
 struct FunctionDefinitionLocation {
     line: usize,
     source: String,
+    /// GNU reports the body group's line for DEBUG fires inside a traced
+    /// function (trap.tests `func2[43] debug`: `func2()` on 42, `{` on 43),
+    /// so the plain-call path needs this in addition to the definition line.
+    body_open_line: Option<usize>,
 }
 
 impl LoopControlKind {
@@ -418,6 +422,11 @@ pub struct Executor {
     debug_trap_running: bool,
     return_trap_running: bool,
     signal_trap_running: bool,
+    /// Child-death notifications that arrived while the SIGCHLD trap action
+    /// was already running (a re-entrant reap drops them otherwise; bash
+    /// re-runs the trap once per pending notification — trap.tests expects
+    /// three "caught a child death" lines for three reaped background jobs).
+    sigchld_notifications_pending: std::cell::Cell<usize>,
     /// GNU builtins/source.def:208-216 unsets the DEBUG trap for the
     /// duration of a sourced file when function_trace_mode is off; the
     /// unwind-protect only restores it after source_file's run_return_trap

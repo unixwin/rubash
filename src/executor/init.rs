@@ -257,6 +257,7 @@ impl Executor {
             debug_trap_running: false,
             return_trap_running: false,
             signal_trap_running: false,
+            sigchld_notifications_pending: std::cell::Cell::new(0),
             source_debug_suppressed: false,
             debug_trap_command: std::cell::RefCell::new(None),
             debug_trap_function_line: None,

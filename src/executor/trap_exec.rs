@@ -428,8 +428,20 @@ impl Executor {
         let saved_trap_command = self.debug_trap_command.borrow().clone();
         *self.debug_trap_command.borrow_mut() =
             Some(crate::executor::command_text::bash_command_text(command));
+        // GNU executes the ERR trap action with LINENO bound to the failed
+        // command's line (trap3.sub: `false | false | false` on line 8 makes
+        // the ERR action's $LINENO print 8). The action AST re-parses with
+        // position-1 lines, which set_current_line would otherwise clobber
+        // the tracking value with — pin the action's node lines instead, the
+        // way run_debug_trap does.
+        let failed_line = command.line;
         let tokens = crate::lexer::tokenize(&action);
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        if let Some(line) = failed_line {
+            for action_command in &mut ast.commands {
+                action_command.line = Some(line);
+            }
+        }
         let _ = self.execute_ast(&ast);
         *self.debug_trap_command.borrow_mut() = saved_trap_command;
         self.exit_code = saved_exit;
@@ -442,7 +454,17 @@ impl Executor {
     /// reaped background subshell, two background sleeps, and the
     /// foreground sleep).
     pub(crate) fn run_sigchld_trap_for_reaped_child(&mut self) -> Result<(), ExecuteError> {
-        if self.signal_trap_running || self.subshell_depth.get() > 0 {
+        if self.signal_trap_running {
+            // A child death notification arrived while the SIGCHLD trap
+            // action is already running: queue it, and the outermost run
+            // re-executes the action once per pending notification (bash
+            // delivers one SIGCHLD per reaped child; trap.tests expects
+            // three catches for three background jobs).
+            self.sigchld_notifications_pending
+                .set(self.sigchld_notifications_pending.get() + 1);
+            return Ok(());
+        }
+        if self.subshell_depth.get() > 0 {
             return Ok(());
         }
         let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "SIGCHLD")
@@ -454,9 +476,20 @@ impl Executor {
         }
         let saved_exit = self.exit_code;
         self.signal_trap_running = true;
-        let tokens = crate::lexer::tokenize(&action);
-        let ast = crate::parser::parse(&tokens);
-        let result = self.execute_ast(&ast);
+        let mut result: Result<(), ExecuteError> = Ok(());
+        loop {
+            let tokens = crate::lexer::tokenize(&action);
+            let ast = crate::parser::parse(&tokens);
+            result = self.execute_ast(&ast);
+            if result.is_err() {
+                break;
+            }
+            if self.sigchld_notifications_pending.get() == 0 {
+                break;
+            }
+            self.sigchld_notifications_pending
+                .set(self.sigchld_notifications_pending.get() - 1);
+        }
         self.signal_trap_running = false;
         match result {
             Ok(()) => self.exit_code = saved_exit,

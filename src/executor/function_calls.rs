@@ -83,6 +83,7 @@ impl Executor {
                 FunctionDefinitionLocation {
                     line,
                     source: self.current_bash_source(),
+                    body_open_line: function.body_open_line,
                 },
             );
         } else {
@@ -271,12 +272,16 @@ impl Executor {
             .get(name)
             .map(|location| location.line);
         if function_traced {
-            if let Some(line) = call_cmd
+            let body_open_line = call_cmd
                 .function_command
                 .as_ref()
                 .and_then(|function| function.body_open_line)
-                .or(definition_line)
-            {
+                .or(self
+                    .function_definition_locations
+                    .get(name)
+                    .and_then(|location| location.body_open_line))
+                .or(definition_line);
+            if let Some(line) = body_open_line {
                 self.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
