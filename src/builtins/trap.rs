@@ -11,8 +11,12 @@ const TRAP_PREFIX: &str = "__RUBASH_TRAP_";
 /// Signals whose disposition was SIG_IGN when this shell started (trap.c
 /// sigmodes SIG_HARD_IGNORE). They cannot be trapped or reset, and POSIX
 /// reports no error when attempted (trap.c set_signal/ignore_signal).
-const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
+pub(crate) const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
 const EX_USAGE: i32 = 2;
+/// Linux signal numbering (the GNU 5.3.0 contract baseline runs on WSL,
+/// where BASH_TRAPSIG, `trap 17`, `kill -l 10` and friends all speak this
+/// table). Slots 32/33 do not exist on Linux; GNU's `trap -l` skips them
+/// and accepts the specifiers silently.
 pub(crate) const SIGNALS: [&str; 64] = [
     "SIGHUP",
     "SIGINT",
@@ -20,31 +24,33 @@ pub(crate) const SIGNALS: [&str; 64] = [
     "SIGILL",
     "SIGTRAP",
     "SIGABRT",
-    "SIGEMT",
+    "SIGBUS",
     "SIGFPE",
     "SIGKILL",
-    "SIGBUS",
+    "SIGUSR1",
     "SIGSEGV",
-    "SIGSYS",
+    "SIGUSR2",
     "SIGPIPE",
     "SIGALRM",
     "SIGTERM",
-    "SIGURG",
+    "SIGSTKFLT",
+    "SIGCHLD",
+    "SIGCONT",
     "SIGSTOP",
     "SIGTSTP",
-    "SIGCONT",
-    "SIGCHLD",
     "SIGTTIN",
     "SIGTTOU",
-    "SIGIO",
+    "SIGURG",
     "SIGXCPU",
     "SIGXFSZ",
     "SIGVTALRM",
     "SIGPROF",
     "SIGWINCH",
+    "SIGIO",
     "SIGPWR",
-    "SIGUSR1",
-    "SIGUSR2",
+    "SIGSYS",
+    "",
+    "",
     "SIGRTMIN",
     "SIGRTMIN+1",
     "SIGRTMIN+2",
@@ -61,8 +67,6 @@ pub(crate) const SIGNALS: [&str; 64] = [
     "SIGRTMIN+13",
     "SIGRTMIN+14",
     "SIGRTMIN+15",
-    "SIGRTMIN+16",
-    "SIGRTMAX-15",
     "SIGRTMAX-14",
     "SIGRTMAX-13",
     "SIGRTMAX-12",
@@ -255,14 +259,29 @@ fn print_signal_list<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    for (index, signal) in SIGNALS.iter().enumerate() {
-        write!(stdout, "{:>2}) {signal}", index + 1)?;
-        if (index + 1) % 5 == 0 || index + 1 == SIGNALS.len() {
+    // GNU trap -l output is byte-identical to `kill -l` (Linux numbering,
+    // 5 entries per line, tab-separated, trailing tab on the final partial
+    // line). Slots 32/33 do not exist on Linux and are skipped.
+    let numbered: Vec<(usize, &str)> = SIGNALS
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| !name.is_empty())
+        .map(|(index, name)| (index + 1, *name))
+        .collect();
+    let total = numbered.len();
+    for (position, (number, signal)) in numbered.iter().enumerate() {
+        let position = position + 1;
+        if position > 1 && (position - 1) % 5 == 0 {
             writeln!(stdout)?;
-        } else {
+        } else if position > 1 {
+            write!(stdout, "\t")?;
+        }
+        write!(stdout, "{number:>2}) {signal}")?;
+        if position == total && position % 5 != 0 {
             write!(stdout, "\t")?;
         }
     }
+    writeln!(stdout)?;
     Ok(())
 }
 
@@ -330,6 +349,27 @@ fn orig_ignored_signals(env_vars: &HashMap<String, String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Value for the child process's TRAP_ORIG_IGNORES at a spawn boundary.
+/// GNU's fork passes the parent's SIG_IGN dispositions through the kernel:
+/// signals the parent ignores at runtime (empty trap actions) become
+/// SIG_HARD_IGNORE in the child, alongside the parent's own inherited
+/// ignores. Windows environment blocks cannot carry empty values (the
+/// per-signal trap keys with "" actions are dropped), so the merged set is
+/// transported in the single non-empty ORIG_IGN variable instead.
+pub(crate) fn transport_inherited_ignores(env_vars: &HashMap<String, String>) -> String {
+    let mut ignored: Vec<String> = trap_list(env_vars)
+        .into_iter()
+        .filter(|signal| {
+            !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERROR" | "RETURN")
+                && env_vars.get(&trap_key(signal)).is_some_and(String::is_empty)
+        })
+        .collect();
+    ignored.extend(orig_ignored_signals(env_vars));
+    ignored.sort();
+    ignored.dedup();
+    ignored.join(":")
+}
+
 fn store_orig_ignored_signals(env_vars: &mut HashMap<String, String>, mut signals: Vec<String>) {
     signals.sort();
     signals.dedup();
@@ -360,6 +400,19 @@ fn add_orig_ignored_signal(env_vars: &mut HashMap<String, String>, signal: &str)
 /// child) become hard-ignored for this shell, matching trap.c's
 /// original_signals == SIG_IGN startup handling.
 pub(crate) fn seed_startup_traps(env_vars: &mut HashMap<String, String>) {
+    // Rebuild the empty trap-table entries for ignores transported across a
+    // process boundary (transport_inherited_ignores): the per-signal "" keys
+    // cannot survive a Windows environment block, so the ORIG_IGN list is
+    // the only record the child has. GNU's child displays these as
+    // `trap -- '' SIG` and refuses to trap or reset them.
+    for signal in orig_ignored_signals(env_vars) {
+        if env_vars.get(&trap_key(&signal)).is_none() {
+            env_vars.insert(trap_key(&signal), String::new());
+            let mut signals = trap_list(env_vars);
+            signals.insert(signal);
+            store_trap_list(env_vars, signals);
+        }
+    }
     for signal in SIGNALS {
         let key = trap_key(signal);
         if env_vars.get(&key).is_some_and(String::is_empty) {
@@ -469,7 +522,12 @@ where
 /// (rubash keys the ERR trap as "ERR").
 fn canonical_trap_order() -> Vec<String> {
     std::iter::once("EXIT".to_string())
-        .chain(SIGNALS.iter().map(|signal| signal.to_string()))
+        .chain(
+            SIGNALS
+                .iter()
+                .filter(|signal| !signal.is_empty())
+                .map(|signal| signal.to_string()),
+        )
         .chain(["DEBUG", "ERR", "RETURN"].iter().map(|s| s.to_string()))
         .collect()
 }

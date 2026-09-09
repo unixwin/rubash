@@ -316,7 +316,7 @@ impl Executor {
                 // Child completion/reaping notifications must not turn into
                 // a synthetic 128+SIGCHLD shell exit when no CHLD trap is
                 // installed (busybox ash `reap*.tests`).
-                if signal == 20 {
+                if signal == 17 {
                     continue;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));

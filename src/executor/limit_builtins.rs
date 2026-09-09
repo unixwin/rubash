@@ -92,9 +92,9 @@ impl Executor {
                 stderr.extend(signal_stderr);
                 continue;
             }
-            if request.signal == 19 {
+            if request.signal == 18 {
                 self.job_table.mark_running(pid);
-            } else if matches!(request.signal, 17 | 18) {
+            } else if matches!(request.signal, 19 | 20) {
                 self.job_table.mark_stopped(pid);
             } else if operand.starts_with('%') {
                 self.job_table.mark_completed(pid, 128 + request.signal);

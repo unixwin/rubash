@@ -12,49 +12,47 @@ const SIGNALS: &[(i32, &str, &str)] = &[
     (4, "4", "ILL"),
     (5, "5", "TRAP"),
     (6, "6", "ABRT"),
-    (7, "7", "EMT"),
+    (7, "7", "BUS"),
     (8, "8", "FPE"),
     (9, "9", "KILL"),
-    (10, "10", "BUS"),
+    (10, "10", "USR1"),
     (11, "11", "SEGV"),
-    (12, "12", "SYS"),
+    (12, "12", "USR2"),
     (13, "13", "PIPE"),
     (14, "14", "ALRM"),
     (15, "15", "TERM"),
-    (16, "16", "URG"),
-    (17, "17", "STOP"),
-    (18, "18", "TSTP"),
-    (19, "19", "CONT"),
-    (20, "20", "CHLD"),
+    (16, "16", "STKFLT"),
+    (17, "17", "CHLD"),
+    (18, "18", "CONT"),
+    (19, "19", "STOP"),
+    (20, "20", "TSTP"),
     (21, "21", "TTIN"),
     (22, "22", "TTOU"),
-    (23, "23", "IO"),
+    (23, "23", "URG"),
     (24, "24", "XCPU"),
     (25, "25", "XFSZ"),
     (26, "26", "VTALRM"),
     (27, "27", "PROF"),
     (28, "28", "WINCH"),
-    (29, "29", "PWR"),
-    (30, "30", "USR1"),
-    (31, "31", "USR2"),
-    (32, "32", "RTMIN"),
-    (33, "33", "RTMIN+1"),
-    (34, "34", "RTMIN+2"),
-    (35, "35", "RTMIN+3"),
-    (36, "36", "RTMIN+4"),
-    (37, "37", "RTMIN+5"),
-    (38, "38", "RTMIN+6"),
-    (39, "39", "RTMIN+7"),
-    (40, "40", "RTMIN+8"),
-    (41, "41", "RTMIN+9"),
-    (42, "42", "RTMIN+10"),
-    (43, "43", "RTMIN+11"),
-    (44, "44", "RTMIN+12"),
-    (45, "45", "RTMIN+13"),
-    (46, "46", "RTMIN+14"),
-    (47, "47", "RTMIN+15"),
-    (48, "48", "RTMIN+16"),
-    (49, "49", "RTMAX-15"),
+    (29, "29", "IO"),
+    (30, "30", "PWR"),
+    (31, "31", "SYS"),
+    (34, "34", "RTMIN"),
+    (35, "35", "RTMIN+1"),
+    (36, "36", "RTMIN+2"),
+    (37, "37", "RTMIN+3"),
+    (38, "38", "RTMIN+4"),
+    (39, "39", "RTMIN+5"),
+    (40, "40", "RTMIN+6"),
+    (41, "41", "RTMIN+7"),
+    (42, "42", "RTMIN+8"),
+    (43, "43", "RTMIN+9"),
+    (44, "44", "RTMIN+10"),
+    (45, "45", "RTMIN+11"),
+    (46, "46", "RTMIN+12"),
+    (47, "47", "RTMIN+13"),
+    (48, "48", "RTMIN+14"),
+    (49, "49", "RTMIN+15"),
     (50, "50", "RTMAX-14"),
     (51, "51", "RTMAX-13"),
     (52, "52", "RTMAX-12"),
@@ -370,15 +368,23 @@ fn write_signal_list<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    for chunk in SIGNALS.chunks(5) {
-        for (index, (number, _, name)) in chunk.iter().enumerate() {
-            if index > 0 {
-                write!(stdout, "\t")?;
-            }
-            write!(stdout, "{number:>2}) SIG{name}")?;
+    // GNU kill.def list_signals: 5 entries per line, tab-separated; the
+    // final partial line still carries the tab separator before the closing
+    // newline (captured from GNU 5.3.0 `kill -l` on the WSL baseline).
+    let total = SIGNALS.len();
+    for (position, (number, _, name)) in SIGNALS.iter().enumerate() {
+        let position = position + 1;
+        if position > 1 && (position - 1) % 5 == 0 {
+            writeln!(stdout)?;
+        } else if position > 1 {
+            write!(stdout, "\t")?;
         }
-        writeln!(stdout)?;
+        write!(stdout, "{number:>2}) SIG{name}")?;
+        if position == total && position % 5 != 0 {
+            write!(stdout, "\t")?;
+        }
     }
+    writeln!(stdout)?;
     Ok(())
 }
 
@@ -455,7 +461,14 @@ fn signal_process(pid: u32, signal: i32) -> Result<(), &'static str> {
         PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     };
 
-    if signal == 17 || signal == 18 || signal == 19 {
+    // Linux numbering: CONT=18 resumes, STOP=19/TSTP=20 suspend. SIGCHLD
+    // (17) is delivered-but-ignored by default, so kill -CHLD succeeds as a
+    // no-op instead of terminating (GNU kill.def sends it through kill(2)
+    // where the default disposition is SIG_DFL-ignored).
+    if signal == 17 {
+        return Ok(());
+    }
+    if signal == 18 || signal == 19 || signal == 20 {
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
         if snapshot == -1isize as _ {
             return Err("Cannot enumerate process threads");
@@ -474,7 +487,7 @@ fn signal_process(pid: u32, signal: i32) -> Result<(), &'static str> {
                     unsafe { CloseHandle(snapshot) };
                     return Err("Cannot open process thread");
                 }
-                let failed = if signal == 19 {
+                let failed = if signal == 18 {
                     unsafe { ResumeThread(thread) == u32::MAX }
                 } else {
                     unsafe { SuspendThread(thread) == u32::MAX }

@@ -435,8 +435,13 @@ impl Executor {
             if words.get(2).map(String::as_str) == Some("|") {
                 return crate::builtins::kill::list_first_signal_for_sed().to_string();
             }
-            if let Some(value) = words.get(2).map(String::as_str) {
-                if let Some(signal) = crate::builtins::kill::translate_signal(value) {
+            if let Some(word) = words.get(2) {
+                // The spec may reference variables set by a running trap
+                // action ($(kill -l $BASH_TRAPSIG) in trap9.sub), so expand
+                // before translating; a literal that names no signal keeps
+                // the historical empty-output behavior.
+                let expanded = self.expand_word(word);
+                if let Some(signal) = crate::builtins::kill::translate_signal(&expanded) {
                     self.last_command_substitution_status.set(Some(0));
                     return signal.to_string();
                 }
