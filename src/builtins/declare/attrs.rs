@@ -123,6 +123,11 @@ where
                     name
                 )?;
                 attr_status = EXECUTION_FAILURE;
+                // GNU declare.def refuses ALL attribute removal from a
+                // readonly variable (nameref17.sub: typeset +r foo1 keeps
+                // declare -nr foo1); report the error and leave the
+                // variable untouched instead of unmarking after the error.
+                continue;
             }
             if (unset_array && arrays.contains(name)) || (unset_assoc && assocs.contains(name)) {
                 writeln!(
@@ -156,6 +161,21 @@ where
                 unmark_typed(variables, CAPCASE_VARS, name);
             }
             if unset_nameref {
+                // GNU declare.def:704-735 (+n): removing the nameref
+                // attribute from a readonly nameref that still carries a
+                // cell is refused; a readonly valueless nameref may drop it.
+                if marked_vars(variables, READONLY_VARS).contains(name)
+                    && variables.get(name).map_or(false, |cell| !cell.is_empty())
+                {
+                    writeln!(
+                        stderr,
+                        "{}{command_name}: {}: readonly variable",
+                        diagnostic_prefix(variables),
+                        name
+                    )?;
+                    attr_status = EXECUTION_FAILURE;
+                    continue;
+                }
                 unmark_typed(variables, NAMEREF_VARS, name);
             }
         }

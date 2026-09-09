@@ -70,6 +70,85 @@ impl Executor {
         NamerefResolution::Circular
     }
 
+    /// GNU variables.c:2011 find_variable_nameref: when a nameref chain
+    /// resolves back onto itself, the fallback is the GLOBAL variable of the
+    /// name that closed the loop, searched without following namerefs
+    /// ("XXX - provisional change - circular refs go to global scope for
+    /// resolution, without namerefs", variables.c:2036-2046). This only
+    /// applies inside a function context (`variable_context && v->context`);
+    /// at the global scope the chain resolution returns nothing.
+    pub(in crate::executor) fn nameref_circular_fallback_name(
+        &self,
+        name: &str,
+    ) -> Option<String> {
+        if self.function_depth == 0 {
+            return None;
+        }
+        let mut current = name;
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            if !seen.insert(current.to_string()) {
+                return Some(current.to_string());
+            }
+            if !is_marked_var(&self.env_vars, NAMEREF_VARS, current) {
+                return None;
+            }
+            let target = self.env_vars.get(current)?;
+            if !is_shell_name(target) && parse_array_subscript(target).is_none() {
+                return None;
+            }
+            current = target.as_str();
+        }
+        None
+    }
+
+    /// The value of the global namesake a circular nameref falls back to
+    /// (GNU find_global_variable_noref): the typed owner only, because the
+    /// legacy env_vars cell holds the local nameref's reference, never the
+    /// shadowed global value.
+    pub(in crate::executor) fn circular_fallback_value(&self, name: &str) -> Option<String> {
+        let fallback = self.nameref_circular_fallback_name(name)?;
+        match self.shell_state.variables.get(&fallback) {
+            Some(crate::shell::Variable {
+                value: crate::shell::ShellValue::Scalar(value),
+                ..
+            }) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// GNU variables.c bind_variable: assigning through a circular nameref
+    /// inside a function writes the global namesake (bind_global_variable on
+    /// the maxloop path) while the local nameref keeps its cell. rubash
+    /// models the global value in the typed owner plus the frame snapshots
+    /// that restore it when the function returns.
+    pub(in crate::executor) fn assign_circular_fallback(&mut self, name: &str, value: String) {
+        let Some(fallback) = self.nameref_circular_fallback_name(name) else {
+            return;
+        };
+        let mut variable = match self.shell_state.variables.get(&fallback) {
+            Some(existing) => existing.clone(),
+            None => crate::shell::Variable::scalar(String::new()),
+        };
+        variable.value = crate::shell::ShellValue::Scalar(value.clone());
+        let _ = self
+            .shell_state
+            .variables
+            .set(fallback.clone(), variable.clone());
+        // Update the frame snapshots so the global value survives the
+        // local-variable restore when the function returns.
+        if let Some(typed_scope) = self.local_typed_scopes.last_mut() {
+            if typed_scope.contains_key(&fallback) {
+                typed_scope.insert(fallback.clone(), Some(variable));
+            }
+        }
+        if let Some(scope) = self.local_var_scopes.last_mut() {
+            if scope.contains_key(&fallback) {
+                scope.insert(fallback.clone(), Some(value));
+            }
+        }
+    }
+
     pub(in crate::executor) fn shell_variable_value(&self, name: &str) -> Option<String> {
         let name = match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => target,
@@ -79,7 +158,9 @@ impl Executor {
                     self.diagnostic_prefix(),
                     name
                 );
-                return None;
+                // GNU variables.c:2036-2046: circular refs inside a function
+                // resolve at the global scope without namerefs.
+                return self.circular_fallback_value(name);
             }
             NamerefResolution::NotNameref => name.to_string(),
         };

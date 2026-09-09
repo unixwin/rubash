@@ -9,8 +9,9 @@ use super::storage::{
 };
 use super::{
     ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS, EXECUTION_FAILURE,
-    EXECUTION_SUCCESS, INTEGER_VARS, READONLY_VARS,
+    EXECUTION_SUCCESS, INTEGER_VARS, NAMEREF_VARS, READONLY_VARS,
 };
+use super::names::valid_nameref_value;
 use crate::executor::arithmetic::eval_conditional_arith_value;
 
 pub(super) fn assign_declare_names<W>(
@@ -198,6 +199,29 @@ where
             )?;
             status = EXECUTION_FAILURE;
             continue;
+        }
+        // GNU variables.c bind_variable_internal (the invisible-nameref
+        // first clause + the visible-nameref cell validation): an
+        // assignment whose target is a nameref without a usable cell
+        // validates the value as a nameref value; an invalid one reports
+        // sh_invalidid and leaves the nameref valueless
+        // (nameref12/nameref13.sub: typeset -n foo; typeset foo=12345).
+        if marked_vars(variables, NAMEREF_VARS).contains(var_name) {
+            let current = variables.get(var_name).cloned().unwrap_or_default();
+            if !append && !valid_nameref_value(&current) {
+                if !valid_nameref_value(value) {
+                    writeln!(
+                        stderr,
+                        "{}{command_name}: `{value}': not a valid identifier",
+                        diagnostic_prefix(variables)
+                    )?;
+                    status = EXECUTION_FAILURE;
+                    continue;
+                }
+                variables.insert(var_name.to_string(), value.to_string());
+                unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
+                continue;
+            }
         }
         let value = if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
             compound

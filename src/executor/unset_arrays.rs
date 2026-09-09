@@ -85,6 +85,14 @@ impl Executor {
             .cloned()
             .collect();
         for name in names {
+            // GNU builtins/set.def:927-935 + 990-1010 (unset_builtin): a
+            // subscripted name whose base is a nameref unbinds the referenced
+            // array's element (unset n[0] with n->v removes v[0]); a plain
+            // nameref whose cell is an array reference unbinds that element
+            // while keeping the nameref itself.
+            if self.unset_through_nameref(&name) {
+                continue;
+            }
             if self.unset_array_element(&name) {
                 continue;
             }
@@ -100,6 +108,22 @@ impl Executor {
             stderr,
         )
         .map_err(ExecuteError::from)?;
+        // GNU builtins/set.def:995-1000: unsetting through a nameref removes
+        // the referenced variable and keeps the nameref; drop the referenced
+        // variable from the typed owner too so parameter expansion does not
+        // see a stale value (unset foo with foo->bar must clear bar).
+        for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
+            if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+                if let Some(cell) = self
+                    .env_vars
+                    .get(name)
+                    .filter(|cell| is_shell_name(cell))
+                    .cloned()
+                {
+                    self.shell_state.variables.remove(cell.as_str());
+                }
+            }
+        }
         // Also remove from shell_state.variables so that shell_variable_value
         // does not return a stale value for an unset variable (the builtin
         // only cleans env_vars).  Without this, ${var-word} after
@@ -112,6 +136,33 @@ impl Executor {
         } else {
             variable_status
         })
+    }
+
+    /// GNU builtins/set.def:990-1010 (unset_builtin): `unset -v` of a
+    /// nameref whose cell is an array reference unbinds the referenced
+    /// element and keeps the nameref; a subscripted name whose base is a
+    /// nameref resolves the subscript against the referenced array
+    /// (nameref3/nameref15.sub). Returns true when this call performed the
+    /// unbind and the ordinary variable path must be skipped.
+    pub(in crate::executor) fn unset_through_nameref(&mut self, name: &str) -> bool {
+        if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+            let cell = self.env_vars.get(name).cloned().unwrap_or_default();
+            if parse_array_subscript(&cell).is_some() {
+                return self.unset_array_element(&cell);
+            }
+            return false;
+        }
+        let Some((base, subscript)) = parse_array_subscript(name) else {
+            return false;
+        };
+        if !is_marked_var(&self.env_vars, NAMEREF_VARS, base) {
+            return false;
+        }
+        let Some(cell) = self.env_vars.get(base).filter(|cell| is_shell_name(cell)) else {
+            return false;
+        };
+        let cell = cell.clone();
+        self.unset_array_element(&format!("{cell}[{subscript}]"))
     }
 
     pub(in crate::executor) fn unset_outer_local_variable(&mut self, name: &str) -> bool {

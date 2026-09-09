@@ -145,9 +145,18 @@ impl Executor {
                 .assignment_keys()
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
+            let pre_existing: Vec<String> = self
+                .local_var_scopes
+                .last()
+                .map(|scope| scope.keys().cloned().collect())
+                .unwrap_or_default();
             self.save_local_names(&args);
             if !local_args_request_inherit(&args) {
-                self.initialize_non_inherited_locals(&args, &prefix_assignment_names);
+                self.initialize_non_inherited_locals(
+                    &args,
+                    &prefix_assignment_names,
+                    &pre_existing,
+                );
             }
         }
         let global_local_values = self.begin_global_declare_for_local_names(&args);
@@ -319,9 +328,18 @@ impl Executor {
                     .assignment_keys()
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();
+                let pre_existing: Vec<String> = self
+                    .local_var_scopes
+                    .last()
+                    .map(|scope| scope.keys().cloned().collect())
+                    .unwrap_or_default();
                 self.save_local_names(&args);
                 if !local_args_request_inherit(&args) {
-                    self.initialize_non_inherited_locals(&args, &prefix_assignment_names);
+                    self.initialize_non_inherited_locals(
+                        &args,
+                        &prefix_assignment_names,
+                        &pre_existing,
+                    );
                 }
             }
             self.write_local_compound_readonly_assignment_errors(&args, &mut stderr)?;
@@ -410,12 +428,24 @@ impl Executor {
         &mut self,
         args: &[String],
         preserve_names: &[String],
+        pre_existing: &[String],
     ) {
         if crate::builtins::shopt::option_enabled(&self.env_vars, "localvar_inherit") {
             return;
         }
         for name in local_names(args) {
             if preserve_names.iter().any(|preserve| preserve == &name) {
+                continue;
+            }
+            // GNU builtins/declare.def:659-668: re-declaring a variable that
+            // is already local at the SAME variable context keeps it (var =
+            // refvar), so a valueless re-declaration of an existing
+            // same-frame nameref preserves its cell (nameref12/nameref13.sub)
+            // instead of resetting a fresh empty local. pre_existing lists
+            // the frame snapshot BEFORE this command saved its own names, so
+            // a first-time `declare -a a` still resets the fresh local
+            // (assoc.tests: f: declare -a a prints an empty local).
+            if pre_existing.iter().any(|existing| existing == &name) {
                 continue;
             }
             if is_marked_var(&self.env_vars, EXPORTED_VARS, &name) {

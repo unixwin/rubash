@@ -530,16 +530,39 @@ where
             continue;
         };
         if (array || assoc) && namerefs.contains(var_name) {
-            // declare.def:841: a nameref cannot be (re)declared as an array
-            // variable, even with an assignment.
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: reference variable cannot be an array",
-                diagnostic_prefix(variables),
-                var_name
-            )?;
-            attr_status = EXECUTION_FAILURE;
-            continue;
+            let operand_has_subscript = name.starts_with(var_name)
+                && name.len() > var_name.len()
+                && name[var_name.len()..].starts_with('[');
+            if operand_has_subscript {
+                // GNU declare.def:737-752: an array assignment to a nameref
+                // WITH a subscript removes the nameref attribute (with an
+                // internal warning) and applies the array declaration to the
+                // name itself (nameref15.sub: declare -a xref[1]=one).
+                writeln!(
+                    stderr,
+                    "{}warning: {var_name}: removing nameref attribute",
+                    diagnostic_prefix(variables)
+                )?;
+                unmark_typed(variables, NAMEREF_VARS, var_name);
+                variables.remove(var_name);
+            } else if declare_nameref_chain(variables, var_name).is_some() {
+                // GNU declare.def:197-216 declare_transform_name + 764-806:
+                // without a subscript the -a/-A flag and the compound
+                // assignment follow the chain onto the referenced variable
+                // (nameref20/nameref21.sub); the effective_assign_names stage
+                // below performs the rewrite, so nothing is rejected here.
+            } else {
+                // Unresolved chain (valueless or invalid cell): GNU rejects
+                // the assignment through the unusable reference.
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {}: reference variable cannot be an array",
+                    diagnostic_prefix(variables),
+                    var_name
+                )?;
+                attr_status = EXECUTION_FAILURE;
+                continue;
+            }
         }
         if assoc && arrays.contains(var_name) && !assocs.contains(var_name) {
             writeln!(

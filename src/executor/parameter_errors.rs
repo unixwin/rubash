@@ -786,10 +786,10 @@ impl Executor {
                         chars.next();
                         name.push(name_ch);
                     }
-                    if !self.dynamic_parameter_is_set(&name)
-                        && !self.env_vars.contains_key(&name)
-                        && std::env::var(&name).is_err()
-                    {
+                    // Route through the braced check so the nounset test
+                    // follows nameref chains to their final target
+                    // (nameref25.sub: $r0 with r0->b unset is unbound).
+                    if self.nounset_braced_parameter_is_unbound(&name) {
                         return Some(name);
                     }
                 }
@@ -848,6 +848,40 @@ impl Executor {
         }
 
         if is_shell_name(name) {
+            // GNU subst.c check_unbound_variable: under nounset a nameref
+            // is tested through to its final target, so a reference to an
+            // unset variable (or to an absent array element) is unbound
+            // (nameref25.sub ok 2-4); @/* cells and invalid cells are not.
+            if is_marked_var(&self.env_vars, NAMEREF_VARS, name) {
+                let cell = self.env_vars.get(name).cloned().unwrap_or_default();
+                if cell.ends_with("[@]") || cell.ends_with("[*]") {
+                    return false;
+                }
+                if let Some((base, key)) = parse_array_subscript(&cell) {
+                    if self.is_assoc_parameter_array(base) {
+                        let assoc_key = self.assoc_subscript_key(key);
+                        return self
+                            .parameter_array_storage(base)
+                            .and_then(|storage| assoc_value_at(&storage, &assoc_key))
+                            .is_none();
+                    }
+                    let index = self.eval_integer_assignment_value(key);
+                    return self
+                        .env_vars
+                        .get(base)
+                        .and_then(|storage| array_value_at(storage, index as usize))
+                        .is_none();
+                }
+                if is_shell_name(&cell) {
+                    let target = self
+                        .resolved_variable_name(&cell)
+                        .unwrap_or_else(|| cell.clone());
+                    return !self.dynamic_parameter_is_set(&target)
+                        && !self.env_vars.contains_key(&target)
+                        && std::env::var(&target).is_err();
+                }
+                return false;
+            }
             return !self.dynamic_parameter_is_set(name)
                 && !self.env_vars.contains_key(name)
                 && std::env::var(name).is_err();

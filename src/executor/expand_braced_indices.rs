@@ -109,6 +109,58 @@ impl Executor {
         if let Some(value) = self.dynamic_parameter_value(var_name) {
             return value.chars().count().to_string();
         }
+        // GNU subst.c ${#name} over a nameref: the length of the value the
+        // reference resolves to. A cell naming a variable resolves through
+        // it (an array contributes element 0); a cell naming an array
+        // element contributes that element; an invalid cell falls back to
+        // the length of the cell string itself
+        // (nameref24.sub: name4 -> 'aa&bb' prints 5, name2 -> unset prints 0).
+        if is_marked_var(&self.env_vars, NAMEREF_VARS, var_name) {
+            let cell = self.env_vars.get(var_name).cloned().unwrap_or_default();
+            if is_shell_name(&cell) {
+                if let Some(target_value) = self.env_vars.get(&cell) {
+                    if is_array_storage(target_value) {
+                        let element_zero = if self.is_assoc_parameter_array(&cell) {
+                            assoc_value_at(target_value, "0")
+                        } else {
+                            array_value_at(target_value, 0)
+                        };
+                        return element_zero
+                            .map(|value| value.chars().count().to_string())
+                            .unwrap_or_else(|| "0".to_string());
+                    }
+                    return target_value.chars().count().to_string();
+                }
+                if let Some(crate::shell::Variable {
+                    value: crate::shell::ShellValue::Scalar(scalar),
+                    ..
+                }) = self.shell_state.variables.get(&cell)
+                {
+                    return scalar.chars().count().to_string();
+                }
+                return "0".to_string();
+            }
+            if let Some((array_name, key)) = parse_array_subscript(&cell) {
+                if self.is_assoc_parameter_array(array_name) {
+                    let key = self.assoc_subscript_key(key);
+                    return self
+                        .parameter_array_storage(array_name)
+                        .and_then(|value| assoc_value_at(&value, &key))
+                        .map(|value| value.chars().count().to_string())
+                        .unwrap_or_else(|| "0".to_string());
+                }
+                if let Some(index) = key.parse::<usize>().ok() {
+                    return self
+                        .env_vars
+                        .get(array_name)
+                        .and_then(|value| array_value_at(value, index))
+                        .map(|value| value.chars().count().to_string())
+                        .unwrap_or_else(|| "0".to_string());
+                }
+                return "0".to_string();
+            }
+            return cell.chars().count().to_string();
+        }
         self.env_vars
             .get(var_name)
             .map(|value| {

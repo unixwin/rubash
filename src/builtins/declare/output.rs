@@ -133,11 +133,11 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
     if attrs.assoc {
         flags.push('A');
     }
-    if attrs.nameref {
-        flags.push('n');
-    }
     if attrs.integer {
         flags.push('i');
+    }
+    if attrs.nameref {
+        flags.push('n');
     }
     if attrs.readonly {
         flags.push('r');
@@ -159,11 +159,11 @@ fn declaration_scalar_attrs(attrs: DeclarationAttrs) -> Option<String> {
 
 fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
     let mut flags = String::from("-a");
-    if attrs.nameref {
-        flags.push('n');
-    }
     if attrs.integer {
         flags.push('i');
+    }
+    if attrs.nameref {
+        flags.push('n');
     }
     if attrs.readonly {
         flags.push('r');
@@ -185,11 +185,11 @@ fn declaration_array_attrs(attrs: DeclarationAttrs) -> String {
 
 fn declaration_assoc_attrs(attrs: DeclarationAttrs) -> String {
     let mut flags = String::from("-A");
-    if attrs.nameref {
-        flags.push('n');
-    }
     if attrs.integer {
         flags.push('i');
+    }
+    if attrs.nameref {
+        flags.push('n');
     }
     if attrs.readonly {
         flags.push('r');

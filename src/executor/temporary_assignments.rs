@@ -186,11 +186,41 @@ impl Executor {
                     base_name
                 );
                 let _ = std::io::stderr().write_all(line.as_bytes());
-                self.exit_code = 1;
-                return false;
+                // GNU variables.c:2036-2046 find_variable_nameref + the
+                // bind_variable maxloop path: inside a function a circula
+                // nameref assignment writes the GLOBAL namesake of the name
+                // that closed the loop, while the local nameref keeps its
+                // cell (nameref8.sub f1, nameref15.sub xxx_func).
+                let circular_value = if append {
+                    let current = self.circular_fallback_value(base_name).unwrap_or_default();
+                    format!("{current}{value}")
+                } else {
+                    value.clone()
+                };
+                self.assign_circular_fallback(base_name, circular_value);
+                self.exit_code = 0;
+                return true;
             }
             NamerefResolution::NotNameref => base_name.to_string(),
         };
+        // GNU variables.c bind_variable_internal: an assignment to a nameref
+        // whose cell is empty or not a valid name is rejected with
+        // sh_invalidid and the nameref is left unchanged
+        // (nameref12.sub: r=^ / r=% against a valueless or invalid cell).
+        if is_marked_var(&self.env_vars, NAMEREF_VARS, base_name) {
+            let cell = self.env_vars.get(base_name).cloned().unwrap_or_default();
+            let cell_valid = is_shell_name(&cell) || parse_array_subscript(&cell).is_some();
+            if !append && !cell_valid {
+                let offender = if cell.is_empty() { value.as_str() } else { cell.as_str() };
+                let line = format!(
+                    "{}`{offender}': not a valid identifier\n",
+                    self.diagnostic_prefix()
+                );
+                let _ = std::io::stderr().write_all(line.as_bytes());
+                self.exit_code = 1;
+                return false;
+            }
+        }
         let base_name = target_name.as_str();
         // GNU arrayfunc.c/variables.c: a nameref whose cell is an array
         // element (declare -in b="a[0]"; b+=1) binds through to that element

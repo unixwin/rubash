@@ -145,14 +145,27 @@ where
         return Ok(EXECUTION_FAILURE);
     }
 
-    let unset_name = if !options.nameref && is_marked_variable(env_vars, NAMEREF_VARS, name) {
-        env_vars
-            .get(name)
-            .filter(|target| valid_identifier(target))
-            .map(String::as_str)
-            .unwrap_or(name)
+    // GNU builtins/set.def:990-1010 (unset_builtin): `unset -v` of a nameref
+    // follows the reference: a plain identifier cell unbinds the referenced
+    // variable and keeps the nameref itself; an array-reference cell unbinds
+    // the referenced element and keeps the nameref; a valueless or invalid
+    // cell falls back to unbinding the nameref variable itself.
+    let nameref_cell: Option<String> = if !options.nameref
+        && is_marked_variable(env_vars, NAMEREF_VARS, name)
+    {
+        env_vars.get(name).cloned()
     } else {
-        name
+        None
+    };
+    let (unset_name, _keep_nameref) = match nameref_cell {
+        Some(ref cell) if valid_identifier(cell) => (cell.as_str(), true),
+        Some(ref cell) if parse_unset_subscript(cell).is_some() => {
+            // Element unbinding through the reference happens in the
+            // executor path (execute_unset_with_stderr); the builtin-only
+            // path keeps the nameref and reports success.
+            return Ok(EXECUTION_SUCCESS);
+        }
+        _ => (name, false),
     };
 
     if is_unsettable_bash_variable(unset_name) {
