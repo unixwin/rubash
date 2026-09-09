@@ -1341,13 +1341,38 @@ impl Executor {
                 Ok(Some((output, String::new(), i32::from(selected == 0))))
             }
             "wc" => {
-                let option = command.words.get(1).map(String::as_str).unwrap_or("-l");
-                let value = match option {
-                    "-c" => input.as_bytes().len(),
-                    "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
-                    _ => return Ok(None),
-                };
-                Ok(Some((format!("{value}\n"), String::new(), 0)))
+                let args: Vec<String> = command.words[1..]
+                    .iter()
+                    .map(|word| self.expand_word(word))
+                    .collect();
+                // Only the single-flag fast paths are emulated inline; every
+                // other invocation (-w, -L, -m, --words, combined flags, file
+                // operands) must run the real external `wc`. Returning None
+                // here would abort the whole pipeline with the misleading
+                // "pipeline command could not execute" diagnostic.
+                if args.len() == 1 {
+                    let value = match args[0].as_str() {
+                        "-c" => input.as_bytes().len(),
+                        "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
+                        "-w" => input.split_whitespace().count(),
+                        _ => {
+                            return self.execute_external_pipeline_stage(command, input);
+                        }
+                    };
+                    return Ok(Some((format!("{value}\n"), String::new(), 0)));
+                }
+                // Default (no operands) matches GNU wc: lines, words, bytes.
+                if args.is_empty() {
+                    let lines = input.bytes().filter(|byte| *byte == b'\n').count();
+                    let words = input.split_whitespace().count();
+                    let bytes = input.as_bytes().len();
+                    return Ok(Some((
+                        format!("{lines:>7} {words:>7} {bytes:>7}\n"),
+                        String::new(),
+                        0,
+                    )));
+                }
+                self.execute_external_pipeline_stage(command, input)
             }
             "tr" => {
                 let args = command.words[1..]

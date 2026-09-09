@@ -28,16 +28,22 @@ pub(super) fn array_attribute_assignment_value(
 pub(super) fn readonly_error_subject(
     value: &str,
     explicit_array: bool,
+    context_name: Option<&str>,
 ) -> Option<String> {
-    // TODO(builtins/setattr.def/variables.c/execute_cmd.c): Bash diagnostics
-    // depend on whether assignment processing or the builtin detects the
-    // readonly attribute. Preserve attr.tests' split until assignment words
-    // carry full parse metadata.
     // GNU Bash (variables.c/execute_cmd.c): a readonly array reassignment reports
     // `<name>: readonly variable` using the variable name, never the enclosing
     // function name. Drop the subject so the caller prints `{name}: readonly variable`.
     if explicit_array && value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-        return None;
+        // Bash 5.3 (subst.c expand_declaration_argument → make_internal_declare):
+        // an *unquoted* compound assignment argument of an assignment builtin is
+        // bound during word expansion, before the builtin runs, so the
+        // declare-internal sh_readonly (builtins/common.c builtin_error_prolog)
+        // prefixes it with `this_command_name` — the name of the enclosing
+        // function invocation when the builtin is invoked from a function body
+        // (attr.tests:17 `f2: a: readonly variable`, attr1.sub:40 `f: r: ...`).
+        // Outside a function this_command_name is NULL and the subject is
+        // dropped (plain `{name}: readonly variable`).
+        return context_name.map(str::to_string);
     }
     if explicit_array {
         return Some("readonly".to_string());

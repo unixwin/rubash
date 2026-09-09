@@ -54,6 +54,7 @@ pub fn readonly(args: &[String], env_vars: &mut HashMap<String, String>) -> io::
         env_vars,
         &mut stdout,
         &mut stderr,
+        None,
     )
 }
 
@@ -143,6 +144,7 @@ pub(crate) fn readonly_with_io<'a, I, W, E>(
     env_vars: &mut HashMap<String, String>,
     stdout: &mut W,
     stderr: &mut E,
+    context_name: Option<&str>,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
@@ -204,7 +206,7 @@ where
 
     let mut status = EXECUTION_SUCCESS;
     for arg in &args[index..] {
-        if apply_readonly_arg(arg, array, env_vars, stderr)? != EXECUTION_SUCCESS {
+        if apply_readonly_arg(arg, array, env_vars, stderr, context_name)? != EXECUTION_SUCCESS {
             status = EXECUTION_FAILURE;
         }
     }

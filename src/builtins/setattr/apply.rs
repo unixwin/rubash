@@ -83,6 +83,7 @@ pub(super) fn apply_readonly_arg<W>(
     array: bool,
     env_vars: &mut HashMap<String, String>,
     stderr: &mut W,
+    context_name: Option<&str>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -115,7 +116,7 @@ where
 
     let readonly = marked_vars(env_vars, READONLY_VARS);
     if readonly.contains(name) && value.is_some() {
-        if let Some(subject) = readonly_error_subject(value.unwrap_or_default(), array) {
+        if let Some(subject) = readonly_error_subject(value.unwrap_or_default(), array, context_name) {
             writeln!(
                 stderr,
                 "{}{}: {}: readonly variable",

@@ -25,7 +25,17 @@ impl Executor {
                     expanded_args.push(self.expand_protected_tilde(&item, quote));
                 }
             } else {
-                expanded_args.push(self.expand_protected_tilde(word, quote));
+                // GNU expand_words field-splits an unquoted expansion word on
+                // $IFS (subst.c), so the substitution body's `echo $a` hands
+                // echo one arg per IFS field, not the raw joined value
+                // (nquote5.tests: `$(echo $a)` with IFS=$'\001'). A fully
+                // quoted word (`echo "$a"`) is one field, never split.
+                let expanded = self.expand_protected_tilde(word, quote);
+                if quote != Some(true) && for_word_has_unquoted_expansion(word, None) {
+                    expanded_args.extend(self.field_split_values(&expanded));
+                } else {
+                    expanded_args.push(expanded);
+                }
             }
         }
         expanded_args
@@ -302,11 +312,20 @@ impl Executor {
                         if let Some(values) = self.quoted_positional_at_word_values(word, None) {
                             return values;
                         }
-                        vec![strip_matching_quotes(&self.expand_protected_tilde(
+                        let expanded = strip_matching_quotes(&self.expand_protected_tilde(
                             word,
                             word_parts.get(index + 1).map(|(_, q)| *q),
                         ))
-                        .to_string()]
+                        .to_string();
+                        // Same expand_words semantics as the echo/recho/zecho
+                        // paths: unquoted expansion words split on $IFS, fully
+                        // quoted words stay one field.
+                        let was_quoted = word_parts.get(index + 1).map(|(_, q)| *q);
+                        if was_quoted != Some(true) && for_word_has_unquoted_expansion(word, None)
+                        {
+                            return self.field_split_values(&expanded);
+                        }
+                        vec![expanded]
                     })
                     .collect();
             let mut env_vars = self.env_vars.clone();

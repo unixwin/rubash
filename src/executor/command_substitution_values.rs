@@ -158,10 +158,20 @@ impl Executor {
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
-        vec![strip_matching_quotes(&restore_command_substitution_output(
+        let expanded = strip_matching_quotes(&restore_command_substitution_output(
             &self.expand_word(word),
         ))
-        .to_string()]
+        .to_string();
+        // The specialized substitution paths emulate GNU's expand_words for
+        // the substitution body (subst.c): an unquoted parameter/command
+        // substitution word is field-split on $IFS exactly like a plain
+        // command's word list (nquote5.tests `$(echo $a)` with IFS=$'\001'
+        // must hand echo three args whose space-joined output re-splits to
+        // one field, not the literal \001 bytes).
+        if for_word_has_unquoted_expansion(word, None) {
+            return self.field_split_values(&expanded);
+        }
+        vec![expanded]
     }
 
     pub(in crate::executor) fn command_describe_substitution_output(
