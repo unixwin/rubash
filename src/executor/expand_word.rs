@@ -155,6 +155,23 @@ impl Executor {
         let raw_value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
+        // subst.c:11432): unquoted element values of a compound assignment
+        // undergo the assignment tilde pass on the RAW word, before
+        // parameter expansion, so tilde text produced by $params is never
+        // re-expanded (array.tests: aa=([0]=~/a:~/b) expands both segments
+        // while w=([0]=~/a [1]=$p) keeps $p's result literal). Quoted
+        // elements stay literal; quoted whole-RHS values skip the pass.
+        let tilde_raw_owned;
+        let raw_value = if !quoted
+            && raw_value.starts_with('(')
+            && raw_value.ends_with(')')
+        {
+            tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
+            &tilde_raw_owned
+        } else {
+            raw_value
+        };
         if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
             let marker = if compound_assignment {
                 COMPOUND_ASSIGNMENT_MARKER.to_string()

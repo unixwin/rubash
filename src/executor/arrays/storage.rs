@@ -128,25 +128,161 @@ pub(in crate::executor) fn store_indexed_array(
 }
 
 pub(in crate::executor) fn quote_array_value(value: &str) -> String {
-    if value.contains(['\n', '\r', '\'']) {
-        return format!(
-            "$'{}'",
-            value
-                .replace('\\', "\\\\")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-                .replace('\'', "\\'")
-        );
+    // GNU array.c array_to_assign (947-989) / array_to_kvpair (895-945):
+    // every element value goes through ansic_quote when it holds a
+    // non-printing character (strtrans.c ansic_shouldquote, 341-361) and
+    // through sh_double_quote otherwise. Printable non-ASCII stays in the
+    // double-quoted form (ansic_wshouldquote passes it).
+    if ansic_shouldquote(value) {
+        return ansic_quote(value);
     }
 
     format!(
         "\"{}\"",
         value
             .replace('\\', "\\\\")
-            .replace('"', "\\\"")
+            .replace('"', "\\\\\"")
             .replace('$', "\\$")
-            .replace('`', "\\`")
+            .replace('\u{60}', "\\`")
     )
+}
+
+/// strtrans.c ansic_shouldquote (341-361): $'' quoting is needed when the
+/// value holds a non-printing byte. High-bit bytes follow the UTF-8-locale
+/// multibyte path (351-354): a printable decoded character is fine, an
+/// undecodable or non-printing one forces quoting.
+fn ansic_shouldquote(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte < 0x80 {
+            if !is_print_byte(byte) {
+                return true;
+            }
+            index += 1;
+            continue;
+        }
+        match decode_utf8_char(&bytes[index..]) {
+            Some(ch) if is_printable_wide(ch) => index += ch.len_utf8(),
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// strtrans.c ansic_quote (230-308): the $'...' form with the named C
+/// escapes, backslash and single-quote escaped, printable bytes (and whole
+/// printable UTF-8 characters under a UTF-8 locale, 266-282) literal, and
+/// every other byte as a three-digit octal escape (291-294).
+fn ansic_quote(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(4 * bytes.len() + 4);
+    out.push_str("$'");
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match byte {
+            0x1b => {
+                out.push_str("\\E");
+                index += 1;
+            }
+            0x07 => {
+                out.push_str("\\a");
+                index += 1;
+            }
+            0x08 => {
+                out.push_str("\\b");
+                index += 1;
+            }
+            0x09 => {
+                out.push_str("\\t");
+                index += 1;
+            }
+            0x0a => {
+                out.push_str("\\n");
+                index += 1;
+            }
+            0x0b => {
+                out.push_str("\\v");
+                index += 1;
+            }
+            0x0c => {
+                out.push_str("\\f");
+                index += 1;
+            }
+            0x0d => {
+                out.push_str("\\r");
+                index += 1;
+            }
+            b'\\' => {
+                out.push_str("\\\\");
+                index += 1;
+            }
+            b'\'' => {
+                out.push_str("\\'");
+                index += 1;
+            }
+            0x20..=0x7e => {
+                out.push(byte as char);
+                index += 1;
+            }
+            _ if byte >= 0x80 => {
+                match decode_utf8_char(&bytes[index..]) {
+                    Some(ch) if is_printable_wide(ch) => {
+                        out.push(ch);
+                        index += ch.len_utf8();
+                    }
+                    _ => {
+                        push_octal_escape(&mut out, byte);
+                        index += 1;
+                    }
+                }
+            }
+            _ => {
+                push_octal_escape(&mut out, byte);
+                index += 1;
+            }
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn push_octal_escape(out: &mut String, byte: u8) {
+    out.push('\\');
+    out.push((b'0' + ((byte >> 6) & 0o7)) as char);
+    out.push((b'0' + ((byte >> 3) & 0o7)) as char);
+    out.push((b'0' + (byte & 0o7)) as char);
+}
+
+/// strtrans.c ISPRINT for single-byte characters.
+fn is_print_byte(byte: u8) -> bool {
+    (0x20..=0x7e).contains(&byte)
+}
+
+/// strtrans.c iswprint under a UTF-8 locale: Unicode control characters
+/// (C0, DEL, the C1 range) are non-printing, everything else prints.
+fn is_printable_wide(ch: char) -> bool {
+    !ch.is_control()
+}
+
+/// Decode one UTF-8 character at the slice start; None for an invalid or
+/// truncated sequence (the mbrtowc MB_INVALIDCH/MB_NULLWCH cases).
+fn decode_utf8_char(bytes: &[u8]) -> Option<char> {
+    let len = match bytes.first()? {
+        0x00..=0x7f => 1,
+        0xc2..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf4 => 4,
+        _ => return None,
+    };
+    if bytes.len() < len {
+        return None;
+    }
+    std::str::from_utf8(&bytes[..len])
+        .ok()
+        .and_then(|s| s.chars().next())
 }
 
 pub(in crate::executor) fn is_array_storage(value: &str) -> bool {
@@ -231,17 +367,71 @@ fn rendered_array_parts(inner: &str) -> Vec<String> {
     parts
 }
 
+/// Decode the value side of a rendered storage entry. $'...' entries carry
+/// the full strtrans.c escape set ansic_quote emits (named C escapes,
+/// escaped backslash/quote and three-digit octal); the roundtrip must
+/// restore the original bytes (array29 control-character renders).
+/// Decode the value side of a rendered storage entry. $'...' entries carry
+/// the full strtrans.c escape set ansic_quote emits (named C escapes,
+/// escaped backslash/quote and three-digit octal); the roundtrip must
+/// restore the original bytes (array29 control-character renders).
+/// Decode the value side of a rendered storage entry. $'...' entries carry
+/// the full strtrans.c escape set ansic_quote emits (named C escapes,
+/// escaped backslash/quote and three-digit octal); the roundtrip must
+/// restore the original bytes (array29 control-character renders).
+/// Decode the value side of a rendered storage entry. $'...' entries carry
+/// the full strtrans.c escape set ansic_quote emits (named C escapes,
+/// escaped backslash/quote and three-digit octal); the roundtrip must
+/// restore the original bytes (array29 control-character renders).
 fn decode_rendered_array_value(value: &str) -> String {
     if let Some(inner) = value
         .strip_prefix("$'")
         .and_then(|value| value.strip_suffix('\''))
     {
-        return inner
-            .replace("\\n", "\n")
-            .replace("\\r", "\r")
-            .replace("\\'", "'")
-            .replace("\\\\", "\\");
+        return decode_ansic_escapes(inner);
     }
 
     unquote_storage_value(value)
+}
+
+fn decode_ansic_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            let escape = bytes[index + 1];
+            index += 2;
+            match escape {
+                b'E' => out.push(0x1b),
+                b'a' => out.push(0x07),
+                b'b' => out.push(0x08),
+                b't' => out.push(0x09),
+                b'n' => out.push(0x0a),
+                b'v' => out.push(0x0b),
+                b'f' => out.push(0x0c),
+                b'r' => out.push(0x0d),
+                b'\\' => out.push(b'\\'),
+                b'\'' => out.push(b'\''),
+                b'0'..=b'7' => {
+                    let mut decoded = (escape - b'0') as u32;
+                    let mut digits = 1;
+                    while digits < 3 && index < bytes.len() && matches!(bytes[index], b'0'..=b'7') {
+                        decoded = decoded * 8 + (bytes[index] - b'0') as u32;
+                        digits += 1;
+                        index += 1;
+                    }
+                    out.push(decoded as u8);
+                }
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

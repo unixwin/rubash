@@ -119,12 +119,12 @@ fn rendered_array_entries(rendered: &str) -> BTreeMap<usize, String> {
                     .and_then(|value| value.parse::<usize>().ok())
                 {
                     default_index = index + 1;
-                    return Some((index, unquote_storage_value(right)));
+                    return Some((index, super::decode_ansic_storage_value(right)));
                 }
             }
             let index = default_index;
             default_index += 1;
-            Some((index, unquote_storage_value(&part)))
+            Some((index, super::decode_ansic_storage_value(&part)))
         })
         .collect()
 }
@@ -134,7 +134,7 @@ pub(in crate::builtins::declare) fn format_indexed_array_storage(
 ) -> String {
     let rendered = entries
         .into_iter()
-        .map(|(index, value)| format!("[{index}]={}", super::quote_declare_value(&value)))
+        .map(|(index, value)| format!("[{index}]={}", super::quote_array_element_value(&value)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("\x1d({rendered})")

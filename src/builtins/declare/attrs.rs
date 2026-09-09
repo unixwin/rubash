@@ -204,7 +204,7 @@ where
         variables.entry(name.to_string()).or_default();
     }
     if integer {
-        for name in names {
+        for (name_index, name) in names.iter().enumerate() {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
             mark_typed(variables, INTEGER_VARS, name);
@@ -212,6 +212,17 @@ where
             // stored value; for a nameref the stored value is a variable NAME,
             // so evaluating it would destroy the reference
             // (nameref23.sub:48 `declare -ni b` must keep b's cell "a[0]").
+            // The empty cell created by array marking above is NOT a value:
+            // an attribute-only operand (no name=value) must stay empty so
+            // `declare -ai c` lists `declare -ai c` without a phantom
+            // ([0]="0"). An explicit `name=` still evaluates ([0]="0"), and
+            // pre-existing non-empty values keep evaluating.
+            let has_assignment = attr_names_owned[name_index].contains('=');
+            let marking_cell_empty = variables
+                .get(name)
+                .map(String::is_empty)
+                .unwrap_or(true);
+            if has_assignment || !marking_cell_empty {
             if !marked_vars(variables, NAMEREF_VARS).contains(name) {
             if let Some(value) = variables.get(name).cloned() {
                 let value = if value.starts_with('\x1d') {
@@ -234,6 +245,7 @@ where
                 };
                 variables.insert(name.to_string(), value.clone());
                 env::set_var(name, value);
+            }
             }
             }
         }

@@ -18,13 +18,13 @@ pub(super) fn format_array_value(value: &str) -> String {
 
     let elements = parse_array_words(value);
     if elements.is_empty() {
-        return format!("([0]={})", quote_declare_value(value));
+        return format!("([0]={})", quote_array_element_value(value));
     }
 
     elements
         .iter()
         .enumerate()
-        .map(|(index, value)| format!("[{index}]={}", quote_declare_value(value)))
+        .map(|(index, value)| format!("[{index}]={}", quote_array_element_value(value)))
         .collect::<Vec<_>>()
         .join(" ")
         .pipe_parenthesized()
@@ -95,6 +95,74 @@ pub(super) fn quote_declare_value(value: &str) -> String {
         return format!("$'{}'", quote_ansi_c(value));
     }
     format!("\"{}\"", quote_double(value))
+}
+
+
+/// array.c array_to_assign element rule (964-968, same pair in
+/// array_to_kvpair 911-915): $'...' for values holding non-printing
+/// characters (ansic_shouldquote), sh_double_quote otherwise. Indexed
+/// array element renders follow array.c, not the scalar setattr.def rule.
+pub(super) fn quote_array_element_value(value: &str) -> String {
+    if gnu_ansic_shouldquote(value) {
+        return gnu_ansic_quote(value);
+    }
+    format!("\"{}\"", quote_double(value))
+}
+
+/// Storage roundtrip for element values: decode the full escape set
+/// ansic_quote emits (named C escapes, escaped backslash/quote and
+/// three-digit octal); other storage forms pass through
+/// unquote_storage_value.
+pub(super) fn decode_ansic_storage_value(value: &str) -> String {
+    if let Some(inner) = value
+        .strip_prefix("$'")
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return decode_ansic_escapes(inner);
+    }
+    unquote_storage_value(value)
+}
+
+fn decode_ansic_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 1 < bytes.len() {
+            let escape = bytes[index + 1];
+            index += 2;
+            match escape {
+                b'E' => out.push(0x1b),
+                b'a' => out.push(0x07),
+                b'b' => out.push(0x08),
+                b't' => out.push(0x09),
+                b'n' => out.push(0x0a),
+                b'v' => out.push(0x0b),
+                b'f' => out.push(0x0c),
+                b'r' => out.push(0x0d),
+                b'\\' => out.push(b'\\'),
+                b'\'' => out.push(b'\''),
+                b'0'..=b'7' => {
+                    let mut decoded = (escape - b'0') as u32;
+                    let mut digits = 1;
+                    while digits < 3 && index < bytes.len() && matches!(bytes[index], b'0'..=b'7') {
+                        decoded = decoded * 8 + (bytes[index] - b'0') as u32;
+                        digits += 1;
+                        index += 1;
+                    }
+                    out.push(decoded as u8);
+                }
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn quote_ansi_c(value: &str) -> String {

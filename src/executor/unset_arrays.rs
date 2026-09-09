@@ -246,6 +246,40 @@ impl Executor {
             return true;
         }
 
+        // GNU arrayfunc.c:1218-1231 unbind_array_element scalar branch: for
+        // a non-array variable the subscript is evaluated arithmetically and
+        // subscript 0 IS the variable itself, so the whole variable is
+        // unbound (array.tests: unset 'v[0]' on a scalar removes v). Any
+        // other subscript returns -2, which unset.def reports as "not an
+        // array variable" -- reached by returning false here, as does an
+        // @/* subscript (arrayfunc.c:1163-1164).
+        if subscript == "*" || subscript == "@" {
+            return false;
+        }
+        let subscript = self.expand_arithmetic_special_parameters(subscript);
+        if self.eval_arithmetic_expansion_value(&subscript) == Some(0) {
+            if is_marked_var(&self.env_vars, READONLY_VARS, array_name) {
+                return false;
+            }
+            self.env_vars.remove(array_name);
+            std::env::remove_var(array_name);
+            self.shell_state.variables.remove(array_name);
+            for key in [
+                EXPORTED_VARS,
+                READONLY_VARS,
+                ARRAY_VARS,
+                ASSOC_VARS,
+                INTEGER_VARS,
+                UPPERCASE_VARS,
+                LOWERCASE_VARS,
+                NAMEREF_VARS,
+                DECLARED_UNSET_VARS,
+            ] {
+                unmark_env_name(&mut self.env_vars, key, array_name);
+            }
+            return true;
+        }
+
         false
     }
 }

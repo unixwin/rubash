@@ -49,6 +49,53 @@ impl Executor {
         expanded.replace(DQ_DATA, "\"")
     }
 
+    /// GNU subst.c:4357 expand_string_assignment (reached with
+    /// W_ASSIGNMENT from subst.c:11432): each unquoted element value of a
+    /// compound assignment undergoes the assignment tilde pass (leading
+    /// `~` and `~` after `:`). Quoted elements stay literal, and tilde
+    /// text introduced by parameter expansion is never re-expanded because
+    /// this pass sees the raw element text (array.tests: aa=([0]=~/a:~/b)
+    /// stores the expanded paths while bb=([0]="~/a:~/b") stays literal).
+    pub(in crate::executor) fn expand_tilde_in_compound_assignment(&self, value: &str) -> String {
+        let Some(inner) = value
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+        else {
+            return value.to_string();
+        };
+
+        let mut elements: Vec<String> = Vec::new();
+        for token in split_compound_element_words(inner) {
+            elements.push(self.expand_compound_element_tilde(&token));
+        }
+        format!("({})", elements.join(" "))
+    }
+
+    fn expand_compound_element_tilde(&self, token: &str) -> String {
+        const DQ_DATA: &str = "\u{E001}";
+        let (prefix, element) = if token.starts_with('[') {
+            match token.find("]=") {
+                Some(offset) => (&token[..offset + 2], &token[offset + 2..]),
+                None => ("", token),
+            }
+        } else {
+            ("", token)
+        };
+        if element.starts_with('\'')
+            || element.starts_with('"')
+            || element.starts_with(DQ_DATA)
+        {
+            return token.to_string();
+        }
+        if !tilde_expand::assignment_value_needs_tilde_expansion(element, true) {
+            return token.to_string();
+        }
+        format!(
+            "{prefix}{}",
+            tilde_expand::expand_assignment_tilde_value(element, &self.home_value(), true)
+        )
+    }
+
     fn expand_assignment_value_inner(&mut self, value: &str) -> String {
         // The verbatim single-element fast path is only for storage-shaped
         // values without expansions: a compound value containing a
@@ -67,6 +114,23 @@ impl Executor {
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
+        // subst.c:11432): unquoted element values of a compound assignment
+        // undergo the assignment tilde pass on the RAW element text, before
+        // parameter expansion, so tilde text produced by $params is never
+        // re-expanded (array.tests: aa=([0]=~/a:~/b) expands both segments
+        // while w=([0]=~/a [1]=$p) keeps $p's result literal). Quoted
+        // elements stay literal; quoted whole-RHS values skip the pass.
+        let tilde_value = if compound_assignment
+            && !quoted
+            && value.starts_with('(')
+            && value.ends_with(')')
+        {
+            std::borrow::Cow::Owned(self.expand_tilde_in_compound_assignment(value))
+        } else {
+            std::borrow::Cow::Borrowed(value)
+        };
+        let value: &str = &tilde_value;
         if value.contains("\\$(") {
             let literal = if quoted {
                 strip_matching_quotes(value)
@@ -663,6 +727,55 @@ impl Executor {
         let result = self.expand_assignment_value_result(value);
         (result.value, result.substitution_status)
     }
+}
+
+/// Split a compound assignment body into element tokens, treating single
+/// quotes, double quotes and the hoisted DQ_DATA marker as quoting, so a
+/// quoted space (`("a b"` hoisted to `(\u{E001}a b\u{E001}`) stays inside its
+/// token. Tokens keep every character verbatim; only unquoted whitespace
+/// separates elements.
+fn split_compound_element_words(value: &str) -> Vec<String> {
+    const DQ_DATA: char = '\u{E001}';
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => {
+                token.push(ch);
+                escaped = true;
+            }
+            '\'' if !double => {
+                single = !single;
+                token.push(ch);
+            }
+            '"' if !single => {
+                double = !double;
+                token.push(ch);
+            }
+            DQ_DATA if !single => {
+                double = !double;
+                token.push(ch);
+            }
+            ch if ch.is_whitespace() && !single && !double => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            ch => token.push(ch),
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
 }
 
 fn preserve_prompt_escapes(value: &str) -> String {

@@ -80,6 +80,24 @@ impl Executor {
             let raw_value = value
                 .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(value);
+            // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
+            // subst.c:11432): unquoted element values of a compound
+            // assignment undergo the assignment tilde pass on their RAW
+            // text, before parameter expansion, so tilde text produced by
+            // $params is never re-expanded (array.tests: `declare -a
+            // n=([0]=~/a:~/b)` stores the expanded paths while
+            // `n=([0]=~/a [1]=$p)` keeps $p's result literal). Quoted
+            // elements stay literal.
+            let tilde_raw_owned;
+            let raw_value = if !quoted
+                && raw_value.starts_with('(')
+                && raw_value.ends_with(')')
+            {
+                tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
+                &tilde_raw_owned
+            } else {
+                raw_value
+            };
             if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
@@ -109,9 +127,12 @@ impl Executor {
                 && !value.contains('$')
                 && !value.contains('`')
             {
-                return format!("{name}={value}");
+                return format!("{name}={COMPOUND_ASSIGNMENT_MARKER}{raw_value}");
             }
-            let expanded = self.expand_embedded_parameters_mut(value);
+            let expanded = self.expand_embedded_parameters_mut(&format!(
+                "{}{raw_value}",
+                if compound_assignment { COMPOUND_ASSIGNMENT_MARKER } else { "" }
+            ));
             if !quoted
                 && !expanded.contains('=')
                 && (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
