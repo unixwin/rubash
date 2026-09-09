@@ -515,8 +515,15 @@ impl Executor {
             // TODO(findcmd.c/execute_cmd.c): On Windows test runs, Bash-style
             // absolute utility paths should resolve through the active shell
             // environment. Keep this echo mapping until command lookup has a
-            // full Unix-path compatibility layer.
-            crate::builtins::echo::execute(&cmd.words[1..])?;
+            // full Unix-path compatibility layer. Output goes through the
+            // buffered builtin channel so command substitution captures it
+            // (execute_cmd.c pipes external stdout like any other command).
+            let mut stdout = Vec::new();
+            crate::builtins::echo::write_echo(
+                cmd.words[1..].iter().map(String::as_str),
+                &mut stdout,
+            )?;
+            self.write_buffered_builtin_output(cmd, &stdout, &[])?;
             self.exit_code = 0;
             return Ok(true);
         }
