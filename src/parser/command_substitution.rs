@@ -287,6 +287,22 @@ fn skip_command_substitution_heredoc(
                 header_closes_command_substitution,
             ));
         }
+        // GNU parse.y gather_here_documents reads the whole heredoc body
+        // before the parser looks at the next token, so a body line that is
+        // the delimiter followed by `)` ends the heredoc AND supplies the
+        // command substitution's closing paren (make_cmd.c:585-640
+        // PST_EOFTOKEN). Consume only up to the `)` and report that the
+        // header did not close the substitution: the caller's paren scan
+        // then closes it at the unconsumed `)`. Mirror of the lexer-side
+        // scanner (lexer/skip.rs strip_suffix form).
+        if let Some(body) = candidate.strip_suffix(')') {
+            if body == delimiter {
+                let paren_index = line_start
+                    + (line.chars().count() - candidate.chars().count())
+                    + delimiter.chars().count();
+                return Some((paren_index, false));
+            }
+        }
         if line_end >= chars.len() {
             break;
         }
