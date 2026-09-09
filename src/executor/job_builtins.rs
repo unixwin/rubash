@@ -1046,6 +1046,10 @@ impl Executor {
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
                 self.completion_specs.insert(pseudo, spec.clone());
+            }
+            for target in &parsed.operands {
+                self.completion_specs.insert(target, spec.clone());
+            }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
         }
