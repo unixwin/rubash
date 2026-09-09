@@ -898,26 +898,166 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = if let Some(provider) = self.history_provider.as_ref() {
-            let entries = provider.borrow_mut().entries()?;
+        let posix_mode = self
+            .get_env("__RUBASH_POSIX_MODE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let session = self.session_history.clone();
+        let result = if let Some(session) = session.as_ref() {
+            let (entries, base, last_added) = {
+                let shell = session.borrow();
+                (shell.entries.clone(), shell.base, shell.last_line_added)
+            };
             crate::builtins::fc::execute_with_history(
                 &cmd.words[1..],
                 &self.diagnostic_prefix(),
                 &entries,
+                base,
+                last_added,
+                posix_mode,
                 &mut stdout,
                 &mut stderr,
             )?
         } else {
-            crate::builtins::fc::execute_with_io(
+            let provider_entries = match self.history_provider.as_ref() {
+                Some(provider) => provider.borrow_mut().entries()?,
+                None => Vec::new(),
+            };
+            crate::builtins::fc::execute_with_history(
                 &cmd.words[1..],
                 &self.diagnostic_prefix(),
+                &provider_entries,
+                1,
+                false,
+                posix_mode,
+                &mut stdout,
                 &mut stderr,
             )?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-        Ok(status)
+        match result {
+            crate::builtins::fc::FcResult::EditWith { editor, start, end, rev } => {
+                // fc.def edit_and_execute_command: write the selected
+                // entries to a temp file, run the editor with inherited
+                // stdio, read the result back, remember and execute it.
+                let indices: Vec<usize> = if rev {
+                    (start..=end).rev().collect()
+                } else {
+                    (start..=end).collect()
+                };
+                let session_entries: Vec<String> = session
+                    .as_ref()
+                    .map(|s| s.borrow().entries.clone())
+                    .unwrap_or_default();
+                let selected: Vec<String> = indices
+                    .iter()
+                    .filter(|i| **i < session_entries.len())
+                    .map(|i| session_entries[*i].clone())
+                    .collect();
+                if selected.is_empty() {
+                    return Ok(0);
+                }
+                let editor_name = editor
+                    .or_else(|| self.get_env("FCEDIT").map(String::from))
+                    .or_else(|| self.get_env("EDITOR").map(String::from))
+                    .unwrap_or_else(|| String::from("vi"));
+                let mut path = std::env::temp_dir();
+                path.push(format!("bash-fc.{}", std::process::id()));
+                if std::fs::write(&path, selected.join("\n") + "\n").is_err() {
+                    writeln!(
+                        stderr,
+                        "{pfx}fc: cannot open temp file",
+                        pfx = self.diagnostic_prefix(),
+                    )?;
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    return Ok(1);
+                }
+                let editor_path =
+                    crate::executor::path::find_user_command(&editor_name, &self.env_vars)
+                    .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
+                let edit_status = std::process::Command::new(&editor_path)
+                    .arg(&path)
+                    .status();
+                match edit_status {
+                    Ok(st) if st.success() => {}
+                    Ok(st) => {
+                        let _ = std::fs::remove_file(&path);
+                        return Ok(st.code().unwrap_or(1));
+                    }
+                    Err(err) => {
+                        writeln!(
+                            stderr,
+                            "{pfx}fc: {editor_name}: {err}",
+                            pfx = self.diagnostic_prefix(),
+                        )?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        let _ = std::fs::remove_file(&path);
+                        return Ok(127);
+                    }
+                }
+                let edited = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let edited = edited.trim_end().to_string();
+                if edited.is_empty() {
+                    return Ok(0);
+                }
+                if let Some(session) = session.as_ref() {
+                    let control = self.get_env("HISTCONTROL").unwrap_or_default();
+                    let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
+                    let histsize = self
+                        .get_env("HISTSIZE")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(500);
+                    session.borrow_mut().record(&edited, &control, &ignore, histsize);
+                }
+                let tokens = crate::lexer::tokenize(&edited);
+                let mut ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        stray_close_is_error: true,
+                        source_text: Some(edited.clone()),
+                        source_line_offset: 0,
+                    },
+                );
+                self.apply_command_output_redirects(cmd, &mut ast)?;
+                self.execute_ast(&ast)?;
+                Ok(self.exit_code)
+            }
+            crate::builtins::fc::FcResult::Status(status) => Ok(status),
+            crate::builtins::fc::FcResult::Reexec { command } => {
+                // fc -s: the substituted command is remembered (the C
+                // parse_and_execute remembers it) and then executed.
+                if let Some(session) = session.as_ref() {
+                    let control = self
+                        .get_env("HISTCONTROL")
+                        .unwrap_or_default();
+                    let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
+                    let histsize = self
+                        .get_env("HISTSIZE")
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(500);
+                    session.borrow_mut().record(
+                        &command,
+                        &control,
+                        &ignore,
+                        histsize,
+                    );
+                }
+                let tokens = crate::lexer::tokenize(&command);
+                let mut ast = crate::parser::parse_with_options(
+                    &tokens,
+                    crate::parser::ParseLoopOptions {
+                        stray_close_is_error: true,
+                        source_text: Some(command.clone()),
+                        source_line_offset: 0,
+                    },
+                );
+                self.apply_command_output_redirects(cmd, &mut ast)?;
+                self.execute_ast(&ast)?;
+                Ok(self.exit_code)
+            }
+        }
     }
-
     pub(in crate::executor) fn execute_completion_builtin(
         &mut self,
         cmd: &CommandNode,

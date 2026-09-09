@@ -149,10 +149,13 @@ impl SessionHistory {
         Ok(self.entries.len())
     }
 
-    /// builtins/history.def -a: append entries added since the last flush.
+    /// builtins/history.def -a: append the last history_lines_this_session
+    /// entries (the ones added since the session baseline) and reset the
+    /// session counter on success.
     pub fn append_file(&mut self, path: &str) -> io::Result<usize> {
         use std::io::Write;
-        let start = self.entries_written.min(self.entries.len());
+        let n = self.lines_this_session.min(self.entries.len());
+        let start = self.entries.len() - n;
         let pending: Vec<String> = self.entries[start..].to_vec();
         if !pending.is_empty() {
             let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
@@ -160,7 +163,7 @@ impl SessionHistory {
                 writeln!(file, "{entry}")?;
             }
         }
-        self.entries_written = self.entries.len();
+        self.lines_this_session = 0;
         Ok(pending.len())
     }
 

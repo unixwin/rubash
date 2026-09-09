@@ -202,10 +202,15 @@ pub(in crate::executor) fn execute_history_session(
                 let _ = writeln!(stderr, "history: filename not specified");
                 return Ok(2);
             };
+            // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
+            // Windows forms the file APIs need; children see the same file.
+            let path = crate::executor::path::shell_path_to_windows(&path, &executor.env_vars)
+                .to_string_lossy()
+                .to_string();
             let outcome = match mode {
                 HistoryMode::Append => shell.append_file(&path).map(|_| 0),
                 HistoryMode::Write => shell.write_file(&path).map(|_| {
-                    shell.entries_written = shell.entries.len();
+                    shell.lines_this_session = 0;
                     0
                 }),
                 HistoryMode::Read => shell.read_file(&path, histsize).map(|_| 0),
@@ -225,7 +230,12 @@ pub(in crate::executor) fn execute_history_session(
                 None => 0,
             };
             for (index, entry) in entries.iter().enumerate().skip(start) {
-                let _ = writeln!(stdout, "{:>5}  {}", base + index, entry);
+                // GNU history.def:407-408: %5d%c %s with the continuation
+                // marker "*" for entries carrying multi-line histdata.
+                // histdata is only set for interactive continuations;
+                // script entries always print the space marker (history.def:408).
+                let mark = " ";
+                let _ = writeln!(stdout, "{:>5}{} {}", base + index, mark, entry);
             }
         }
     }
