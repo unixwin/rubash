@@ -715,10 +715,13 @@ impl Executor {
         // `echo mn; echo op` to the echo shortcut treats `;` as an argument
         // and yields `mn; echo op` instead of `mn\nop` (comsub.tests
         // `ab$(echo mn; echo op)yz`). A quoted `a;b` argument is harmless to
-        // route here too: the AST still prints it correctly.
+        // route here too: the AST still prints it correctly. Newlines in the
+        // raw source are command separators the same way (old-style
+        // backticks span lines: `echo ab\ncd` runs two commands).
         if words
             .iter()
             .any(|word| word.contains(';') || matches!(word.as_str(), "&&" | "||"))
+            || source.contains('\n')
         {
             if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
                 return output;
@@ -1317,7 +1320,7 @@ fn command_substitution_contains_heredoc(source: &str) -> bool {
     false
 }
 
-fn update_command_substitution_case_depth(
+pub(in crate::executor) fn update_command_substitution_case_depth(
     ch: char,
     single: bool,
     double: bool,

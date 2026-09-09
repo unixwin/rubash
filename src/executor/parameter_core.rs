@@ -165,8 +165,12 @@ impl Executor {
 
         // Current-shell forms are special `${...}` expansions, not ordinary
         // parameter names. GNU param_expand recognizes them before the generic
-        // whole-word braced-parameter path.
-        if word_contains_current_shell_command_substitution(word) {
+        // whole-word braced-parameter path. A funsub nested inside an outer
+        // parameter form (`${word-${ echo x; }}`) stays on the parameter
+        // path, whose alternate expansion executes it.
+        if word_contains_current_shell_command_substitution(word)
+            && funsub_span_is_top_level(word)
+        {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }
 
@@ -508,6 +512,61 @@ pub(in crate::executor) fn current_shell_command_substitution_span(word: &str) -
 
 pub(in crate::executor) fn word_contains_current_shell_command_substitution(word: &str) -> bool {
     current_shell_command_substitution_span(word).is_some()
+}
+
+/// True when the word's first funsub/valsub span is not nested inside an
+/// outer `${...}` parameter form. A nested span (`${word-${ echo x; }}`)
+/// must expand through the outer parameter's operator machinery, not the
+/// top-level funsub routing: the walker cannot run an outer parameter form,
+/// and re-routing the whole word to itself recursed until the stack
+/// overflowed (probe ${word-${ echo funsub; }}).
+pub(in crate::executor) fn funsub_span_is_top_level(word: &str) -> bool {
+    let Some(span) = current_shell_command_substitution_span(word) else {
+        return false;
+    };
+    let base = word.as_ptr() as usize;
+    let Some(start) = (span.as_ptr() as usize).checked_sub(base) else {
+        return false;
+    };
+    let bytes = word.as_bytes();
+    let mut opens = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut index = 0usize;
+    while index < start.min(bytes.len()) {
+        let ch = bytes[index] as char;
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' if !double => {
+                single = !single;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '$' if !single && bytes.get(index + 1) == Some(&b'{') => {
+                opens += 1;
+                index += 2;
+            }
+            '}' if !single && !double => {
+                opens = opens.saturating_sub(1);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    opens == 0
 }
 
 #[cfg(test)]

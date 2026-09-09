@@ -217,6 +217,28 @@ impl Executor {
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
+        // Bash 5.3 (parser.h FUNSUB_CHAR): a whitespace-led `${ command; }` /
+        // `${|command;}` word is a nofork command substitution, not a
+        // parameter form. The operator split_once parsing below would treat
+        // the body's first `=` as ${name=word} assignment syntax and expand
+        // the rest of the body as literal text (comsub22.sub: a multi-line
+        // funsub in double quotes printed the body instead of executing it).
+        // Route the whole word through the embedded walker, which collects
+        // the funsub span and executes it in the current shell.
+        // Bash 5.3 (parser.h FUNSUB_CHAR): a whitespace-led `${ command; }` /
+        // `${|command;}` word is a nofork command substitution, not a
+        // parameter form. The operator split_once parsing below would treat
+        // the body's first `=` as ${name=word} assignment syntax and expand
+        // the rest of the body as literal text (comsub22.sub: a multi-line
+        // funsub in double quotes printed the body instead of executing it).
+        // Route the whole word through the embedded walker, which collects
+        // the funsub span and executes it in the current shell. Nested
+        // funsubs inside an outer parameter form stay on the operator path.
+        if crate::executor::parameter_core::word_contains_current_shell_command_substitution(word)
+            && crate::executor::parameter_core::funsub_span_is_top_level(word)
+        {
+            return self.expand_embedded_parameters_mut_with_context(word, context);
+        }
         // In POSIX mode, a double-quoted `${...}` may close at a `}` inside
         // the apparent word when a single quote is literal (Interp 221).
         // Expand that braced head separately, then continue with the suffix.

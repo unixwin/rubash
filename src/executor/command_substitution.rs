@@ -709,7 +709,10 @@ fn command_substitution_needs_command_list(source: &str, words: &[String]) -> bo
         words.first().map(String::as_str),
         Some("if" | "for" | "case" | "while" | "until" | "{" | "(")
     );
-    starts_compound || source.contains(';')
+    // A newline is a command separator in the body (GNU subst.c parses the
+    // whole body: old-style `echo ab\ncd` runs two commands, while the word
+    // shortcuts below treat the newline as plain whitespace).
+    starts_compound || source.contains(';') || source.contains('\n')
 }
 
 fn command_substitution_has_unclosed_compound(source: &str) -> bool {

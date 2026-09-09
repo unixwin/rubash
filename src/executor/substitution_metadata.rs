@@ -416,6 +416,14 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
             let mut cursor = index + if dollar_paren { 2 } else { 1 };
             let mut inner_single = false;
             let mut inner_double = false;
+            // Track `case ... esac` pattern lists inside the span: a pattern
+            // clause's `)` (`case 1 in 1) echo;; esac`) must not close the
+            // substitution. Same word-boundary rules as the lexer's comsub
+            // scanner (lexer/skip.rs) and the embedded walker.
+            let mut inner_case_depth = 0usize;
+            let mut inner_word = String::new();
+            let mut inner_word_boundary = true;
+            let mut inner_current_word_boundary = true;
             while cursor < chars.len() {
                 let (_, inner) = chars[cursor];
                 if inner == '\\' && !inner_single {
@@ -432,6 +440,16 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                     break;
                 }
                 if dollar_paren {
+                    crate::executor::embedded_mutations::update_command_substitution_case_depth(
+                        inner,
+                        inner_single,
+                        inner_double,
+                        &mut inner_word,
+                        &mut inner_case_depth,
+                        &mut inner_word_boundary,
+                        &mut inner_current_word_boundary,
+                        &raw[cursor + 1..],
+                    );
                     if inner == '\'' && !inner_double {
                         inner_single = !inner_single;
                     }
@@ -447,7 +465,7 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         cursor += 2;
                         continue;
                     }
-                    if !inner_single && !inner_double && inner == ')' {
+                    if !inner_single && !inner_double && inner == ')' && inner_case_depth == 0 {
                         depth = depth.saturating_sub(1);
                         if depth == 0 {
                             spans.push(SubstitutionSpan {
