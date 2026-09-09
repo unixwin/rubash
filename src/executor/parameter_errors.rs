@@ -796,6 +796,15 @@ impl Executor {
                 Some('?') | Some('$') | Some('@') | Some('*') | Some('#') | Some('-') => {
                     chars.next();
                 }
+                Some('!') => {
+                    // GNU subst.c: the last-background-pid parameter is unset
+                    // until a background job runs and errors under nounset
+                    // (posixexp1).
+                    chars.next();
+                    if self.last_background_pid.is_none() {
+                        return Some(String::from("!"));
+                    }
+                }
                 Some('(') => {
                     chars.next();
                 }
@@ -806,6 +815,12 @@ impl Executor {
     }
 
     pub(in crate::executor) fn nounset_braced_parameter_is_unbound(&self, name: &str) -> bool {
+        if name == "!" {
+            // GNU subst.c: the last-background-pid parameter is unset until a
+            // background job runs; under nounset it reports an unbound
+            // variable (posixexp1).
+            return self.last_background_pid.is_none();
+        }
         if name.is_empty()
             || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
             || name.starts_with('!')
@@ -816,11 +831,6 @@ impl Executor {
             || name.contains('-')
             || name.contains('=')
             || name.contains('+')
-            || name.contains('#')
-            || name.contains('%')
-            || name.contains('/')
-            || name.contains('^')
-            || name.contains(',')
         {
             return false;
         }
@@ -840,6 +850,30 @@ impl Executor {
         }
 
         if name.contains('@') {
+            return false;
+        }
+
+        // GNU subst.c parameter_brace_expand / parameter_brace_expand_length:
+        // value-consuming operators (pattern removal, case modification,
+        // substitution, and the substring form) require the base parameter's
+        // value, so under nounset an unset base reports an unbound variable
+        // (posixexp1: the length form printed 0 and the pattern-removal forms
+        // printed empty). Default/assign/alternate operators stay excluded
+        // above; arrays keep their own semantics.
+        let core = name.strip_prefix('#').unwrap_or(name);
+        let base_len = core
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(core.len());
+        let base = &core[..base_len];
+        if base.len() < core.len() || core.len() != name.len() {
+            if let Ok(index) = base.parse::<usize>() {
+                return index > 0 && self.positional_params.get(index - 1).is_none();
+            }
+            if is_shell_name(base) {
+                return !self.dynamic_parameter_is_set(base)
+                    && !self.env_vars.contains_key(base)
+                    && std::env::var(base).is_err();
+            }
             return false;
         }
 

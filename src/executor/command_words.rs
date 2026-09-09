@@ -96,6 +96,18 @@ impl Executor {
         raw: Option<&str>,
         metadata: Option<&WordMetadata>,
     ) -> Result<Vec<String>, String> {
+        // A fully single-quoted for-list item carries literal data only
+        // (the lexer already removed the outer quotes); any double quotes
+        // left in the value are characters, not operators. Without this
+        // fast path expand_word re-removed them, so
+        // `for testcmd in 'set -- ${foo="$*"}'` iterated over
+        // `set -- ${foo=$*}` (posixexp5 lost the testcmd echo).
+        if super::command_prepare::raw_word_is_fully_single_quoted(raw) {
+            // The token value carries the protected-dollar marker; the walker
+            // normally restores it, so do that here too (posixexp5 echoed the
+            // raw marker instead of the dollar).
+            return Ok(vec![word.replace('\u{1f}', "$")]);
+        }
         let suppress_glob = word.starts_with('\x1b')
             || word.starts_with('\x1d')
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);

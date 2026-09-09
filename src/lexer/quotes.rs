@@ -70,7 +70,17 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                 if escaped {
                     quoted.push('\\');
                 }
-                out.push_str(&decode_ansi_c_quoted(&quoted));
+                // GNU subst.c CTLESC-quotes every byte an ANSI-C string decodes
+                // to, so quote characters in the decoded value are data for
+                // every later pass (posixexp7: the escaped-quote ANSI-C word
+                // kept its literal quote; unescaped, the expansion walker
+                // consumed the bare quote as a delimiter). Rubash's walker
+                // expresses that with backslash escapes, so escape the decode
+                // output with that convention, keeping backslash-prefixed
+                // runs verbatim.
+                out.push_str(&escape_decoded_ansi_c_quotes(&decode_ansi_c_quoted(
+                    &quoted,
+                )));
             }
             '$' if chars.peek() == Some(&'"') => {
                 pending_name = false;
@@ -393,6 +403,15 @@ fn copy_ansi_c_single_quoted_raw(
             break;
         }
     }
+}
+
+/// Mark quote characters in a decoded ANSI-C string with the walker's
+/// data-quote markers so later expansion passes treat them as data (the
+/// CTLESC equivalent; see the call site). The markers are the same ones the
+/// lexer emits for backslash-escaped quotes in source words, so every
+/// consumer already restores them.
+fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
+    decoded.replace('\'', "\u{17}").replace('"', "\u{18}")
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

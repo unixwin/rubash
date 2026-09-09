@@ -617,6 +617,18 @@ impl Executor {
                 self.env_vars.get("IFS").map(String::as_str),
             );
         }
+        // Unquoted `$*` with a set-empty IFS: Posix interp 888 expands it
+        // like $@ (space-joined) and the result splits on the join spaces
+        // despite the null IFS (subst.c string_list_pos_params:3047-3048
+        // dispatches to string_list_dollar_at; param_expand marks the
+        // result W_SPLITSPACE at subst.c:10202-10207). The plain IFS[0]
+        // join concatenated `1` and `2` into `12` (posixexp3).
+        if word == "$*" && !raw_word_is_quoted(raw)
+            && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+        {
+            let joined = self.positional_params.join(" ");
+            return field_split_values_with_ifs(&joined, Some(" "));
+        }
         if let Some(values) =
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
         {
@@ -859,6 +871,38 @@ impl Executor {
             )));
         }
 
+        // Posix interp 888 (subst.c string_list_pos_params:3047-3072): the
+        // word of ${param-OPword} expands $@/$* in assignment-RHS style.
+        // An unquoted $* with a set-empty IFS joins with a space and splits
+        // on the join spaces (W_SPLITSPACE, subst.c:10202-10207) — the
+        // dollar_star path below concatenates the positionals instead
+        // (posixexp3 `${var-$*}` IFS=). An unquoted $@ with a non-null IFS
+        // joins with spaces (string_list_dollar_at:2951-2955; param_expand
+        // sets PF_ASSIGNRHS for special parameters, subst.c:7840-7860) and
+        // the joined value then field-splits per the ambient IFS, so
+        // ${var-$@} under IFS=: stays one word (posixexp4's "inconsistent"
+        // line). A null IFS leaves $@ on the per-parameter path below,
+        // which already matches GNU.
+        if !outer_double_quoted && matches!(alternate, "$@" | "${@}" | "$*" | "${*}") {
+            if self.positional_params.is_empty() {
+                return Some(Vec::new());
+            }
+            match self.env_vars.get("IFS").map(String::as_str) {
+                Some("") => {
+                    if alternate == "$*" || alternate == "${*}" {
+                        let joined = self.positional_params.join(" ");
+                        return Some(field_split_values_with_ifs(&joined, Some(" ")));
+                    }
+                }
+                Some(ifs) => {
+                    if alternate == "$@" || alternate == "${@}" {
+                        let joined = self.positional_params.join(" ");
+                        return Some(field_split_values_with_ifs(&joined, Some(ifs)));
+                    }
+                }
+                None => {}
+            }
+        }
         let positional_at = alternate.contains("$@")
             || alternate.contains("${@}")
             || alternate.contains("$*");
@@ -1257,7 +1301,7 @@ pub(in crate::executor) fn raw_word_suppresses_pathname_expansion(
             .unwrap_or(true)
 }
 
-fn raw_word_is_fully_single_quoted(raw: Option<&str>) -> bool {
+pub(in crate::executor) fn raw_word_is_fully_single_quoted(raw: Option<&str>) -> bool {
     let Some(raw) = raw else {
         return false;
     };

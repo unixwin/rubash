@@ -97,6 +97,15 @@ impl Executor {
             return Some(self.positional_params.last().cloned().unwrap_or_default());
         }
 
+        // GNU subst.c parameter_brace_expand_indir: the target may itself be
+        // a special parameter, so the bang-question form expands the exit
+        // status first and indirects through the result (posixexp2: with
+        // status 0 it resolves to the shell name).
+        if indirect_name == "?" {
+            let target = self.exit_code.to_string();
+            return Some(self.expand_parameter_named_value(&target));
+        }
+
         if is_shell_name(indirect_name) {
             if let Some(target_name) = self.nameref_target_name(indirect_name) {
                 return Some(target_name);
