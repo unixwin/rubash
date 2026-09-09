@@ -41,8 +41,12 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
 
 ### 宿主侧（owner 已授权在 NIU 仓同步更改）
 - P1-A 重编 niu.exe 带最新 rubash（path 依赖，纯构建即得）。
-- P1-B 修 bash shim 偏斜：宿主启动 export NIU_SHELL=<niu.exe>（或 WINUXSH_SHELL
-  过渡），让 PATH 上的 bash 脚本不再跑 8/21 旧引擎。
+- P1-B ✅ 已完成（2026-09-09，owner 指令"直接替换"）：winuxcmd 树的
+  usr/bin/{bash,sh}.exe 与 bin/{bash,sh}.exe 四个 PATH 入口已直接替换为
+  target/release/rubash.exe（5.3.0(1) 真引擎，转发链消失）；旧 shim 备份为
+  *.bak-20260909 可回滚。验证：四个入口 $BASH_VERSION 全部 5.3.0(1)-release。
+  后续维护流：每次平价合并后 cargo build --release + 重拷这四个路径；
+  真相探针用 $BASH_VERSION（横幅不可信——宿主可写 Niubash 1.0.1 而内嵌引擎是旧的）。
 - P2-A WINUXSH_HIST_IGNORE_DUPS/_SPACE 死信道：宿主零读者已实锤 →
   rubash 停写（或宿主映射 reedline history_exclusion_prefix + 去重）。
 - P2-D rubash 读 NIU_* 优先 + WINUXSH_* 兜底 → 宿主 shell.rs 删旧名双写。
