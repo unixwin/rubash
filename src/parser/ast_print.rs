@@ -26,7 +26,10 @@ struct DeferredHeredoc {
 struct Printer {
     out: String,
     indentation: i32,
-    inside_function_def: bool,
+    /// print_cmd.c keeps a COUNTER (static int inside_function_def): nested
+    /// function defs increment while the enclosing def is still printing, so
+    /// the flag stays set for the enclosing list's `;`+newline connectors.
+    inside_function_def: usize,
     skip_this_indent: usize,
     was_heredoc: bool,
     printing_connection: usize,
@@ -37,20 +40,126 @@ struct Printer {
 /// Render `name () { body }` the way `declare -f` / `type NAME` print it
 /// (named_function_string with FUNC_MULTILINE, no trailing newline).
 pub fn multiline_function_def_text(name: &str, body: &[CommandNode]) -> String {
+    multiline_function_def_text_with(name, body, None, &[])
+}
+
+/// named_function_string port with the function-definition metadata: the
+/// body kind (`( ... )` bodies print inside the braces) and the redirections
+/// attached to the definition itself, which print after the closing brace
+/// (print_cmd.c:1419-1462: `newline ("} "); print_redirection_list`).
+pub fn multiline_function_def_text_with(
+    name: &str,
+    body: &[CommandNode],
+    body_kind: Option<crate::parser::FunctionBodyKind>,
+    def_redirects: &[Redirect],
+) -> String {
     let mut printer = Printer::new();
-    // named_function_string prints a `function ` prefix only when the name
-    // is not valid; the parser already accepted it, so none is added here.
+    // named_function_string: prefix `function ` when the name is not a valid
+    // function name (general.c valid_function_name with pflags=0/4 —
+    // POSIX_RESTRICT_FUNCNAME is off in the 5.3 build, so only the
+    // assignment-word check fires, e.g. `a=2`).
+    if is_assignment_word_name(name) {
+        printer.cprintf("function ");
+    }
     printer.cprintf(&format!("{name} () \n"));
     printer.indent(printer.indentation);
     printer.cprintf("{ \n");
-    printer.inside_function_def = true;
+    printer.inside_function_def += 1;
     printer.indentation += INDENTATION_AMOUNT;
-    printer.print_command_list(body);
-    printer.print_deferred_heredocs("");
+    if body_kind == Some(crate::parser::FunctionBodyKind::Subshell) {
+        // cm_subshell branch of make_command_string_internal: the indent
+        // lands before `( ` and the inner command follows it directly. The
+        // definition's redirects belong to the subshell command, so they
+        // print after ` )` INSIDE the braces (GNU `u () { ( echo y ) 2>&1 }`).
+        printer.indent(printer.indentation);
+        printer.cprintf("( ");
+        printer.skip_this_indent += 1;
+        printer.print_command_list(body);
+        printer.print_deferred_heredocs("");
+        printer.cprintf(" )");
+        if !def_redirects.is_empty() {
+            printer.cprintf(" ");
+            printer.print_redirect_slice(def_redirects);
+        }
+        printer.was_heredoc = false;
+    } else {
+        printer.print_command_list(body);
+        printer.print_deferred_heredocs("");
+    }
     printer.indentation -= INDENTATION_AMOUNT;
-    printer.inside_function_def = false;
-    printer.newline("}");
+    printer.inside_function_def = printer.inside_function_def.saturating_sub(1);
+    if body_kind != Some(crate::parser::FunctionBodyKind::Subshell) {
+        if def_redirects.is_empty() {
+            printer.newline("}");
+        } else {
+            printer.newline("} ");
+            printer.print_redirect_slice(def_redirects);
+        }
+    } else {
+        printer.newline("}");
+    }
     printer.out
+}
+
+/// Redirects of a command node in printed order (the Printer's
+/// collect_redirects logic exposed for the exportstr roundtrip).
+pub fn collected_redirects(cmd: &CommandNode) -> Vec<Redirect> {
+    Printer::new().collect_redirects(cmd)
+}
+
+/// Render a redirect list the way print_redirection_list does (headers only
+/// for heredocs; the exportstr cannot carry deferred bodies inline).
+pub fn redirect_list_text(redirects: &[Redirect]) -> String {
+    let mut printer = Printer::new();
+    printer.print_redirect_slice(redirects);
+    printer.out
+}
+
+/// general.c assignment(): non-zero when NAME is an assignment word — a
+/// legal variable name followed by `=` (possibly `name[...]=` / `name+=`).
+/// valid_function_name rejects such names, so named_function_string and
+/// print_function_def prefix the `function` keyword when printing them.
+fn is_assignment_word_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    let bytes = name.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let ch = bytes[index] as char;
+        if ch == '=' {
+            return true;
+        }
+        if ch == '+' && bytes.get(index + 1) == Some(&b'=') {
+            return true;
+        }
+        if ch == '[' {
+            // GNU assignment() skips a subscript and requires `]` then `=`.
+            let mut depth = 0usize;
+            let mut cursor = index;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'[' {
+                    depth += 1;
+                } else if bytes[cursor] == b']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                cursor += 1;
+            }
+            if cursor >= bytes.len() {
+                return false;
+            }
+            index = cursor;
+        } else if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            return false;
+        }
+        index += 1;
+    }
+    false
 }
 
 impl Printer {
@@ -58,7 +167,7 @@ impl Printer {
         Self {
             out: String::new(),
             indentation: 0,
-            inside_function_def: false,
+            inside_function_def: 0,
             skip_this_indent: 0,
             was_heredoc: false,
             printing_connection: 0,
@@ -169,9 +278,15 @@ impl Printer {
         } else if let Some(coproc) = &cmd.coproc_command {
             self.print_coproc_command(coproc);
         } else if cmd.function_command.is_some() {
-            // Nested function definitions print through print_function_def.
-            let text = function_def_text(cmd);
-            self.cprintf(&text);
+            // Nested function definitions print through print_function_def,
+            // which owns the definition's own redirect list (printed after
+            // the closing brace) — the generic trailing print below must
+            // not repeat it.
+            self.print_function_def_node(cmd);
+            if cmd.background {
+                self.cprintf(" &");
+            }
+            return;
         } else if let Some(select) = &cmd.select_command {
             self.print_select_command(select);
         } else if let Some(pipeline) = &cmd.pipeline_command {
@@ -251,10 +366,10 @@ impl Printer {
                         self.cprintf(";");
                     }
                 } else {
-                    let connector = if self.inside_function_def { "" } else { ";" };
+                    let connector = if self.inside_function_def > 0 { "" } else { ";" };
                     self.print_deferred_heredocs(connector);
                 }
-                if self.inside_function_def {
+                if self.inside_function_def > 0 {
                     self.cprintf("\n");
                 } else if self.printing_comsub {
                     self.cprintf("\n");
@@ -548,7 +663,7 @@ impl Printer {
     /// group prints multiline; the body's last command gets no `;`.
     fn print_group_command(&mut self, body: &[CommandNode]) {
         self.cprintf("{ ");
-        if self.inside_function_def {
+        if self.inside_function_def > 0 {
             self.cprintf("\n");
             self.indentation += INDENTATION_AMOUNT;
         } else {
@@ -556,7 +671,7 @@ impl Printer {
         }
         self.print_command_list(body);
         self.print_deferred_heredocs("");
-        if self.inside_function_def {
+        if self.inside_function_def > 0 {
             self.cprintf("\n");
             self.indentation -= INDENTATION_AMOUNT;
             self.indent(self.indentation);
@@ -626,6 +741,81 @@ impl Printer {
     }
 
     // ---- redirections ----
+
+    /// Render a redirect slice in order (def-redirect lists and exportstr
+    /// roundtrips). Heredoc headers print inline; their bodies cannot be
+    /// deferred across a `}` boundary the way GNU's global printer does, so
+    /// only the header is emitted.
+    fn print_redirect_slice(&mut self, redirects: &[Redirect]) {
+        let count = redirects.len();
+        for (index, redirect) in redirects.iter().enumerate() {
+            if redirect.kind == RedirectKind::HereDoc {
+                let info = HereDocRedirect {
+                    fd: redirect.fd,
+                    fd_var: redirect.fd_var.clone(),
+                    operator: redirect.operator.clone(),
+                    operator_metadata: redirect.operator_metadata.clone(),
+                    delimiter: redirect.target.clone(),
+                    delimiter_metadata: redirect.target_metadata.clone(),
+                    strip_tabs: redirect.operator.ends_with("<<-"),
+                    quoted_delimiter: false,
+                    here_string: false,
+                    body: None,
+                };
+                self.cprintf(&heredoc_header(&info));
+            } else {
+                self.print_redirection(redirect);
+            }
+            if index + 1 < count {
+                self.cprintf(" ");
+            }
+        }
+    }
+
+    /// print_function_def (print_cmd.c:1323): nested `function NAME () ...`
+    /// printing. Non-posix mode always prefixes the `function` keyword; the
+    /// body indents relative to the enclosing printer state, and the
+    /// definition's redirections print after the closing brace.
+    fn print_function_def_node(&mut self, cmd: &CommandNode) {
+        let Some(function) = cmd.function_command.as_ref() else {
+            return;
+        };
+        self.cprintf(&format!("function {} () \n", function.name));
+        self.indent(self.indentation);
+        self.cprintf("{ \n");
+        self.inside_function_def += 1;
+        self.indentation += INDENTATION_AMOUNT;
+        if function.body_kind == crate::parser::FunctionBodyKind::Subshell {
+            self.indent(self.indentation);
+            self.cprintf("( ");
+            self.skip_this_indent += 1;
+            self.print_command_list(&function.body);
+            self.print_deferred_heredocs("");
+            self.cprintf(" )");
+            let def_redirects = self.collect_redirects(cmd);
+            if !def_redirects.is_empty() {
+                self.cprintf(" ");
+                self.print_redirect_slice(&def_redirects);
+            }
+            self.was_heredoc = false;
+        } else {
+            self.print_command_list(&function.body);
+            self.print_deferred_heredocs("");
+        }
+        self.indentation -= INDENTATION_AMOUNT;
+        self.inside_function_def = self.inside_function_def.saturating_sub(1);
+        if function.body_kind != crate::parser::FunctionBodyKind::Subshell {
+            let def_redirects = self.collect_redirects(cmd);
+            if def_redirects.is_empty() {
+                self.newline("}");
+            } else {
+                self.newline("} ");
+                self.print_redirect_slice(&def_redirects);
+            }
+        } else {
+            self.newline("}");
+        }
+    }
 
     fn print_redirection_list(&mut self, cmd: &CommandNode) {
         self.was_heredoc = false;
@@ -781,8 +971,19 @@ impl Printer {
                         .unwrap_or_else(|| target.trim_start_matches('&').to_string());
                     self.cprintf(&format!("{{{var}}}<&{fd}"));
                 } else {
-                    let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                    self.cprintf(&format!("{fd}<&{}", target.trim_start_matches('&')));
+                    let redirectee = target.trim_start_matches('&');
+                    if redirectee.chars().all(|ch| ch.is_ascii_digit()) {
+                        // print_cmd.c r_duplicating_input prints both fds
+                        // unconditionally: `<&3` prints as `0<&3`.
+                        let fd = redirect.fd.unwrap_or(0);
+                        self.cprintf(&format!("{fd}<&{redirectee}"));
+                    } else if redirect.fd == Some(0) || redirect.fd.is_none() {
+                        // r_duplicating_input_word omits a zero redirector.
+                        self.cprintf(&format!("<&{redirectee}"));
+                    } else {
+                        let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
+                        self.cprintf(&format!("{fd}<&{redirectee}"));
+                    }
                 }
             }
             RedirectKind::DuplicateOutput => {
@@ -793,8 +994,19 @@ impl Printer {
                         .unwrap_or_else(|| target.trim_start_matches('&').to_string());
                     self.cprintf(&format!("{{{var}}}>&{fd}"));
                 } else {
-                    let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                    self.cprintf(&format!("{fd}>&{}", target.trim_start_matches('&')));
+                    let redirectee = target.trim_start_matches('&');
+                    if redirectee.chars().all(|ch| ch.is_ascii_digit()) {
+                        // print_cmd.c r_duplicating_output prints both fds
+                        // unconditionally: `>&2` prints as `1>&2`.
+                        let fd = redirect.fd.unwrap_or(1);
+                        self.cprintf(&format!("{fd}>&{redirectee}"));
+                    } else if redirect.fd == Some(1) || redirect.fd.is_none() {
+                        // r_duplicating_output_word omits a unit redirector.
+                        self.cprintf(&format!(">&{redirectee}"));
+                    } else {
+                        let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
+                        self.cprintf(&format!("{fd}>&{redirectee}"));
+                    }
                 }
             }
             RedirectKind::CloseInput => {
@@ -858,25 +1070,6 @@ impl Printer {
         }
         self.deferred_heredocs.clear();
     }
-}
-
-fn function_def_text(cmd: &CommandNode) -> String {
-    let Some(function) = cmd.function_command.as_ref() else {
-        return String::new();
-    };
-    let mut printer = Printer::new();
-    // print_function_def: non-posix mode always prefixes `function`.
-    printer.cprintf(&format!("function {} () \n", function.name));
-    printer.indent(printer.indentation);
-    printer.cprintf("{ \n");
-    printer.inside_function_def = true;
-    printer.indentation += INDENTATION_AMOUNT;
-    printer.print_command_list(&function.body);
-    printer.print_deferred_heredocs("");
-    printer.indentation -= INDENTATION_AMOUNT;
-    printer.inside_function_def = false;
-    printer.newline("}");
-    printer.out
 }
 
 fn heredoc_header(info: &HereDocRedirect) -> String {

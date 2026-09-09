@@ -78,7 +78,10 @@ impl Executor {
             index += 1;
         }
 
-        if print && index >= args.len() {
+        if index >= args.len() {
+            // declare.def set_or_show_attributes(NULL, f|r): `readonly -f`
+            // and `readonly -fp` both print each readonly function's full
+            // definition followed by the `declare -fr NAME` attribute line.
             let mut names = marked_env_names(&self.env_vars, READONLY_FUNCTIONS);
             names.sort();
             for name in names {
@@ -125,8 +128,16 @@ impl Executor {
             writeln!(stdout, "declare -fx {name}")?;
         }
         // declare -f prints the stored command tree through the GNU
-        // print_cmd.c port so it matches `type NAME` and upstream bash.
-        let text = crate::parser::ast_print::multiline_function_def_text(name, body);
+        // print_cmd.c port so it matches `type NAME` and upstream bash,
+        // including the body kind and definition-level redirects.
+        let info = self.function_def_infos.get(name);
+        let text = crate::parser::ast_print::multiline_function_def_text_with(
+            name,
+            body,
+            info.and_then(|info| info.body_kind),
+            info.map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]),
+        );
         writeln!(stdout, "{text}")
     }
 
@@ -135,9 +146,14 @@ impl Executor {
             let Some(body) = self.functions.get(&name) else {
                 continue;
             };
+            let def_redirects = self
+                .function_def_infos
+                .get(&name)
+                .map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]);
             process.env(
                 exported_function_env_name(&name),
-                exported_function_env_value(&body.commands),
+                exported_function_env_value(&body.commands, def_redirects),
             );
         }
     }

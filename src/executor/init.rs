@@ -46,7 +46,8 @@ impl Executor {
             }
         }
 
-        let imported_functions = import_exported_functions_from_env(&env_vars);
+        let (imported_functions, imported_function_def_infos) =
+            import_exported_functions_from_env(&env_vars);
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
         if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) != Some("1") {
@@ -194,6 +195,7 @@ impl Executor {
             aliases: HashMap::new(),
             functions: imported_functions,
             function_definition_redirects: HashMap::new(),
+            function_def_infos: imported_function_def_infos,
             function_definition_locations: HashMap::new(),
             positional_params: Vec::new(),
             pipestatus: vec![0],

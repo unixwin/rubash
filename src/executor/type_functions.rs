@@ -14,7 +14,13 @@ impl Executor {
         W: Write,
     {
         writeln!(stdout, "{name} is a function")?;
-        let text = crate::parser::ast_print::multiline_function_def_text(name, body);
+        let info = self.function_def_infos.get(name);
+        let text = crate::parser::ast_print::multiline_function_def_text_with(
+            name,
+            body,
+            info.and_then(|info| info.body_kind),
+            info.map(|info| info.def_redirects.as_slice()).unwrap_or(&[]),
+        );
         writeln!(stdout, "{text}")?;
         Ok(())
     }
@@ -27,7 +33,13 @@ impl Executor {
         use crate::executor::shell_options::GlobalStdout;
         use std::io::Write;
         let mut stdout = GlobalStdout;
-        let text = crate::parser::ast_print::multiline_function_def_text(name, body);
+        let info = self.function_def_infos.get(name);
+        let text = crate::parser::ast_print::multiline_function_def_text_with(
+            name,
+            body,
+            info.and_then(|info| info.body_kind),
+            info.map(|info| info.def_redirects.as_slice()).unwrap_or(&[]),
+        );
         let _ = write!(stdout, "{name} is a function\n{text}\n");
     }
 

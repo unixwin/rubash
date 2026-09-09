@@ -2,18 +2,33 @@ use super::*;
 
 pub(in crate::executor) fn import_exported_functions_from_env(
     env_vars: &HashMap<String, String>,
-) -> HashMap<String, FunctionBody> {
+) -> (
+    HashMap<String, FunctionBody>,
+    HashMap<String, crate::executor::FunctionDefInfo>,
+) {
     let mut functions = HashMap::new();
+    let mut def_infos = HashMap::new();
     for (env_name, value) in env_vars {
         let Some(name) = imported_function_name(env_name) else {
             continue;
         };
-        let Some(body) = parse_exported_function_body(value) else {
+        let Some((body, def_redirects)) = parse_exported_function_body(value) else {
             continue;
         };
         functions.insert(name.to_string(), Rc::new(Ast { commands: body }));
+        // The exportstr carries the function-definition redirections after
+        // the closing brace (`() { ... } 1>&2`), the way GNU's
+        // named_function_string(FUNC_EXTERNAL) renders them, so a re-imported
+        // function still prints them.
+        def_infos.insert(
+            name.to_string(),
+            crate::executor::FunctionDefInfo {
+                body_kind: Some(crate::parser::FunctionBodyKind::BraceGroup),
+                def_redirects,
+            },
+        );
     }
-    functions
+    (functions, def_infos)
 }
 
 pub(in crate::executor) fn imported_function_name(env_name: &str) -> Option<&str> {
@@ -37,28 +52,59 @@ pub(in crate::executor) fn is_exportable_function_name(name: &str) -> bool {
     is_imported_function_name(name) && !name.contains('/') && !name.contains('\\')
 }
 
-pub(in crate::executor) fn parse_exported_function_body(value: &str) -> Option<Vec<CommandNode>> {
+pub(in crate::executor) fn parse_exported_function_body(
+    value: &str,
+) -> Option<(Vec<CommandNode>, Vec<crate::parser::Redirect>)> {
     let value = value.trim();
     let rest = value.strip_prefix("()")?.trim_start();
-    if !rest.starts_with('{') || !rest.ends_with('}') {
+    if !rest.starts_with('{') {
         return None;
     }
-    let body = rest[1..rest.len() - 1].trim();
+    // Split the closing brace of the definition from any trailing
+    // function-definition redirections (`} 1>&2`). GNU exportstr values are
+    // the printed definition, so the redirections come after the brace.
+    let (body_and_brace, def_redirects) = match rest.rfind('}') {
+        Some(close) if close + 1 == rest.len() => (rest, Vec::new()),
+        Some(close) => {
+            let trailing = rest[close + 1..].trim();
+            let tokens = crate::lexer::tokenize(&format!(": {trailing}"));
+            let parsed = crate::parser::parse(&tokens);
+            let redirects = parsed
+                .commands
+                .first()
+                .map(crate::parser::ast_print::collected_redirects)
+                .unwrap_or_default();
+            (&rest[..close + 1], redirects)
+        }
+        None => return None,
+    };
+    if !body_and_brace.ends_with('}') {
+        return None;
+    }
+    let body = body_and_brace[1..body_and_brace.len() - 1].trim();
     let tokens = crate::lexer::tokenize(body);
-    Some(crate::parser::parse(&tokens).commands)
+    Some((crate::parser::parse(&tokens).commands, def_redirects))
 }
 
 pub(in crate::executor) fn exported_function_env_name(name: &str) -> String {
     format!("BASH_FUNC_{name}%%")
 }
 
-pub(in crate::executor) fn exported_function_env_value(body: &[CommandNode]) -> String {
+pub(in crate::executor) fn exported_function_env_value(
+    body: &[CommandNode],
+    def_redirects: &[crate::parser::Redirect],
+) -> String {
     let commands: Vec<String> = body
         .iter()
         .filter_map(exported_function_command_text)
         .collect();
-    if commands.is_empty() {
+    if commands.is_empty() && def_redirects.is_empty() {
         "() { :; }".to_string()
+    } else if commands.is_empty() {
+        format!(
+            "() {{ :; }}{}",
+            redirect_suffix_text(def_redirects)
+        )
     } else {
         let mut output = String::from("() {");
         for (index, command) in commands.iter().enumerate() {
@@ -72,8 +118,21 @@ pub(in crate::executor) fn exported_function_env_value(body: &[CommandNode]) -> 
             }
         }
         output.push_str("\n}");
+        output.push_str(&redirect_suffix_text(def_redirects));
         output
     }
+}
+
+/// Function-definition redirections rendered after the closing brace of an
+/// exportstr value (print_cmd.c prints them via print_redirection_list).
+fn redirect_suffix_text(def_redirects: &[crate::parser::Redirect]) -> String {
+    if def_redirects.is_empty() {
+        return String::new();
+    }
+    format!(
+        " {}",
+        crate::parser::ast_print::redirect_list_text(def_redirects)
+    )
 }
 
 pub(in crate::executor) fn exported_function_command_text(command: &CommandNode) -> Option<String> {

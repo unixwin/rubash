@@ -264,6 +264,19 @@ enum LoopControlKind {
 
 type FunctionBody = Rc<Ast>;
 
+/// Print/roundtrip metadata for a defined function that the body AST alone
+/// does not carry. GNU keeps the whole FUNCTION_DEF command for
+/// `declare -f`/`type NAME` rendering (print_cmd.c named_function_string /
+/// print_function_def): the body kind decides whether the stored body is
+/// wrapped in `( )` (cm_subshell body), and redirections attached to the
+/// function definition itself (`f () { ... } 1>&2`) print after the closing
+/// brace and travel in the exportstr so subshell children re-import them.
+#[derive(Clone, Debug, Default)]
+pub(in crate::executor) struct FunctionDefInfo {
+    pub body_kind: Option<crate::parser::FunctionBodyKind>,
+    pub def_redirects: Vec<crate::parser::Redirect>,
+}
+
 #[derive(Clone, Debug)]
 struct FunctionDefinitionLocation {
     line: usize,
@@ -367,6 +380,7 @@ pub struct Executor {
     aliases: HashMap<String, Alias>,
     functions: HashMap<String, FunctionBody>,
     function_definition_redirects: HashMap<String, CommandNode>,
+    function_def_infos: HashMap<String, FunctionDefInfo>,
     function_definition_locations: HashMap<String, FunctionDefinitionLocation>,
     positional_params: Vec<String>,
     pipestatus: Vec<i32>,

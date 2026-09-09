@@ -135,6 +135,7 @@ impl Executor {
         let saved_positional_params = self.positional_params.clone();
         let saved_functions = self.functions.clone();
         let saved_function_redirects = self.function_definition_redirects.clone();
+        let saved_function_def_infos = self.function_def_infos.clone();
         let saved_aliases = self.aliases.clone();
         let saved_bash_source_stack = self.bash_source_stack.clone();
         let saved_bash_lineno_stack = self.bash_lineno_stack.clone();
@@ -167,6 +168,7 @@ impl Executor {
         self.set_positional_params(saved_positional_params);
         self.functions = saved_functions;
         self.function_definition_redirects = saved_function_redirects;
+        self.function_def_infos = saved_function_def_infos;
         self.aliases = saved_aliases;
         self.bash_source_stack = saved_bash_source_stack;
         self.bash_lineno_stack = saved_bash_lineno_stack;

@@ -237,9 +237,12 @@ pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
     )
 }
 
-/// GNU general.c::valid_identifier: `[A-Za-z_][A-Za-z0-9_]*`. Used to enforce
-/// the POSIX function-name restriction in execute_intern_function (names that
-/// are not valid identifiers are rejected under POSIX mode).
+/// GNU general.c::valid_identifier: `[A-Za-z_][A-Za-z0-9_]*`. The POSIX
+/// function-name restriction it supports is compiled out of the 5.3 baseline
+/// (config-top.h leaves POSIX_RESTRICT_FUNCNAME undefined, so
+/// execute_intern_function never sets pflags&1 and `!! () { ...; }` is a
+/// legal POSIX-mode definition); the helper stays for the documented ifdef.
+#[allow(dead_code)]
 pub(in crate::executor) fn valid_function_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {

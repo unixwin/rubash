@@ -38,6 +38,34 @@ impl Executor {
                 }
             }
 
+            // GNU describe_command order (builtins/type.def:240-330):
+            // reserved words, then -- in posix mode -- special builtins
+            // BEFORE functions (execute_cmd.c:4659 "Posix.2 says special
+            // builtins are found before functions"), then functions, then
+            // other builtins.
+            if is_shell_keyword(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => println!("{name} is a shell keyword"),
+                    TypeDescribeMode::Reusable => println!("{name}"),
+                    TypeDescribeMode::TypeOnly => println!("keyword"),
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return true;
+            }
+
+            if self.posix_mode_enabled()
+                && self.is_enabled_shell_builtin_name(name)
+                && is_posix_special_builtin(name)
+            {
+                match mode {
+                    TypeDescribeMode::Verbose => println!("{name} is a special shell builtin"),
+                    TypeDescribeMode::Reusable => println!("{name}"),
+                    TypeDescribeMode::TypeOnly => println!("builtin"),
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return true;
+            }
+
             if !skip_functions {
                 if let Some(body) = self.functions.get(name) {
                     match mode {
@@ -52,23 +80,8 @@ impl Executor {
                 }
             }
 
-            if is_shell_keyword(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => println!("{name} is a shell keyword"),
-                    TypeDescribeMode::Reusable => println!("{name}"),
-                    TypeDescribeMode::TypeOnly => println!("keyword"),
-                    TypeDescribeMode::PathOnly => {}
-                }
-                return true;
-            }
-
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
-                    TypeDescribeMode::Verbose
-                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
-                    {
-                        println!("{name} is a special shell builtin")
-                    }
                     TypeDescribeMode::Verbose => println!("{name} is a shell builtin"),
                     TypeDescribeMode::Reusable => println!("{name}"),
                     TypeDescribeMode::TypeOnly => println!("builtin"),
@@ -139,6 +152,33 @@ impl Executor {
                 }
             }
 
+            // GNU describe_command order: keywords, posix special builtins
+            // before functions, then functions, then other builtins.
+            if is_shell_keyword(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return Ok(true);
+            }
+
+            if self.posix_mode_enabled()
+                && self.is_enabled_shell_builtin_name(name)
+                && is_posix_special_builtin(name)
+            {
+                match mode {
+                    TypeDescribeMode::Verbose => {
+                        writeln!(stdout, "{name} is a special shell builtin")?
+                    }
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                return Ok(true);
+            }
+
             if !skip_functions {
                 if let Some(body) = self.functions.get(name) {
                     match mode {
@@ -153,23 +193,8 @@ impl Executor {
                 }
             }
 
-            if is_shell_keyword(name) {
-                match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
-                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
-                    TypeDescribeMode::PathOnly => {}
-                }
-                return Ok(true);
-            }
-
             if self.is_enabled_shell_builtin_name(name) {
                 match mode {
-                    TypeDescribeMode::Verbose
-                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
-                    {
-                        writeln!(stdout, "{name} is a special shell builtin")?
-                    }
                     TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
                     TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
@@ -255,6 +280,37 @@ impl Executor {
                 }
             }
 
+            // type -a (all != 0): describe_command keeps scanning after each
+            // match. Order: keyword, posix special builtin (which then
+            // suppresses the duplicate plain-builtin block via skipbuiltin),
+            // function, builtin.
+            let mut skip_builtin = false;
+            if is_shell_keyword(name) {
+                match mode {
+                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                found = true;
+            }
+
+            if self.posix_mode_enabled()
+                && self.is_enabled_shell_builtin_name(name)
+                && is_posix_special_builtin(name)
+            {
+                match mode {
+                    TypeDescribeMode::Verbose => {
+                        writeln!(stdout, "{name} is a special shell builtin")?
+                    }
+                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
+                    TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,
+                    TypeDescribeMode::PathOnly => {}
+                }
+                skip_builtin = true;
+                found = true;
+            }
+
             if !skip_functions {
                 if let Some(body) = self.functions.get(name) {
                     match mode {
@@ -269,23 +325,8 @@ impl Executor {
                 }
             }
 
-            if is_shell_keyword(name) {
+            if !skip_builtin && self.is_enabled_shell_builtin_name(name) {
                 match mode {
-                    TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell keyword")?,
-                    TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
-                    TypeDescribeMode::TypeOnly => writeln!(stdout, "keyword")?,
-                    TypeDescribeMode::PathOnly => {}
-                }
-                found = true;
-            }
-
-            if self.is_enabled_shell_builtin_name(name) {
-                match mode {
-                    TypeDescribeMode::Verbose
-                        if self.posix_mode_enabled() && is_posix_special_builtin(name) =>
-                    {
-                        writeln!(stdout, "{name} is a special shell builtin")?
-                    }
                     TypeDescribeMode::Verbose => writeln!(stdout, "{name} is a shell builtin")?,
                     TypeDescribeMode::Reusable => writeln!(stdout, "{name}")?,
                     TypeDescribeMode::TypeOnly => writeln!(stdout, "builtin")?,

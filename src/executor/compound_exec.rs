@@ -468,12 +468,17 @@ impl Executor {
         let result = self.with_command_input_redirects(cmd, |executor| executor.execute_ast(&body));
         // Bash runs a subshell with errexit active; a failing command exits
         // the subshell with that status but the parent script continues.
-        // Catch ExitCode errors at the subshell boundary.
+        // Catch ExitCode errors at the subshell boundary. `return N` inside a
+        // subshell likewise only ends the subshell with status N: the forked
+        // child longjmps to its own copy of execute_function's return_catch
+        // (return.def return_builtin) and exits N, so the function continues
+        // with $? = N (func.tests: `( return 5 ); status=$?` prints 5, 5).
         let status = match result {
             Ok(()) => self.exit_code,
             Err(ExecuteError::ExitCode(code))
             | Err(ExecuteError::ExpansionFailure(code))
-            | Err(ExecuteError::FatalFunctionError(code)) => code,
+            | Err(ExecuteError::FatalFunctionError(code))
+            | Err(ExecuteError::Return(code)) => code,
             Err(error) => {
                 self.restore_shell_env(saved_env);
                 self.shell_state.variables = saved_variables;

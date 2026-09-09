@@ -604,6 +604,7 @@ impl Executor {
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
+            function_def_infos: self.function_def_infos.clone(),
             function_definition_locations: self.function_definition_locations.clone(),
             positional_params: self.positional_params.clone(),
             pipestatus: self.pipestatus.clone(),

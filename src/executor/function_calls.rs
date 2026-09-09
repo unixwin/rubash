@@ -54,15 +54,11 @@ impl Executor {
             self.exit_code = 2;
             return Err(ExecuteError::FatalFunctionError(2));
         }
-        if posix_mode && !valid_function_identifier(&function.name) {
-            eprintln!(
-                "{}`{}': not a valid identifier",
-                name_error_prefix(self),
-                function.name
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::FatalFunctionError(2));
-        }
+        // GNU 5.3 builds with POSIX_RESTRICT_FUNCNAME undefined
+        // (config-top.h:211), so posix mode does NOT reject non-identifier
+        // function names (execute_cmd.c execute_intern_function only sets
+        // pflags&1 under that ifdef). `!! () { fc -s "$@"; }` under
+        // `set -o posix` defines the function (func.tests func5.sub).
         if marked_env_names(&self.env_vars, READONLY_FUNCTIONS)
             .iter()
             .any(|name| name == &function.name)
@@ -106,6 +102,16 @@ impl Executor {
         } else {
             self.function_definition_redirects.remove(&function.name);
         }
+        // Print/roundtrip metadata: body kind plus the definition-level
+        // redirect list (the generic `redirects` field collects `} >&2`
+        // style trailing redirections at parse time).
+        self.function_def_infos.insert(
+            function.name.clone(),
+            FunctionDefInfo {
+                body_kind: Some(function.body_kind),
+                def_redirects: crate::parser::ast_print::collected_redirects(cmd),
+            },
+        );
         self.exit_code = 0;
         Ok(())
     }

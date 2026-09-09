@@ -71,6 +71,7 @@ impl Executor {
                 }
                 self.functions.remove(name);
                 self.function_definition_redirects.remove(name);
+                self.function_def_infos.remove(name);
                 unmark_env_name(&mut self.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }

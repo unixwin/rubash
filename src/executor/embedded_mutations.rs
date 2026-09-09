@@ -797,6 +797,7 @@ impl Executor {
         let saved_pipestatus = self.pipestatus.clone();
         let saved_functions = self.functions.clone();
         let saved_function_redirects = self.function_definition_redirects.clone();
+        let saved_function_def_infos = self.function_def_infos.clone();
         let saved_aliases = self.aliases.clone();
         let saved_exit_code = self.exit_code;
         let saved_positional_params = self.positional_params.clone();
@@ -837,6 +838,7 @@ impl Executor {
         self.pipestatus = saved_pipestatus;
         self.functions = saved_functions;
         self.function_definition_redirects = saved_function_redirects;
+        self.function_def_infos = saved_function_def_infos;
         self.aliases = saved_aliases;
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
