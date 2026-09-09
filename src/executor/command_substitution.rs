@@ -594,6 +594,7 @@ impl Executor {
 
     pub(in crate::executor) fn command_substitution_executor(&self) -> Executor {
         Executor {
+            session_history: None,
             shell_state: self.shell_state.clone(),
             fd_table: self.fd_table.clone(),
             job_table: self.job_table.clone(),

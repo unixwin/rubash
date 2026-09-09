@@ -758,6 +758,19 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let args = &cmd.words[1..];
+        if let Some(session) = self.session_history.clone() {
+            // The shell's own session history (scripts that ran
+            // "set -o history") takes precedence over the host provider.
+            let status = super::history_exec::execute_history_session(
+                self,
+                args,
+                session,
+                &mut stdout,
+                &mut stderr,
+            )?;
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(status);
+        }
         let provider = self.history_provider.as_ref().cloned();
         if let Some(provider) = provider {
             // Detect history file I/O modes (-a/-n/-r/-w) and optional -c.

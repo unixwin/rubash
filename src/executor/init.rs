@@ -245,6 +245,7 @@ impl Executor {
             external_file_builtins_enabled: true,
             process_env_snapshot,
             history_provider: None,
+            session_history: None,
             last_notified_job_ids: HashSet::new(),
             completion_specs: crate::builtins::complete::CompletionRegistry::new(),
         }

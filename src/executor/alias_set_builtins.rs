@@ -70,7 +70,37 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        self.load_history_file_if_needed();
         Ok(status)
+    }
+
+    /// bashhist.c load_history: the first "set -o history" in a session
+    /// reads HISTFILE into the list (only when no lines have been recorded
+    /// yet and the file has not already been loaded).
+    pub(in crate::executor) fn load_history_file_if_needed(&mut self) {
+        let Some(session) = self.session_history.clone() else {
+            return;
+        };
+        if !crate::builtins::set::shell_option_enabled(&self.env_vars, "history") {
+            return;
+        }
+        let needs_load = {
+            let shell = session.borrow_mut();
+            !shell.histfile_loaded && shell.lines_this_session == 0
+        };
+        if !needs_load {
+            return;
+        }
+        let Some(path) = self.get_env("HISTFILE") else {
+            return;
+        };
+        let histsize = self
+            .get_env("HISTSIZE")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut shell = session.borrow_mut();
+        shell.histfile_loaded = true;
+        let _ = shell.load_file(&path, histsize);
     }
 
     pub(in crate::executor) fn execute_set_command(

@@ -23,6 +23,7 @@ mod alias_reparse;
 mod alias_select;
 mod alias_set_builtins;
 mod arithmetic_aliases;
+mod history_exec;
 mod array_assignment_exec;
 mod assignment_dispatch;
 mod assignment_expansion;
@@ -168,7 +169,7 @@ use crate::parser::{
     LoopCommand, PipelineCommand, Redirect, SelectCommand, SubshellCommand, TimeCommand,
     WordMetadata,
 };
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -434,6 +435,9 @@ pub struct Executor {
     external_file_builtins_enabled: bool,
     process_env_snapshot: HashMap<String, String>,
     history_provider: Option<crate::history::SharedHistoryProvider>,
+    /// The shell's own session history (bashhist.c the_history) for scripts
+    /// that turn history on; None when history was never enabled.
+    pub(crate) session_history: Option<Rc<RefCell<crate::history::SessionHistory>>>,
     last_notified_job_ids: HashSet<usize>,
     completion_specs: crate::builtins::complete::CompletionRegistry,
 }

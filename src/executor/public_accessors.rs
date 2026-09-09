@@ -206,6 +206,14 @@ impl Executor {
         self.env_vars.get(name).map(|s| s.as_str())
     }
 
+    /// Attach the session history list used by scripts that enable history.
+    pub fn set_session_history(
+        &mut self,
+        session: Option<std::rc::Rc<std::cell::RefCell<crate::history::SessionHistory>>>,
+    ) {
+        self.session_history = session;
+    }
+
     pub(crate) fn push_bash_source(&mut self, source: String) {
         let source = if self
             .env_vars

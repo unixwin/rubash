@@ -5,8 +5,10 @@
 use rubash::executor::{ExecuteError, Executor};
 use rubash::lexer::{has_unclosed_input_syntax, tokenize, tokenize_with_initial_posix, TokenKind};
 use rubash::parser::parse;
+use std::cell::RefCell;
 use std::env;
 use std::fs;
+use std::rc::Rc;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
 fn main() {
@@ -294,7 +296,11 @@ fn run_script_file_with_init(
         let _ = run_init_file(executor, init_file);
     }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
-    let status = run_source(executor, &contents, interactive);
+    let status = if script_uses_history(&contents) {
+        run_script_with_history(executor, &contents)
+    } else {
+        run_source(executor, &contents, interactive)
+    };
     finish_shell(executor, status, interactive)
 }
 
@@ -436,6 +442,267 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     finish_shell(executor, status, false)
 }
 
+/// bashhist.c: does this script turn history on? Detects the long-form
+/// option (set -o history / -o histexpand) and the short flag cluster
+/// containing -H, which is how the histexp tests enable expansion.
+fn script_uses_history(contents: &str) -> bool {
+    for line in contents.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("set ") else {
+            continue;
+        };
+        let mut expecting_option = false;
+        for token in rest.split_whitespace() {
+            if expecting_option {
+                if token == "history" || token == "histexpand" {
+                    return true;
+                }
+                expecting_option = false;
+                continue;
+            }
+            if token == "-o" {
+                expecting_option = true;
+            } else if token.len() >= 2
+                && token.starts_with('-')
+                && !token.starts_with("--")
+                && token[1..].contains('H')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// shell.c run_pending_command style driver for scripts with history on:
+/// gather each syntactically complete group (like the stdin driver), run
+/// history expansion over its lines, record the joined entry, then execute.
+fn run_script_with_history(executor: &mut Executor, contents: &str) -> i32 {
+    let session = Rc::new(RefCell::new(rubash::history::SessionHistory::new()));
+    executor.set_session_history(Some(session.clone()));
+    let raw_lines: Vec<&str> = contents.split_inclusive('\n').collect();
+    let mut index = 0usize;
+    while index < raw_lines.len() {
+        let mut pending = String::new();
+        let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
+        let mut group: Vec<(String, bool)> = Vec::new();
+        // Driver-side unbalanced-paren gate: has_unclosed_input_syntax skips
+        // heredoc regions wholesale, which can swallow the open paren of a
+        // process substitution that declares a heredoc (cat <( cat <<EOF).
+        // Track paren depth over non-body lines, but only for groups that
+        // actually declared a heredoc, so other scripts group exactly as before.
+        let mut paren_depth: i64 = 0;
+        let mut saw_heredoc = false;
+        let start_line = index + 1;
+        while index < raw_lines.len() {
+            let raw = raw_lines[index];
+            let text = raw.trim_end_matches('\n');
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            index += 1;
+            let mut is_body = false;
+            if let Some((delimiter, strip_tabs)) = pending_heredocs.first().cloned() {
+                let candidate = if strip_tabs {
+                    text.trim_start_matches('\t')
+                } else {
+                    text
+                };
+                if candidate == delimiter {
+                    pending_heredocs.remove(0);
+                } else {
+                    is_body = true;
+                }
+            } else {
+                let declared = stdin_heredoc_declarations(text);
+                // Only line-spanning substitutions need the paren gate: a
+                // heredoc declared inside $( ) or <( ) keeps the group open
+                // past its terminator until the substitution closes.
+                saw_heredoc = saw_heredoc
+                    || (!declared.is_empty()
+                        && (text.contains("$(") || text.contains("<(") || text.contains(">(")));
+                pending_heredocs.extend(declared);
+            }
+            if !is_body {
+                paren_depth += line_paren_delta(&text);
+            }
+            group.push((text.to_string(), is_body));
+            pending.push_str(raw);
+            if pending_heredocs.is_empty()
+                && (!saw_heredoc || paren_depth <= 0)
+                && !stdin_source_needs_more(&pending)
+            {
+                break;
+            }
+        }
+        let status = run_history_group(executor, &session, &group, start_line);
+        let parse_error = executor.take_parse_error();
+        if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+            break;
+        }
+    }
+    executor.last_exit_code()
+}
+
+/// Process one syntactically complete group: expand (when history expansion
+/// is on), record the delimited entry, then execute. Lines whose expansion
+/// fails or is print-only do not execute; print-only lines still record.
+fn run_history_group(
+    executor: &mut Executor,
+    session: &Rc<RefCell<rubash::history::SessionHistory>>,
+    group: &[(String, bool)],
+    start_line: usize,
+) -> i32 {
+    let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
+    let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
+    let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
+    let lithist = shopt_state_enabled(executor, "lithist", false);
+    let control = executor.get_env("HISTCONTROL").unwrap_or_default();
+    let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
+    let histsize = executor
+        .get_env("HISTSIZE")
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let chars = executor.get_env("histchars").unwrap_or("!^#");
+    let mut chars = chars.chars();
+    let ctx = rubash::history_expand::HistCtx {
+        chars: rubash::history_expand::HistChars {
+            expand: chars.next().unwrap_or('!'),
+            subst: chars.next().unwrap_or('^'),
+            comment: chars.next().unwrap_or('#'),
+        },
+        posix,
+    };
+
+    let mut exec_parts: Vec<String> = Vec::new();
+    let mut record_texts: Vec<Option<String>> = Vec::new();
+    let mut modified_any = false;
+    for (text, is_body) in group {
+        if *is_body || !history_on || !histexpand_on {
+            exec_parts.push(text.clone());
+            record_texts.push(Some(text.clone()));
+            continue;
+        }
+        let result = session.borrow_mut().expand(text, ctx);
+        match result.status {
+            -1 => {
+                eprintln!("{}", result.text);
+                exec_parts.push(String::new());
+                record_texts.push(None);
+                // A dropped line changes the executed text even when no other
+                // line expanded: the group must run from exec_parts, not the
+                // verbatim text (bash does not execute the failed line).
+                modified_any = true;
+            }
+            2 => {
+                eprintln!("{}", result.text);
+                exec_parts.push(String::new());
+                record_texts.push(Some(result.text));
+                // Print-only (:p) lines are never executed; use exec_parts so
+                // the group text omits them entirely.
+                modified_any = true;
+            }
+            status => {
+                if status == 1 {
+                    eprintln!("{}", result.text);
+                    modified_any = true;
+                }
+                exec_parts.push(result.text.clone());
+                record_texts.push(Some(result.text));
+            }
+        }
+    }
+
+    // Record the entry (bashhist.c history_delimiting_chars join).
+    if history_on {
+        if cmdhist {
+            let record = build_recorded_entry(&record_texts, group, lithist);
+            let was_recorded = if record.trim().is_empty() {
+                false
+            } else {
+                session.borrow_mut().record(&record, &control, &ignore, histsize)
+            };
+            session.borrow_mut().last_line_added = was_recorded;
+        } else {
+            for text in record_texts.iter().flatten() {
+                let was_recorded =
+                    session.borrow_mut().record(text, &control, &ignore, histsize);
+                session.borrow_mut().last_line_added = was_recorded;
+            }
+        }
+    } else {
+        session.borrow_mut().last_line_added = false;
+    }
+
+    let exec_text = if modified_any {
+        exec_parts.join("\n")
+    } else {
+        group.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n")
+    };
+    if exec_text.trim().is_empty() {
+        return executor.last_exit_code();
+    }
+    run_source_with_line_offset(executor, &exec_text, false, start_line.saturating_sub(1))
+}
+
+/// Join the recorded line texts with GNU history_delimiting_chars rules:
+/// backslash continuation removes the backslash, heredoc bodies keep real
+/// newlines, reserved words and operators join with a space, everything else
+/// with semicolon-space. lithist saves newlines instead of semicolons.
+fn build_recorded_entry(
+    texts: &[Option<String>],
+    group: &[(String, bool)],
+    lithist: bool,
+) -> String {
+    const NO_SEMI: &[&str] = &[
+        "{", "(", ")", "[", ";", "&", "|", "case", "do", "else", "if",
+        "in", "then", "until", "while", "time",
+    ];
+    let mut out = String::new();
+    let mut prev_kept: Option<usize> = None;
+    for (index, text) in texts.iter().enumerate() {
+        let Some(text) = text else { continue };
+        if out.is_empty() {
+            out.push_str(text);
+            prev_kept = Some(index);
+            continue;
+        }
+        let prev_text = texts[prev_kept.unwrap_or(index)]
+            .as_deref()
+            .unwrap_or_default();
+        let prev_was_body = index > 0 && group[index - 1].1;
+        let cur_is_body = group[index].1;
+        let delim = if prev_text.ends_with('\\') {
+            if out.ends_with('\\') {
+                out.pop();
+            }
+            ""
+        } else if prev_was_body || cur_is_body {
+            "\n"
+        } else if prev_text
+            .split_whitespace()
+            .next_back()
+            .map(|word| NO_SEMI.contains(&word))
+            .unwrap_or(false)
+        {
+            " "
+        } else if lithist {
+            "\n"
+        } else {
+            "; "
+        };
+        out.push_str(delim);
+        out.push_str(text);
+        prev_kept = Some(index);
+    }
+    out
+}
+
+/// builtins/shopt.rs SHOPT_STATE membership with the built-in default.
+fn shopt_state_enabled(executor: &Executor, name: &str, default: bool) -> bool {
+    match executor.get_env("__RUBASH_SHOPT_STATE") {
+        None => default,
+        Some(state) => state.split('\u{1f}').any(|entry| entry == name),
+    }
+}
 fn run_internal_pipeline_utility(name: &str, args: &[String]) -> ! {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -553,6 +820,33 @@ fn stdin_source_needs_more(source: &str) -> bool {
     !stack.is_empty()
 }
 
+/// Net open-paren count for one command line, ignoring quoted spans. Used
+/// by the history driver to keep a group open across a heredoc declared
+/// inside a process substitution.
+fn line_paren_delta(line: &str) -> i64 {
+    let chars: Vec<char> = line.chars().collect();
+    let mut depth = 0i64;
+    let mut quote: Option<char> = None;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if let Some(active) = quote {
+            if active == '"' && c == '\\' && i + 1 < chars.len() && chars[i + 1] == '"' {
+                i += 1;
+            } else if c == active {
+                quote = None;
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+        } else if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+        }
+        i += 1;
+    }
+    depth
+}
 fn stdin_heredoc_declarations(line: &str) -> Vec<(String, bool)> {
     let words = line.split_whitespace().collect::<Vec<_>>();
     let mut declarations = Vec::new();
