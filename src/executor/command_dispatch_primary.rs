@@ -150,6 +150,12 @@ impl Executor {
                         eprint!("{stderr}");
                     }
                     self.exit_code = status;
+                    // GNU sleep is a real child process; its completion
+                    // delivers SIGCHLD and a set trap runs at this boundary
+                    // (trap8.sub counts the foreground sleep among the four
+                    // CHLD firings). The fast path performs no spawn, so the
+                    // notification is raised here instead.
+                    self.run_sigchld_trap_for_reaped_child()?;
                     Ok(())
                 } else {
                     self.execute_external(cmd)

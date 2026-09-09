@@ -130,6 +130,13 @@ impl Executor {
             let child_env = self.child_shell_environment();
             self.env_vars = child_env.clone();
             self.shell_state.variables = crate::shell::VariableStore::from_environment(&child_env);
+            // A fresh shell invocation entering a script derives
+            // SIG_HARD_IGNORE from the inherited dispositions (trap.c
+            // ignore_signal: "A signal ignored on entry to the shell cannot
+            // be trapped or reset, but no error is reported"). Runtime
+            // ignores of plain subshells stay mutable; only this
+            // shell-entry boundary freezes them.
+            crate::builtins::trap::mark_startup_ignores(&mut self.env_vars);
         }
         let saved_pipestatus = self.pipestatus.clone();
         let saved_positional_params = self.positional_params.clone();

@@ -46,6 +46,10 @@ impl Executor {
     ) -> Result<(String, String, i32), ExecuteError> {
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // A pipeline member runs in a subshell: caught signal traps reset to
+        // the inherited disposition (execute_cmd.c subshell trap reset), so
+        // only traps set inside the member run at its exit.
+        crate::builtins::trap::reset_for_subshell(&mut subshell.env_vars);
         // Compound pipeline stages keep Bash's child-list errexit semantics;
         // the caller handles the stage status at the pipeline boundary.
         if force_compound_errexit {

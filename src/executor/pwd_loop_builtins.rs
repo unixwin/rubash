@@ -128,10 +128,24 @@ impl Executor {
                 }
             }
         } else {
-            self.env_vars
-                .get("__RUBASH_SIGNAL_TRAP_STATUS")
-                .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or(self.exit_code)
+            // A bare return inside a running signal trap action gets the
+            // pre-trap $? only when it terminates the trap action itself
+            // (posix interp 1602); a return in a function called by the
+            // action uses the current $? (trap9.sub: handler's return sees
+            // setexit's 111, not the pre-trap status).
+            let action_depth = self
+                .env_vars
+                .get("__RUBASH_SIGNAL_TRAP_DEPTH")
+                .and_then(|value| value.parse::<usize>().ok());
+            let in_trap_action = action_depth == Some(self.function_depth);
+            if in_trap_action {
+                self.env_vars
+                    .get("__RUBASH_SIGNAL_TRAP_STATUS")
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(self.exit_code)
+            } else {
+                self.exit_code
+            }
         };
 
         let in_function = self.function_depth > 0;

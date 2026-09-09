@@ -111,6 +111,9 @@ pub(super) fn parse_function_command(
             tokens
                 .get(i)
                 .map(|token| token.position + token.raw.matches('\n').count()),
+            tokens
+                .get(i)
+                .map(|token| token.position + token.raw.matches('\n').count()),
         ));
         return Some(finish_function_command(command, tokens, i + 1));
     }
@@ -133,6 +136,9 @@ pub(super) fn parse_function_command(
             Some(i),
             body_end.checked_sub(1),
             tokens.get(body_end.saturating_sub(1)).map(|token| token.position),
+            tokens
+                .get(i)
+                .map(|token| token.position + token.raw.matches('\n').count()),
         ));
         return Some(finish_function_command(command, tokens, body_end));
     }
@@ -157,6 +163,9 @@ pub(super) fn parse_function_command(
             Some(i),
             Some(close_i),
             tokens.get(close_i).map(|token| token.position),
+            tokens
+                .get(i)
+                .map(|token| token.position + token.raw.matches('\n').count()),
         ));
         return Some(finish_function_command(command, tokens, close_i + 1));
     }
@@ -180,6 +189,9 @@ pub(super) fn parse_function_command(
             Some(i),
             body_end.checked_sub(1),
             tokens.get(body_end.saturating_sub(1)).map(|token| token.position),
+            tokens
+                .get(i)
+                .map(|token| token.position + token.raw.matches('\n').count()),
         ));
         return Some(finish_function_command(command, tokens, body_end));
     }
@@ -223,6 +235,9 @@ pub(super) fn parse_function_command(
         Some(body_start),
         i.checked_sub(1),
         tokens.get(i).map(|token| token.position),
+        tokens
+            .get(open_brace)
+            .map(|token| token.position + token.raw.matches('\n').count()),
     ));
     Some(finish_function_command(command, tokens, i + 1))
 }
@@ -255,6 +270,7 @@ fn function_command(
     body_start: Option<usize>,
     body_end: Option<usize>,
     body_end_line: Option<usize>,
+    body_open_line: Option<usize>,
 ) -> Box<FunctionCommand> {
     let (
         body_open_delimiter,
@@ -299,6 +315,7 @@ fn function_command(
         body_start,
         body_end,
         body_end_line,
+        body_open_line,
     })
 }
 

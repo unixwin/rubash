@@ -506,6 +506,10 @@ impl Executor {
                 {
                     return Err(ExecuteError::ExitCode(self.exit_code));
                 }
+                // GNU fires the ERR trap for a failing pipeline just like a
+                // failing simple command (trap3.sub: "trap: 8" after
+                // false | false | false; trap2.sub "exit 42 | command false").
+                self.maybe_run_error_trap(command)?;
                 if let Some(next_index) = self.skip_and_or_rhs(ast, index) {
                     index = next_index;
                 } else {
@@ -828,30 +832,8 @@ impl Executor {
             self.set_pipestatus([self.exit_code]);
 
             // Execute ERR trap if command failed and not in &&/||/! context
-            if self.exit_code != 0
-                && !command.inverted
-                && command.and_or().is_none()
-                && self.suppress_errexit == 0
-                // ERR traps are not inherited by functions unless errtrace
-                // (-E) is enabled (execute_cmd.c / trap.c).
-                && (self.function_depth == 0
-                    || crate::builtins::set::shell_option_enabled(&self.env_vars, "errtrace"))
-            {
-                if let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "ERR")
-                {
-                    if !action.is_empty() {
-                        let saved_exit = self.exit_code;
-                        let saved_trap_command = self.debug_trap_command.borrow().clone();
-                        *self.debug_trap_command.borrow_mut() =
-                            Some(crate::executor::command_text::bash_command_text(command));
-                        let tokens = crate::lexer::tokenize(&action);
-                        let ast = crate::parser::parse(&tokens);
-                        let _ = self.execute_ast(&ast);
-                        *self.debug_trap_command.borrow_mut() = saved_trap_command;
-                        self.exit_code = saved_exit;
-                    }
-                }
-            }
+            // (trap_exec.rs maybe_run_error_trap; GNU execute_cmd.c).
+            self.maybe_run_error_trap(command)?;
 
             if command.subshell_end {
                 if let Some((old_stdin, old_offset)) = subshell_stdin.take() {

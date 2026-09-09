@@ -29,6 +29,12 @@ impl Executor {
             env_vars.entry("PATH".to_string()).or_insert(path_val);
         }
 
+        // Seed the trap table a shell inherits from its environment: traps
+        // ignored at startup become hard-ignores (trap.c), and WSL's init
+        // leaves SIGRTMIN ignored for every child, which the GNU 5.3.0
+        // baseline lists as "trap -- '' SIGRTMIN" in fresh shells.
+        crate::builtins::trap::seed_startup_traps(&mut env_vars);
+
         // MSYS Bash exposes HOME even when the native Windows environment
         // only provides USERPROFILE.  Keep `$HOME` usable for scripts that
         // pass it to cd and other builtins, while preserving an explicitly

@@ -586,6 +586,10 @@ impl Executor {
                     match child.wait_with_output() {
                         Ok(output) => {
                             self.exit_code = 0;
+                            // A reaped foreground child delivers SIGCHLD in
+                            // GNU bash; a set trap runs once at this
+                            // boundary (trap8.sub).
+                            self.run_sigchld_trap_for_reaped_child()?;
                             self.write_external_fd_copy_output(
                                 cmd,
                                 &output.stdout,
@@ -601,6 +605,10 @@ impl Executor {
                     match child.wait() {
                         Ok(status) => {
                             self.exit_code = status.code().unwrap_or(1);
+                            // A reaped foreground child delivers SIGCHLD in
+                            // GNU bash; a set trap runs once at this
+                            // boundary (trap8.sub).
+                            self.run_sigchld_trap_for_reaped_child()?;
                         }
                         Err(error) => self.report_external_spawn_error(cmd, error)?,
                     }

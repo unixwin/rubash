@@ -952,6 +952,12 @@ pub struct FunctionCommand {
     /// execute_intern_function via line_number), so the executor uses it for
     /// err_invalidid / special-builtin diagnostics.
     pub body_end_line: Option<usize>,
+    /// Line of the token that opens the function body (the `{` of a brace
+    /// group, the `(` of a parenthesized body). GNU execute_cmd.c:5351 sets
+    /// line_number = function_line_number = tc->line (the body command's
+    /// line) before the function-entry DEBUG fire, so a functraced function
+    /// reports the body-open line (trap.tests: "func2[43] debug").
+    pub body_open_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

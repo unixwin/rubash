@@ -246,21 +246,37 @@ impl Executor {
             self.debug_trap_function_line = body.commands.first().and_then(|command| command.line);
         }
         // GNU execute_cmd.c:5351 sets line_number = function_line_number =
-        // tc->line (the function definition line) at entry, and 5383-5387
-        // runs the DEBUG trap there ("so we can trap at the start of a
-        // function's execution rather than the execution of the body's first
-        // command"). The fire only happens when the function inherits the
-        // DEBUG trap (5270: trace attribute or functrace); otherwise
+        // tc->line (the body-open line) at entry, and 5383-5387 runs the
+        // DEBUG trap there ("so we can trap at the start of a function's
+        // execution rather than the execution of the body's first command").
+        // The fire only happens when the function inherits the DEBUG trap
+        // (5270: trace attribute or functrace); otherwise
         // restore_default_signal(DEBUG_TRAP) removed it. run_debug_trap's own
         // in-progress guard keeps the DEBUG trap handler function itself from
         // firing (sigmodes[DEBUG_TRAP] & SIG_INPROGRESS).
-        let function_traced = crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        let functrace =
+            crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        let function_traced = functrace || self.function_has_trace_attribute(name);
+        // GNU execute_cmd.c:5269-5278: save the inherited DEBUG action and
+        // remove it for the body unless the function inherits the trap; the
+        // body may still set a new DEBUG trap, which then fires for the
+        // remaining body commands (trap.tests: "func[29] funcdebug").
+        let saved_debug_action =
+            crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG");
+        if saved_debug_action.is_some() && !function_traced {
+            crate::builtins::trap::clear_debug_trap(&mut self.env_vars);
+        }
         let definition_line = self
             .function_definition_locations
             .get(name)
             .map(|location| location.line);
         if function_traced {
-            if let Some(line) = definition_line {
+            if let Some(line) = call_cmd
+                .function_command
+                .as_ref()
+                .and_then(|function| function.body_open_line)
+                .or(definition_line)
+            {
                 self.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
@@ -269,6 +285,15 @@ impl Executor {
             self.run_debug_trap(&command_text)?;
         }
         let result = self.execute_ast_inner(body_ast);
+        // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
+        // saved DEBUG action is restored only when the body did not set a
+        // new one, so a trap set inside the function persists after return
+        // (trap.tests listing shows the funcdebug action after func).
+        if let Some(action) = saved_debug_action {
+            if !function_traced {
+                crate::builtins::trap::maybe_restore_debug_trap(&mut self.env_vars, action);
+            }
+        }
         self.debug_trap_function_line = old_debug_trap_function_line;
         // GNU restores line_number to the function definition line when the
         // body group finishes (the group's execute_command_internal unwinds

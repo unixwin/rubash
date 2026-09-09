@@ -263,6 +263,7 @@ impl Executor {
             self.background_children.remove(&pid);
             self.join_coproc_stderr_forwarder(pid)?;
             self.job_table.mark_completed(pid, status);
+            self.run_sigchld_trap_for_reaped_child()?;
             if !protected_coprocs.contains(&pid) {
                 self.retire_completed_coproc(pid);
             }
@@ -375,6 +376,7 @@ impl Executor {
         let status = child.wait()?.code().unwrap_or(1);
         self.join_coproc_stderr_forwarder(pid)?;
         self.job_table.mark_completed(pid, status);
+        self.run_sigchld_trap_for_reaped_child()?;
         // Remove the visible job after any wait, while retaining the exit
         // status for repeated explicit PID waits.
         self.job_table.remove_job_by_pid_preserve_status(pid);
@@ -674,6 +676,7 @@ impl Executor {
         self.fd_table.close(pid);
         let status = child.wait()?.code().unwrap_or(1);
         self.job_table.mark_completed(pid, status);
+        self.run_sigchld_trap_for_reaped_child()?;
         let status = self.job_table.wait_pid(pid).unwrap_or(status);
         self.job_table.remove_job_by_pid(pid);
         Ok(status)
@@ -1043,10 +1046,6 @@ impl Executor {
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
                 self.completion_specs.insert(pseudo, spec.clone());
-            }
-            for target in &parsed.operands {
-                self.completion_specs.insert(target, spec.clone());
-            }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
         }

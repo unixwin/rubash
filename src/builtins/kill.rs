@@ -294,20 +294,64 @@ pub fn register_signal_mailbox(pid: u32) -> io::Result<()> {
 pub fn unregister_signal_mailbox(pid: u32) {
     let _ = std::fs::remove_file(signal_marker_path(pid));
     let _ = std::fs::remove_file(signal_queue_path(pid));
+    if let Ok(entries) = std::fs::read_dir(signal_mailbox_dir()) {
+        let prefix = format!("{pid}.q.");
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&prefix) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+fn parse_signal_lines(content: &str) -> Vec<i32> {
+    content
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .collect()
 }
 
 pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
-    let path = signal_queue_path(pid);
-    let content = match std::fs::read_to_string(&path) {
-        Ok(content) => content,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+    let dir = signal_mailbox_dir();
+    let mut signals = Vec::new();
+    // Legacy single-file queue: take it atomically via rename so a signal
+    // appended after the read is not dropped by the remove below.
+    let legacy_taken = dir.join(format!("{pid}.queue.taking"));
+    if std::fs::rename(signal_queue_path(pid), &legacy_taken).is_ok() {
+        if let Ok(content) = std::fs::read_to_string(&legacy_taken) {
+            signals.extend(parse_signal_lines(&content));
+        }
+        let _ = std::fs::remove_file(&legacy_taken);
+    }
+    // Per-delivery entries: senders write a unique .part file and rename it
+    // into place, so the reader only ever sees fully written entries and a
+    // concurrent delivery can never be lost. The old read-then-remove
+    // window dropped a signal whenever a delivery landed between the two
+    // steps, which made the trap9 kill-to-self from a busy loop
+    // unreliable.
+    let prefix = format!("{pid}.q.");
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.starts_with(&prefix) && !name.ends_with(".part"))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(signals),
         Err(error) => return Err(error),
     };
-    let _ = std::fs::remove_file(path);
-    Ok(content
-        .lines()
-        .filter_map(|line| line.trim().parse::<i32>().ok())
-        .collect())
+    entries.sort();
+    for path in entries {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            signals.extend(parse_signal_lines(&content));
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+    Ok(signals)
 }
 
 fn signal_name(number: i32) -> Option<&'static str> {
@@ -370,11 +414,19 @@ fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
     }
 
     std::fs::create_dir_all(signal_mailbox_dir())?;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(signal_queue_path(pid))?;
-    writeln!(file, "{signal}")?;
+    // Deliver as a unique per-signal entry: write to a .part file and
+    // rename it into place. The rename is atomic, so the reading shell
+    // either misses the entry entirely or observes it fully written; a
+    // shared append-queue could lose the write to the reader's
+    // read-then-remove window.
+    static SIGNAL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SIGNAL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let base = format!("{pid}.q.{}.{}", std::process::id(), seq);
+    let part = signal_mailbox_dir().join(format!("{base}.part"));
+    let full = signal_mailbox_dir().join(&base);
+    std::fs::write(&part, format!("{signal}
+"))?;
+    std::fs::rename(&part, &full)?;
     Ok(true)
 }
 

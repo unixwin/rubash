@@ -243,12 +243,33 @@ impl Executor {
     /// happen at the top level or inside inheriting functions.
     /// GNU builtins/source.def:208-216 additionally unsets the DEBUG trap
     /// for the whole duration of a sourced file when functrace is off.
+    /// Whether the DEBUG trap is in execution scope at the current context.
+    /// Function-level suppression is table-driven: execute_function removes
+    /// the inherited DEBUG trap at entry unless the function carries the
+    /// trace attribute or functrace is on (execute_cmd.c:5270), and a trap
+    /// set inside the body fires like any other command (trap.tests
+    /// "func[29] funcdebug"). Subshell environments (command substitutions,
+    /// pipeline members) inherit the DEBUG trap only under functrace, which
+    /// the cli trap contract encodes: without functrace the
+    /// substitution-internal commands do not fire, with functrace they do
+    /// (dbg-support.tests caller echoes carry the debug lines).
     pub(crate) fn debug_trap_in_scope(&self) -> bool {
         if self.source_debug_suppressed {
             return false;
         }
-        (self.subshell_depth.get() == 0 && self.function_depth == 0)
-            || crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace")
+        if self.subshell_depth.get() > 0 {
+            return crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        }
+        true
+    }
+
+    /// Whether a function carries the trace attribute (declare -ft name;
+    /// trap.def/execute_cmd.c trace_p(var)) making it inherit the DEBUG and
+    /// RETURN traps even with the global functrace option off.
+    pub(crate) fn function_has_trace_attribute(&self, name: &str) -> bool {
+        marked_env_names(&self.env_vars, FUNC_TRACE_FUNCTIONS)
+            .iter()
+            .any(|entry| entry == name)
     }
 
     /// Whether the RETURN trap can fire at a sourced-file exit here.
@@ -311,9 +332,56 @@ impl Executor {
                 "__RUBASH_SIGNAL_TRAP_STATUS".to_string(),
                 saved_exit.to_string(),
             );
+            // The pre-trap status override for a bare "return" applies only
+            // to the return that terminates the trap action itself (posix
+            // interp 1602). A "return" in a function CALLED by the action
+            // uses the current $?, so record the action's entry
+            // function_depth for the return builtin to compare.
+            let old_signal_depth = self.env_vars.insert(
+                "__RUBASH_SIGNAL_TRAP_DEPTH".to_string(),
+                self.function_depth.to_string(),
+            );
+            // GNU trap.c _run_trap_internal:373-385 binds BASH_TRAPSIG to the
+            // signal number of the trap being executed for the duration of
+            // the action, restoring the previous value afterwards
+            // (save_bash_trapsig/set_bash_trapsig/restore_bash_trapsig).
+            let old_bash_trapsig = self.env_vars.get("BASH_TRAPSIG").cloned();
+            self.env_vars
+                .insert("BASH_TRAPSIG".to_string(), signal.to_string());
+            // BASH_TRAPSIG is bound unexported (bind_var_to_int attrs 0), but
+            // command substitutions run as child processes that only receive
+            // exported variables, so the trap action's $(kill -l
+            // $BASH_TRAPSIG) would otherwise see nothing. Export it for the
+            // duration of the action; this is invisible to the script.
+            let bash_trapsig_was_exported = marked_env_names(&self.env_vars, EXPORTED_VARS)
+                .iter()
+                .any(|name| name == "BASH_TRAPSIG");
+            if !bash_trapsig_was_exported {
+                mark_env_name(&mut self.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
+            }
             let tokens = crate::lexer::tokenize(&action);
             let ast = crate::parser::parse(&tokens);
             let result = self.execute_ast(&ast);
+            if !bash_trapsig_was_exported {
+                unmark_env_name(&mut self.env_vars, EXPORTED_VARS, "BASH_TRAPSIG");
+            }
+            match old_bash_trapsig {
+                Some(value) => {
+                    self.env_vars.insert("BASH_TRAPSIG".to_string(), value);
+                }
+                None => {
+                    self.env_vars.remove("BASH_TRAPSIG");
+                }
+            }
+            match old_signal_depth {
+                Some(value) => {
+                    self.env_vars
+                        .insert("__RUBASH_SIGNAL_TRAP_DEPTH".to_string(), value);
+                }
+                None => {
+                    self.env_vars.remove("__RUBASH_SIGNAL_TRAP_DEPTH");
+                }
+            }
             match old_signal_status {
                 Some(value) => {
                     self.env_vars
@@ -332,6 +400,68 @@ impl Executor {
             }
         }
 
+        Ok(())
+    }
+
+    /// Run the ERR trap after a command (or pipeline) completes with a
+    /// non-zero status. GNU execute_cmd.c fires the error trap for every
+    /// failing command that is not part of a &&/|| list, not inverted with
+    /// the ! keyword, and not suppressed by errexit handling; functions
+    /// inherit it only under "set -o errtrace" (trap.c error_trace_mode).
+    pub(crate) fn maybe_run_error_trap(&mut self, command: &CommandNode) -> Result<(), ExecuteError> {
+        if self.exit_code == 0
+            || command.inverted
+            || command.and_or().is_some()
+            || self.suppress_errexit != 0
+            || (self.function_depth > 0
+                && !crate::builtins::set::shell_option_enabled(&self.env_vars, "errtrace"))
+        {
+            return Ok(());
+        }
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "ERR") else {
+            return Ok(());
+        };
+        if action.is_empty() {
+            return Ok(());
+        }
+        let saved_exit = self.exit_code;
+        let saved_trap_command = self.debug_trap_command.borrow().clone();
+        *self.debug_trap_command.borrow_mut() =
+            Some(crate::executor::command_text::bash_command_text(command));
+        let tokens = crate::lexer::tokenize(&action);
+        let ast = crate::parser::parse(&tokens);
+        let _ = self.execute_ast(&ast);
+        *self.debug_trap_command.borrow_mut() = saved_trap_command;
+        self.exit_code = saved_exit;
+        Ok(())
+    }
+
+    /// Run the SIGCHLD trap once for one reaped child. GNU bash processes
+    /// each child-death notification after waitpid and runs a set SIGCHLD
+    /// trap at the next boundary (trap8.sub: four CHLD firings for the
+    /// reaped background subshell, two background sleeps, and the
+    /// foreground sleep).
+    pub(crate) fn run_sigchld_trap_for_reaped_child(&mut self) -> Result<(), ExecuteError> {
+        if self.signal_trap_running || self.subshell_depth.get() > 0 {
+            return Ok(());
+        }
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "SIGCHLD")
+        else {
+            return Ok(());
+        };
+        if action.is_empty() {
+            return Ok(());
+        }
+        let saved_exit = self.exit_code;
+        self.signal_trap_running = true;
+        let tokens = crate::lexer::tokenize(&action);
+        let ast = crate::parser::parse(&tokens);
+        let result = self.execute_ast(&ast);
+        self.signal_trap_running = false;
+        match result {
+            Ok(()) => self.exit_code = saved_exit,
+            Err(error) => return Err(error),
+        }
         Ok(())
     }
 

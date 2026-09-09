@@ -34,6 +34,15 @@ impl Executor {
         let readonly = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('r'));
+        // GNU declare.def declares -t on functions: set/clear the trace
+        // attribute (trace_p(var) in execute_cmd.c). A traced function
+        // inherits the DEBUG and RETURN traps even with functrace off.
+        let set_trace = args
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg.contains('t') && arg.contains('f'));
+        let clear_trace = args
+            .iter()
+            .any(|arg| arg.starts_with('+') && arg.contains('t') && arg.contains('f'));
         let print = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
@@ -87,6 +96,18 @@ impl Executor {
             }
             if readonly {
                 mark_env_name(&mut self.env_vars, READONLY_FUNCTIONS, name);
+                if !print {
+                    continue;
+                }
+            }
+            if set_trace {
+                mark_env_name(&mut self.env_vars, FUNC_TRACE_FUNCTIONS, name);
+                if !print {
+                    continue;
+                }
+            }
+            if clear_trace {
+                unmark_env_name(&mut self.env_vars, FUNC_TRACE_FUNCTIONS, name);
                 if !print {
                     continue;
                 }
