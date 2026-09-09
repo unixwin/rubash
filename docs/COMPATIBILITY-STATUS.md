@@ -580,3 +580,16 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
 - **台账演进：v8 4155 → L −64 → K −156 → O −194 ≈ 3741；零缺口 24→26（+dbg-support +rsh）**
 - 流程沉淀：管道后 `$?` 取的是 head 退出码；跨树补丁先查 CRLF；共享文件 git merge-file（base=HEAD, ours=主树脏态, theirs=代理版）；exe 句柄锁可改名绕过（mv rubash.exe → cargo 重写）；trap9/printf7 孤儿每次全量后例行核查
 - 在途：M builtins 182、N2 quote 族 172、P array 357、Q assoc 274（wave-5/6）
+
+### 会话接力实录（2026-09-09 晚，owner 指令接替停手的并行会话）：trap/invocation/histexp 落地 + 信号编号统一，v9 台账 3427，零缺口 31
+
+主树 staged 的 trap 链批（与 wt-trap 工作副本 11/16 逐字节一致、5 文件为新基线版本）先落 `f9e42da9`；随后清点 unstaged：declare/set 族为纯 CRLF 噪声（renormalize 收拢 `79b7b540`），真实增量两笔——comsub parser 侧 heredoc `delim)` 收尾镜像 lexer 扫描（`2caddded`，make_cmd.c PST_EOFTOKEN）与 complete 多操作数注册（`cd4eb4f8`，`complete -F f c1 c2` 双双生效）。wt-invocation（+718 行）git apply -3way 落主树，唯一冲突 ast_print.rs 为双方各自新增函数（保留双方）→ `327d32db`（BASH_ARGV0 环境导入 $0/shell_name、login-shell argv0、长选项表、-o/-O 启动期报错 prolog、--pretty-print；invocation 14→2）；wt-histexp（fc.def verbatim 移植 +507 行）三方合并干净 → `75b91b68`（histexp 5，history 190→160）。
+
+**信号编号统一（`ec45a000`）**：rubash 全表从 BSD/Cygwin 风格（USR1=30、CHLD=20、RTMIN=32）换到 Linux 表（USR1=10、CHLD=17、RTMIN=34，32/33 空缺），与 GNU 5.3.0 WSL 契约基线一致；`kill -l`/`trap -l` 输出逐字节对齐（含表尾 tab）、BASH_TRAPSIG 携带 Linux 号、`trap 17`=CHLD、TerminateProcess 退出码 128+N 归位、CHLD kill 不再 terminate。继承语义：SIG_IGN 经进程边界传递（`trap '' USR2` 后子 shell 不可再 trap，trap1.sub 对齐 GNU）——空值 trap 键活不过 Windows 环境块，改由 ORIG_IGN 合并清单跨边界运输。
+
+**trap 链 residual 16→3（`5ff2854a`）**：ERR action `$LINENO` 绑失败命令行（action AST 重解析的 position-1 行会污染 CURRENT_LINE，按 run_debug_trap 同法钉行号，trap3.sub `trap: 8` 对齐）；SIGCHLD 通知在 action 运行中到达时排队、外层按 pending 重放（三个后台 job 三次 catch，原实现丢 2 次）；后台子进程剥离继承 trap 表（POSIX caught-trap reset，否则 `rubash -c` 子壳结束时误放父 EXIT trap 喷 3 行 "exiting"）；traced 函数 DEBUG 行号用 body_open_line（经 definition registry 供普通词调用路径，func2[43] 对齐）。
+
+- **v9 全台账：3427**，零缺口 **31**（28 + trap 邻近收敛 + intl/comsub 等晚间批次落账）；trap 16→3、invocation 14→2、builtins 182→2、complete 0、shopt 13、histexp 6→5、history 190→160
+- cargo test 2740 全绿（唯一失败 `export_assignment_arg_preserves_quoted_spaces` 为环境敏感既有问题：工作台注入的 PATH 键名/形状变化触发，stash 至 327d32db 亦复现，与本轮改动无关）
+- **残余（trap 3 行）**：trap6.sub `$( f )` 中函数内外部命令（`/bin/echo bar`）stdout 直写真实 stdout 未入捕获，RETURN trap 的 builtin 输出反被捕获——外部命令 comsub 捕获路径对路径前缀词失效（`$(/bin/echo x)` 亦泄漏而 `$(whoami)` 正常），判定分歧在 external_needs_fd_copy_capture 之外的派发路径，独立战役
+- 流程沉淀：跨树合并首选 `git apply -3way --ignore-whitespace`；冒烟探针先分 stdout/stderr 再下结论；`env` 在本机被 shim 劫持（/usr/bin/env 才真）；全量台账 10 分钟跑完可直接后台
