@@ -125,6 +125,13 @@ impl<'a> Lexer<'a> {
                 && !(array_assignment && array_subscript_depth > 0 && c.is_ascii_whitespace())
                 && !(in_array_value && c.is_ascii_whitespace())
                 && !(in_array_value && matches!(c, '(' | ')'))
+                // GNU skip_to_delim/skipsubscript (subst.c:2186): the
+                // subscript scan only terminates at the matching `]`, so
+                // parens inside a subscript are ordinary word text --
+                // `A[x\$(echo uname)]=v` stays ONE assignment word and the
+                // escaped `\$` never opens a substitution (census-array2.sh
+                // V2 previously broke at the paren: syntax error).
+                && !(array_assignment && array_subscript_depth > 0 && matches!(c, '(' | ')'))
                 // GNU read_token_word: inside a name=(...) compound
                 // assignment value every metacharacter -- whitespace, |, &,
                 // ;, <, >, the parens themselves -- is part of the word
