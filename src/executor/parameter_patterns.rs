@@ -238,8 +238,22 @@ impl Executor {
     }
 
     pub(in crate::executor) fn assoc_subscript_key(&self, key: &str) -> String {
+        // GNU subst.c expand_subscript_string runs the subscript through
+        // word expansion where a backslash quotes the next character:
+        // `\$` yields a LITERAL `$` and never opens a substitution
+        // (census-array2.sh V1: `A["x,\$(echo uname)"]=v` stores the key
+        // `x,$(echo uname)`, it must not execute `echo uname` nor truncate
+        // at the bracket). Convert `\$` to the $ marker BEFORE expansion;
+        // expand_embedded_parameters restores it verbatim without treating
+        // the `$` as an expansion start. Unescaped `$(cmd)` subscripts
+        // still expand, matching GNU.
+        let protected = if key.contains("\\$") {
+            key.replace("\\$", "\u{1f}")
+        } else {
+            key.to_string()
+        };
         let mut expanded = self
-            .expand_embedded_parameters(key)
+            .expand_embedded_parameters(&protected)
             // Double-quote quote removal (subst.c): a backslash keeps its
             // special meaning only before $ ` " \ and newline; the raw
             // subscript path stores `\$` literally and must shed it.

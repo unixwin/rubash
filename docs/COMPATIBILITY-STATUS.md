@@ -625,6 +625,8 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
 - **executor_tests failset 提取口径修正**：`grep "FAILED"` 会被并行测试输出交错吞行（114 failed 只抓到 101 行），必须从 cargo 输出尾部的 `failures:` 汇总段提取。本轮 failset 与合并时 **114 完全一致（零新增、零回归）**
 - **array.tests vs GNU diff 行：基线 461 → 上批 444 → 当前 435**（run-ab-b.sh 的 wc -l 口径）。勘误：早先把 `ls -la` 的**字节数**（13344/12965）误当 diff 行数汇报——diff 行数与字节数差 30 倍，测量汇报必须只认 wc -l 输出
 - **census array 桶形态复核（96c88d19）**：`declare -a f=([0]="\${d[@]}")` 字面存储与 declare -p 输出、`{x}`/`y{` 花括号形态均已与 GNU 5.2.21 一致（target/forms/census-array.sh P1/P2/P3 PASS）——census 的 297 行是 8d30cd04 基线值，合并后该桶三形态已修
+- **测量口径切换（团队标准）**：array.tests oracle 从 WSL /usr/bin/bash（5.2.21）改为 **/usr/local/bin/bash（5.3.0，2026-09-09 编译）**——run-ab-b.sh 已固化。5.3.0 口径当前漂移 **436 行**（5.2.21 口径 435，基本相同——差异非版本漂移，是真实 gap）。历史 461/444 为 5.2.21 口径
+- **census quotearray 桶 #2 已修**（parameter_patterns.rs `assoc_subscript_key`）：原实现先跑 `expand_embedded_parameters` 再处理反斜杠转义，引号键内 `\$` 中的 `$` 照常打开命令替换（真执行了 echo uname）且键截断为 `x],b[\`。修法：展开**前**把 `\$` 换成 $ 标记（0x1F marker），展开器恢复为字面 $；未转义的 `$(cmd)` 下标照常展开（GNU expand_subscript_string subst.c:11063 语义）。P4/V1 与 GNU 5.3.0 逐字节一致；executor_tests failset 114 零新增；残余：**bare 键形态 `A[x\$(echo uname)]=v` 词法断词**（V2，skip_word_inner 下标内 `(` 判 metachar break），另批处理
 - **census quotearray 桶 #2 确认真 bug（P4 FAIL）**：`A["x],b[\$(echo uname >&2)"]=v` —— rubash 把双引号键内 `\$(...)` 按未转义处理（真执行了 echo uname），键被截成 `x],b[\`；GNU 在双引号内 `\$` 为字面，存全键 `x],b[\$(echo uname >&2)`。简单形态 `B["x]b"]` PASS。根因方向：assoc 键词法对双引号内 `\$` 的转义处理（疑与 wt-prepush WIP 的 declare.rs 族相邻，修前需协调）
 - **转 PASS**：f55、f61、f64、f67、f72、f78、gg4、gg5
 
