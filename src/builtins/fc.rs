@@ -133,6 +133,8 @@ where
 
     while let Some(arg) = args.get(index) {
         if arg == "--" {
+            // loptend points PAST the "--"; a bare "--" is not a spec.
+            index += 1;
             break;
         }
         if arg == "--help" || arg == "-h" {
@@ -192,6 +194,12 @@ where
         return Ok(FcResult::Status(EXECUTION_SUCCESS));
     }
 
+    // fc.def: "fc -e -" means execute without an editor -- same as fc -s.
+    if editor.as_deref() == Some("-") {
+        execute = true;
+        editor = None;
+    }
+
     // fc.def: hist_last_line_added handling -- when the currently executing
     // line was recorded, back up over it so the "last entry" is the one
     // before the current line (last_hist = i - rh - hist_last_line_added).
@@ -222,15 +230,11 @@ where
         };
         let idx = match resolved {
             Ok(i) => i,
-            Err(SpecErr::NotFound) => {
+            // fc_gethist returns NULL for every negative sentinel
+            // (HIST_INVALID / HIST_ERANGE / HIST_NOTFOUND), so fc -s
+            // reports "no command found" for ALL resolution failures.
+            Err(SpecErr::NotFound) | Err(SpecErr::Erange) => {
                 writeln!(stderr, "{diagnostic_prefix}fc: no command found")?;
-                return Ok(FcResult::Status(EXECUTION_FAILURE));
-            }
-            Err(SpecErr::Erange) => {
-                writeln!(
-                    stderr,
-                    "{diagnostic_prefix}fc: history specification out of range"
-                )?;
                 return Ok(FcResult::Status(EXECUTION_FAILURE));
             }
         };

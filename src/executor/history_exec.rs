@@ -142,6 +142,17 @@ pub(in crate::executor) fn execute_history_session(
         operands.push(arg.clone());
         i += 1;
     }
+    // GNU display_history -> get_numeric_arg: a non-numeric listing limit is
+    // "numeric argument required" with EX_USAGE, not a full listing.
+    if mode == HistoryMode::List {
+        if let Some(bad) = operands.first() {
+            if bad.parse::<i64>().is_err() {
+                let _ = writeln!(stderr, "{}history: {bad}: numeric argument required", executor.diagnostic_prefix());
+                return Ok(2);
+            }
+            count = bad.parse::<usize>().ok();
+        }
+    }
 
     let ctx = hist_ctx(executor);
     let histsize = histsize_of(executor);
@@ -205,20 +216,27 @@ pub(in crate::executor) fn execute_history_session(
                             };
                             let _ = writeln!(
                                 stderr,
-                                "history: {bad}: history position out of range"
+                                "{}history: {bad}: history position out of range",
+                                executor.diagnostic_prefix()
                             );
                             return Ok(1);
                         }
                         (Some(start), _) if start < 0 || start >= len => {
-                            let _ =
-                                writeln!(stderr, "history: {start_text}: history position out of range");
+                            let _ = writeln!(
+                                stderr,
+                                "{}history: {start_text}: history position out of range",
+                                executor.diagnostic_prefix()
+                            );
                             return Ok(1);
                         }
                         _ => {
                             // unparseable sides: GNU restores the '-' and
                             // reports the WHOLE argument
-                            let _ =
-                                writeln!(stderr, "history: {arg}: history position out of range");
+                            let _ = writeln!(
+                                stderr,
+                                "{}history: {arg}: history position out of range",
+                                executor.diagnostic_prefix()
+                            );
                             return Ok(1);
                         }
                     }
@@ -230,11 +248,16 @@ pub(in crate::executor) fn execute_history_session(
                         }
                         _ => {
                             if arg.parse::<i64>().is_err() {
-                                let _ = writeln!(stderr, "history: {arg}: invalid number");
+                                let _ = writeln!(
+                                    stderr,
+                                    "{}history: {arg}: invalid number",
+                                    executor.diagnostic_prefix()
+                                );
                             } else {
                                 let _ = writeln!(
                                     stderr,
-                                    "history: {arg}: history position out of range"
+                                    "{}history: {arg}: history position out of range",
+                                    executor.diagnostic_prefix()
                                 );
                             }
                             return Ok(1);

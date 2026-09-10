@@ -931,8 +931,8 @@ fn run_history_group(
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
     let lithist = shopt_state_enabled(executor, "lithist", false);
-    let control = executor.get_env("HISTCONTROL").unwrap_or_default();
-    let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
+    let control = executor.get_env("HISTCONTROL").unwrap_or_default().to_string();
+    let ignore = executor.get_env("HISTIGNORE").unwrap_or_default().to_string();
     let histsize = executor
         .get_env("HISTSIZE")
         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -951,7 +951,13 @@ fn run_history_group(
     let mut exec_parts: Vec<String> = Vec::new();
     let mut record_texts: Vec<Option<String>> = Vec::new();
     let mut modified_any = false;
+    // Physical line of each group entry: every entry consumes at least one
+    // input line; embedded newlines (quoted strings, heredoc bodies read as
+    // one text) consume more.
+    let mut physical_offset = 0usize;
     for (text, is_body) in group {
+        let line_no = start_line + physical_offset;
+        physical_offset += text.lines().count().max(1);
         if *is_body || !history_on || !histexpand_on {
             exec_parts.push(text.clone());
             record_texts.push(Some(text.clone()));
@@ -960,7 +966,28 @@ fn run_history_group(
         let result = session.borrow_mut().expand(text, ctx);
         match result.status {
             -1 => {
-                eprintln!("{}", result.text);
+                // bashhist.c pre_process_line: failed history expansion is
+                // an internal_error-class diagnostic reported at the line
+                // being READ (current_command_line_count), so pin the
+                // location to this entry's physical line, not the last
+                // executed command's line.
+                executor.set_env("__RUBASH_CURRENT_LINE", &line_no.to_string());
+                // Executor::diagnostic_prefix logic; bin crate can't call
+                // the pub(crate) method directly.
+                let prefix = match (
+                    executor.get_env("__RUBASH_SCRIPT_NAME"),
+                    executor.get_env("__RUBASH_CURRENT_LINE"),
+                ) {
+                    (Some(script), Some(line)) => {
+                        if executor.get_env("__RUBASH_EVAL_CONTEXT").is_some() {
+                            format!("{script}: eval: line {line}: ")
+                        } else {
+                            format!("{script}: line {line}: ")
+                        }
+                    }
+                    _ => "bash: ".to_string(),
+                };
+                eprintln!("{}{}", prefix, result.text);
                 exec_parts.push(String::new());
                 record_texts.push(None);
                 // A dropped line changes the executed text even when no other
@@ -1034,6 +1061,11 @@ fn build_recorded_entry(
     ];
     let mut out = String::new();
     let mut prev_kept: Option<usize> = None;
+    // parse.y history_delimiting_chars: while a quoted construct opened on
+    // an earlier line is still open (dstack delimiter is ' " or `), lines
+    // join with a real newline, not "; ". Heredoc bodies never feed the
+    // quote scanner (GNU reads them raw, PST_HEREDOC path).
+    let mut quote_state: Option<char> = None;
     for (index, text) in texts.iter().enumerate() {
         let Some(text) = text else { continue };
         if out.is_empty() {
@@ -1045,8 +1077,13 @@ fn build_recorded_entry(
             .as_deref()
             .unwrap_or_default();
         let prev_was_body = index > 0 && group[index - 1].1;
+        if !prev_was_body && index > 0 {
+            quote_state = advance_quote_state(quote_state, &group[index - 1].0);
+        }
         let cur_is_body = group[index].1;
-        let delim = if prev_text.ends_with('\\') {
+        let delim = if quote_state.is_some() {
+            "\n"
+        } else if prev_text.ends_with('\\') {
             if out.ends_with('\\') {
                 out.pop();
             }
@@ -1070,6 +1107,49 @@ fn build_recorded_entry(
         prev_kept = Some(index);
     }
     out
+}
+
+/// Track the open quote delimiter across lines the way parse.y's dstack
+/// does for history delimiting: returns the still-open ' " or ` delimiter,
+/// or None when the text ends outside quotes. Backslash escapes work
+/// outside single quotes; inside double quotes only the shell-escaped set.
+fn advance_quote_state(state: Option<char>, text: &str) -> Option<char> {
+    let mut state = state;
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        match state {
+            Some('\'') => {
+                if c == '\'' {
+                    state = None;
+                }
+            }
+            Some('`') => {
+                if c == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                } else if c == '`' {
+                    state = None;
+                }
+            }
+            Some('"') => {
+                if c == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '"' | '\\' | '$' | '`' | '\n')
+                {
+                    i += 1;
+                } else if c == '"' {
+                    state = None;
+                }
+            }
+            _ => match c {
+                '\\' => i += 1,
+                '\'' | '"' | '`' => state = Some(c),
+                '#' if i == 0 || matches!(chars[i - 1], ' ' | '\t' | ';' | '\n') => break,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    state
 }
 
 /// builtins/shopt.rs SHOPT_STATE membership with the built-in default.

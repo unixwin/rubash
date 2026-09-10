@@ -886,7 +886,8 @@ impl Executor {
                             _ => {
                                 writeln!(
                                     stderr,
-                                    "history: {arg}: history position out of range"
+                                    "{}history: {arg}: history position out of range",
+                                    self.diagnostic_prefix()
                                 )?;
                                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                                 return Ok(1);
@@ -899,7 +900,8 @@ impl Executor {
                         } else {
                             writeln!(
                                 stderr,
-                                "history: {arg}: history position out of range"
+                                "{}history: {arg}: history position out of range",
+                                self.diagnostic_prefix()
                             )?;
                             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                             return Ok(1);
@@ -1087,12 +1089,16 @@ impl Executor {
                         .get_env("HISTSIZE")
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(500);
-                    session.borrow_mut().record(
-                        &command,
-                        &control,
-                        &ignore,
-                        histsize,
-                    );
+                    let mut shell = session.borrow_mut();
+                    // fc.def fc_replhist: the executed command REPLACES the
+                    // fc entry (delete the last line, add the new one), so
+                    // the fc command itself never appears in the history.
+                    if shell.last_line_added && !shell.entries.is_empty() {
+                        shell.entries.pop();
+                    }
+                    let was_recorded =
+                        shell.record(&command, &control, &ignore, histsize);
+                    shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&command);
                 let mut ast = crate::parser::parse_with_options(

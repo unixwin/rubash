@@ -652,3 +652,22 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
 
 - WSL 启动 Windows exe **不传普通 env**（RUBASH_DBG/THIS_SH 均如此）：调参/调试须在 Windows 侧（Git Bash）直跑 exe；套件 harness 的 THIS_SH 必须 WSL 路径形式（/mnt/d/...），WSL bash 无法直接 exec `D:/...`
 - Bash 工具会对 wsl bash -c 的字符串**预展开** `$PATH`/`$R`/`$(...)`（`\$` 转义不可靠）：一切复杂命令落脚本文件再调用（target/run-*.sh 均为此产物）
+
+### 第三批（history/histexp/fc 桶，本轮落地——均在安全区，未碰 command_substitution/command_prepare/declare.rs/set.rs）
+
+- **harness 伪影修复（run-suite.sh）**：rubash.exe 是 Windows 二进制，WSL interop 只转发 WSLENV 列出的 env——history.tests 顶层 `export HISTIGNORE='&:history*:fc*'` 到达 GNU 子进程但**丢失给 rubash 子进程**，导致 history*/fc* 命令全部被录进历史、后续所有 listing 差一个"自身条目"。run-suite.sh 现在把 HISTFILE/HISTSIZE/HISTFILESIZE/HISTCONTROL/HISTIGNORE/HISTTIMEFORMAT/HISTCHARS 加入 WSLENV 转发。**history.tests 243 行里有相当部分是这个伪影**，非 rubash gap
+- **history 内建报错补位置前缀**（history_exec.rs + job_builtins.rs provider 分支）：GNU 的 sh_erange/builtin_error 带 "./script: line N: " 前缀（error.c），rubash 的 erange/invalid-number 消息此前是裸的。统一走 Executor::diagnostic_prefix()
+- **`history @42` 数字参数校验**：GNU display_history → get_numeric_arg 非数字报 "numeric argument required" 且 rc=2（EX_USAGE），rubash 此前忽略坏参数照常列出
+- **histexp 展开失败报错补前缀 + 行号对齐**（main.rs run_history_group）：status -1（event not found 等）按 bashhist.c pre_process_line 是 internal_error 级诊断，报**读取时**的行号——run_history_group 现在按物理行偏移（每 entry ≥1 行，嵌入换行计多行）跟踪行号并 pin CURRENT_LINE；此前借用上一条已执行命令的行号（差一行）。histexp.tests 20→17
+- **build_recorded_entry 引号状态跟踪**（main.rs）：parse.y history_delimiting_chars——上一行未闭合的 `'`/`"`/`` ` ``（dstack delimiter）使行间分隔用真实换行而非 "; "；heredoc body 不喂引号扫描器（GNU PST_HEREDOC 路径）。修掉 history4 `printf $'...\cRleft\cO...' | -i` 回放块：HISTFILE 里的多行引号条目此前被存成 `(left; mid; right)`，回放执行输出错误
+- **fc 三处对齐 GNU**（builtins/fc.rs + job_builtins.rs Reexec）：
+  1. `fc -e -` == `fc -s`（fc.def:245 ename=="-" → execute=1）；此前 "-" 被当编辑器名报 "fc: -: program not found"
+  2. `fc -s -- -42`：arg 循环 break 在 "--" 时**跳过它**（loptend 语义），此前 "--" 被当成 spec 走字符串前缀搜索 → "no command found"
+  3. fc -s spec 解析失败统一 "no command found"（fc_gethist 对所有负 sentinel 返回 NULL）；越界数字 spec 按 POSIX 钳位（负→+last_hist+1 截 0，正溢出→HN_FIRST?0:last_hist）——"out of range specs aren't errors"
+  4. **Reexec 替换自身条目**（fc_replhist 语义）：重执行的命令删除 fc 自己的历史条目后以 maybe_add_history 录入（受 HISTCONTROL/HISTIGNORE 约束），fc 永不出现在历史列表。history5.final `fc -l` 的 4/5/6 号条目（comment×2、echo a）与 GNU 一致
+- **测量**：history.tests **243 → 151**（其中 ~26 行 rm-shim 噪声 + ~47 行 CRLF glue/交互回放噪声为 host/harness 伪影，真实残余 gap 见下）；histexp.tests 20 → 17；array.tests 436 维持；assoc.tests 320 维持；executor_tests failset **114 逐条一致（零回归）**；lib 测试 export_assignment_arg_preserves_quoted_spaces 失败为存量环境问题（host PATH 泄漏，git stash 验证与基线一致）
+- **残余 gap（未修，记录在案）**：
+  - **命令替换内 fc/history 看不到 session 历史**：command_substitution.rs:604 `session_history: None` → `$(fc -nl -1)` 输出空（GNU comsub 明确沿用 set -o history 的列表，fc.def:587-594 注释）。修法一行（clone session），但该文件是 wt-baseline 冲突区，**留给合并后协调 pass**
+  - history2.sub 的 132/139 两行空白差异（GNU 多两个空行，来源待考）与 146 行空 entry（同 comsub 根因链）
+  - history7/test-glue $'\r' 块：GNU 拒绝 CRLF glue 文件、rubash 静默接受——两侧行为分叉但根因是 Windows checkout 的 CRLF 文件（host 伪影）
+  - `-i` 子 shell 的 \cR/\cO readline 回放控制字符未实现（history4 后两个 block），交互/readline 域，另行立项
