@@ -1,4 +1,4 @@
-pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
+pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
 

@@ -1,5 +1,48 @@
 use super::*;
 
+/// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
+/// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
+/// the expansion). Only $'...' is accepted; single-quoted, double-quoted, and
+/// nested-braced names are bad substitutions, so they are deliberately not tried
+/// here. The span may be the whole name (${$'x1'}) or the leading part of an
+/// operator form (${$'x1'%t}, ${$'x1'-fallback}). Returns the rewritten
+/// body, or None when the name is not a decodable dollar-quoted span.
+fn resolve_dollar_quoted_parameter_name(name: &str) -> Option<String> {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() < 3 || chars[0] != '$' || chars[1] != '\'' {
+        return None;
+    }
+    let mut body = String::new();
+    let mut index = 2usize;
+    while index < chars.len() {
+        if chars[index] == '\'' {
+            break;
+        }
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            body.push(chars[index]);
+            body.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        body.push(chars[index]);
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+    let decoded = crate::lexer::ansi::decode_ansi_c_quoted(&body);
+    if !is_shell_name(&decoded) {
+        return None;
+    }
+    let rest: String = chars[index + 1..].iter().collect();
+    let resolved = if rest.is_empty() {
+        decoded
+    } else {
+        format!("{}{}", decoded, rest)
+    };
+    (resolved != name).then_some(resolved)
+}
+
 impl Executor {
     pub(crate) fn expand_word(&self, word: &str) -> String {
         if let Some(value) = self.expand_marked_or_special_word(word) {
@@ -49,6 +92,10 @@ impl Executor {
     ) -> String {
         if !braced_parameter_spans_whole_word(word) {
             return self.expand_embedded_parameters(word);
+        }
+
+        if let Some(resolved) = resolve_dollar_quoted_parameter_name(name) {
+            return self.expand_braced_parameter_word(word, &resolved);
         }
 
         if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {

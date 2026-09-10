@@ -674,6 +674,37 @@ fn remove_compound_assignment_quotes(raw: &str) -> String {
                     out.push(escaped);
                 }
             }
+            '$' if chars.peek().copied() == Some('\'') => {
+                // GNU assign_array_var_from_string re-parses the compound
+                // value through the same quote grammar as a shell word, so an
+                // ANSI-C span in an associative element value must decode here
+                // instead of leaving the bare dollar sign and stripping the
+                // quotes: that stored the literal escape text (5 bytes) where
+                // GNU stores the single decoded byte.
+                chars.next();
+                let mut quoted = String::new();
+                let mut escaped = false;
+                for quoted_ch in chars.by_ref() {
+                    if escaped {
+                        quoted.push('\\');
+                        quoted.push(quoted_ch);
+                        escaped = false;
+                        continue;
+                    }
+                    if quoted_ch == '\\' {
+                        escaped = true;
+                        continue;
+                    }
+                    if quoted_ch == '\'' {
+                        break;
+                    }
+                    quoted.push(quoted_ch);
+                }
+                if escaped {
+                    quoted.push('\\');
+                }
+                out.push_str(&crate::lexer::ansi::decode_ansi_c_quoted(&quoted));
+            }
             _ => out.push(ch),
         }
     }
