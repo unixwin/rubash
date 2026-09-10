@@ -469,10 +469,17 @@ impl Executor {
     ) -> Option<String> {
         match words.first().map(String::as_str)? {
             "echo" => {
-                let args = words[1..]
+                // GNU subst.c expand_words runs pathname expansion on each
+                // word of a pipeline stage inside a command substitution
+                // (`$(echo * | cat)` yields the directory listing). The
+                // printf arm beside this one already routes through
+                // expand_command_substitution_arg_values for that reason;
+                // the echo arm was still calling plain expand_word, so a
+                // literal glob pattern in the first stage stayed a literal.
+                let args: Vec<String> = words[1..]
                     .iter()
-                    .map(|word| self.expand_word(word))
-                    .collect::<Vec<_>>();
+                    .flat_map(|word| self.expand_command_substitution_arg_values(word))
+                    .collect();
                 Some(echo_raw_output(&args))
             }
             "printf" => {

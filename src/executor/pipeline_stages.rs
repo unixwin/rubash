@@ -355,23 +355,36 @@ impl Executor {
         };
 
         let mut args: Vec<String> = leading_args;
-        args.extend(command.words[1..]
-            .iter()
-            .enumerate()
-            .flat_map(|(offset, word)| {
-                let index = offset + 1;
-                let raw = command
-                    .word_metadata
-                    .get(index)
-                    .map(|metadata| metadata.raw.as_str());
-                self.expand_command_word(command, index, word, raw)
-                    .into_iter()
-                    .map(|word| {
-                        crate::executor::command_prepare::restore_pathname_escape_markers(
-                            &word.replace('\x15', "\\").replace('\x14', "\\"),
-                        )
-                    })
-            }));
+        // GNU execute_simple_command runs pathname expansion on every
+        // argument of an external command in a pipeline element, so
+        // `ls *` hands ls the directory listing rather than a literal
+        // `*`. Without this the pattern reached the host binary verbatim
+        // (probe 2026-09-09: `ls * | wc -c` gave 2 bytes instead of 15,
+        // while `ls -1 | wc -c` was correct).
+        for (offset, word) in command.words[1..].iter().enumerate() {
+            let index = offset + 1;
+            let raw = command
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str());
+            for expanded in self.expand_command_word(command, index, word, raw) {
+                let value = crate::executor::command_prepare::restore_pathname_escape_markers(
+                    &expanded.replace('\x15', "\\").replace('\x14', "\\"),
+                )
+                .to_string();
+                // \x1d marks a fully quoted word and \x1b a quoted tilde;
+                // both stay literal, as command_prepare does.
+                if expanded.starts_with('\x1d') || expanded.starts_with('\x1b') {
+                    args.push(value);
+                    continue;
+                }
+                match glob::pathname_expand_word(&value, &self.env_vars) {
+                    glob::PathnameExpansion::Matches(matches) => args.extend(matches),
+                    glob::PathnameExpansion::NoMatch
+                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                }
+            }
+        }
         // GNU execute_cmd.c:6139-6233 (shell_execve): a file the OS cannot
         // exec natively is classified by its first bytes before the
         // shell-script fallback: an unresolvable #! interpreter is refused

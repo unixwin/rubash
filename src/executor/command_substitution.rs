@@ -19,10 +19,21 @@ impl Executor {
         let mut expanded_args = Vec::new();
         for (index, word) in words[1..].iter().enumerate() {
             let quote = word_parts.get(index + 1).map(|(_, q)| *q);
+            let unquoted = quote != Some(true);
             let braced = crate::expand::braces::expand_braces(word);
             if braced.len() > 1 {
                 for item in braced {
-                    expanded_args.push(self.expand_protected_tilde(&item, quote));
+                    let expanded = self.expand_protected_tilde(&item, quote);
+                    // GNU subst.c expand_words runs pathname expansion on
+                    // each brace-expanded word when the original was unquoted
+                    // (`$(echo {a,b}*)` expands `a*` and `b*` separately).
+                    if unquoted {
+                        expanded_args.extend(
+                            self.expand_command_substitution_arg_values_quoted(&item, false)
+                        );
+                    } else {
+                        expanded_args.push(expanded);
+                    }
                 }
             } else {
                 // GNU expand_words field-splits an unquoted expansion word on
@@ -31,8 +42,23 @@ impl Executor {
                 // (nquote5.tests: `$(echo $a)` with IFS=$'\001'). A fully
                 // quoted word (`echo "$a"`) is one field, never split.
                 let expanded = self.expand_protected_tilde(word, quote);
-                if quote != Some(true) && for_word_has_unquoted_expansion(word, None) {
-                    expanded_args.extend(self.field_split_values(&expanded));
+                if unquoted && for_word_has_unquoted_expansion(word, None) {
+                    let split = self.field_split_values(&expanded);
+                    // Pathname expansion after field splitting (subst.c
+                    // expand_words -> pathname expansion): each field is
+                    // expanded independently. `$(echo *)` yields the
+                    // directory listing, `$(echo $a)` yields the IFS fields.
+                    for value in split {
+                        expanded_args.extend(
+                            self.apply_command_substitution_pathname_expansion(&value),
+                        );
+                    }
+                } else if unquoted {
+                    // No unquoted parameter expansion, but the word may still
+                    // be a literal glob pattern (`echo *`, `echo *.sh`).
+                    expanded_args.extend(
+                        self.apply_command_substitution_pathname_expansion(&expanded),
+                    );
                 } else {
                     expanded_args.push(expanded);
                 }
@@ -312,20 +338,31 @@ impl Executor {
                         if let Some(values) = self.quoted_positional_at_word_values(word, None) {
                             return values;
                         }
+                        let was_quoted = word_parts.get(index + 1).map(|(_, q)| *q);
+                        let unquoted = was_quoted != Some(true);
                         let expanded = strip_matching_quotes(&self.expand_protected_tilde(
                             word,
-                            word_parts.get(index + 1).map(|(_, q)| *q),
+                            was_quoted,
                         ))
                         .to_string();
                         // Same expand_words semantics as the echo/recho/zecho
                         // paths: unquoted expansion words split on $IFS, fully
                         // quoted words stay one field.
-                        let was_quoted = word_parts.get(index + 1).map(|(_, q)| *q);
-                        if was_quoted != Some(true) && for_word_has_unquoted_expansion(word, None)
-                        {
-                            return self.field_split_values(&expanded);
+                        let values = if unquoted && for_word_has_unquoted_expansion(word, None) {
+                            self.field_split_values(&expanded)
+                        } else {
+                            vec![expanded]
+                        };
+                        // Pathname expansion (subst.c expand_words): each
+                        // unquoted field is expanded independently.
+                        if unquoted {
+                            values
+                                .into_iter()
+                                .flat_map(|v| self.apply_command_substitution_pathname_expansion(&v))
+                                .collect::<Vec<_>>()
+                        } else {
+                            values
                         }
-                        vec![expanded]
                     })
                     .collect();
             let mut env_vars = self.env_vars.clone();
@@ -503,10 +540,10 @@ impl Executor {
             return None;
         }
         let target = if let Some(word) = left_words.get(1) {
-            self.expand_command_substitution_arg_values(word)
-                .into_iter()
-                .next()
-                .unwrap_or_default()
+            // GNU subst.c expands the cd target with expand_string (parameter,
+            // tilde) but not pathname expansion: `cd` takes a single directory,
+            // so a glob pattern would be a literal path, not a match list.
+            self.expand_word(word)
         } else {
             self.home_value()
         };

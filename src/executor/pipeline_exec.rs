@@ -719,10 +719,26 @@ impl Executor {
             {
                 return Ok(None);
             }
-            let args = command.words[1..]
-                .iter()
-                .map(|word| self.expand_word(word))
-                .collect::<Vec<_>>();
+            // GNU execute_simple_command pathname-expands every argument
+            // of an external pipeline member, so `ls *` gets the
+            // directory listing, not a literal `*` (probe 2026-09-09:
+            // `ls * | wc -c` gave 2 bytes instead of 15, while
+            // `ls -1 | wc -c` was correct).
+            let mut args: Vec<String> = Vec::new();
+            for word in command.words[1..].iter() {
+                let value = self.expand_word(word);
+                // \x1d marks a fully quoted word and \x1b a quoted
+                // tilde; both stay literal.
+                if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                    args.push(value);
+                    continue;
+                }
+                match glob::pathname_expand_word(&value, &self.env_vars) {
+                    glob::PathnameExpansion::Matches(matches) => args.extend(matches),
+                    glob::PathnameExpansion::NoMatch
+                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                }
+            }
             specs.push((program, args));
         }
 
@@ -887,10 +903,26 @@ impl Executor {
             let Some(program) = find_user_command(&expanded_name, &self.env_vars) else {
                 return Ok(None);
             };
-            let args = command.words[1..]
-                .iter()
-                .map(|word| self.expand_word(word))
-                .collect::<Vec<_>>();
+            // GNU execute_simple_command pathname-expands every argument
+            // of an external pipeline member, so `ls *` gets the
+            // directory listing, not a literal `*` (probe 2026-09-09:
+            // `ls * | wc -c` gave 2 bytes instead of 15, while
+            // `ls -1 | wc -c` was correct).
+            let mut args: Vec<String> = Vec::new();
+            for word in command.words[1..].iter() {
+                let value = self.expand_word(word);
+                // \x1d marks a fully quoted word and \x1b a quoted
+                // tilde; both stay literal.
+                if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                    args.push(value);
+                    continue;
+                }
+                match glob::pathname_expand_word(&value, &self.env_vars) {
+                    glob::PathnameExpansion::Matches(matches) => args.extend(matches),
+                    glob::PathnameExpansion::NoMatch
+                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                }
+            }
             specs.push((program, args));
         }
 
@@ -1058,6 +1090,45 @@ impl Executor {
         rebuilt
     }
 
+    /// Expand a pipeline stage's argument words and apply pathname
+    /// expansion.
+    ///
+    /// GNU execute_simple_command (execute_cmd.c) runs the full word
+    /// expansion sequence on every pipeline element: parameter expansion,
+    /// word splitting, then pathname expansion. This stage fast path
+    /// expanded the words but never reached the pathname-expansion step,
+    /// so `echo * | cat` handed echo the literal pattern `*` instead of
+    /// the directory listing (probe 2026-09-09: top-level `echo *` is
+    /// correct, every pipeline element is not).
+    fn expand_pipeline_stage_arg_words(
+        &mut self,
+        command: &CommandNode,
+        first_index: usize,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for (offset, word) in command.words[first_index..].iter().enumerate() {
+            let index = offset + first_index;
+            let raw = command
+                .word_metadata
+                .get(index)
+                .map(|metadata| metadata.raw.as_str());
+            for expanded in self.expand_command_word(command, index, word, raw) {
+                //  marks a fully quoted word and  a quoted tilde;
+                // both stay literal, exactly as command_prepare does.
+                if expanded.starts_with('\x1d') || expanded.starts_with('\x1b') {
+                    out.push(expanded);
+                    continue;
+                }
+                match glob::pathname_expand_word(&expanded, &self.env_vars) {
+                    glob::PathnameExpansion::Matches(matches) => out.extend(matches),
+                    glob::PathnameExpansion::NoMatch
+                    | glob::PathnameExpansion::Fail(_) => out.push(expanded),
+                }
+            }
+        }
+        out
+    }
+
     pub(in crate::executor) fn execute_pipeline_stage(
         &mut self,
         command: &CommandNode,
@@ -1174,18 +1245,7 @@ impl Executor {
             "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
             "false" => Ok(Some((String::new(), String::new(), 1))),
             "echo" => {
-                let mut args: Vec<String> = command.words[1..]
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(offset, word)| {
-                        let index = offset + 1;
-                        let raw = command
-                            .word_metadata
-                            .get(index)
-                            .map(|metadata| metadata.raw.as_str());
-                        self.expand_command_word(command, index, word, raw)
-                    })
-                    .collect();
+                let mut args = self.expand_pipeline_stage_arg_words(command, 1);
                 let newline = !args.first().is_some_and(|arg| arg == "-n");
                 if !newline {
                     args.remove(0);
@@ -1197,18 +1257,7 @@ impl Executor {
                 Ok(Some((output, String::new(), 0)))
             }
             "printf" => {
-                let args: Vec<String> = command.words[1..]
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(offset, word)| {
-                        let index = offset + 1;
-                        let raw = command
-                            .word_metadata
-                            .get(index)
-                            .map(|metadata| metadata.raw.as_str());
-                        self.expand_command_word(command, index, word, raw)
-                    })
-                    .collect();
+                let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
                 let mut env_vars = self.env_vars.clone();
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();
@@ -1249,16 +1298,51 @@ impl Executor {
                     .iter()
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
+                // GNU head with file operands ignores stdin and reads the
+                // files (`printf x | head -1 f*` prints the file header,
+                // not the pipe input). This inline arm can only count
+                // lines of the pipe input, so an operand-bearing
+                // invocation must run the real external head.
+                let mut cursor = 0;
+                while cursor < args.len() {
+                    let arg = args[cursor].as_str();
+                    if matches!(arg, "-n" | "-c" | "-b") {
+                        cursor += 2;
+                        continue;
+                    }
+                    if arg.starts_with('-') {
+                        cursor += 1;
+                        continue;
+                    }
+                    return self.execute_external_pipeline_stage(command, input);
+                }
                 let count = head_line_count(&args).unwrap_or(10);
                 let output = input.split_inclusive('\n').take(count).collect::<String>();
                 Ok(Some((output, String::new(), 0)))
             }
             "cat" => {
-                let file_operands = command.words[1..]
-                    .iter()
-                    .filter(|word| !word.starts_with('-'))
-                    .map(|word| self.expand_word(word))
-                    .collect::<Vec<_>>();
+                // Pathname-expand the operands the way
+                // execute_simple_command does, or `cat f*` opens the
+                // literal name "f*" and reports it as missing (probe
+                // 2026-09-09: `printf x | cat f*` printed nothing).
+                let mut file_operands: Vec<String> = Vec::new();
+                for word in command.words[1..].iter() {
+                    if word.starts_with('-') {
+                        continue;
+                    }
+                    let value = self.expand_word(word);
+                    // \x1d marks a fully quoted word and \x1b a quoted
+                    // tilde; both stay literal.
+                    if value.starts_with('\x1d') || value.starts_with('\x1b') {
+                        file_operands.push(value);
+                        continue;
+                    }
+                    match glob::pathname_expand_word(&value, &self.env_vars) {
+                        glob::PathnameExpansion::Matches(matches) => file_operands.extend(matches),
+                        glob::PathnameExpansion::NoMatch
+                        | glob::PathnameExpansion::Fail(_) => file_operands.push(value),
+                    }
+                }
                 if !file_operands.is_empty() {
                     let mut output = String::new();
                     let mut stderr = String::new();
@@ -1811,7 +1895,20 @@ fn inline_grep_args(args: &[String]) -> Option<InlineGrepSpec> {
             continue;
         }
         if pattern.is_none() {
-            pattern = Some(arg.as_str());
+            let candidate = arg.as_str();
+            // The inline matcher is a literal substring search with an
+            // optional leading ^ anchor; it does not implement BRE. A
+            // pattern carrying a regex met character must run the real
+            // external grep, or `grep -c .` counts a line that has no
+            // literal dots as 0 instead of 1 (probe 2026-09-09).
+            if candidate.chars().any(|ch| matches!(
+                ch,
+                '.' | '*' | '[' | ']' | '\\' | '?' | '+' | '|' | '(' | ')'
+                    | '{' | '}' | '$'
+            )) {
+                return None;
+            }
+            pattern = Some(candidate);
             continue;
         }
         // Second operand (or an operand before --) means file input.

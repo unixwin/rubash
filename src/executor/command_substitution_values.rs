@@ -148,9 +148,26 @@ impl Executor {
         }
     }
 
+    /// Expand one command-substitution argument word, applying pathname
+    /// expansion for unquoted words. GNU Bash runs expand_words (subst.c)
+    /// on the substitution body's word list before dispatching the command:
+    /// unquoted `*`, `?`, `[...]` patterns in the body undergo pathname
+    /// expansion exactly like a top-level command's argument list. The
+    /// specialised shortcuts below emulated only the parameter-expansion
+    /// and field-splitting steps, leaving literal globs unexpanded
+    /// (`x=$(echo *)` produced the literal star instead of the directory
+    /// listing). This helper restores the missing final step.
     pub(in crate::executor) fn expand_command_substitution_arg_values(
         &self,
         word: &str,
+    ) -> Vec<String> {
+        self.expand_command_substitution_arg_values_quoted(word, false)
+    }
+
+    pub(in crate::executor) fn expand_command_substitution_arg_values_quoted(
+        &self,
+        word: &str,
+        quoted: bool,
     ) -> Vec<String> {
         if let Some(values) = self.quoted_positional_at_word_values(word, None) {
             return values;
@@ -158,6 +175,7 @@ impl Executor {
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
+        let suppress_glob = quoted || word.starts_with('\x1b') || word.starts_with('\x1d');
         let expanded = strip_matching_quotes(&restore_command_substitution_output(
             &self.expand_word(word),
         ))
@@ -168,10 +186,31 @@ impl Executor {
         // command's word list (nquote5.tests `$(echo $a)` with IFS=$'\001'
         // must hand echo three args whose space-joined output re-splits to
         // one field, not the literal \001 bytes).
-        if for_word_has_unquoted_expansion(word, None) {
-            return self.field_split_values(&expanded);
+        let values = if for_word_has_unquoted_expansion(word, None) {
+            self.field_split_values(&expanded)
+        } else {
+            vec![expanded]
+        };
+        if suppress_glob {
+            return values;
         }
-        vec![expanded]
+        // Pathname expansion (subst.c expand_words -> pathname expansion):
+        // each field of the unquoted word list is expanded independently.
+        values
+            .into_iter()
+            .flat_map(|value| self.apply_command_substitution_pathname_expansion(&value))
+            .collect()
+    }
+
+    /// Apply pathname expansion to one already-expanded word from a command
+    /// substitution body. Returns the match list when the word is a pattern,
+    /// or the word itself when it is not.
+    pub(in crate::executor) fn apply_command_substitution_pathname_expansion(&self, word: &str) -> Vec<String> {
+        match glob::pathname_expand_word(word, &self.env_vars) {
+            glob::PathnameExpansion::Matches(matches) => matches,
+            glob::PathnameExpansion::NoMatch => vec![word.to_string()],
+            glob::PathnameExpansion::Fail(_) => vec![word.to_string()],
+        }
     }
 
     pub(in crate::executor) fn command_describe_substitution_output(
@@ -475,7 +514,27 @@ impl Executor {
         value: &str,
         expression: &str,
     ) -> String {
-        let values = array_values(value)
+        // GNU assoc.c / hashlib.c iterate `${name[@]}` over hash-slot order,
+        // not insertion order. Every other array-expansion path already routes
+        // declared associative variables through assoc_hash_ordered_values; this
+        // shared join helper was the one still using raw insertion order
+        // (assoc4.sub: `"at|${i[@]}"` gave `at|fooq  barq ` instead of
+        // `at| barq  fooq`, while the standalone `"${i[@]}"` and unquoted
+        // `${i[@]}` forms were already correct).
+        //
+        // `expression` is the already-stripped parameter name (`foo[@]`,
+        // `foo[*]`, or a transform expression), so the `[@]`/`[*]` suffix is
+        // present directly - there is no leading `${` to remove first.
+        let array_name = expression
+            .strip_suffix("[@]")
+            .or_else(|| expression.strip_suffix("[*]"))
+            .unwrap_or_default();
+        let ordered = if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
+            assoc_hash_ordered_values(value)
+        } else {
+            array_values(value)
+        };
+        let values = ordered
             .into_iter()
             .map(normalize_array_expanded_value)
             .collect::<Vec<_>>();
