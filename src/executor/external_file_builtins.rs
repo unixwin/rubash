@@ -19,32 +19,10 @@ impl Executor {
             "mkdir" => self.external_mkdir(cmd),
             "touch" => self.external_touch(cmd),
             "chmod" => self.external_chmod(cmd),
-            "cp" => {
-                // Fast-path decline design (mirrors external_sed): flag forms
-                // beyond the simple in-process copies (e.g. -r/-v/-p) are
-                // handled by the real cp -- winuxcmd in the product, the
-                // host coreutils in the test harness -- both GNU-shaped.
-                if cmd.words[1..]
-                    .iter()
-                    .any(|arg| arg.starts_with('-') && arg != "-")
-                {
-                    return Ok(false);
-                }
-                self.external_cp(cmd)
-            }
+            "cp" => self.external_cp(cmd),
             "rm" => self.external_rm(cmd),
             "rmdir" => self.external_rmdir(cmd),
-            "cat" | "/bin/cat" | "/usr/bin/cat" => {
-                // cat -n/-b/-s/-A and friends are delegated to the real cat;
-                // the in-process copy only serves plain operand forms.
-                if cmd.words[1..]
-                    .iter()
-                    .any(|arg| arg.starts_with('-') && arg != "-")
-                {
-                    return Ok(false);
-                }
-                self.external_cat(cmd)
-            }
+            "cat" | "/bin/cat" | "/usr/bin/cat" => self.external_cat(cmd),
             "sed" => self.external_sed(cmd),
             "mkfifo" => self.external_mkfifo(cmd),
             "tty" | "/bin/tty" | "/usr/bin/tty" => self.external_tty(cmd),
@@ -75,103 +53,37 @@ impl Executor {
     }
 
     fn external_mkdir(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        // GNU mkdir (coreutils): operands processed independently; without
-        // -p an existing directory is an error ("File exists"), -p suppresses
-        // only that error; -m MODE applies the emulated permission bits.
-        // Option-looking words are flags (-- ends parsing, -m consumes one).
-        let mut parents = false;
-        let mut verbose = false;
-        let mut mode: Option<String> = None;
+        // GNU mkdir (coreutils) parses options before operands: -p (parents,
+        // already implied by create_dir_all), -m MODE which consumes a value,
+        // -v verbose; `--` ends option parsing so a following `-p` is an
+        // operand. Without this the flag itself became a literal directory
+        // entry (`mkdir -p d` created `./-p`).
         let mut mode_value_pending = false;
-        let mut end_of_flags = false;
-        let mut operands: Vec<String> = Vec::new();
+        let mut no_more_flags = false;
         for word in &cmd.words[1..] {
-            if end_of_flags {
-                operands.push(word.clone());
+            let expanded = self.expand_word(word);
+            if !no_more_flags && !mode_value_pending && expanded == "--" {
+                no_more_flags = true;
                 continue;
             }
-            if word == "--" {
-                end_of_flags = true;
-                continue;
-            }
-            if !mode_value_pending && word.starts_with('-') && word.len() > 1 {
-                for ch in word.chars().skip(1) {
-                    match ch {
-                        'p' => parents = true,
-                        'v' => verbose = true,
-                        'm' => mode_value_pending = true,
-                        _ => {}
-                    }
+            if !no_more_flags
+                && !mode_value_pending
+                && expanded.starts_with('-')
+                && expanded != "-"
+            {
+                if expanded == "-m" {
+                    mode_value_pending = true;
                 }
                 continue;
             }
             if mode_value_pending {
                 mode_value_pending = false;
-                mode = Some(word.clone());
                 continue;
             }
-            operands.push(word.clone());
+            fs::create_dir_all(shell_path_to_windows(&expanded, &self.env_vars))?
+                ;
         }
-
-        if operands.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "mkdir: missing operand\nTry 'mkdir --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
-
-        let mut stderr = Vec::new();
-        let mut status = 0;
-        for path in &operands {
-            let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.env_vars);
-            let result = if parents {
-                fs::create_dir_all(&target)
-            } else if target.is_dir() {
-                Err(io::Error::new(io::ErrorKind::AlreadyExists, "File exists"))
-            } else {
-                fs::create_dir(&target)
-            };
-            match result {
-                Ok(()) => {
-                    if verbose {
-                        writeln!(&mut stderr, "created directory '{}'", expanded)?;
-                    }
-                    if let Some(mode) = &mode {
-                        let windows = target.to_string_lossy().into_owned();
-                        let base = crate::builtins::test::emulated_file_mode(&expanded, &self.env_vars)
-                            .unwrap_or_else(|| self.default_emulated_mode(&windows));
-                        if let Some(new_mode) = apply_chmod_mode(base, mode) {
-                            store_emulated_file_mode(&mut self.env_vars, &windows, new_mode);
-                        }
-                    }
-                }
-                Err(error) => {
-                    let suppress = parents && error.kind() == io::ErrorKind::AlreadyExists;
-                    if !suppress {
-                        status = 1;
-                        let message = if error.kind() == io::ErrorKind::AlreadyExists {
-                            "File exists".to_string()
-                        } else {
-                            crate::posix_errors::message(&error)
-                        };
-                        writeln!(
-                            &mut stderr,
-                            "mkdir: cannot create directory \u{2018}{}\u{2019}: {message}",
-                            expanded
-                        )?;
-                    }
-                }
-            }
-        }
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        }
-        self.exit_code = status;
+        self.exit_code = 0;
         Ok(true)
     }
 
@@ -179,134 +91,227 @@ impl Executor {
         // GNU touch.c processes every operand independently: a failed create
         // prints `touch: cannot touch 'FILE': ...` and continues with the
         // remaining files, leaving exit status 1 (touch.c: do_touch loop).
-        let mut operands: Vec<String> = Vec::new();
-        let mut end_of_flags = false;
-        for word in &cmd.words[1..] {
-            if end_of_flags {
-                operands.push(word.clone());
-                continue;
-            }
-            if word == "--" {
-                end_of_flags = true;
-                continue;
-            }
-            if word.starts_with('-') && word.len() > 1 {
-                continue;
-            }
-            operands.push(word.clone());
-        }
-        if operands.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "touch: missing file operand\nTry 'touch --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
         let mut failed = false;
-        let mut stderr = Vec::new();
-        for path in &operands {
+        for path in &cmd.words[1..] {
             let expanded = self.expand_word(path);
             let target = shell_path_to_windows(&expanded, &self.env_vars);
             if let Err(error) = File::create(target) {
-                writeln!(
-                    &mut stderr,
-                    "touch: cannot touch '{}': {}",
+                eprintln!(
+                    "{}touch: cannot touch '{}': {}",
+                    self.diagnostic_prefix(),
                     expanded,
-                    crate::posix_errors::message(&error)
-                )?;
+                    error
+                );
                 failed = true;
             }
-        }
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         }
         self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
 
     fn external_cp(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        let mut args = Vec::new();
-        for word in &cmd.words[1..] {
-            if !word.starts_with('-') {
-                args.push(self.expand_word(word));
+        // GNU cp (coreutils cp.c) parses long and short options before and
+        // between operands, and `--` ends option parsing. -r/-R/-a recurse
+        // into directories, -n/--no-clobber skips files that already exist
+        // (and warns that the short form is non-portable), -i/--interactive
+        // prompts before overwriting, -v/--verbose prints `'src' -> 'dst', -p preserves metadata,
+        // -u/--update copies only when the source is newer or the destination
+        // is absent, --remove-destination unlinks the destination first, and
+        // -t/--target-directory routes every operand into one directory.
+        // Tolerated but unimplemented (accepted as no-ops, like cp itself):
+        // -f, -l, -s, -d/-P, --parents, --backup, -S/--suffix.
+        let mut recursive = false;
+        let mut no_clobber = false;
+        let mut interactive = false;
+        let mut verbose = false;
+        let mut update_only = false;
+        let mut remove_dest = false;
+        let mut target_dir: Option<String> = None;
+        let mut no_more_flags = false;
+        let mut operands: Vec<String> = Vec::new();
+
+        let prefix = self.diagnostic_prefix();
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut words = cmd.words[1..].iter();
+
+        while let Some(word) = words.next() {
+            let expanded = self.expand_word(word);
+            if no_more_flags {
+                operands.push(expanded);
+                continue;
+            }
+            if expanded == "--" {
+                no_more_flags = true;
+                continue;
+            }
+            if expanded == "-" || !expanded.starts_with('-') {
+                operands.push(expanded);
+                continue;
+            }
+            if let Some(rest) = expanded.strip_prefix("--") {
+                let (name, value) = match rest.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_string())),
+                    None => (rest, None),
+                };
+                match name {
+                    "recursive" => recursive = true,
+                    "archive" => recursive = true,
+                    "no-clobber" => no_clobber = true,
+                    "interactive" => interactive = true,
+                    "verbose" => verbose = true,
+                    "preserve" => {}
+                    "update" => update_only = true,
+                    "remove-destination" => remove_dest = true,
+                    "force" | "link" | "symbolic-link" | "parents" | "backup"
+                    | "no-dereference" | "no-preserve"
+                    | "suffix" | "context" => {}
+                    "target-directory" | "target-dir" => {
+                        target_dir = value.or_else(|| {
+                            words.next().map(|next| self.expand_word(next))
+                        });
+                    }
+                    "help" => {
+                        let _ = writeln!(stderr, "{}", cp_usage_text());
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        self.exit_code = 0;
+                        return Ok(true);
+                    }
+                    other => {
+                        let _ = writeln!(
+                            stderr,
+                            "{}cp: unknown option '--{}'",
+                            prefix, other
+                        );
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                }
+                continue;
+            }
+            // Short option cluster such as -upv; -t and -S take the next
+            // word as their value.
+            let chars: Vec<char> = expanded[1..].chars().collect();
+            let mut index = 0;
+            while index < chars.len() {
+                match chars[index] {
+                    'r' | 'R' | 'a' => recursive = true,
+                    'n' => no_clobber = true,
+                    'i' => interactive = true,
+                    'v' => verbose = true,
+                    'p' => {}
+                    'u' => update_only = true,
+                    'f' | 'l' | 's' | 'd' | 'P' | 'Z' => {}
+                    't' => {
+                        target_dir = words.next().map(|next| self.expand_word(next));
+                        break;
+                    }
+                    'S' => {
+                        words.next();
+                        break;
+                    }
+                    other => {
+                        let _ = writeln!(
+                            stderr,
+                            "{}cp: invalid option -- '{}'",
+                            prefix, other
+                        );
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                }
+                index += 1;
             }
         }
 
-        if args.len() == 2
-            && crate::executor::path::is_shell_null_device(&args[0])
-            && crate::executor::path::is_shell_null_device(&args[1])
+        if no_clobber {
+            let _ = writeln!(
+                stderr,
+                "{}cp: warning: behavior of -n is non-portable and may change in future; use --update=none instead",
+                prefix
+            );
+        }
+
+        // With -t DIR every operand is a source copied into DIR, so the
+        // directory becomes the trailing destination operand.
+        let effective: Vec<String> = match target_dir {
+            Some(dir) if !operands.is_empty() => {
+                let mut all = operands.clone();
+                all.push(dir);
+                all
+            }
+            _ => operands,
+        };
+
+        // GNU copy.c rejects `cp /dev/null /dev/null` as a same-file copy
+        // before any data would move.
+        if effective.len() == 2
+            && crate::executor::path::is_shell_null_device(&effective[0])
+            && crate::executor::path::is_shell_null_device(&effective[1])
         {
-            // GNU copy.c rejects `cp /dev/null /dev/null` as a same-file
-            // copy before any data would move.
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "cp: '{}' and '{}' are the same file",
-                args[0], args[1]
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            let _ = writeln!(
+                stderr,
+                "{}cp: '{}' and '{}' are the same file",
+                prefix, effective[0], effective[1]
+            );
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             self.exit_code = 1;
             return Ok(true);
         }
 
-        if args.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(&mut stderr, "cp: missing file operand")?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
-        if args.len() == 1 {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "cp: missing destination file operand after '{}'",
-                args[0]
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
-
-        let destination =
-            shell_path_to_windows(args.last().expect("cp destination"), &self.env_vars);
-        if args.len() > 2 && !destination.is_dir() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "cp: target '{}' is not a directory",
-                args.last().expect("cp destination")
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        if effective.len() < 2 {
+            let _ = match effective.last() {
+                Some(last) => writeln!(
+                    stderr,
+                    "{}cp: missing destination file operand after '{}'\nTry 'cp --help' for more information.",
+                    prefix, last
+                ),
+                None => writeln!(
+                    stderr,
+                    "{}cp: missing file operand\nTry 'cp --help' for more information.",
+                    prefix
+                ),
+            };
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             self.exit_code = 1;
             return Ok(true);
         }
 
-        // GNU null-device semantics: /dev/null reads as an empty stream and
-        // discards writes (coreutils copy.c opens the source O_RDONLY and
-        // gets EOF, so `cp /dev/null TARGET` creates/truncates TARGET as an
-        // empty file -- basename "null" when TARGET is a directory -- while
-        // `cp FILE /dev/null` discards FILE with status 0). Windows has no
-        // device CopyFileExW can stat, so model both directions explicitly
-        // instead of failing with "Invalid argument".
-        if args.len() == 2
-            && crate::executor::path::is_shell_null_device(args.last().expect("cp destination"))
+        let destination_word = &effective[effective.len() - 1];
+        let destination = shell_path_to_windows(destination_word, &self.env_vars);
+
+        // GNU null-device semantics: coreutils copy.c opens the destination
+        // and the write goes nowhere, so `cp FILE /dev/null` succeeds without
+        // creating anything. Windows has no device CopyFileExW can stat, so
+        // model both directions explicitly.
+        if effective.len() == 2
+            && crate::executor::path::is_shell_null_device(destination_word)
         {
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             self.exit_code = 0;
             return Ok(true);
         }
 
-        // GNU copy.c processes sources independently: a failed source is
-        // reported ("cannot stat" vs "cannot create" wording) and the
-        // remaining sources are still copied; any failure leaves status 1.
-        let mut stderr = Vec::new();
+        if effective.len() > 2 && !destination.exists() {
+            let _ = writeln!(
+                stderr,
+                "{}cp: target '{}': No such file or directory",
+                prefix, destination_word
+            );
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            self.exit_code = 1;
+            return Ok(true);
+        }
+
         let mut status = 0;
-        for source in &args[..args.len() - 1] {
-            if crate::executor::path::is_shell_null_device(source) {
-                let name = source
+        for source_word in &effective[..effective.len() - 1] {
+            // /dev/null as a source reads as an empty stream, so the copy
+            // creates or truncates the target as an empty file (basename
+            // "null" when the destination is a directory).
+            if crate::executor::path::is_shell_null_device(source_word) {
+                let name = source_word
                     .replace('\\', "/")
                     .rsplit('/')
                     .next()
@@ -319,150 +324,140 @@ impl Executor {
                 };
                 if let Err(error) = File::create(&target_path) {
                     status = 1;
-                    writeln!(
-                        &mut stderr,
-                        "cp: cannot create '{}': {}",
-                        target_path.display(),
-                        crate::posix_errors::message(&error)
-                    )?;
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: cannot create '{}': {}",
+                        prefix, target_path.display(), crate::posix_errors::message(&error)
+                    );
                 }
                 continue;
             }
-
-            let source_path = shell_path_to_windows(source, &self.env_vars);
-            let target_path = if destination.is_dir() {
-                let Some(name) = source_path.file_name() else {
+            let source = shell_path_to_windows(source_word, &self.env_vars);
+            let (target, target_display) = if destination.is_dir() {
+                let Some(name) = source.file_name() else {
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: missing destination file operand after '{}'",
+                        prefix, source_word
+                    );
                     status = 1;
-                    writeln!(
-                        &mut stderr,
-                        "cp: cannot stat '{}': No such file or directory",
-                        source
-                    )?;
                     continue;
                 };
-                destination.join(name)
+                let leaf = name.to_string_lossy().to_string();
+                (
+                    destination.join(name),
+                    format!("{}/{}", destination_word.trim_end_matches('/'), leaf),
+                )
             } else {
-                destination.clone()
+                (destination.clone(), destination_word.clone())
             };
 
-            if let Err(error) = fs::copy(&source_path, &target_path) {
-                // GNU cp wording: source stat failures use "cannot stat",
-                // everything else reports the destination operation.
-                if !source_path.exists() {
-                    writeln!(
-                        &mut stderr,
-                        "cp: cannot stat '{}': {}",
-                        source,
-                        crate::posix_errors::message(&error)
-                    )?;
-                } else {
-                    writeln!(
-                        &mut stderr,
-                        "cp: cannot create '{}': {}",
-                        target_path.display(),
-                        crate::posix_errors::message(&error)
-                    )?;
-                }
+            if !source.exists() {
+                let _ = writeln!(
+                    stderr,
+                    "{}cp: cannot stat '{}': No such file or directory",
+                    prefix, source_word
+                );
                 status = 1;
+                continue;
+            }
+            if source.is_dir() && !recursive {
+                let _ = writeln!(
+                    stderr,
+                    "{}cp: -r not specified; omitting directory '{}'",
+                    prefix, source_word
+                );
+                status = 1;
+                continue;
+            }
+            if target.exists() {
+                if no_clobber {
+                    continue;
+                }
+                if interactive {
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    stdout.clear();
+                    stderr.clear();
+                    if !cp_confirm_overwrite(&target_display) {
+                        status = 1;
+                        continue;
+                    }
+                }
+            }
+            if remove_dest {
+                let _ = fs::remove_file(&target);
+            }
+            if update_only && target.exists() && cp_source_not_newer(&source, &target) {
+                continue;
+            }
+
+            let result = if source.is_dir() {
+                cp_copy_tree(&source, &target, 0)
+            } else {
+                fs::copy(&source, &target).map(|_| ())
+            };
+            match result {
+                Ok(_) => {
+                    if !source.is_dir() {
+                        cp_set_modified_now(&target);
+                    }
+                    if verbose {
+                        let _ = writeln!(
+                            stdout,
+                            "{} -> {}",
+                            cp_quoted_name(source_word),
+                            cp_quoted_name(&target_display)
+                        );
+                    }
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        stderr,
+                        "{}cp: cannot create '{}': {}",
+                        prefix, target.display(), crate::posix_errors::message(&error)
+                    );
+                    status = 1;
+                }
             }
         }
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        }
+
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.exit_code = status;
         Ok(true)
     }
 
     fn external_rm(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        // GNU rm (coreutils remove.c): operands processed independently with
-        // exit status 1 if any failed. -f suppresses only nonexistent-file
-        // diagnostics; removing a directory without -r/-R fails with "Is a
-        // directory" even under -f; -v prints "removed 'x'" after success.
-        let mut force = false;
-        let mut recursive = false;
-        let mut verbose = false;
-        let mut end_of_flags = false;
-        let mut operands: Vec<String> = Vec::new();
-        for arg in &cmd.words[1..] {
-            if end_of_flags {
-                operands.push(arg.clone());
-                continue;
-            }
-            if arg == "--" {
-                end_of_flags = true;
-                continue;
-            }
-            if arg.starts_with('-') && arg.len() > 1 {
-                for ch in arg.chars().skip(1) {
-                    match ch {
-                        'f' => force = true,
-                        'r' | 'R' => recursive = true,
-                        'v' => verbose = true,
-                        _ => {}
-                    }
-                }
-                continue;
-            }
-            operands.push(arg.clone());
-        }
-
-        if operands.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "rm: missing operand\nTry 'rm --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
-
-        let mut stderr = Vec::new();
-        let mut stdout = Vec::new();
+        let force = cmd
+            .words
+            .iter()
+            .skip(1)
+            .any(|arg| arg.starts_with('-') && arg.contains('f'));
         let mut status = 0;
-        for path in &operands {
+        let mut stderr = Vec::new();
+        for path in cmd.words.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
             let expanded = self.expand_word(path);
             let target = shell_path_to_windows(&expanded, &self.env_vars);
-            let was_dir = target.is_dir();
-            let result = if was_dir {
-                if recursive {
-                    fs::remove_dir_all(&target)
-                } else {
-                    Err(io::Error::new(io::ErrorKind::Other, "Is a directory"))
-                }
+            let result = if target.is_dir() {
+                fs::remove_dir_all(&target)
             } else {
                 fs::remove_file(&target)
             };
-            match result {
-                Ok(()) => {
-                    if verbose {
-                        // GNU rm -v reports removals on stdout.
-                        writeln!(&mut stdout, "removed '{}'", expanded)?;
-                    }
-                }
-                Err(error) => {
-                    let suppress = force && error.kind() == io::ErrorKind::NotFound;
-                    if !suppress {
-                        status = 1;
-                        let message = if was_dir {
-                            "Is a directory".to_string()
-                        } else if matches!(
-                            error.kind(),
-                            io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
-                        ) || (cfg!(windows)
-                            && contains_windows_forbidden_posix_filename_char(&expanded))
-                        {
-                            "No such file or directory".to_string()
-                        } else {
-                            crate::posix_errors::message(&error)
-                        };
-                        writeln!(&mut stderr, "rm: cannot remove '{}': {message}", expanded)?;
-                    }
+            if let Err(error) = result {
+                if !force {
+                    status = 1;
+                    let message = if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
+                    ) || (cfg!(windows)
+                        && contains_windows_forbidden_posix_filename_char(&expanded))
+                    {
+                        "No such file or directory".to_string()
+                    } else {
+                        crate::posix_errors::message(&error)
+                    };
+                    writeln!(&mut stderr, "rm: cannot remove '{}': {message}", expanded)?;
                 }
             }
-        }
-        if !stdout.is_empty() {
-            self.write_buffered_builtin_output(cmd, &stdout, &[])?;
         }
         if !stderr.is_empty() {
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
@@ -472,70 +467,13 @@ impl Executor {
     }
 
     fn external_rmdir(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        // GNU rmdir (coreutils rmd-ir.c... rmdir.c): every operand must be an
-        // empty directory; failures are reported per operand and any failure
-        // leaves exit status 1.
-        let mut end_of_flags = false;
-        let mut operands: Vec<String> = Vec::new();
-        for arg in &cmd.words[1..] {
-            if end_of_flags {
-                operands.push(arg.clone());
-                continue;
-            }
-            if arg == "--" {
-                end_of_flags = true;
-                continue;
-            }
-            if arg.starts_with('-') && arg.len() > 1 {
-                continue;
-            }
-            operands.push(arg.clone());
+        for path in &cmd.words[1..] {
+            let _ = fs::remove_dir(shell_path_to_windows(
+                &self.expand_word(path),
+                &self.env_vars,
+            ));
         }
-
-        if operands.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "rmdir: missing operand\nTry 'rmdir --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
-
-        let mut stderr = Vec::new();
-        let mut status = 0;
-        for path in &operands {
-            let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.env_vars);
-            let result = if target.is_dir() {
-                fs::remove_dir(&target)
-            } else {
-                Err(io::Error::new(io::ErrorKind::NotFound, "No such file or directory"))
-            };
-            if let Err(error) = result {
-                status = 1;
-                let message = if target.is_dir() {
-                    "Directory not empty".to_string()
-                } else if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::InvalidInput
-                ) {
-                    "No such file or directory".to_string()
-                } else {
-                    crate::posix_errors::message(&error)
-                };
-                writeln!(
-                    &mut stderr,
-                    "rmdir: failed to remove '{}': {message}",
-                    expanded
-                )?;
-            }
-        }
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        }
-        self.exit_code = status;
+        self.exit_code = 0;
         Ok(true)
     }
 
@@ -607,31 +545,27 @@ impl Executor {
             return Ok(false);
         }
 
-        // GNU cat (coreutils cat.c): operands processed in order, a missing
-        // file is reported per operand and the remaining files are still
-        // concatenated; any failure leaves exit status 1.
         let mut output = Vec::new();
-        let mut stderr = Vec::new();
-        let mut failures = 0usize;
         for word in cat_file_operands(cmd) {
-            let expanded = self.expand_word(word);
-            match fs::read(shell_path_to_windows(&expanded, &self.env_vars)) {
+            let target = self.expand_word(word);
+            match fs::read(shell_path_to_windows(&target, &self.env_vars)) {
                 Ok(bytes) => output.extend(bytes),
                 Err(_) => {
+                    let mut stderr = Vec::new();
                     writeln!(
                         &mut stderr,
-                        "cat: {}: No such file or directory",
-                        expanded
+                        "{}cat: {}: No such file or directory",
+                        self.diagnostic_prefix(),
+                        target
                     )?;
-                    failures += 1;
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(true);
                 }
             }
         }
         self.write_cat_output(cmd, &output)?;
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        }
-        self.exit_code = if failures > 0 { 1 } else { 0 };
+        self.exit_code = 0;
         Ok(true)
     }
 
@@ -675,38 +609,174 @@ impl Executor {
     }
 
     fn external_mkfifo(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        // GNU mkfifo (coreutils): operands processed independently; a create
-        // failure (including an existing node) is reported per operand and
-        // any failure leaves exit status 1.
-        let mut stderr = Vec::new();
-        let mut status = 0;
-        for path in cmd.words.iter().skip(1).filter(|arg| !arg.starts_with('-')) {
-            let expanded = self.expand_word(path);
-            let target = shell_path_to_windows(&expanded, &self.env_vars);
-            if let Err(error) = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)
-            {
-                status = 1;
-                let message = if error.kind() == io::ErrorKind::AlreadyExists {
-                    "File exists".to_string()
-                } else {
-                    crate::posix_errors::message(&error)
-                };
-                writeln!(
-                    &mut stderr,
-                    "mkfifo: cannot create fifo '{}': {message}",
-                    expanded
-                )?;
-            }
+        for path in &cmd.words[1..] {
+            let target = shell_path_to_windows(&self.expand_word(path), &self.env_vars);
+            let _ = File::create(target)?;
         }
-        if !stderr.is_empty() {
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-        }
-        self.exit_code = status;
+        self.exit_code = 0;
         Ok(true)
     }
+}
+
+/// cp's help text, scoped to the forms this implementation honours.
+fn cp_usage_text() -> &'static str {
+    "Usage: cp [OPTION]... SOURCE DEST\n\n\
+     Copy SOURCE to DEST, or multiple SOURCES to DIRECTORY.\n\n\
+     Supported: -a -d -f -i -l -n -P -p -R -r -s -u -v --archive --backup\
+       --force --help --interactive --link --no-clobber --no-dereference\
+       --parents --preserve[=ATTR_LIST] --remove-destination --recursive\
+       --suffix=SUFFIX --symbolic-link --target-directory=DIR\
+       --target-dir=DIR --update\n"
+}
+
+/// cp quotes names with quotearg_colon: single quotes around the name, and
+/// an embedded single quote becomes '\'' .
+fn cp_quoted_name(name: &str) -> String {
+    let mut out = String::new();
+    out.push('\u{27}');
+    for ch in name.chars() {
+        if ch == '\u{27}' {
+            out.push('\u{27}');
+            out.push('\u{5c}');
+            out.push('\u{27}');
+            out.push('\u{27}');
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\u{27}');
+    out
+}
+
+/// cp's overwrite prompt. EOF or anything but a leading y/Y is a refusal.
+fn cp_confirm_overwrite(target_display: &str) -> bool {
+    use std::io::{BufRead, Write};
+    let mut prompt = String::from("cp: overwrite ");
+    prompt.push_str(&cp_quoted_name(target_display));
+    prompt.push_str("? ");
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr.write_all(prompt.as_bytes());
+    let _ = stderr.flush();
+    let mut answer = String::new();
+    match std::io::stdin().lock().read_line(&mut answer) {
+        Ok(0) => false,
+        Ok(_) => {
+            answer.trim_start().starts_with(|c: char| c == 'y' || c == 'Y')
+        }
+        Err(_) => false,
+    }
+}
+
+/// cp without -p sets the destination's modification time to now. Rust's
+/// fs::copy preserves the source's timestamps (it uses CopyFileW on
+/// Windows), so the value must be reset explicitly; otherwise -u compares
+/// against the stale source time instead of the copy time.
+#[cfg(windows)]
+fn cp_set_modified_now(target: &std::path::Path) {
+    use std::ffi::c_void;
+
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+    const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const INVALID_HANDLE_VALUE: usize = usize::MAX;
+
+    extern "system" {
+        fn CreateFileW(
+            lpFileName: *const u16,
+            dwDesiredAccess: u32,
+            dwShareMode: u32,
+            lpSecurityAttributes: *mut c_void,
+            dwCreationDisposition: u32,
+            dwFlagsAndAttributes: u32,
+            hTemplateFile: usize,
+        ) -> usize;
+        fn SetFileTime(
+            hFile: usize,
+            lpCreationTime: *const c_void,
+            lpLastAccessTime: *const c_void,
+            lpLastWriteTime: *const c_void,
+        ) -> i32;
+        fn CloseHandle(hObject: usize) -> i32;
+    }
+
+    // FILETIME counts 100-nanosecond intervals since 1601-01-01 in UTC,
+    // while SystemTime is anchored at 1970-01-01. The 11644473600-second
+    // offset converts between the two.
+    const FILETIME_EPOCH_OFFSET_SECS: u64 = 11_644_473_600;
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let ticks = (duration.as_secs() + FILETIME_EPOCH_OFFSET_SECS) * 10_000_000
+        + (duration.subsec_nanos() as u64) / 100;
+    let mut wide: Vec<u16> = target.to_string_lossy().encode_utf16().collect();
+    wide.push(0);
+
+    let last_write: i64 = ticks as i64;
+    unsafe {
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            FILE_WRITE_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            0,
+        );
+        if handle != INVALID_HANDLE_VALUE {
+            SetFileTime(
+                handle,
+                std::ptr::null(),
+                std::ptr::null(),
+                &last_write as *const i64 as *const c_void,
+            );
+            CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn cp_set_modified_now(_target: &std::path::Path) {}
+
+/// -u/--update: skip the copy when the source is not strictly newer than
+/// the destination. Missing metadata is not grounds for skipping.
+fn cp_source_not_newer(source: &std::path::Path, target: &std::path::Path) -> bool {
+    match (
+        fs::metadata(source).and_then(|meta| meta.modified()),
+        fs::metadata(target).and_then(|meta| meta.modified()),
+    ) {
+        (Ok(source_time), Ok(target_time)) => source_time <= target_time,
+        _ => false,
+    }
+}
+
+/// cp -r: directories are created and walked in sorted entry order so the
+/// result is deterministic. Symlinks are followed, which is cp's default
+/// (without -d); the depth cap turns a link cycle into an error instead of
+/// a stack overflow.
+fn cp_copy_tree(source: &std::path::Path, target: &std::path::Path, depth: usize) -> io::Result<()> {
+    if depth > 40 {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            "too many levels of symbolic links",
+        ));
+    }
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return cp_copy_tree(&fs::canonicalize(source)?, target, depth + 1);
+    }
+    if metadata.is_dir() {
+        fs::create_dir_all(target)?;
+        let mut entries: Vec<_> = fs::read_dir(source)?.filter_map(Result::ok).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            cp_copy_tree(entry.path().as_path(), &target.join(entry.file_name()), depth + 1)?;
+        }
+        return Ok(());
+    }
+    fs::copy(source, target)?;
+    Ok(())
 }
 
 fn cat_file_operands(cmd: &CommandNode) -> Vec<&String> {
@@ -792,43 +862,14 @@ impl Executor {
             files.push(arg.clone());
         }
         let Some(mode) = mode else {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "chmod: missing operand\nTry 'chmod --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
+            self.exit_code = 0;
             return Ok(true);
         };
-        if files.is_empty() {
-            let mut stderr = Vec::new();
-            writeln!(
-                &mut stderr,
-                "chmod: missing operand after \u{2018}{mode}\u{2019}\nTry 'chmod --help' for more information."
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
-        }
         let mut failures = 0usize;
         for file in &files {
             let windows = crate::executor::path::shell_path_to_windows(file, &self.env_vars)
                 .to_string_lossy()
                 .to_string();
-            if !std::path::Path::new(&windows).exists()
-                && crate::builtins::test::emulated_file_mode(file, &self.env_vars).is_none()
-            {
-                let mut stderr = Vec::new();
-                writeln!(
-                    &mut stderr,
-                    "chmod: cannot access '{}': No such file or directory",
-                    file
-                )?;
-                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                failures += 1;
-                continue;
-            }
             let base = crate::builtins::test::emulated_file_mode(file, &self.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             match apply_chmod_mode(base, mode) {
@@ -837,13 +878,11 @@ impl Executor {
                 }
                 None => {
                     failures += 1;
-                    let mut stderr = Vec::new();
-                    writeln!(&mut stderr, "chmod: invalid mode: '{}'", mode)?;
-                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    eprintln!("chmod: invalid mode: '{}'", mode);
                 }
             }
         }
-        self.exit_code = i32::from(failures > 0);
+        self.exit_code = i32::from(failures > 0 || files.is_empty());
         Ok(true)
     }
 
