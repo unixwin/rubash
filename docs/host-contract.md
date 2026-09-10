@@ -6,8 +6,14 @@
 
 ## 0. Owner 裁决
 
-1. **License 统一 MIT**。Cargo.toml 已是 MIT；仓库内残留 GPL-3.0-or-later
-   文件头需要一次性清扫（低优先级 TODO，本条即记录）。
+1. **License 统一 MIT**。`LICENSE` 文件本体一直是 MIT 全文，Cargo.toml 包字段
+   亦为 MIT。2026-09-10 清扫实测：全部 `.rs` 与 `.sh`（含 harness 全 13 个脚本）
+   **零 GPL 字眼**；残留只在 3 处项目面向文案——Cargo.toml 顶部注释、README.md /
+   README.zh-CN.md 的 badge 与许可声明——已全部改为 MIT。
+   保留不动的两类：`third_party/bash/**` 是 vendored 上游 GNU Bash（其本体即 GPL），
+   5 个含 GPL 的文件是上游授权事实；CHANGELOG.md / HANDOFF-20260829.md /
+   bash-upstream-tests.md 里的是历史与上游事实记录（改写历史记录不诚实）。
+   2026-09-10 起 harness 全脚本补 MIT 头（原先无任何许可声明）。
 2. **品牌命名空间 = NIU_\***（正名）；WINUXSH_\* = 遗留兜底别名；
    `__RUBASH_\*` = 引擎内部通道（清单不可见），维持不变。
 3. rubash 定位：通用 bash 语义引擎（可被任意宿主嵌入/调用），宿主无关为终态。
@@ -57,7 +63,8 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
   ⚠️ ~/.niubashrc 含真实 API 密钥——任何文档/打包严禁引用其内容。
 
 ### 引擎侧（rubash）
-- GPL 文件头 → MIT 清扫（一次性，低优先）。
+- ✅ GPL 字眼 → MIT 清扫（2026-09-10 完成，见 §0.1：0 个 .rs/.sh 命中，
+  3 处文案改 MIT，vendored 上游与历史记录保留，harness 全脚本补 MIT 头）。
 - set_shell_root/set_winuxcmd_path 停止**导出**品牌变量（改只设 __RUBASH_*
   隐藏通道；宿主确认不读导出值后执行）。
 - WINUXSH_UNSUPPORTED_DEVICE sentinel 改名 NIU_（T1 机械）。

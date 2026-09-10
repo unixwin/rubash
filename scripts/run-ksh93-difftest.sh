@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # run-ksh93-difftest.sh -- ksh93 vendored suite, GNU-bash-anchored gate.
 #
 # Runs every third_party/ksh93/tests/*.sh under:

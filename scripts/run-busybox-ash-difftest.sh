@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # run-busybox-ash-difftest.sh -- BusyBox ash vs rubash comparison gate.
 #
 # Runs every vendored BusyBox ash test item (third_party/busybox/tests/ash_test,

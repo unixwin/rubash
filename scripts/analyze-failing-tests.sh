@@ -1,4 +1,6 @@
 #!/bin/bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # Run all failing Bash official tests
 
 TESTS_DIR="third_party/bash/tests"

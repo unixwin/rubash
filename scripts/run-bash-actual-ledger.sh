@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 set -u
 set -o pipefail
 

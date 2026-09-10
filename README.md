@@ -7,7 +7,7 @@ A GNU Bash-compatible shell implementation written in Rust.
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## Overview
 
@@ -135,7 +135,7 @@ The full compatibility suite is still expanding. For compatibility work, prefer 
 
 ## License
 
-Rubash is licensed under GPL-3.0-or-later. See `LICENSE`.
+Rubash is licensed under the MIT License. See `LICENSE`.
 
 ## Contributing
 

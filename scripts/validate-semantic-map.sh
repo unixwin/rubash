@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 set -eu
 
 map="docs/semantic-ownership.tsv"

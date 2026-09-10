@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # TRUE-baseline harness -- THE one measurement path for the 83 GNU suites.
 #
 # Usage (from Windows):

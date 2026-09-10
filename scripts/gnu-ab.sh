@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # GNU-side A/B: run each suite under /usr/local/bin/bash (5.3.0) and
 # /usr/bin/bash (5.2.21) and count output drift lines.  Diagnosis aid
 # for the v5->v6 ledger regression hunt (GNU version drift theory).

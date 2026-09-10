@@ -7,7 +7,7 @@
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
-[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## 概述
 
@@ -143,7 +143,7 @@ for UAC elevation. Hosts may disable a builtin through
 
 ## 许可证
 
-Rubash 使用 GPL-3.0-or-later 许可证。详见 `LICENSE`。
+Rubash 采用 MIT 许可证。详见 `LICENSE`。
 
 ## 贡献
 

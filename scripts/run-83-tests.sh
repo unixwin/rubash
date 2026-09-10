@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # 正确运行83个Bash官方测试的脚本
 # 使用GNU bash作为对比基准
 

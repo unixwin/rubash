@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# License: MIT (full text: LICENSE at the repository root).
+# Copyright 2024-2026 Rust-Shell Contributors.
 # true-baseline.sh variant that pins the GNU side to /usr/bin/bash 5.2.21
 # (the system bash) by REMOVING /usr/local/bin from PATH.  Context: a
 # bash 5.3.0 was installed at /usr/local/bin/bash on 2026-09-09 and
