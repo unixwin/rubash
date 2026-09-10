@@ -62,11 +62,11 @@ pub(in crate::executor) fn append_assoc_value(
     let mut entries = assoc_entries(current);
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
     // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
-    // the mode — a first word with `=` selects strict [key]=value form;
-    // otherwise the whole list is alternating literal key/value pairs.
+    // the mode — kvpair (alternating pairs) requires the first word to NOT
+    // start with `[` (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d").
     let explicit_subscripts = tokens
         .first()
-        .map(|token| token.contains('='))
+        .map(|token| token.starts_with('['))
         .unwrap_or(false);
 
     if !explicit_subscripts {
@@ -133,28 +133,32 @@ pub(in crate::executor) fn append_assoc_value(
     format_assoc_storage(entries)
 }
 
-/// Return every bare (non `[key]=value`) element of an associative array
-/// compound assignment so the caller can emit the GNU "must use subscript"
-/// error for each one. Returns an empty vec for the alternating `key value`
+/// Return the FIRST bare (non `[key]=value`) element of an associative
+/// array compound assignment so the caller can emit the GNU "must use
+/// subscript" error. GNU assign_compound_array_list (arrayfunc.c) breaks
+/// the strict loop at the first offending word, so exactly one diagnostic
+/// is printed. Returns an empty vec for the alternating `key value`
 /// form (no explicit subscripts) — that form has no bare elements.
 pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
     // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
-    // the mode — a first word with `=` selects strict [key]=value form;
-    // otherwise the list is alternating literal key/value pairs with no
-    // bare elements (declare -A a=([x] one [y] two) keeps keys "[x]").
+    // the mode — kvpair (alternating literal key/value pairs) requires the
+    // first word to NOT start with `[` (strict [key]=value words always
+    // start with the bracket). A first word like `a=b` is kvpair data: the
+    // `=` inside a compound assignment list has no assignment semantics
+    // (assoc-kv2 probe M2: a=(a=b c=d) stores [a=b]="c=d").
     let strict_mode = tokens
         .first()
-        .map(|token| token.contains('='))
+        .map(|token| token.starts_with('['))
         .unwrap_or(false);
     if !strict_mode {
         return Vec::new();
     }
-    tokens
+    let first_bare = tokens
         .iter()
-        .filter(|token| assoc_assignment_token(token).is_none())
-        .map(|token| unquote_storage_value(token))
-        .collect()
+        .find(|token| assoc_assignment_token(token).is_none())
+        .map(|token| unquote_storage_value(token));
+    first_bare.into_iter().collect()
 }
 
 /// Split an assoc assignment token (`[key]=value` / `[key]+=value`) at the

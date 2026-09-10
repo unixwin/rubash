@@ -311,15 +311,27 @@ where
 /// compound assignment value, or `None` if every element uses a subscript.
 fn assoc_bare_element(value: &str) -> Option<String> {
     let inner = value.strip_prefix('(').and_then(|v| v.strip_suffix(')'))?;
-    // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
-    // the mode. A first word carrying `=` selects the strict [key]=value
-    // form where a bare word is rejected; a first word without `=` puts the
-    // whole list into alternating key/value pairs, and no word is "bare"
-    // there — even a bracketed word like [x] becomes a literal key
-    // (assoc11: declare -A inside=(a 1 b 2 c 3); comsub companion
-    // declare -A a=([x] one [y] two) stores keys "[x]"/"[y]").
+    // DECLARE-path mode decision (GNU declare.def routes the compound
+    // operand with W_ASSIGNMENT words, unlike the plain-assignment path in
+    // executor/assignment_helpers.rs): a first word that is a COMPLETE
+    // [key]=value token selects the strict form where a bare word is
+    // rejected (assoc-kv3 probe D3: declare -A a=([k]=v a b) reports 'a');
+    // any other first word ([x] -- no '=' -- or a=b) puts the whole list
+    // into alternating literal key/value pairs (probe D1: declare -A
+    // a=([x] one [y] two) stores keys "[x]"/"[y]"; D2: a=(a=b c=d) stores
+    // [a=b]="c=d").
     let tokens: Vec<String> = parse_array_tokens(inner);
-    let strict_mode = tokens.first().map(|token| token.contains('=')).unwrap_or(false);
+    let strict_mode = tokens
+        .first()
+        .map(|token| {
+            token.starts_with('[')
+                && token.contains('=')
+                && token
+                    .trim_end_matches(']')
+                    .rfind(']')
+                    .map_or(false, |i| token.find('=').map_or(false, |e| i < e))
+        })
+        .unwrap_or(false);
     if !strict_mode {
         return None;
     }
@@ -329,7 +341,7 @@ fn assoc_bare_element(value: &str) -> Option<String> {
         let is_subscript = token.starts_with('[')
             && token.contains('=')
             && subscript_end.map_or(false, |i| eq.map_or(false, |e| i < e));
-        if !is_subscript && !token.contains('=') {
+        if !is_subscript {
             return Some(token.clone());
         }
     }

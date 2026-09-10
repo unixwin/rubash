@@ -69,13 +69,23 @@ pub(in crate::builtins::declare) fn append_assoc_value(
     };
     let mut entries = parse_assoc_words(current);
     let tokens = merge_assoc_subscript_tokens(parse_array_tokens(value));
-    // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
-    // the mode — a first word with `=` selects strict [key]=value form;
-    // otherwise the whole list is alternating literal key/value pairs
-    // (declare -A a=([x] one [y] two) keys stay "[x]"/"[y]").
+    // DECLARE-path mode decision (GNU declare.def routes the compound
+    // operand with W_ASSIGNMENT words, unlike the plain-assignment path in
+    // executor/assignment_helpers.rs): a first word that is a complete
+    // [key]=value token selects strict mode; any other first word ([x] --
+    // no '=' -- or a=b) puts the list into alternating literal key/value
+    // pairs (assoc-kv3 probe D1: declare -A a=([x] one [y] two) stores
+    // keys "[x]"/"[y]"; D2: a=(a=b c=d) stores [a=b]="c=d").
     let explicit_subscripts = tokens
         .first()
-        .map(|token| token.contains('='))
+        .map(|token| {
+            token.starts_with('[')
+                && token.contains('=')
+                && token
+                    .trim_end_matches(']')
+                    .rfind(']')
+                    .map_or(false, |i| token.find('=').map_or(false, |e| i < e))
+        })
         .unwrap_or(false);
 
     if !explicit_subscripts {

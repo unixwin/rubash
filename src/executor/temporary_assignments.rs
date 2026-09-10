@@ -342,13 +342,20 @@ impl Executor {
             && value.ends_with(')')
             && is_marked_var(&self.env_vars, ASSOC_VARS, base_name)
         {
-            for bare in assoc_bare_elements(&value) {
+            let bare_elements = assoc_bare_elements(&value);
+            for bare in &bare_elements {
+                // GNU assign_compound_array_list breaks the strict loop at
+                // the first offending word and abandons the assignment
+                // (assoc-kv2 probe M1: a=([x] one [y] two) stores NOTHING).
                 eprintln!(
                     "{}{}: {}: must use subscript when assigning associative array",
                     self.diagnostic_prefix(),
                     base_name,
                     bare
                 );
+            }
+            if !bare_elements.is_empty() {
+                return false;
             }
             append_assoc_value(
                 "()",
