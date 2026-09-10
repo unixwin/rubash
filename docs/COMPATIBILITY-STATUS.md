@@ -593,3 +593,50 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
 - cargo test 2740 全绿（唯一失败 `export_assignment_arg_preserves_quoted_spaces` 为环境敏感既有问题：工作台注入的 PATH 键名/形状变化触发，stash 至 327d32db 亦复现，与本轮改动无关）
 - **残余（trap 3 行）**：trap6.sub `$( f )` 中函数内外部命令（`/bin/echo bar`）stdout 直写真实 stdout 未入捕获，RETURN trap 的 builtin 输出反被捕获——外部命令 comsub 捕获路径对路径前缀词失效（`$(/bin/echo x)` 亦泄漏而 `$(whoami)` 正常），判定分歧在 external_needs_fd_copy_capture 之外的派发路径，独立战役
 - 流程沉淀：跨树合并首选 `git apply -3way --ignore-whitespace`；冒烟探针先分 stdout/stderr 再下结论；`env` 在本机被 shim 劫持（/usr/bin/env 才真）；全量台账 10 分钟跑完可直接后台
+
+## 2026-09-10 数组嵌套引号替换战役（lane wt-regress @ 8d30cd04 起）
+
+任务：根治 `${a[@]/#/"-iname '"}`（数组形态 patsub + 替换词含引号）产出垃圾的问题。oracle：WSL `/usr/bin/bash`（GNU 5.2.21），测试件为 `target/issue-suites/results/bash-tests-rw/` 的 array.tests staged 副本 + 自编译 recho/zecho（/tmp/bash-helpers）。
+
+### 已修（工作树，patch 见 target/lane-all.patch）
+
+- **DQ_DATA 提升**（assignment_expansion.rs `hoist_data_double_quotes`）：原实现把值里**所有** `"` 提为 E001 数据标记，连 `${...}` 体内的引号算子也被吞；现在用 `matching_parameter_brace` 逐段跳过 `${...}` 体，体内引号保持算子身份
+- **词法原子性**（scanner.rs/word.rs `skip_word_at(start)`）：`next_token` 已消费首字符导致 `compound_assignment_start` 只看到 `2=`，多字符名 `a2=(...)` 不再走 token-split 路径
+- **复合赋值元素切分器视 `${...}` 体为不透明**：`split_compound_element_words`、`split_compound_assignment_words`（parser/assignment.rs）、`compound_raw_quote_unclosed` 均经 `scan_braced_parameter_body` 跳体——体内引号/空格不再污染元素级状态（本轮新增：**StorageWordIter**（assignment_helpers.rs）同法跳体，修 f64 `\'` 形态的元素合并）
+- **复合赋值逐元素 patsub**（`expand_compound_positional_at_assignment` 新分支）：quoted `${a[@]/pat/rep}` 逐元素过 `replace_patsub_pattern`（generic word expander 会把数组塌成单串）；本轮扩展：**裸 `@`/`*` 名（`${@/...}`）也接受**（取 positional_params），`[*]` 按首 IFS 字符 join 成单元素（GNU join_array_values 语义）；复合赋值值形态跳过尾部整体 `remove_shell_quotes`（GNU 不对展开结果重跑去引号）
+
+### 测量（同口径 A/B：stash 全改动 vs 改动后，array.tests 全套 vs GNU 5.2.21）
+
+- 基线 461 行 diff → 改动后 **444（−17）**；f55/f64/f72（`${a[@]}`/`${@}` × `"-iname '"`/`-iname \'` 替换）与 GNU 逐字节一致
+- executor_tests 单线程 failset：**基线 119 → 改动后 114（净 −5，零新增失败）**。转绿：`part_002/003::compound/local compound assignment preserves quoted array at`（两处，见下方第三修复）、`part_026::kill` 两项、`part_041::eval expands assignment lhs to array name`、`part_069::declare assoc alternating bracket words`
+- **第三修复（由 executor_tests 哨兵逼出）**：原子词法路径下 `local v=("${foo[@]}")` 的元素值不再带 `\x1d` quoted-RHS 标记（改为 E001 包裹裸引号），`expand_compound_positional_at_assignment` 的 plain `${a[@]}` 分支漏配 → generic 展开合并成 `"a b c d"` → 存储时 whitespace 拆成 4 元素。修复：该分支追加 `trim_matches('\u{E001}')` 形态匹配
+- 教训：**二分 stash/pop 后必须立刻重建**——上轮 bisect 结束忘了 build，CLI 探针跑的是回退态旧二进制，得出"CLI 过测试挂"的假矛盾，白查两轮
+
+### 新定位 gap（本轮未落地，按差异化→文档→清池→批修流程入池）
+
+- **eval 二次解析族**（array6.sub L58/61/67/75/78，5 形态全 FAIL，基线同 FAIL）：GNU 把赋值形状的 eval 参数按**赋值上下文**展开成**不加合成引号**的扁平串 `a2=(-iname 'abc -iname 'def)` 再重解析；rubash 逐元素 re-quote（`a2=("-iname 'abc" "-iname 'def")`）。经验证据：GNU 复合赋值元素扫描对 `'abc -iname 'def` 产出 2 元素（闭合引号后继续吸收直到非引号空白）——probe 存 target/forms/gnu-probe-eval.sh。修复面：eval 参数 flatten 去合成引号 + 重解析侧元素扫描语义，牵动 quote_array_value 存储契约，建议独占切片 + 全 A/B
+- **非声明 builtin 后 `name=(...)` 被语法接受** + `__RUBASH_CA1__` 标记泄漏到用户可见输出（`echo a=(x y)`、`printf "%s\n" -a a=(a 'b  c')`）；GNU 判 syntax error near unexpected token `('（parse.y 仅 declaration builtin/赋值上下文接受复合赋值词）
+- **plain `a2=("${a[@]}")` 复合赋值塌缩单元素**（g1 probe）；array6.sub L 案（unquoted 标量赋值 `-iname abc` vs GNU `-iname 'abc`）未动
+
+### 第二批（eval 裸 flatten + debug 清除，本轮落地）
+
+- **eval 裸 flatten 接线**（command_prepare.rs `expand_command_word`）：head word 为 `eval` 且词含 `__RUBASH_CA1__` 复合标记、值为 `(…)` 形状时，走 `expand_compound_positional_at_assignment_bare`——元素逐字面存储、不加合成引号（GNU subst.c evalstring：eval 参数按普通词展开，join 后重解析）。f61/f67/f78（`${a[@]}`/`${@}` 嵌套引号 eval 形态）转 PASS；gg7 E1 语义对齐（declare -p 输出 `[0]="a" [1]="b" [2]="c"` 与 GNU 一致）；无展开的 `eval a2=(x y)` 走 None 落回原路径，零扰动
+- **debug 清除**：assignment_expansion.rs（4 处 RUBASH_DBG/`__result`）、lexer/word.rs、parser/assignment.rs、executor/assignment_helpers.rs 的全部 DBG 站点删除。教训：上一轮 bisect 的 stash/pop 把已删的 debug 编辑吞掉，泄漏进了已提交的 1f76a150（`grep -c RUBASH_DBG` = 6）；主树未 push，已用 amend 剔除。**规矩：stash/pop 之后除了重建，还必须 grep 一次 DBG 泄漏再提交**
+- **executor_tests failset 提取口径修正**：`grep "FAILED"` 会被并行测试输出交错吞行（114 failed 只抓到 101 行），必须从 cargo 输出尾部的 `failures:` 汇总段提取。本轮 failset 与合并时 **114 完全一致（零新增、零回归）**
+- **array.tests vs GNU diff 行：基线 461 → 上批 444 → 当前 435**（run-ab-b.sh 的 wc -l 口径）。勘误：早先把 `ls -la` 的**字节数**（13344/12965）误当 diff 行数汇报——diff 行数与字节数差 30 倍，测量汇报必须只认 wc -l 输出
+- **census array 桶形态复核（96c88d19）**：`declare -a f=([0]="\${d[@]}")` 字面存储与 declare -p 输出、`{x}`/`y{` 花括号形态均已与 GNU 5.2.21 一致（target/forms/census-array.sh P1/P2/P3 PASS）——census 的 297 行是 8d30cd04 基线值，合并后该桶三形态已修
+- **census quotearray 桶 #2 确认真 bug（P4 FAIL）**：`A["x],b[\$(echo uname >&2)"]=v` —— rubash 把双引号键内 `\$(...)` 按未转义处理（真执行了 echo uname），键被截成 `x],b[\`；GNU 在双引号内 `\$` 为字面，存全键 `x],b[\$(echo uname >&2)`。简单形态 `B["x]b"]` PASS。根因方向：assoc 键词法对双引号内 `\$` 的转义处理（疑与 wt-prepush WIP 的 declare.rs 族相邻，修前需协调）
+- **转 PASS**：f55、f61、f64、f67、f72、f78、gg4、gg5
+
+### eval 二次解析族残余（本轮界定，未落地）
+
+- **xtrace 展示保真**：GNU 的 `set -x` 打印 eval 参数是**展开后**的多词带引号保护形态（`+ eval 'b2=(a b' 'c)'`）；rubash 打印展开前/单词形态。语义已对齐，仅 xtrace 显示差异（gg7/gg2 X1/X3）
+- **`__RUBASH_CA1__` 标记泄漏到 xtrace**（`eval a2=(x y)` 显示 `+ eval a2=__RUBASH_CA1__(x y)`）与用户可见输出（`echo a=(x y)`）——同前批"非声明 builtin 后 name=(...)" gap，合并处理
+- **f58/f75 转义引号形态**（`eval a2=("${a[@]/#/\"-iname '\"}")`）：`'` 在双引号内为字面反斜杠+引号，eval 重解析侧元素扫描与 GNU 的 `'-quote 吸收语义不一致，产出 4 元素 vs GNU 2 元素
+- **gnu-probe-eval F**（`eval "a2='-iname 'abc ..."` 标量形状）：GNU 报 `unexpected EOF while looking for matching “'”`（status 2），rubash 继续执行报 command not found——重解析侧未闭合引号是 fatal parse error
+- **gg3 R2**（eval 参数中 `$()` 产物分词）、**gg6**（`"p${a[@]}s"` 前缀贴首元素、后缀贴尾元素，rubash 塌缩单词）——词分裂族 gap，与 eval 族同池
+
+### 测量基建坑（复用价值高）
+
+- WSL 启动 Windows exe **不传普通 env**（RUBASH_DBG/THIS_SH 均如此）：调参/调试须在 Windows 侧（Git Bash）直跑 exe；套件 harness 的 THIS_SH 必须 WSL 路径形式（/mnt/d/...），WSL bash 无法直接 exec `D:/...`
+- Bash 工具会对 wsl bash -c 的字符串**预展开** `$PATH`/`$R`/`$(...)`（`\$` 转义不可靠）：一切复杂命令落脚本文件再调用（target/run-*.sh 均为此产物）

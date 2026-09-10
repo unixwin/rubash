@@ -251,7 +251,11 @@ impl Executor {
     pub(in crate::executor) fn expand_parameter_named_value(&self, name: &str) -> String {
         match name {
             "#" => return self.positional_params.len().to_string(),
-            "@" | "*" => return self.positional_params.join(" "),
+            // GNU string_list_dollar_star (subst.c): `*` joins with IFS[0]
+            // in scalar contexts (assignments, quoted joins); the same rule
+            // the unbraced `$*` walker path applies. `@` stays space-joined.
+            "@" => return self.positional_params.join(" "),
+            "*" => return self.positional_params_star_joined(),
             "?" => return self.exit_code.to_string(),
             "$" => return self.shell_pid_value().to_string(),
             "!" => return self.last_background_pid_value(),

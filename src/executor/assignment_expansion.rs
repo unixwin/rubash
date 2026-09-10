@@ -1,4 +1,5 @@
 use super::*;
+use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::executor) struct AssignmentExpansionResult {
@@ -6,6 +7,41 @@ pub(in crate::executor) struct AssignmentExpansionResult {
     pub(in crate::executor) substitution_status: Option<i32>,
     pub(in crate::executor) arithmetic_error: bool,
     pub(in crate::executor) arithmetic_nonfatal_error: bool,
+}
+
+/// Hoist raw `"` quote DATA to `marker` before assignment expansion, but
+/// leave the quotes inside a `${...}` body alone: those are quoting
+/// operators owned by the parameter-expansion pipeline downstream (the
+/// patsub replacement scanner mark_patsub_replacement_quotes consumes them,
+/// exactly as it does on the echo path). Quote removal keeps `${...}`
+/// bodies lexically intact (copy_braced_parameter_unquoted), and
+/// single-quoted segment data can never contain a raw `${` (the lexer
+/// protects those dollars as \x1f), so a plain `${` here is always a real
+/// expansion body (array6.sub: a2=("${a[@]/#/"-iname '"}")).
+fn hoist_data_double_quotes(value: &str, marker: &str) -> String {
+    if !value.contains("${") {
+        return value.replace('"', marker);
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(offset) = rest.find("${") {
+        out.push_str(&rest[..offset].replace('"', marker));
+        let body_start = offset + 2;
+        match matching_parameter_brace(&rest[body_start..]) {
+            Some(close) => {
+                out.push_str(&rest[offset..body_start + close + 1]);
+                rest = &rest[body_start + close + 1..];
+            }
+            None => {
+                // Unterminated body: keep the tail verbatim, matching the
+                // downstream scanner which also fails to close it.
+                out.push_str(&rest[offset..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(&rest.replace('"', marker));
+    out
 }
 
 impl Executor {
@@ -45,7 +81,7 @@ impl Executor {
             return self.expand_assignment_value_inner(value);
         }
         const DQ_DATA: &str = "\u{E001}";
-        let expanded = self.expand_assignment_value_inner(&value.replace('"', DQ_DATA));
+        let expanded = self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
         expanded.replace(DQ_DATA, "\"")
     }
 
@@ -259,7 +295,14 @@ impl Executor {
                 .replace('\x17', DATA_SINGLE_QUOTE)
                 .replace('\x18', DATA_DOUBLE_QUOTE);
             let expanded_value = self.expand_embedded_parameters_mut(&hoisted_value);
-            let stripped = if expanded_value.contains(['\'', '"'])
+            // A compound assignment never takes a whole-value quote-removal
+            // pass: element words carry their own quote structure through the
+            // embedded walker, and quotes that patsub replacement produced as
+            // DATA (array6.sub ${a[@]/#/-iname '"}) would be re-stripped as
+            // syntax here.
+            let compound_paren_value = value.starts_with('(') && value.ends_with(')');
+            let stripped = if !compound_paren_value
+                && expanded_value.contains(['\'', '"'])
                 && !contains_command_substitution_payload(&expanded_value)
             {
                 crate::lexer::remove_shell_quotes(&expanded_value)
@@ -466,32 +509,84 @@ impl Executor {
         value: &str,
         quoted: bool,
     ) -> Option<String> {
+        self.expand_compound_positional_at_assignment_impl(value, quoted, false)
+    }
+
+    /// GNU eval-argument flatten (xtrace evidence, gg7.sh E1): an
+    /// assignment-shaped word after `eval` expands as a NORMAL word -- the
+    /// per-element results join with a bare space and NO synthetic
+    /// re-quoting (`eval b2=("${x[@]}")` with x=("a b" c) receives
+    /// `b2=(a b c)` and eval's reparse splits it into three elements).
+    /// Declaration builtins take the re-quoted assignment flatten instead.
+    pub(in crate::executor) fn expand_compound_positional_at_assignment_bare(
+        &self,
+        value: &str,
+    ) -> Option<String> {
+        self.expand_compound_positional_at_assignment_impl(value, false, true)
+    }
+
+    fn expand_compound_positional_at_assignment_impl(
+        &self,
+        value: &str,
+        quoted: bool,
+        bare: bool,
+    ) -> Option<String> {
         let inner = value.strip_prefix('(')?.strip_suffix(')')?;
         let mut changed = false;
         let mut values = Vec::new();
-        for token in split_storage_words(inner) {
-            let token = unquote_storage_value(&token);
+        // Bare (eval-argument) flatten stores expansion results verbatim:
+        // quote_array_value's synthetic wrapping would change what eval's
+        // re-parsed string looks like versus GNU (gg7.sh E1/E2 divergence).
+        macro_rules! store {
+            ($v:expr) => {
+                if bare { $v.to_string() } else { quote_array_value($v) }
+            };
+            // Literal fallback element: bare mode keeps the raw storage
+            // token (quotes intact) so eval's reparse sees the same
+            // quoting GNU's verbatim flatten produces.
+            ($v:expr, $raw:expr) => {
+                if bare { $raw.clone() } else { quote_array_value($v) }
+            };
+        }
+        // Bare (eval-argument) flatten keeps the RAW token text: literal
+        // quoted elements like 'a b' must reach eval's reparse with their
+        // quotes intact so the element stays one field.
+        for token_raw in split_storage_words(inner) {
+            let token = unquote_storage_value(&token_raw);
             if token.strip_prefix('\x1d') == Some("${@}") || token == "$@" {
                 changed = true;
                 values.extend(
                     self.positional_params
                         .iter()
-                        .map(|value| quote_array_value(value)),
+                        .map(|value| store!(value)),
                 );
             } else if let Some(array_name) = token
                 .strip_prefix('\x1d')
                 .and_then(|token| token.strip_prefix("${"))
                 .and_then(|token| token.strip_suffix("[@]}"))
+                .or_else(|| {
+                    // The atomic lexer path (skip_word_at) preserves the
+                    // element's wrapping quotes as raw text, so the hoist
+                    // pass delivers `"${a[@]}"` as
+                    // \u{E001}${a[@]}\u{E001} with no \x1d quoted-RHS
+                    // marker; the [@] list must still fan out per element
+                    // (array.tests: local v=("${foo[@]}") keeps 'b c' one
+                    // element).
+                    token
+                        .trim_matches('\u{E001}')
+                        .strip_prefix("${")
+                        .and_then(|token| token.strip_suffix("[@]}"))
+                })
             {
                 if let Some(storage) = self.parameter_array_storage(array_name) {
                     changed = true;
                     values.extend(
                         array_values(&storage)
                             .iter()
-                            .map(|value| quote_array_value(value)),
+                            .map(|value| store!(value)),
                     );
                 } else {
-                    values.push(quote_array_value(""));
+                    values.push(store!(""));
                 }
             } else if let Some(indirect_name) = token
                 .strip_prefix('\x1d')
@@ -509,7 +604,7 @@ impl Executor {
                         changed = true;
                         values.append(&mut expanded);
                     }
-                    None => values.push(quote_array_value(&token)),
+                    None => values.push(store!(&token, token_raw)),
                 }
             } else if let Some(indirect_name) = token
                 .strip_prefix("${")
@@ -525,7 +620,79 @@ impl Executor {
                         changed = true;
                         values.append(&mut expanded);
                     }
-                    None => values.push(quote_array_value(&token)),
+                    None => values.push(store!(&token, token_raw)),
+                }
+            } else if let Some((var_name, pattern, replacement, global)) = {
+                // The hoist pass carries the element's wrapping quotes as
+                // DQ_DATA markers; strip them before matching the patsub
+                // shape (`\u{E001}${a[@]/#/"q"}\u{E001}`).
+                let core = token.trim_matches('\u{E001}');
+                core.strip_prefix("${")
+                    .and_then(|token| token.strip_suffix('}'))
+                    .and_then(parse_parameter_replacement)
+                    .filter(|(var_name, _, _, _)| {
+                        var_name.ends_with("[@]")
+                            || var_name.ends_with("[*]")
+                            || *var_name == "@"
+                            || *var_name == "*"
+                    })
+            } {
+                // A quoted `${a[@]/pat/rep}` (or `${@/pat/rep}`) element
+                // expands PER ELEMENT (GNU subst.c param_expand +
+                // arrayfunc.c: the [@] word list stays a list inside the
+                // compound assignment). The generic word expander would join
+                // it into one string, collapsing the array to a single
+                // element.
+                let storage_name = var_name
+                    .strip_suffix("[@]")
+                    .or_else(|| var_name.strip_suffix("[*]"))
+                    .unwrap_or(var_name);
+                let storage_opt = self.parameter_array_storage(storage_name);
+                let element_values: Vec<String> = if var_name == "@" || var_name == "*" {
+                    self.positional_params.clone()
+                } else {
+                    match storage_opt {
+                        Some(storage) => array_values(&storage),
+                        None => Vec::new(),
+                    }
+                };
+                if element_values.is_empty() && var_name != "@" && var_name != "*" {
+                    values.push(store!(&token, token_raw));
+                } else {
+                    let pattern = self.expand_parameter_pattern_word(
+                        &pattern
+                            .replace(r"\/", "/")
+                            .replace('\x14', "/")
+                            .replace('\x18', "/"),
+                    );
+                    let replacement = self.expand_patsub_replacement_text(replacement);
+                    changed = true;
+                    if var_name.ends_with("[*]") || var_name == "*" {
+                        // A quoted `[*]` form joins into ONE compound element
+                        // (GNU join_array_values with the first IFS char).
+                        let joined = element_values
+                            .iter()
+                            .map(|value| {
+                                self.replace_patsub_pattern(
+                                    value,
+                                    &pattern,
+                                    &replacement,
+                                    global,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(&self.ifs_first_char_separator());
+                        values.push(store!(&joined));
+                    } else {
+                        values.extend(element_values.iter().map(|value| {
+                            store!(&self.replace_patsub_pattern(
+                                value,
+                                &pattern,
+                                &replacement,
+                                global,
+                            ))
+                        }));
+                    }
                 }
             } else if let Some(name) = token
                 .strip_prefix('\x1d')
@@ -538,7 +705,7 @@ impl Executor {
                         values.extend(
                             positional_parameter_substring(&self.positional_params, offset, length)
                                 .iter()
-                                .map(|value| quote_array_value(value)),
+                                .map(|value| store!(value)),
                         );
                         continue;
                     }
@@ -555,15 +722,15 @@ impl Executor {
                                     length.and_then(|length| usize::try_from(length).ok()),
                                 )
                                 .iter()
-                                .map(|value| quote_array_value(value)),
+                                .map(|value| store!(value)),
                             );
                             continue;
                         }
                     }
                 }
-                values.push(quote_array_value(&token));
+                values.push(store!(&token, token_raw));
             } else {
-                values.push(quote_array_value(&token));
+                values.push(store!(&token, token_raw));
             }
         }
         changed.then(|| format!("({})", values.join(" ")))
@@ -749,10 +916,36 @@ fn split_compound_element_words(value: &str) -> Vec<String> {
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
-    for ch in value.chars() {
+    let mut chars = value.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         if escaped {
             token.push(ch);
             escaped = false;
+            continue;
+        }
+        if ch == '$' && !single && matches!(chars.peek(), Some((_, '{'))) {
+            // A `${...}` body is scanned by GNU parse_matched_pair with its
+            // own nested-pair quote state: body quotes neither split the
+            // element here nor leak into the element-level quote state
+            // (array6.sub: ("${a[@]/#/"-iname '"}")).
+            token.push(ch);
+            token.push('{');
+            chars.next();
+            let rest = &value[offset + 2..];
+            if let Some(scan) = scan_braced_parameter_body(
+                rest,
+                BraceContext {
+                    outer_double_quote: double,
+                    posix: false,
+                    replacement_context: false,
+                    initial_state: DolbraceState::Param,
+                },
+            ) {
+                token.push_str(&rest[..scan.end]);
+                for _ in 0..rest[..scan.end].chars().count() {
+                    chars.next();
+                }
+            }
             continue;
         }
         match ch {

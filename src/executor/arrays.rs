@@ -28,6 +28,7 @@ use super::{
     strip_matching_quotes, unquote_storage_value, Executor, ParameterTransform,
     ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
+use crate::lexer::remove_shell_quotes;
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((left, _)) = word.split_once('=') else {
@@ -423,6 +424,14 @@ pub(super) fn append_array_value(
             }
             continue;
         }
+        // GNU field splitting for compound assignment tokens: only
+        // whitespace OUTSIDE quote pairs splits a field. `'a b'` is one
+        // element, and so is `'a b'c` -- the quoted span continues the
+        // same field after the closing quote (array6.sub
+        // a2=(-iname 'abc -iname 'def) stores (-iname, "abc -iname def")).
+        let split_needed = token_has_unquoted_whitespace(&token);
+        let partially_quoted =
+            !quoted_token && (token.contains('\'') || token.contains('"'));
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
@@ -438,13 +447,20 @@ pub(super) fn append_array_value(
             }
             continue;
         }
-        if token.contains('\n') || (token.contains(char::is_whitespace) && !quoted_token) {
+        if split_needed {
             for value in field_split_values_with_ifs(&token, ifs) {
                 entries.insert(next_index, value.to_string());
                 next_index += 1;
             }
             continue;
         }
+        let token = if partially_quoted {
+            // A quote pair inside the token (not wrapping it) is still an
+            // OPERATOR pair: `'a b'c` stores `a bc`, with the quotes gone.
+            remove_shell_quotes(&token)
+        } else {
+            token
+        };
         if scalar_append && !entries.is_empty() {
             let current = entries.get(&0).cloned().unwrap_or_default();
             let appended = if integer {
@@ -490,6 +506,30 @@ pub(super) fn array_assignment_has_subscript(left: &str) -> bool {
     left.strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
         .is_some()
+}
+
+/// True when the raw token has whitespace outside every quote pair (GNU
+/// field splitting for compound assignment tokens): `'a b'` has none (one
+/// field), `'a b'c d` does (split after the quoted span), and
+/// `'a b'c` does not (the quoted span continues the same field).
+fn token_has_unquoted_whitespace(token: &str) -> bool {
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for ch in token.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            c if c.is_whitespace() && !single && !double => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(super) fn array_assignment_tokens(value: &str) -> Vec<String> {

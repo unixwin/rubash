@@ -103,7 +103,7 @@ impl<'a> Lexer<'a> {
                         Some(Token::new(TokenKind::RedirectOut, "&>", start))
                     }
                 } else if self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-                    self.skip_word();
+                    self.skip_word_at(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else {
                     Some(Token::new(TokenKind::Background, "&", start))
@@ -112,7 +112,7 @@ impl<'a> Lexer<'a> {
             '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
             '!' => {
                 if self.peek() == Some('=') {
-                    self.skip_word();
+                    self.skip_word_at(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else if self.peek() == Some('(') {
                     Some(self.finish_word_token(start, false))
@@ -212,7 +212,7 @@ impl<'a> Lexer<'a> {
                 } else if self.peek() == Some('<') {
                     Some(self.finish_prefixed_input_redirect(start))
                 } else {
-                    self.skip_word();
+                    self.skip_word_at(start);
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 }
             }
@@ -276,7 +276,7 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {
                     let pos = self.position;
-                    self.skip_word();
+                    self.skip_word_at(start);
                     if !is_simple_parameter_tail(self.slice(pos)) {
                         return Some(self.finish_word_token(start, false));
                     }

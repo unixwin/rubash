@@ -312,24 +312,25 @@ where
 fn assoc_bare_element(value: &str) -> Option<String> {
     let inner = value.strip_prefix('(').and_then(|v| v.strip_suffix(')'))?;
     // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
-    // the mode. A leading word without the [key]= assignment shape puts the
-    // whole list into alternating key/value mode, so no word is "bare"
-    // (assoc11: declare -A inside=(a 1 b 2 c 3)).
-    let mut first = true;
-    for token in parse_array_tokens(inner) {
-        if first {
-            first = false;
-            if !token.starts_with('[') {
-                return None;
-            }
-        }
+    // the mode. A first word carrying `=` selects the strict [key]=value
+    // form where a bare word is rejected; a first word without `=` puts the
+    // whole list into alternating key/value pairs, and no word is "bare"
+    // there — even a bracketed word like [x] becomes a literal key
+    // (assoc11: declare -A inside=(a 1 b 2 c 3); comsub companion
+    // declare -A a=([x] one [y] two) stores keys "[x]"/"[y]").
+    let tokens: Vec<String> = parse_array_tokens(inner);
+    let strict_mode = tokens.first().map(|token| token.contains('=')).unwrap_or(false);
+    if !strict_mode {
+        return None;
+    }
+    for token in &tokens {
         let subscript_end = token.trim_end_matches(']').rfind(']');
         let eq = token.find('=');
         let is_subscript = token.starts_with('[')
             && token.contains('=')
             && subscript_end.map_or(false, |i| eq.map_or(false, |e| i < e));
         if !is_subscript && !token.contains('=') {
-            return Some(token);
+            return Some(token.clone());
         }
     }
     None

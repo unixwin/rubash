@@ -7,7 +7,10 @@ impl Executor {
     ) -> Option<String> {
         match name {
             "#" => return Some(self.positional_params.len().to_string()),
-            "@" | "*" => return Some(self.positional_params.join(" ")),
+            // GNU string_list_dollar_star: `*` joins with IFS[0] in scalar
+            // contexts; `@` stays space-joined.
+            "@" => return Some(self.positional_params.join(" ")),
+            "*" => return Some(self.positional_params_star_joined()),
             "?" => return Some(self.exit_code.to_string()),
             "$" => return Some(self.shell_pid_value().to_string()),
             "!" => return Some(self.last_background_pid_value()),

@@ -11,7 +11,7 @@ impl<'a> Lexer<'a> {
         if self.word_so_far_ends_extglob_operator(start) && self.peek() == Some('(') {
             self.skip_extglob_group();
         }
-        self.skip_word();
+        self.skip_word_at(start);
         let raw = self.slice(start);
         // Only real assignment words (`a=$(cmd)`) preserve quotes verbatim so
         // the RHS quote state survives to assignment expansion. Ordinary words
@@ -94,12 +94,25 @@ impl<'a> Lexer<'a> {
         Token::new_with_raw(kind, &value, &raw, start)
     }
 
+    pub(super) fn skip_word_at(&mut self, token_start: usize) {
+        self.skip_word_inner(token_start);
+    }
+
     pub(super) fn skip_word(&mut self) {
+        self.skip_word_inner(self.position);
+    }
+
+    fn skip_word_inner(&mut self, token_start: usize) {
         let mut extglob_operator = false;
         let array_assignment = self.looks_like_array_element_assignment();
         let mut array_subscript_depth = 0usize;
         let mut array_value_paren_depth = 0usize;
-        let word_start = self.position;
+        // GNU parse.y read_token_word tracks the whole token: a `name=(...)`
+        // compound assignment is one atomic word regardless of the name's
+        // length, so compound_assignment_start must see the FULL name
+        // (`a2=(...)`), not the tail after next_token consumed the first
+        // character.
+        let word_start = token_start;
         // GNU parse.y keeps a "name=(...)" compound assignment word atomic
         // even when it appears as a builtin operand ("declare -ar
         // b=([1]="" [2]="bdef")"); the word must not be split at the

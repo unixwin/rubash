@@ -39,6 +39,16 @@ fn execute_ast_with_args(
     args: &[String],
     source_name: Option<&str>,
 ) -> Result<(), ExecuteError> {
+    // GNU builtins/source.def: the return status of `.` is the exit status of
+    // the last command executed in the file, or **zero** when no commands run
+    // (builtins.tests sources a zero-length file and expects $? == 0). An
+    // empty AST must therefore succeed without touching any shell state —
+    // positional params, BASH_SOURCE frames, and traps stay exactly as the
+    // sourcer left them.
+    if ast.commands.is_empty() {
+        executor.set_exit_code(0);
+        return Ok(());
+    }
     let old_positional_params = executor.positional_params();
     let source_positional_params: Vec<String> = args.to_vec();
     let had_source_args = !source_positional_params.is_empty();

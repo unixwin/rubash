@@ -275,6 +275,25 @@ impl Executor {
             return false;
         }
 
+        // Integer/uppercase/lowercase attributes transform the stored value
+        // exactly like the declare assignment path does (arrayfunc.c). This
+        // applies to both indexed and associative arrays.
+        let value = if is_marked_var(&self.env_vars, INTEGER_VARS, array_name) {
+            match self.eval_arithmetic_expansion_value(&value) {
+                Some(evaluated) => evaluated.to_string(),
+                None => value,
+            }
+        } else {
+            value
+        };
+        let value = if is_marked_var(&self.env_vars, UPPERCASE_VARS, array_name) {
+            value.to_uppercase()
+        } else if is_marked_var(&self.env_vars, LOWERCASE_VARS, array_name) {
+            value.to_lowercase()
+        } else {
+            value
+        };
+
         if is_marked_var(&self.env_vars, ASSOC_VARS, array_name) {
             let key = self.assoc_subscript_key(key);
             let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
@@ -293,9 +312,22 @@ impl Executor {
             return true;
         }
 
-        let Some(index) = key.parse::<usize>().ok() else {
+        // GNU evaluates indexed-array subscripts arithmetically at assignment
+        // time (subst.c/eval_arith_subscript): ${a[$(echo 42)]=x} lands at
+        // index 42 instead of being dropped as an unparseable literal key.
+        // The @ and * subscripts are expansion operators, not arithmetic
+        // operands, and keep their existing handling.
+        let subscript = self.expand_arithmetic_special_parameters(&key);
+        if matches!(subscript.as_str(), "@" | "*") || subscript.trim().is_empty() {
+            return false;
+        }
+        let Some(index) = self.eval_arithmetic_expansion_value(&subscript) else {
             return false;
         };
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+
         let current = self.env_vars.get(array_name).cloned().unwrap_or_default();
         let mut entries = indexed_array_entries(&current);
         entries.insert(index, value);

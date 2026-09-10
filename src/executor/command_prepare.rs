@@ -507,6 +507,32 @@ impl Executor {
         // the point where their word is expanded. Applying them to every
         // command word up front changes Bash's left-to-right semantics.
         self.apply_parameter_assignment_expansions_in_word(word);
+        // GNU eval arguments expand as NORMAL words (subst.c evalstring:
+        // word_list_expand, no W_ASSIGNMENT re-quoting), then eval joins
+        // them and re-reads the string as parser input. An assignment-shaped
+        // operand therefore must flatten its compound elements VERBATIM --
+        // `eval b2=("${x[@]}")` yields args `b2=("a b` + `c)` in GNU
+        // (xtrace), joined to `b2=(a b c)` and re-parsed to (a b c), while
+        // the assignment-context synthetic re-quote would reparse as
+        // ("a b" "c"). declaration builtins keep the re-quote path
+        // (assignment_builtin_receives_assignment_word).
+        if cmd.words.first().map(String::as_str) == Some("eval")
+            && index > 0
+            && word.contains(COMPOUND_ASSIGNMENT_MARKER)
+        {
+            if let Some((name, value)) = word.split_once('=') {
+                let value = value
+                    .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
+                    .unwrap_or(value);
+                if value.starts_with('(') && value.ends_with(')') {
+                    if let Some(flattened) =
+                        self.expand_compound_positional_at_assignment_bare(value)
+                    {
+                        return vec![format!("{name}={flattened}")];
+                    }
+                }
+            }
+        }
         // GNU subst.c materializes a complete quoted arithmetic expansion before
         // word splitting. Keep it out of the legacy `$()` materializer, which
         // otherwise treats the inner `+` as a command word.

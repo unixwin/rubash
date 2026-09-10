@@ -944,7 +944,9 @@ impl Executor {
             // (more-exp.tests `${*-x}` with no args prints x) instead of
             // keeping a null value.
             "@" | "*" if self.positional_params.is_empty() => None,
-            "@" | "*" => Some(self.positional_params.join(" ")),
+            // GNU string_list_dollar_star: `*` joins with IFS[0]; `@` space.
+            "@" => Some(self.positional_params.join(" ")),
+            "*" => Some(self.positional_params_star_joined()),
             "?" => Some(self.exit_code.to_string()),
             "$" => Some(self.shell_pid_value().to_string()),
             // `$!` is unset until the first background job (variables.c), so

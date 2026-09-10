@@ -69,9 +69,14 @@ pub(in crate::builtins::declare) fn append_assoc_value(
     };
     let mut entries = parse_assoc_words(current);
     let tokens = merge_assoc_subscript_tokens(parse_array_tokens(value));
+    // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
+    // the mode — a first word with `=` selects strict [key]=value form;
+    // otherwise the whole list is alternating literal key/value pairs
+    // (declare -A a=([x] one [y] two) keys stay "[x]"/"[y]").
     let explicit_subscripts = tokens
-        .iter()
-        .any(|token| assoc_assignment_token(token).is_some());
+        .first()
+        .map(|token| token.contains('='))
+        .unwrap_or(false);
 
     if !explicit_subscripts {
         for pair in tokens.chunks(2) {

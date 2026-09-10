@@ -1,5 +1,6 @@
 use super::*;
 use crate::lexer::Token;
+use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
 pub(super) fn compound_assignment_from_word(
     word: &str,
@@ -149,50 +150,64 @@ fn split_compound_element_operator<'a>(
 fn split_compound_assignment_words(inner: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
-    let chars = inner.chars().collect::<Vec<_>>();
-    let mut index = 0usize;
     let mut double = false;
     let mut single = false;
     let mut escaped = false;
-    let mut brace_depth = 0usize;
     let mut bracket_depth = 0usize;
     let mut paren_depth = 0usize;
-    while index < chars.len() {
-        let ch = chars[index];
+    let mut chars = inner.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         if escaped {
             current.push(ch);
             escaped = false;
-            index += 1;
             continue;
         }
 
         if ch == '\\' && !single {
             current.push(ch);
             escaped = true;
-            index += 1;
             continue;
         }
 
         if ch == '$' && !single {
-            if matches!(chars.get(index + 1), Some('(')) {
+            if matches!(chars.peek(), Some((_, '('))) {
                 current.push(ch);
                 current.push('(');
                 paren_depth += 1;
-                index += 2;
+                chars.next();
                 continue;
             }
-            if matches!(chars.get(index + 1), Some('{')) {
+            if matches!(chars.peek(), Some((_, '{'))) {
                 current.push(ch);
                 current.push('{');
-                brace_depth += 1;
-                index += 2;
+                chars.next();
+                // A `${...}` body is scanned by GNU parse_matched_pair with
+                // its own nested-pair quote state, so body quotes neither
+                // split the element here nor leak into the element-level
+                // quote state (array6.sub: ("${a[@]/#/"-iname '"}")).
+                let rest = &inner[offset + 2..];
+                let scan = scan_braced_parameter_body(
+                    rest,
+                    BraceContext {
+                        outer_double_quote: double,
+                        posix: false,
+                        replacement_context: false,
+                        initial_state: DolbraceState::Param,
+                    },
+                );
+                if let Some(scan) = scan {
+                    current.push_str(&rest[..scan.end]);
+                    for _ in 0..rest[..scan.end].chars().count() {
+                        chars.next();
+                    }
+                }
                 continue;
             }
-            if matches!(chars.get(index + 1), Some('[')) {
+            if matches!(chars.peek(), Some((_, '['))) {
                 current.push(ch);
                 current.push('[');
                 bracket_depth += 1;
-                index += 2;
+                chars.next();
                 continue;
             }
         }
@@ -200,10 +215,8 @@ fn split_compound_assignment_words(inner: &str) -> Vec<String> {
         match ch {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
-            '[' if !single && !double && brace_depth == 0 && paren_depth == 0 => bracket_depth += 1,
+            '[' if !single && !double && paren_depth == 0 => bracket_depth += 1,
             ']' if !single && bracket_depth > 0 => bracket_depth -= 1,
-            '{' if !single && brace_depth > 0 => brace_depth += 1,
-            '}' if !single && brace_depth > 0 => brace_depth -= 1,
             '(' if !single && paren_depth > 0 => paren_depth += 1,
             ')' if !single && paren_depth > 0 => paren_depth -= 1,
             _ => {}
@@ -212,25 +225,21 @@ fn split_compound_assignment_words(inner: &str) -> Vec<String> {
         if ch.is_ascii_whitespace()
             && !single
             && !double
-            && brace_depth == 0
             && bracket_depth == 0
             && paren_depth == 0
         {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
             }
-            index += 1;
             continue;
         }
 
         current.push(ch);
-        index += 1;
     }
 
     if !current.is_empty() {
         words.push(current);
     }
-
     words
 }
 
@@ -249,9 +258,31 @@ fn compound_raw_quote_unclosed(raw: &str) -> bool {
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
-    for ch in raw.chars() {
+    let mut chars = raw.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         if escaped {
             escaped = false;
+            continue;
+        }
+        if ch == '$' && matches!(chars.peek(), Some((_, '{'))) {
+            // A `${...}` body carries its own nested-pair quote scan (see
+            // split_compound_assignment_words): body quotes never count
+            // toward the element-level unclosed-quote decision.
+            chars.next();
+            let rest = &raw[offset + 2..];
+            if let Some(scan) = scan_braced_parameter_body(
+                rest,
+                BraceContext {
+                    outer_double_quote: in_double,
+                    posix: false,
+                    replacement_context: false,
+                    initial_state: DolbraceState::Param,
+                },
+            ) {
+                for _ in 0..rest[..scan.end].chars().count() {
+                    chars.next();
+                }
+            }
             continue;
         }
         match ch {

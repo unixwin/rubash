@@ -140,6 +140,40 @@ builtin），但实现是进程内执行 coreutils 语义、**没有外部回退
 
 ## 四、与 winuxcmd 的重叠
 
+### 4.1 外部文件命令的进程内模拟（external_file_builtins.rs）
+
+除下述 13 个重叠命令外，还有一层**只在本进程内模拟、默认不回退外部命令**
+的文件命令：`cp` `rm` `rmdir` `mkdir` `touch` `chmod` `cat` `sed`（简单参数）
+`mkfifo` `tty`。它们由 `executor/external_file_builtins.rs` 实现，
+`external_file_builtins_enabled` 默认开启（init.rs），仅测试代码会关闭。
+
+关键事实：
+
+- **裸跑 rubash.exe（83 套件 harness 即如此）时这层模拟生效**，上面表里的
+  重叠判定不适用；产品 niubash（niubash-runtime/shell.rs:253）会关闭该层，
+  让 winuxcmd 的同名命令接管。两侧因此行为可能不同。
+- 模拟实现必须对齐 GNU coreutils 的 stdout/rc（ledger 只计 stdout），错误
+  措辞按子进程 stderr 形式输出（无 shell 前缀、走缓冲 stderr 通道，
+  `2>/dev/null` 可捕获）。2026-09-10 已按 GNU 差分探针根治：cp `/dev/null`
+  读写两向语义、cat 多操作数遇缺继续、rm `-r/-f/-v` 组合与目录语义、
+  mkdir `-p/-m/File exists`、touch/rmdir missing operand、chmod
+  `cannot access`、mkfifo `File exists`。
+- **拼写契约分层**（2026-09-10 队长裁定）：POSIX 设备拼写（`/dev/null` 等）
+  是 **shell（rubash）边界的翻译职责**——spawn 外部命令时统一翻成 Windows
+  形态（`NUL`）；winuxcmd 作为 coreutils 移植只讲 Windows 拼写，不认
+  `/dev/null` 不是缺陷（可选支持 `NUL`，需绕过 CRT stat 对设备名的 EINVAL，
+  用 CreateFile 路径）。
+- **decline 策略**（同 sed fast-path 设计）：cp/cat 带任何标志（`-` 开头
+  且非裸 `-`）即返回未处理、交真实外部命令（产品=winuxcmd、harness=宿主
+  coreutils，两者均为 GNU 形态）；无标志简单形态走进程内模拟。三方差分
+  （GNU 5.3.0 / winuxcmd / rubash，probe9-11）在此策略下 stdout+stderr
+  全对齐。winuxcmd 侧已知措辞缺口：chmod 报错缺 strerror 后缀；mkfifo 为
+  登记在案的 Windows limitation。
+- 宿主环境注入的 shell 函数（如 WorkBuddy 的 safe-bin `rm`）会合法遮蔽
+  这些命令——这是宿主层产物，不是 rubash 缺陷。
+
+### 4.2 重叠命令
+
 winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 13 个：
 
 `echo` `env` `kill` `printf` `pwd` `test` `[` `true` `false`（真 builtin）、

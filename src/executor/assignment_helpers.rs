@@ -61,9 +61,13 @@ pub(in crate::executor) fn append_assoc_value(
     };
     let mut entries = assoc_entries(current);
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
+    // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
+    // the mode — a first word with `=` selects strict [key]=value form;
+    // otherwise the whole list is alternating literal key/value pairs.
     let explicit_subscripts = tokens
-        .iter()
-        .any(|token| assoc_assignment_token(token).is_some());
+        .first()
+        .map(|token| token.contains('='))
+        .unwrap_or(false);
 
     if !explicit_subscripts {
         for pair in tokens.chunks(2) {
@@ -135,10 +139,15 @@ pub(in crate::executor) fn append_assoc_value(
 /// form (no explicit subscripts) — that form has no bare elements.
 pub(in crate::executor) fn assoc_bare_elements(value: &str) -> Vec<String> {
     let tokens = merge_assoc_subscript_tokens(array_assignment_tokens(value));
-    let explicit_subscripts = tokens
-        .iter()
-        .any(|token| assoc_assignment_token(token).is_some());
-    if !explicit_subscripts {
+    // GNU arrayfunc.c kvpair_assignment_p: the FIRST compound word decides
+    // the mode — a first word with `=` selects strict [key]=value form;
+    // otherwise the list is alternating literal key/value pairs with no
+    // bare elements (declare -A a=([x] one [y] two) keeps keys "[x]").
+    let strict_mode = tokens
+        .first()
+        .map(|token| token.contains('='))
+        .unwrap_or(false);
+    if !strict_mode {
         return Vec::new();
     }
     tokens
@@ -465,7 +474,8 @@ impl Iterator for StorageWordIter<'_> {
         let mut in_double = false;
         let mut in_single = false;
         let mut escaped = false;
-        for (relative, ch) in self.input[self.offset..].char_indices() {
+        let mut chars = self.input[self.offset..].char_indices().peekable();
+        while let Some((relative, ch)) = chars.next() {
             if escaped {
                 word.push(ch);
                 escaped = false;
@@ -474,6 +484,31 @@ impl Iterator for StorageWordIter<'_> {
             if ch == '\\' && in_double {
                 word.push(ch);
                 escaped = true;
+                continue;
+            }
+            if ch == '$' && !in_single && matches!(chars.peek(), Some((_, '{'))) {
+                // A `${...}` body is one lexical unit: GNU parse_matched_pair
+                // scans it with its own nested-pair quote state, so body
+                // whitespace never splits a compound-assignment word
+                // (array6.sub: ("${a[@]/#/-iname \'}")).
+                word.push(ch);
+                word.push('{');
+                chars.next();
+                let rest = &self.input[self.offset + relative + 2..];
+                if let Some(scan) = crate::lexer::dolbrace::scan_braced_parameter_body(
+                    rest,
+                    crate::lexer::dolbrace::BraceContext {
+                        outer_double_quote: in_double,
+                        posix: false,
+                        replacement_context: false,
+                        initial_state: crate::lexer::dolbrace::DolbraceState::Param,
+                    },
+                ) {
+                    word.push_str(&rest[..scan.end]);
+                    for _ in 0..rest[..scan.end].chars().count() {
+                        chars.next();
+                    }
+                }
                 continue;
             }
             // Mirror the declare storage splitter (declare/storage/words.rs):
