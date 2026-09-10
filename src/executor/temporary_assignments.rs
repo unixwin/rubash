@@ -203,14 +203,26 @@ impl Executor {
             }
             NamerefResolution::NotNameref => base_name.to_string(),
         };
-        // GNU variables.c bind_variable_internal: an assignment to a nameref
-        // whose cell is empty or not a valid name is rejected with
-        // sh_invalidid and the nameref is left unchanged
-        // (nameref12.sub: r=^ / r=% against a valueless or invalid cell).
+        // GNU variables.c bind_variable_internal: when a nameref has an
+        // empty cell (valueless, created by `declare -n name` without a
+        // value), an assignment with a valid shell name or array subscript
+        // sets the nameref target; an invalid value is rejected with
+        // sh_invalidid.  A nameref whose cell is already invalid (not
+        // empty, not a valid name) is left unchanged on any assignment
+        // (nameref12.sub: r=^ against an invalid cell).
         if is_marked_var(&self.env_vars, NAMEREF_VARS, base_name) {
             let cell = self.env_vars.get(base_name).cloned().unwrap_or_default();
             let cell_valid = is_shell_name(&cell) || parse_array_subscript(&cell).is_some();
             if !append && !cell_valid {
+                // Distinguish valueless (empty) from already-invalid cells.
+                let value_valid =
+                    is_shell_name(value.as_str()) || parse_array_subscript(value.as_str()).is_some();
+                if cell.is_empty() && value_valid {
+                    // Valueless nameref: set the target to the new value.
+                    self.env_vars.insert(base_name.to_string(), value.clone());
+                    self.exit_code = 0;
+                    return true;
+                }
                 let offender = if cell.is_empty() { value.as_str() } else { cell.as_str() };
                 let line = format!(
                     "{}`{offender}': not a valid identifier\n",
