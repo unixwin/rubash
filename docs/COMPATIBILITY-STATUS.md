@@ -594,6 +594,13 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
 - **残余（trap 3 行）**：trap6.sub `$( f )` 中函数内外部命令（`/bin/echo bar`）stdout 直写真实 stdout 未入捕获，RETURN trap 的 builtin 输出反被捕获——外部命令 comsub 捕获路径对路径前缀词失效（`$(/bin/echo x)` 亦泄漏而 `$(whoami)` 正常），判定分歧在 external_needs_fd_copy_capture 之外的派发路径，独立战役
 - 流程沉淀：跨树合并首选 `git apply -3way --ignore-whitespace`；冒烟探针先分 stdout/stderr 再下结论；`env` 在本机被 shim 劫持（/usr/bin/env 才真）；全量台账 10 分钟跑完可直接后台
 
+## 2026-09-10 census 桶 #4/#5：assoc 键序判定 + history -d 范围
+
+- **census #4 assoc"键序差异"判定：基本形态不成立**（assoc-order.sh 六形态 O1-O6：插入序/逆序/数字键/符号键/${!A[@]}/桶增长，GNU 5.2.21、5.3.0、rubash 三方逐字节一致——GNU 的序是哈希桶序非字典序，但 5.2↔5.3 稳定且 rubash 已复刻）。**真实差异在复合赋值键切分/转义层**：assoc.tests rubash vs GNU 5.3.0 = 323 行，形态：`(["bar\"bie"]="doll")` 键内转义错、多元素粘连成一个键、assoc9.sub L16 unexpected EOF、declare -p 对特殊键带外层引号包裹、BASH_CMDS 动态数组遍历序与计数列。**未修，另批大切片**（与 array 复合赋值同族，根因疑在 split_compound_assignment_words 对 [键] 内引号的处理）
+- **census #5 history 已修大头**：`history -d start-end` 范围删除（GNU 5.3 特性，history.def:190-262 + bashhist.c bash_delete_history_range + readline remove_history_range）。语义：分隔符扫描跳过首字符 `-`（`-2-4`=start -2, end 4）；负数从尾部计数（-1=最后一条）；正数减 history_base；闭区间 drain；first>last 静默 rc=1；越界报 "history: {side}: history position out of range"（side=对应端文本——GNU 用就地 NUL 截断）；valid_number 是 strtoimax base 10（general.c:248），**0xaf 是 invalid 报整个 arg**。history.tests 284→243 行
+- **残余（入册未修）**：套件里 rubash 会话历史入表内容/时机差（`history ; echo` 多命令行条目、空条目 ${BASH_VERSION%\.*} 行）；execute_history_session 的 erange 消息缺 shell stderr 前缀（ledger 不计项）；探针 bashver.sh 证实 BASH_VERSION %/# 变换四形态 rubash 与 GNU 一致
+- 回归：executor_tests failset 114 零新增；array.tests 5.3.0 口径 436 行维持
+
 ## 2026-09-10 数组嵌套引号替换战役（lane wt-regress @ 8d30cd04 起）
 
 任务：根治 `${a[@]/#/"-iname '"}`（数组形态 patsub + 替换词含引号）产出垃圾的问题。oracle：WSL `/usr/bin/bash`（GNU 5.2.21），测试件为 `target/issue-suites/results/bash-tests-rw/` 的 array.tests staged 副本 + 自编译 recho/zecho（/tmp/bash-helpers）。

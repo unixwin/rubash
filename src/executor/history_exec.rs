@@ -153,25 +153,96 @@ pub(in crate::executor) fn execute_history_session(
 
     match mode {
         HistoryMode::Delete => {
-            if let Some(offset) = delete_offset.as_deref().and_then(|v| v.parse::<i64>().ok()) {
-                let len = shell.entries.len();
-                let index: Option<usize> = if offset >= 0 {
-                    let offset = offset as usize;
-                    if offset >= shell.base && offset < shell.base + len {
-                        Some(offset - shell.base)
-                    } else {
-                        None
+            // GNU 5.3 history.def:190-262: `history -d start-end` deletes
+            // the INCLUSIVE range. The separator scan starts after a
+            // leading '-' (`-2-4` = start -2, end 4); negative numbers
+            // count back from the end of the list (-1 is the last entry);
+            // positive numbers are displayed numbers, offset by
+            // history_base (bashhist.c). valid_number accepts strtoimax
+            // base-0 spellings (0xaf). The C code NUL-terminates the
+            // separator in place, so erange diagnostics print the
+            // offending SIDE (start text on start errors, end text on
+            // end errors); first > last fails silently
+            // (remove_history_range, readline/history.c).
+            let len = shell.entries.len() as i128;
+            // GNU valid_number (general.c:248) uses strtoimax base 10 --
+            // no hex/octal spellings ("0xaf" is INVALID and reports the
+            // whole argument after restoring the '-' separator).
+            let parse_pos = |text: &str| -> Option<i128> {
+                let value: i128 = text.parse().ok()?;
+                if text.starts_with('-') && value < 0 {
+                    Some(value + len)
+                } else if value > 0 {
+                    Some(value - shell.base as i128)
+                } else {
+                    Some(0)
+                }
+            };
+            if let Some(arg) = delete_offset.as_deref() {
+                let search_from = if arg.starts_with('-') { 1 } else { 0 };
+                let range_pos = arg[search_from..].find('-').map(|pos| pos + search_from);
+                let ok = if let Some(pos) = range_pos {
+                    let (start_text, end_text) = (&arg[..pos], &arg[pos + 1..]);
+                    match (parse_pos(start_text), parse_pos(end_text)) {
+                        (Some(start), Some(end))
+                            if start >= 0
+                                && end >= 0
+                                && (start as usize) < shell.entries.len()
+                                && (end as usize) < shell.entries.len()
+                                && start <= end =>
+                        {
+                            shell.entries.drain(start as usize..=end as usize);
+                            true
+                        }
+                        (Some(start), Some(end)) if start >= 0 && start < len => {
+                            // start in range, end bad (or first > last
+                            // with a bad end): GNU reports the end text
+                            let bad = if end < 0 || end >= len {
+                                end_text
+                            } else {
+                                // first > last, both in range: silent
+                                return Ok(1);
+                            };
+                            let _ = writeln!(
+                                stderr,
+                                "history: {bad}: history position out of range"
+                            );
+                            return Ok(1);
+                        }
+                        (Some(start), _) if start < 0 || start >= len => {
+                            let _ =
+                                writeln!(stderr, "history: {start_text}: history position out of range");
+                            return Ok(1);
+                        }
+                        _ => {
+                            // unparseable sides: GNU restores the '-' and
+                            // reports the WHOLE argument
+                            let _ =
+                                writeln!(stderr, "history: {arg}: history position out of range");
+                            return Ok(1);
+                        }
                     }
                 } else {
-                    let back = (-offset) as usize;
-                    if back >= 1 && back <= len {
-                        Some(len - back)
-                    } else {
-                        None
+                    match parse_pos(arg) {
+                        Some(index) if index >= 0 && (index as usize) < shell.entries.len() => {
+                            shell.entries.remove(index as usize);
+                            true
+                        }
+                        _ => {
+                            if arg.parse::<i64>().is_err() {
+                                let _ = writeln!(stderr, "history: {arg}: invalid number");
+                            } else {
+                                let _ = writeln!(
+                                    stderr,
+                                    "history: {arg}: history position out of range"
+                                );
+                            }
+                            return Ok(1);
+                        }
                     }
                 };
-                if let Some(index) = index {
-                    shell.entries.remove(index);
+                if !ok {
+                    return Ok(1);
                 }
             }
         }

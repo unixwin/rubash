@@ -845,14 +845,65 @@ impl Executor {
                 Vec::new()
             } else if let Some(index) = delete {
                 let mut entries = provider.borrow_mut().entries()?;
-                if let Some(offset) = args
-                    .get(index + 1)
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|offset| *offset > 0)
-                {
-                    if offset <= entries.len() {
-                        entries.remove(offset - 1);
-                        provider.borrow_mut().replace(entries.clone())?;
+                // GNU 5.3 history.def:190-222: `history -d start-end`
+                // deletes the INCLUSIVE range. The separator scan starts
+                // after a leading '-' (so `-2-4` is start -2, end 4);
+                // negative numbers count back from the end of the list
+                // (-1 is the last entry), positive numbers are the
+                // displayed numbers (offset by history_base = 1).
+                // remove_history_range (lib/readline/history.c) silently
+                // refuses first > last and out-of-range positions.
+                let history_number = |text: &str| -> Option<i128> {
+                    let value: i128 = text.parse().ok()?;
+                    let length = entries.len() as i128;
+                    if text.starts_with('-') && value < 0 {
+                        Some(value + length)
+                    } else if value > 0 {
+                        Some(value - 1)
+                    } else {
+                        Some(0)
+                    }
+                };
+                if let Some(arg) = args.get(index + 1) {
+                    let search_from = if arg.starts_with('-') { 1 } else { 0 };
+                    let range_pos = arg[search_from..].find('-').map(|pos| pos + search_from);
+                    if let Some(pos) = range_pos {
+                        let (start_text, end_text) = (&arg[..pos], &arg[pos + 1..]);
+                        match (
+                            history_number(start_text),
+                            history_number(end_text),
+                        ) {
+                            (Some(start), Some(end))
+                                if start >= 0
+                                    && end >= 0
+                                    && (start as usize) < entries.len()
+                                    && (end as usize) < entries.len()
+                                    && start <= end =>
+                            {
+                                entries.drain(start as usize..=end as usize);
+                                provider.borrow_mut().replace(entries.clone())?;
+                            }
+                            _ => {
+                                writeln!(
+                                    stderr,
+                                    "history: {arg}: history position out of range"
+                                )?;
+                                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                return Ok(1);
+                            }
+                        }
+                    } else if let Some(value) = history_number(arg) {
+                        if value >= 0 && (value as usize) < entries.len() {
+                            entries.remove(value as usize);
+                            provider.borrow_mut().replace(entries.clone())?;
+                        } else {
+                            writeln!(
+                                stderr,
+                                "history: {arg}: history position out of range"
+                            )?;
+                            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                            return Ok(1);
+                        }
                     }
                 }
                 Vec::new()
