@@ -30,6 +30,10 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     // through declare/typeset or let, where the argument is evaluated by the
     // corresponding arithmetic-aware owner. Quoted assignment-looking strings
     // passed as arguments, such as eval payloads, must remain ordinary words.
+    // The escaped quote must be UNQUOTED: inside a quoted subscript the
+    // escape is ordinary data, and an associative array subscript is a string
+    // key, not an arithmetic expression (assoc6.sub:44
+    // `foo["bar\"bie"]="doll"` is a valid assoc assignment in 5.3.0).
     let arithmetic_aware_command = matches!(
         cmd.words.first().map(String::as_str),
         Some("declare" | "typeset" | "let")

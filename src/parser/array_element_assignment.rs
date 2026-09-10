@@ -26,8 +26,60 @@ pub(super) fn record_array_element_assignment_for_word(
 }
 
 pub(super) fn array_element_subscript_has_escaped_quote(raw: &str) -> bool {
-    array_element_raw_subscript(raw)
-        .is_some_and(|subscript| subscript.contains(r#"\""#) || subscript.contains(r#"\'"#))
+    let Some(subscript) = array_element_raw_subscript(raw) else {
+        return false;
+    };
+    // An escaped quote inside a quoted region is ordinary quoted data, not an
+    // arithmetic operand: an associative array subscript is a string key, so
+    // `a["x\"y"]=v` is a legal assignment in GNU 5.3.0 (assoc6.sub:44) and
+    // must not be flagged. Only an unquoted escaped quote -- `a[\" \"]=15` --
+    // reaches the arithmetic parser as a bad operand. Walk the raw subscript
+    // keeping the same quote state the lexer uses and report only escaped
+    // quotes seen outside any quote region.
+    let chars: Vec<char> = subscript.chars().collect();
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < chars.len() {
+        if in_single {
+            if chars[index] == '\'' {
+                in_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if in_double {
+            if chars[index] == '\\' {
+                index += 2;
+                continue;
+            }
+            if chars[index] == '"' {
+                in_double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match chars[index] {
+            '\'' => {
+                in_single = true;
+                index += 1;
+            }
+            '"' => {
+                in_double = true;
+                index += 1;
+            }
+            '\\' if index + 1 < chars.len() && matches!(chars[index + 1], '\'' | '"') => {
+                return true;
+            }
+            '\\' => {
+                index += 2;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    false
 }
 
 pub(super) fn array_element_assignment_from_word(
