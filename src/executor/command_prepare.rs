@@ -810,6 +810,14 @@ impl Executor {
             // literal `$()` key after the single-quote fix) is split into
             // several fields and the assignment is lost to a bogus command
             // lookup (quotearray.tests `a[$key]=42`).
+            if let Some(prepared) = cmd
+                .array_element_assignments
+                .iter()
+                .find(|assignment| assignment.word_index == Some(index))
+                .and_then(|assignment| self.prepare_array_element_assignment_word(assignment))
+            {
+                return vec![prepared];
+            }
             return vec![expanded];
         }
         if assignment_builtin_receives_assignment_word(cmd, index, word) {

@@ -116,6 +116,7 @@ pub(super) fn array_element_assignment_from_word(
         close_delimiter: "]".to_string(),
         close_delimiter_metadata: Box::new(super::build_word_metadata(0, "]", "]")),
         value: value.to_string(),
+        raw_value: raw_value.to_string(),
         operator: operator.to_string(),
         operator_metadata: Box::new(super::build_word_metadata(0, operator, operator)),
         append,

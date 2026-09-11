@@ -33,6 +33,20 @@ impl Executor {
         index: usize,
         expanded: &str,
     ) -> bool {
+        // GNU general.c:480 (parse.y) marks `name[subscript]=value` an
+        // ASSIGNMENT word, and an assignment word is never field-split: the
+        // parser expands the subscript with expand_subscript_string and the
+        // value as an assignment RHS, neither of which splits. An unquoted
+        // `$(...)` or `$var` inside the SUBSCRIPT must therefore not break
+        // the word into `A[m` + `n]=v` -- the expanded word is consumed
+        // verbatim by execute_array_element_assignment.
+        if cmd
+            .array_element_assignments
+            .iter()
+            .any(|assignment| assignment.word_index == Some(index))
+        {
+            return false;
+        }
         // A word wrapped in quotes (e.g. `"$(cmd) extra"`) keeps its spaces
         // together: quote removal happens after field splitting in Bash, so
         // quoted words must not be split even when they expand to whitespace.

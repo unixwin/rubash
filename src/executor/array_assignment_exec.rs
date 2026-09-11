@@ -1,6 +1,50 @@
 use super::*;
 
 impl Executor {
+    /// GNU never expands `name[subscript]=value` as one word:
+    /// `general.c:480 assignment()` splits the SYNTACTIC word into name,
+    /// subscript and value, then `subst.c expand_subscript_string` expands
+    /// the subscript and the W_ASSIGNMENT pass expands the value. Splitting
+    /// the EXPANDED word instead loses the real `=` whenever the subscript
+    /// expands to a `]` or an `=` (`x='a=b'; A[$x]=1` became `A[a` +
+    /// `b]=2`).
+    ///
+    /// Returns the word the array-element executor should see when the
+    /// expanded key would be unparseable: the key is the expanded subscript
+    /// (marker-encoded when it carries a delimiter) and the value the
+    /// assignment-RHS expansion of the raw value. `None` keeps the ordinary
+    /// whole-word expansion, whose split is reliable for every other key.
+    pub(in crate::executor) fn prepare_array_element_assignment_word(
+        &mut self,
+        assignment: &crate::parser::ArrayElementAssignment,
+    ) -> Option<String> {
+        let name = assignment.name.as_str();
+        let raw_subscript = assignment.subscript_metadata.raw.as_str();
+        let key = self.expand_subscript_string(raw_subscript);
+        let associative = is_marked_var(&self.env_vars, ASSOC_VARS, name)
+            || self.is_assoc_parameter_array(name);
+        if !associative || !key.contains(['[', ']', '=']) {
+            return None;
+        }
+        // Dynamic arrays are consumed by name before the associative branch,
+        // so their subscript must stay readable text.
+        if matches!(name, "BASH_ALIASES" | "BASH_CMDS" | "DIRSTACK") {
+            return None;
+        }
+        let synthetic = format!("{name}={}", assignment.raw_value);
+        let expanded = self.expand_word_mut_with_context(
+            &synthetic,
+            SubstitutionQuoteContext::Unquoted,
+        );
+        let prefix = format!("{name}=");
+        let value = expanded.strip_prefix(prefix.as_str()).unwrap_or(&expanded);
+        Some(format!(
+            "{name}[{}]{}{value}",
+            super::arithmetic::encode_arithmetic_assoc_key(&key),
+            assignment.operator
+        ))
+    }
+
     pub(in crate::executor) fn execute_array_element_assignment(
         &mut self,
         cmd: &CommandNode,
@@ -70,6 +114,10 @@ impl Executor {
         });
         let raw_subscript =
             element_assignment.map(|assignment| assignment.subscript_metadata.raw.as_str());
+        // GNU reports the LHS the way it was WRITTEN -- `h[]`, `A[""]`,
+        // `A[$EMPTY]` -- not the whole assignment word and not the expanded
+        // index (arrays.c `err_badarraysub`).
+        let lhs_as_written = format!("{name}[{}]", raw_subscript.unwrap_or(index));
         let value_is_syntactic_compound_list = element_assignment.is_some_and(|assignment| {
             let raw_value = assignment.value.trim();
             raw_value.starts_with('(')
@@ -166,6 +214,17 @@ impl Executor {
             // with quote removal and expansion. This stores the simple
             // `A[key]=value` form exercised by upstream builtins5.sub.
             let key = self.assoc_subscript_key(raw_subscript.unwrap_or(index));
+            if key.is_empty() {
+                // An associative key is data, so nothing can fill in an empty
+                // one: GNU rejects `A[]`, `A[""]` and `A[$unset]` with the
+                // subscript as written (assoc.c assign_array_element).
+                eprintln!(
+                    "{}{lhs_as_written}: bad array subscript",
+                    self.diagnostic_prefix()
+                );
+                self.exit_code = 1;
+                return true;
+            }
             let current = self.env_vars.get(name).cloned().unwrap_or_default();
             let mut entries = assoc_entries(&current);
             let value = if append {
@@ -234,7 +293,7 @@ impl Executor {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.diagnostic_prefix(),
-                cmd.words[0]
+                lhs_as_written
             );
             self.exit_code = 1;
             return true;
@@ -244,7 +303,7 @@ impl Executor {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.diagnostic_prefix(),
-                cmd.words[0]
+                lhs_as_written
             );
             self.exit_code = 1;
             return true;
@@ -253,7 +312,7 @@ impl Executor {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.diagnostic_prefix(),
-                cmd.words[0]
+                lhs_as_written
             );
             self.exit_code = 1;
             return true;
@@ -268,7 +327,7 @@ impl Executor {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.diagnostic_prefix(),
-                cmd.words[0]
+                lhs_as_written
             );
             self.exit_code = 1;
             return true;
@@ -280,7 +339,7 @@ impl Executor {
                 eprintln!(
                     "{}{}: bad array subscript",
                     self.diagnostic_prefix(),
-                    cmd.words[0]
+                    lhs_as_written
                 );
                 self.exit_code = 1;
                 return true;

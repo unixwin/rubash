@@ -428,6 +428,11 @@ pub struct ArrayElementAssignment {
     pub close_delimiter: String,
     pub close_delimiter_metadata: Box<WordMetadata>,
     pub value: String,
+    /// The value exactly as written (before quote removal), so the executor
+    /// can expand the assignment RHS independently of the subscript --
+    /// general.c:480 splits the SYNTACTIC word, and the subscript may expand
+    /// to a `]` or an `=` that would misplace the `=` in the expanded word.
+    pub raw_value: String,
     pub operator: String,
     pub operator_metadata: Box<WordMetadata>,
     pub append: bool,
