@@ -230,7 +230,22 @@ enum ShoptMode {
     Query,
 }
 
+/// GNU builtins/shopt.def:180-181 binds `array_expand_once` and
+/// `assoc_expand_once` to the SAME variable (expand_once_flag) through the
+/// same set_array_expand handler, so the two names always report and toggle
+/// ONE shared flag; doc/bashref.info:5208 calls `assoc_expand_once`
+/// "Deprecated; a synonym for array_expand_once". The canonical state entry
+/// is `array_expand_once`, and the alias never persists in the state set.
+fn canonical_shopt_name(name: &str) -> &str {
+    if name == "assoc_expand_once" {
+        "array_expand_once"
+    } else {
+        name
+    }
+}
+
 pub(crate) fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
+    let name = canonical_shopt_name(name);
     match name {
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
@@ -265,7 +280,13 @@ pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, ena
         _ => {}
     }
 
+    // The expand-once pair shares one flag (canonical_shopt_name); the
+    // alias name never persists in the state set so both names always
+    // report the same value.
+    let name = canonical_shopt_name(name);
+
     let mut state = state(env_vars);
+    state.remove("assoc_expand_once");
     if enabled {
         state.insert(name.to_string());
     } else {
@@ -304,4 +325,67 @@ fn diagnostic_prefix() -> String {
     }
 
     "rubash: ".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fresh_env() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn assoc_expand_once_aliases_array_expand_once() {
+        let mut env_vars = fresh_env();
+
+        assert!(!option_enabled(&env_vars, "assoc_expand_once"));
+        assert!(!option_enabled(&env_vars, "array_expand_once"));
+
+        set_option(&mut env_vars, "assoc_expand_once", true);
+
+        assert!(option_enabled(&env_vars, "assoc_expand_once"));
+        assert!(option_enabled(&env_vars, "array_expand_once"));
+        // The canonical entry persists, the alias does not.
+        assert!(state(&env_vars).contains("array_expand_once"));
+        assert!(!state(&env_vars).contains("assoc_expand_once"));
+
+        // Unsetting either name clears the shared flag for both.
+        set_option(&mut env_vars, "array_expand_once", false);
+
+        assert!(!option_enabled(&env_vars, "assoc_expand_once"));
+        assert!(!option_enabled(&env_vars, "array_expand_once"));
+    }
+
+    #[test]
+    fn bashopts_lists_both_expand_once_names_when_enabled() {
+        let mut env_vars = fresh_env();
+
+        assert!(!bashopts_value(&env_vars).split(':').any(|name| name
+            == "assoc_expand_once"
+            || name == "array_expand_once"));
+
+        set_option(&mut env_vars, "assoc_expand_once", true);
+
+        let bashopts = bashopts_value(&env_vars);
+        assert!(bashopts.split(':').any(|name| name == "assoc_expand_once"));
+        assert!(bashopts.split(':').any(|name| name == "array_expand_once"));
+
+        set_option(&mut env_vars, "array_expand_once", false);
+
+        let bashopts = bashopts_value(&env_vars);
+        assert!(!bashopts.split(':').any(|name| name == "assoc_expand_once"));
+        assert!(!bashopts.split(':').any(|name| name == "array_expand_once"));
+    }
+
+    #[test]
+    fn other_shopts_keep_independent_names() {
+        let mut env_vars = fresh_env();
+
+        set_option(&mut env_vars, "dotglob", true);
+
+        assert!(option_enabled(&env_vars, "dotglob"));
+        assert!(state(&env_vars).contains("dotglob"));
+        assert!(!option_enabled(&env_vars, "assoc_expand_once"));
+    }
 }

@@ -3287,3 +3287,32 @@ fn tilde_user_colon_terminated_word_glues_verbatim() {
         "/c/Users/niu-home:sub\n/c/Users/niu-home:~niu2\n"
     );
 }
+
+#[test]
+fn shopt_expand_once_names_share_one_flag() {
+    let script = "shopt -s assoc_expand_once; \
+shopt array_expand_once assoc_expand_once; \
+shopt -u array_expand_once; \
+shopt assoc_expand_once array_expand_once; \
+echo \"[$BASHOPTS]\"";
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "array_expand_once   	on");
+    assert_eq!(lines[1], "assoc_expand_once   	on");
+    assert_eq!(lines[2], "assoc_expand_once   	off");
+    assert_eq!(lines[3], "array_expand_once   	off");
+    // BASHOPTS carries neither expand_once name while the shared flag is
+    // off (the remaining entries are the default-enabled options).
+    assert!(!lines[4]
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(':')
+        .any(|name| name == "assoc_expand_once" || name == "array_expand_once"));
+}
