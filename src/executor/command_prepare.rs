@@ -800,6 +800,17 @@ impl Executor {
                     )];
                 }
             }
+            // An array-element assignment word is never field-split. GNU
+            // parse.y marks `name[subscript]=value` as an assignment word
+            // (general.c:480), expands the subscript with
+            // expand_subscript_string and the value as an assignment RHS —
+            // neither pass performs field splitting. The expanded word is
+            // already a single string, so return it verbatim. Without this a
+            // subscript value carrying IFS whitespace (`k='a b'; A[$k]=1`, or a
+            // literal `$()` key after the single-quote fix) is split into
+            // several fields and the assignment is lost to a bogus command
+            // lookup (quotearray.tests `a[$key]=42`).
+            return vec![expanded];
         }
         if assignment_builtin_receives_assignment_word(cmd, index, word) {
             return vec![strip_assignment_builtin_command_subst_quotes(
