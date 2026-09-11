@@ -579,6 +579,70 @@ impl Executor {
                         }
                     }
                 }
+                // GNU subst.c: `$'...'` is a self-contained ANSI-C quoted
+                // string. Consuming only the `$` and the opening quote would
+                // leave the closing quote for the single-quoted span pass
+                // below, which then swallows the rest of the word (unicode1.sub
+                // array elements: `A=([k]=$'\001')` stored `$'\001`).
+                // Decode the span here, the way the lexer does for whole words.
+                Some('\'') => {
+                    chars.next();
+                    let mut quoted = String::new();
+                    let mut escaped = false;
+                    let mut closed = false;
+                    for quoted_ch in chars.by_ref() {
+                        if escaped {
+                            quoted.push('\\');
+                            quoted.push(quoted_ch);
+                            escaped = false;
+                            continue;
+                        }
+                        if quoted_ch == '\\' {
+                            escaped = true;
+                            continue;
+                        }
+                        if quoted_ch == '\'' {
+                            closed = true;
+                            break;
+                        }
+                        quoted.push(quoted_ch);
+                    }
+                    if escaped {
+                        quoted.push('\\');
+                    }
+                    if closed {
+                        let decoded = crate::lexer::decode_ansi_c_quoted(&quoted);
+                        if alternate {
+                            for ch in decoded.chars() {
+                                if matches!(ch, ' ' | '\t' | '\n') {
+                                    output.push('\x1c');
+                                }
+                                output.push(ch);
+                            }
+                        } else if decoded
+                            .chars()
+                            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+                        {
+                            output.push('"');
+                            for ch in decoded.chars() {
+                                match ch {
+                                    '\\' => output.push_str("\\\\"),
+                                    '"' => output.push_str("\\\""),
+                                    '$' => output.push_str("\\$"),
+                                    '`' => output.push_str("\\`"),
+                                    _ => output.push(ch),
+                                }
+                            }
+                            output.push('"');
+                        } else {
+                            output.push_str(&decoded);
+                        }
+                    } else {
+                        output.push('$');
+                        output.push('\'');
+                        output.push_str(&quoted);
+                    }
+                }
                 Some(other) => {
                     chars.next();
                     output.push('$');

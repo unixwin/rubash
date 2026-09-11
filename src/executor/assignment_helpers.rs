@@ -538,6 +538,20 @@ impl Iterator for StorageWordIter<'_> {
 }
 
 pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
+    // GNU arrayfunc.c assign_compound_array_list runs each raw compound word
+    // through the same quote removal as an ordinary word, so a dollar-single-quote
+    // element value is ANSI-C decoded here. unicode1.sub's C_UTF_8 table is 1318
+    // octal-escape elements, and without this branch the whole table collapsed
+    // into one literal element (intl: Failed 1 of 1).
+    // The lexer decoder owns the >=0x80 owner-marker contract, so it is not
+    // re-implemented with char::from_u32 here.
+    if let Some(inner) = value
+        .strip_prefix("$'")
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return crate::lexer::decode_ansi_c_quoted(inner);
+    }
+
     fn restore_quote_markers(value: &str) -> String {
         value
             .replace('\x1f', "$")
