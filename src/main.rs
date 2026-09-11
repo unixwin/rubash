@@ -22,6 +22,9 @@ fn main() {
 }
 
 fn run_main() -> i32 {
+    // Initialize locale state from environment (LC_ALL > LC_CTYPE > LANG)
+    rubash::locale::init_locale();
+
     let args: Vec<String> = env::args().collect();
     if let Some(name) = args
         .get(1)

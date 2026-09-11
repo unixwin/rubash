@@ -7,6 +7,7 @@ pub mod executor;
 pub mod expand;
 pub mod history;
 pub mod history_expand;
+pub mod locale;
 pub mod invocation;
 pub mod jobs;
 pub mod lexer;
