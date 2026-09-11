@@ -128,7 +128,11 @@ where
                 // compound replaces the array (array.tests:112
                 // declare -a e[10]='(test)' stores [0]="test").
                 if !append_elem && value.starts_with('(') && value.ends_with(')') {
-                    let storage = append_array_value("()", value, integer);
+                    // GNU arrayfunc.c:557 expand_compound_array_assignment:
+                    // re-parse and expand the compound value (array.tests:115
+                    // declare -a f='("${d[@]}")' expands d into f).
+                    let expanded_value = expand_compound_array_value(value, variables);
+                    let storage = append_array_value("()", &expanded_value, integer);
                     variables.insert(base.to_string(), storage);
                     mark_typed(variables, ARRAY_VARS, base);
                     unmark_typed(variables, DECLARED_UNSET_VARS, base);
@@ -297,7 +301,11 @@ where
                 eval_arith_value(value).to_string()
             }
         } else if value.starts_with('(') && value.ends_with(')') {
-            append_array_value("()", value, false)
+            // GNU arrayfunc.c:557 expand_compound_array_assignment:
+            // re-parse and expand the compound value (array.tests:115
+            // declare -a f='("${d[@]}")' expands d into f).
+            let expanded_value = expand_compound_array_value(value, variables);
+            append_array_value("()", &expanded_value, false)
         } else {
             value.to_string()
         };
@@ -342,4 +350,85 @@ fn declare_indexed_element(name: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((base, subscript))
+}
+
+/// GNU arrayfunc.c:557 expand_compound_array_assignment: when declare receives
+/// a parenthesized value like `(${d[@]})`, it re-parses and expands the inner
+/// words. This function handles the common case of `${var[@]}` / `${var[*]}`
+/// in compound array assignment values (array.tests:115).
+fn expand_compound_array_value(
+    value: &str,
+    variables: &HashMap<String, String>,
+) -> String {
+    let inner = value
+        .strip_prefix('(')
+        .and_then(|v| v.strip_suffix(')'))
+        .unwrap_or(value);
+    
+    let mut result = String::from("(");
+    let mut remaining = inner;
+    
+    while let Some(dollar_pos) = remaining.find("${") {
+        // Append everything before ${
+        result.push_str(&remaining[..dollar_pos]);
+        let expr_start = dollar_pos;
+        
+        // Find the matching closing brace
+        let mut depth = 1;
+        let mut i = expr_start + 2;
+        while i < remaining.len() && depth > 0 {
+            let byte = remaining.as_bytes()[i];
+            if byte == b'{' {
+                depth += 1;
+            } else if byte == b'}' {
+                depth -= 1;
+            }
+            i += 1;
+        }
+        
+        let expr = &remaining[expr_start..i.min(remaining.len())];
+        remaining = &remaining[i.min(remaining.len())..];
+        
+        // Try to expand as array parameter
+        if let Some(expanded) = expand_array_parameter(expr, variables) {
+            result.push_str(&expanded);
+        } else {
+            result.push_str(expr);
+        }
+    }
+    
+    // Append the rest
+    result.push_str(remaining);
+    result.push(')');
+    result
+}
+
+/// Expand `${var[@]}` or `${var[*]}` using the variables HashMap.
+/// Returns a space-separated list of quoted array elements.
+fn expand_array_parameter(expr: &str, variables: &HashMap<String, String>) -> Option<String> {
+    let inner = expr.strip_prefix("${")?.strip_suffix("}")?;
+    
+    // Look for [@] or [*] suffix
+    let name = if let Some(at) = inner.rfind("[@]") {
+        &inner[..at]
+    } else if let Some(star) = inner.rfind("[*]") {
+        &inner[..star]
+    } else {
+        return None;
+    };
+    
+    // Look up the array variable
+    let array_value = variables.get(name)?;
+    
+    // Parse the array elements
+    let entries = indexed_array_entries(array_value);
+    
+    // Format the expanded elements as a space-separated list with quotes
+    // (append_array_value expects this format for parse_array_tokens)
+    let elements: Vec<String> = entries
+        .values()
+        .map(|v| format!("'{}'", v.replace('\'', "\\'")))
+        .collect();
+    
+    Some(elements.join(" "))
 }
