@@ -94,6 +94,7 @@ pub(crate) use shell_options::GlobalStdout;
 
 mod shift_echo_builtins;
 mod source_type_state;
+mod subscript_expansion;
 mod temporary_assignments;
 mod trap_exec;
 mod trap_stack_builtins;

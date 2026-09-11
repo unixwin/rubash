@@ -237,37 +237,16 @@ impl Executor {
         expanded.replace('\x11', "\\")
     }
 
+    /// The key of an associative-array subscript, expanded through the one
+    /// shared `expand_subscript_string` pass (`subscript_expansion.rs`) that
+    /// the arithmetic path also uses, so `${A[key]=v}`, `A[key]=v` and
+    /// `(( A[key] ))` always agree.
     pub(in crate::executor) fn assoc_subscript_key(&self, key: &str) -> String {
-        // GNU subst.c expand_subscript_string runs the subscript through
-        // word expansion where a backslash quotes the next character:
-        // `\$` yields a LITERAL `$` and never opens a substitution
-        // (census-array2.sh V1: `A["x,\$(echo uname)"]=v` stores the key
-        // `x,$(echo uname)`, it must not execute `echo uname` nor truncate
-        // at the bracket). Convert `\$` to the $ marker BEFORE expansion;
-        // expand_embedded_parameters restores it verbatim without treating
-        // the `$` as an expansion start. Unescaped `$(cmd)` subscripts
-        // still expand, matching GNU.
-        let protected = if key.contains("\\$") {
-            key.replace("\\$", "\u{1f}")
-        } else {
-            key.to_string()
-        };
-        let mut expanded = self
-            .expand_embedded_parameters(&protected)
-            // Double-quote quote removal (subst.c): a backslash keeps its
-            // special meaning only before $ ` " \ and newline; the raw
-            // subscript path stores `\$` literally and must shed it.
-            .replace("\\$", "$")
-            .replace("\\\"", "\"")
-            .replace("\\'", "'");
-        loop {
-            let trimmed = expanded.trim_matches('\x1d');
-            let stripped = strip_matching_quotes(trimmed);
-            if stripped == trimmed {
-                return stripped.trim_matches('\x1d').to_string();
-            }
-            expanded = stripped.to_string();
-        }
+        // A `\x1d` marker is the lexer's wholly-double-quoted word bookkeeping
+        // and never part of the key text.
+        self.expand_subscript_string(key)
+            .trim_matches('\x1d')
+            .to_string()
     }
 
     pub(in crate::executor) fn apply_array_element_parameter_assignment(

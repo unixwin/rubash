@@ -328,8 +328,18 @@ impl Executor {
     /// single-quoted subscript is literal data — nothing expands inside a
     /// single-quoted span, which is why `A['$v']` keys on `$v` — and anything
     /// else goes through the ordinary word expansion, which stops at one round.
+    ///
+    /// NOTE: the arithmetic evaluator is handed the `(( ))` body AFTER the
+    /// lexer's own escape pass, so its subscript text is not the source
+    /// spelling; re-running the assignment path's quote-removal pass here
+    /// would drop one backslash too many (`A[a\\b]` read `a\b` instead of
+    /// `ab`). The assignment path owns the faithful
+    /// `expand_subscript_string`; this path keeps its own one-round word
+    /// expansion until the `(( ))` body reaches the evaluator unescaped.
     fn expand_assoc_subscript_once(&mut self, raw: &str) -> String {
-        if let Some(literal) = wholly_single_quoted_literal(raw) {
+        if let Some(literal) =
+            crate::executor::subscript_expansion::wholly_single_quoted_literal(raw)
+        {
             return literal;
         }
         self.expand_word_mut_with_context(raw, SubstitutionQuoteContext::Unquoted)
@@ -760,24 +770,6 @@ pub(super) fn decode_arithmetic_assoc_key(text: &str) -> Option<String> {
         bytes.push((hi * 16 + lo) as u8);
     }
     String::from_utf8(bytes).ok()
-}
-
-/// The concatenated contents of `text` when it is covered entirely by
-/// single-quoted spans (`'a b'`, `'a''b'`); `None` when any character sits
-/// outside a single-quoted span, in which case the subscript still has to be
-/// expanded.
-pub(super) fn wholly_single_quoted_literal(text: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut rest = text;
-    let mut saw_span = false;
-    while !rest.is_empty() {
-        let inner = rest.strip_prefix('\'')?;
-        let end = inner.find('\'')?;
-        out.push_str(&inner[..end]);
-        rest = &inner[end + 1..];
-        saw_span = true;
-    }
-    saw_span.then_some(out)
 }
 
 /// A single quote in `expression` that is not part of an associative-array

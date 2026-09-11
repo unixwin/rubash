@@ -163,7 +163,9 @@ impl ConditionalArithParser<'_> {
         // expand_subscript_string removes the quotes but runs no expansion
         // inside a single-quoted span, so `A['$var']` keys on the text `$var`
         // and `A['a b']` keys on `a b`.
-        if let Some(literal) = super::super::wholly_single_quoted_literal(key) {
+        if let Some(literal) =
+            crate::executor::subscript_expansion::wholly_single_quoted_literal(key)
+        {
             return literal;
         }
 
