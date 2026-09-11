@@ -104,7 +104,15 @@ pub(crate) fn pathname_expand_word(
     } else {
         DotMode::Period
     };
-    let matches = glob_vector_expand(word, ".", nocaseglob, extglob, dot_mode, globskipdots, env_vars);
+    let matches = glob_vector_expand(
+        word,
+        ".",
+        nocaseglob,
+        extglob,
+        dot_mode,
+        globskipdots,
+        env_vars,
+    );
     let matches = apply_globignore(matches, env_vars);
     if matches.is_empty() {
         return unmatched_expansion(word, nullglob, failglob);
@@ -129,14 +137,7 @@ fn pathname_expand_segments(
     } else {
         DotMode::Period
     };
-    let matches = glob_filename_expand(
-        word,
-        nocaseglob,
-        extglob,
-        dot_mode,
-        globskipdots,
-        env_vars,
-    );
+    let matches = glob_filename_expand(word, nocaseglob, extglob, dot_mode, globskipdots, env_vars);
     let matches = apply_globignore(matches, env_vars);
     if matches.is_empty() {
         return unmatched_expansion(word, nullglob, failglob);
@@ -166,14 +167,7 @@ fn glob_filename_expand(
             Some(stripped) => stripped,
             None => directory,
         };
-        let dirs = glob_filename_expand(
-            d,
-            nocaseglob,
-            extglob,
-            dot_mode,
-            globskipdots,
-            env_vars,
-        );
+        let dirs = glob_filename_expand(d, nocaseglob, extglob, dot_mode, globskipdots, env_vars);
         let mut out = Vec::new();
         for dname in dirs {
             if filename.is_empty() {
@@ -453,7 +447,15 @@ fn globstar_expand(
     // plus multi-segment remainders (**/foo*/*) and trailing-slash pattern
     // remainders (**/foo*/).
     if parts.len() > 2 {
-        return expand_multi_globstar(word, nullglob, failglob, nocaseglob, dotglob, globskipdots, env_vars);
+        return expand_multi_globstar(
+            word,
+            nullglob,
+            failglob,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            env_vars,
+        );
     }
     let prefix = parts[0];
     // GNU globstar forms (parse.y/glob.c GLOBSTAR): a bare `**` matches every
@@ -464,7 +466,15 @@ fn globstar_expand(
     let raw_suffix = parts[1];
     let single_remainder = !raw_suffix.starts_with('/') || !raw_suffix[1..].contains('/');
     if !single_remainder {
-        return expand_multi_globstar(word, nullglob, failglob, nocaseglob, dotglob, globskipdots, env_vars);
+        return expand_multi_globstar(
+            word,
+            nullglob,
+            failglob,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            env_vars,
+        );
     }
     // GNU `**/foo*/` matches directories named foo* with the trailing slash
     // preserved: a trailing slash on a non-empty remainder means
@@ -579,7 +589,13 @@ fn expand_multi_globstar(
                 expanded = PathnameExpansion::Matches(
                     values
                         .into_iter()
-                        .map(|value| if value == slash_base { base.clone() } else { value })
+                        .map(|value| {
+                            if value == slash_base {
+                                base.clone()
+                            } else {
+                                value
+                            }
+                        })
                         .collect(),
                 );
             }
@@ -683,8 +699,16 @@ fn collect_multi_globstar_paths(
     let segment = segments[index];
     if segment == "**" {
         collect_multi_globstar_paths(
-            segments, index + 1, logical, physical, dirs_only, matches,
-            nocaseglob, dotglob, globskipdots, env_vars,
+            segments,
+            index + 1,
+            logical,
+            physical,
+            dirs_only,
+            matches,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            env_vars,
         );
         let entries = match shell_directory_entries(logical, env_vars) {
             Ok(entries) => entries,
@@ -696,7 +720,9 @@ fn collect_multi_globstar_paths(
             if (name.starts_with('.') && !dotglob) || name == "." || name == ".." {
                 continue;
             }
-            let child_physical = entries.iter().find(|entry| entry.name == name)
+            let child_physical = entries
+                .iter()
+                .find(|entry| entry.name == name)
                 .map(|entry| entry.path.clone())
                 .unwrap_or_else(|| physical.join(&name));
             let child_logical = join_path_segment(if logical == "." { "" } else { logical }, &name);
@@ -705,11 +731,21 @@ fn collect_multi_globstar_paths(
                 let is_symlink = std::fs::symlink_metadata(&child_physical)
                     .map(|meta| meta.file_type().is_symlink())
                     .unwrap_or(false);
-                if !is_dir || is_symlink { continue; }
+                if !is_dir || is_symlink {
+                    continue;
+                }
             }
             collect_multi_globstar_paths(
-                segments, index, &child_logical, &child_physical, dirs_only, matches,
-                nocaseglob, dotglob, globskipdots, env_vars,
+                segments,
+                index,
+                &child_logical,
+                &child_physical,
+                dirs_only,
+                matches,
+                nocaseglob,
+                dotglob,
+                globskipdots,
+                env_vars,
             );
         }
         return;
@@ -729,8 +765,12 @@ fn collect_multi_globstar_paths(
         } else {
             super::case_pattern_matches(segment, &name)
         };
-        if !matched { continue; }
-        let child_physical = entries.iter().find(|entry| entry.name == name)
+        if !matched {
+            continue;
+        }
+        let child_physical = entries
+            .iter()
+            .find(|entry| entry.name == name)
             .map(|entry| entry.path.clone())
             .unwrap_or_else(|| physical.join(&name));
         let child_logical = join_path_segment(if logical == "." { "" } else { logical }, &name);
@@ -738,11 +778,21 @@ fn collect_multi_globstar_paths(
             let is_symlink = std::fs::symlink_metadata(&child_physical)
                 .map(|meta| meta.file_type().is_symlink())
                 .unwrap_or(false);
-            if !child_physical.is_dir() || is_symlink { continue; }
+            if !child_physical.is_dir() || is_symlink {
+                continue;
+            }
         }
         collect_multi_globstar_paths(
-            segments, index + 1, &child_logical, &child_physical, dirs_only, matches,
-            nocaseglob, dotglob, globskipdots, env_vars,
+            segments,
+            index + 1,
+            &child_logical,
+            &child_physical,
+            dirs_only,
+            matches,
+            nocaseglob,
+            dotglob,
+            globskipdots,
+            env_vars,
         );
     }
 }
@@ -818,10 +868,8 @@ fn collect_multi_globstar(
                         .find(|entry| entry.name == name)
                         .map(|entry| entry.path.clone())
                         .unwrap_or_else(|| physical.join(&name));
-                    let child_logical = join_path_segment(
-                        if logical == "." { "" } else { logical },
-                        &name,
-                    );
+                    let child_logical =
+                        join_path_segment(if logical == "." { "" } else { logical }, &name);
                     let is_dir = child_physical.is_dir();
                     if is_last {
                         if !dirs_only || is_dir {
@@ -880,9 +928,8 @@ fn collect_globstar_matches(
     // byte sort over full paths (which would interleave `builtins.o` with
     // `builtins/...`).
     names.sort();
-    let include_dotfiles = dotglob
-        || suffix.starts_with('.')
-        || globignore_patterns(env_vars).is_some();
+    let include_dotfiles =
+        dotglob || suffix.starts_with('.') || globignore_patterns(env_vars).is_some();
     for name in names {
         if name.starts_with('.') && !include_dotfiles {
             continue;
@@ -995,7 +1042,11 @@ fn split_ignore_specs(value: &str, extglob: bool) -> Vec<String> {
                         while j + 1 < chars.len() && !(chars[j] == ':' && chars[j + 1] == ']') {
                             j += 1;
                         }
-                        i = if j + 1 < chars.len() { j + 2 } else { chars.len() };
+                        i = if j + 1 < chars.len() {
+                            j + 2
+                        } else {
+                            chars.len()
+                        };
                         continue;
                     }
                     i += 1;
@@ -1056,7 +1107,8 @@ fn apply_globignore(
         .into_iter()
         .filter(|name| {
             let base = name.rsplit('/').next().unwrap_or(name);
-            base != "." && base != ".."
+            base != "."
+                && base != ".."
                 && !patterns
                     .iter()
                     .any(|pattern| ignore_pattern_matches(pattern, base, extglob, nocase))
@@ -1309,8 +1361,7 @@ fn split_top_alternatives(body: &[char]) -> Vec<Vec<char>> {
 
 /// True when the pattern starts with an extglob operator followed by `(`.
 fn extglob_at(pattern: &[char], p: usize) -> bool {
-    matches!(pattern.get(p), Some('+' | '*' | '?' | '@' | '!'))
-        && pattern.get(p + 1) == Some(&'(')
+    matches!(pattern.get(p), Some('+' | '*' | '?' | '@' | '!')) && pattern.get(p + 1) == Some(&'(')
 }
 
 /// Port of glob.c skipname (glob.c:256-292) plus extglob_skipname
@@ -1436,11 +1487,28 @@ fn gmatch(
                 if pattern[p] == '(' {
                     if p - 1 == star_start {
                         let local_guard = if n == 0 { guard } else { DotMode::Off };
-                        return extmatch('*', pattern, p + 1, name, n, local_guard, extglob, nocase);
+                        return extmatch(
+                            '*',
+                            pattern,
+                            p + 1,
+                            name,
+                            n,
+                            local_guard,
+                            extglob,
+                            nocase,
+                        );
                     }
                     for split in n..=name.len() {
-                        if extmatch('*', pattern, p + 1, name, split, DotMode::Off, extglob, nocase)
-                        {
+                        if extmatch(
+                            '*',
+                            pattern,
+                            p + 1,
+                            name,
+                            split,
+                            DotMode::Off,
+                            extglob,
+                            nocase,
+                        ) {
                             return true;
                         }
                     }
@@ -1542,9 +1610,8 @@ fn extmatch(
         // sm_loop.c:852 / 881: re-apply the whole group (operator included).
         gmatch(pattern, paren - 1, name, srest, extglob, xg, nocase)
     };
-    let alt_matches = |alt: &[char], srest: usize| {
-        alt_matches_slice(alt, name, s, srest, extglob, guard, nocase)
-    };
+    let alt_matches =
+        |alt: &[char], srest: usize| alt_matches_slice(alt, name, s, srest, extglob, guard, nocase);
     // sm_loop.c xflags: the leading-dot flags are dropped once the match
     // position has moved past the string start.
     let xflags = |srest: usize| if srest > s { DotMode::Off } else { guard };
@@ -1824,16 +1891,15 @@ fn all_digits(s: &str) -> bool {
 
 fn numeric_value(s: &str) -> u128 {
     s.chars().fold(0u128, |acc, c| {
-        acc.wrapping_mul(10).wrapping_add(c.to_digit(10).unwrap_or(0) as u128)
+        acc.wrapping_mul(10)
+            .wrapping_add(c.to_digit(10).unwrap_or(0) as u128)
     })
 }
 
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{
-        component_matches, pathname_expand_word, DotMode, PathnameExpansion,
-    };
+    use super::{component_matches, pathname_expand_word, DotMode, PathnameExpansion};
     #[cfg(windows)]
     use std::collections::HashMap;
 

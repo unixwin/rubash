@@ -101,10 +101,7 @@ pub(in crate::executor) fn exported_function_env_value(
     if commands.is_empty() && def_redirects.is_empty() {
         "() { :; }".to_string()
     } else if commands.is_empty() {
-        format!(
-            "() {{ :; }}{}",
-            redirect_suffix_text(def_redirects)
-        )
+        format!("() {{ :; }}{}", redirect_suffix_text(def_redirects))
     } else {
         let mut output = String::from("() {");
         for (index, command) in commands.iter().enumerate() {

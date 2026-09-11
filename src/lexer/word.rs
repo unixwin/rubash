@@ -194,7 +194,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     compound_paren_depth += 1;
                 }
-')' if compound_paren_depth > 0 => {
+                ')' if compound_paren_depth > 0 => {
                     self.advance();
                     compound_paren_depth -= 1;
                 }
@@ -314,9 +314,7 @@ impl<'a> Lexer<'a> {
             && bytes
                 .iter()
                 .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
-            && bytes
-                .iter()
-                .any(|b| b.is_ascii_alphabetic() || *b == b'_')
+            && bytes.iter().any(|b| b.is_ascii_alphabetic() || *b == b'_')
     }
 
     fn looks_like_array_element_assignment(&self) -> bool {

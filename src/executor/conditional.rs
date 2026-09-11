@@ -752,4 +752,3 @@ fn escape_bracket_char(c: char) -> Vec<char> {
         vec![c]
     }
 }
-

@@ -64,8 +64,7 @@ impl Executor {
             // the command's starting line, so the span is not added there.
             let start_line = cmd.line.unwrap_or(1);
             let word_newlines = bad_word.matches('\n').count();
-            let embedded_single_newline =
-                !bad_word.starts_with("${") && word_newlines == 1;
+            let embedded_single_newline = !bad_word.starts_with("${") && word_newlines == 1;
             let diag_line = if embedded_single_newline {
                 start_line
             } else {
@@ -650,12 +649,14 @@ impl Executor {
         // spaces survive the re-split: the net result is one word per
         // positional parameter, preserved verbatim (exp10.sub `${*}` with
         // `set -- ' A ' ' B '`).
-        if word == "${*}" && !raw_word_is_quoted(raw)
+        if word == "${*}"
+            && !raw_word_is_quoted(raw)
             && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
         {
             return self.positional_params.clone();
         }
-        if word == "$*" && !raw_word_is_quoted(raw)
+        if word == "$*"
+            && !raw_word_is_quoted(raw)
             && self.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
         {
             return self.positional_params.clone();
@@ -717,9 +718,8 @@ impl Executor {
         // A double-quoted $@ or $* is excluded: those reach the per-positional
         // split through the raw-based path, and skipping it here collapsed
         // "${1+  $@  }" to one word (exp suite).
-        let quoted_whole_word = word.starts_with('\x1d')
-            && !word.contains("$@")
-            && !word.contains("$*");
+        let quoted_whole_word =
+            word.starts_with('\x1d') && !word.contains("$@") && !word.contains("$*");
         if !quoted_whole_word && raw.is_some() && self.is_brace_expand_enabled()
         // GNU runs brace expansion before parameter expansion, so a
         // dollar-brace in the word does not suppress it: the dollar-brace
@@ -768,8 +768,7 @@ impl Executor {
         let context = if word.starts_with('\x1d') {
             SubstitutionQuoteContext::DoubleQuoted
         } else {
-            raw
-                .map(scan_substitution_spans)
+            raw.map(scan_substitution_spans)
                 .filter(|spans| spans.len() == 1)
                 .and_then(|spans| spans.first().map(|span| span.context))
                 .unwrap_or(SubstitutionQuoteContext::Unquoted)
@@ -876,7 +875,11 @@ impl Executor {
         Some(values)
     }
 
-    fn braced_alternate_word_values(&mut self, word: &str, raw: Option<&str>) -> Option<Vec<String>> {
+    fn braced_alternate_word_values(
+        &mut self,
+        word: &str,
+        raw: Option<&str>,
+    ) -> Option<Vec<String>> {
         let name = word.strip_prefix("${")?.strip_suffix('}')?;
         if !braced_parameter_spans_whole_word(word) {
             return None;
@@ -935,9 +938,7 @@ impl Executor {
             && !fragment_quoted
             && (alternate.contains("$@") || alternate.contains("${@}"))
         {
-            return Some(self.expand_alternate_word_fragment(&format!(
-                "\"{alternate}\""
-            )));
+            return Some(self.expand_alternate_word_fragment(&format!("\"{alternate}\"")));
         }
 
         // Posix interp 888 (subst.c string_list_pos_params:3047-3072): the
@@ -975,9 +976,8 @@ impl Executor {
                 None => {}
             }
         }
-        let positional_at = alternate.contains("$@")
-            || alternate.contains("${@}")
-            || alternate.contains("$*");
+        let positional_at =
+            alternate.contains("$@") || alternate.contains("${@}") || alternate.contains("$*");
         let posix_literal_quotes = self.posix_mode_enabled()
             && alternate.starts_with("\"")
             && alternate.ends_with("\"")
@@ -1028,10 +1028,7 @@ impl Executor {
     // alternate is expanded here as the body of a double-quoted span: affix
     // text attaches to the first/last positional word, one word per
     // parameter. Returning None leaves every other form on its existing path.
-    fn quoted_braced_alternate_positional_at_values(
-        &mut self,
-        word: &str,
-    ) -> Option<Vec<String>> {
+    fn quoted_braced_alternate_positional_at_values(&mut self, word: &str) -> Option<Vec<String>> {
         let braced = word.strip_prefix('\x1d')?;
         if !braced.starts_with("${") || !braced.ends_with('}') {
             return None;
@@ -1078,10 +1075,9 @@ impl Executor {
         // word, so `"${var-$*}"` never field-splits (exp9.sub `${var-$*}`
         // under IFS=':' stays `abc:def ghi:jkl`).
         if alternate == "$*" || alternate == "${*}" {
-            return Some(vec![
-                self.positional_params
-                    .join(&self.ifs_first_char_separator()),
-            ]);
+            return Some(vec![self
+                .positional_params
+                .join(&self.ifs_first_char_separator())]);
         }
 
         let synthetic_raw = format!("\"{alternate}\"");
@@ -1554,10 +1550,7 @@ fn raw_quoted_at_word_has_quoted_null(raw: &str, executor: &Executor) -> bool {
                 }
                 if content.is_empty() {
                     saw_quoted_null = true;
-                } else if matches!(
-                    content.as_str(),
-                    "$@" | "$*" | "${@}" | "${*}"
-                ) {
+                } else if matches!(content.as_str(), "$@" | "$*" | "${@}" | "${*}") {
                     saw_quoted_at = true;
                 } else if quoted_pure_reference_expands_empty(&content, executor) {
                     saw_quoted_null = true;
@@ -1609,9 +1602,8 @@ fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bo
         return false;
     };
     if !(is_shell_name(name)
-        || name.chars().all(|ch| ch.is_ascii_digit())
-            && !name.is_empty()
-            || matches!(name, "?" | "!" | "#" | "-" | "$"))
+        || name.chars().all(|ch| ch.is_ascii_digit()) && !name.is_empty()
+        || matches!(name, "?" | "!" | "#" | "-" | "$"))
     {
         return false;
     }
@@ -1641,8 +1633,10 @@ fn field_split_values_with_quoted_nulls(value: &str, ifs: Option<&str>) -> Vec<S
     field_split_values_with_ifs(value, ifs)
         .into_iter()
         .map(|field| {
-            let had_quoted_null = field.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER);
-            let stripped = field.replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "");
+            let had_quoted_null =
+                field.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER);
+            let stripped =
+                field.replace(crate::executor::embedded_mutations::QUOTED_NULL_MARKER, "");
             match stripped.is_empty() {
                 true if had_quoted_null => String::new(),
                 _ => stripped,

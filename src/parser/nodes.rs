@@ -1102,7 +1102,6 @@ pub struct CommandNode {
     pub line: Option<usize>,
 }
 
-
 impl CommandNode {
     /// Assignments keep source order and duplicates (GNU applies prefix
     /// assignments left-to-right, each expansion seeing the previous one).
@@ -1110,7 +1109,10 @@ impl CommandNode {
         self.assignments.push((name, value));
     }
     pub fn get_assignment(&self, name: &str) -> Option<&String> {
-        self.assignments.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        self.assignments
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v)
     }
     pub fn has_assignment(&self, name: &str) -> bool {
         self.assignments.iter().any(|(n, _)| n == name)

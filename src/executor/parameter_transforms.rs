@@ -65,10 +65,7 @@ impl Executor {
             else {
                 return format!("declare -A {array_name}");
             };
-            return format!(
-                "declare -A {array_name}={}",
-                shell_reusable_quote(&value)
-            );
+            return format!("declare -A {array_name}={}", shell_reusable_quote(&value));
         }
 
         self.scalar_assignment_transform(name)
@@ -95,10 +92,7 @@ impl Executor {
                 .get(name)
                 .and_then(|value| assoc_value_at(value, "0"))
             {
-                return format!(
-                    "declare -A {name}={}",
-                    shell_reusable_quote(&value)
-                );
+                return format!("declare -A {name}={}", shell_reusable_quote(&value));
             }
             return format!("declare -A {name}");
         }
@@ -113,12 +107,7 @@ impl Executor {
                 .env_vars
                 .get(name)
                 .and_then(|value| array_value_at(value, 0))
-                .map(|value| {
-                    format!(
-                        "declare -a {name}={}",
-                        shell_reusable_quote(&value)
-                    )
-                })
+                .map(|value| format!("declare -a {name}={}", shell_reusable_quote(&value)))
                 .unwrap_or_else(|| format!("declare -a {name}"));
         }
 
@@ -170,7 +159,11 @@ impl Executor {
     /// var_attribute_string attribute letters for an array-typed variable:
     /// the array attribute comes first (a indexed, A associative), then
     /// i, r, x, l, u in GNU's setattr.def order.
-    pub(in crate::executor) fn variable_assignment_flags(&self, name: &str, array_typed: bool) -> String {
+    pub(in crate::executor) fn variable_assignment_flags(
+        &self,
+        name: &str,
+        array_typed: bool,
+    ) -> String {
         let mut flags = String::new();
         if array_typed {
             if is_marked_var(&self.env_vars, ASSOC_VARS, name) {

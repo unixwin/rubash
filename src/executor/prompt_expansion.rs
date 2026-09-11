@@ -21,18 +21,30 @@ impl Executor {
         let values = values
             .into_iter()
             .map(|value| match operation {
-                PatternRemoval::ShortestPrefix => {
-                    remove_matching_prefix(&value, &pattern, MatchLength::Shortest, self.extglob_enabled())
-                }
-                PatternRemoval::LongestPrefix => {
-                    remove_matching_prefix(&value, &pattern, MatchLength::Longest, self.extglob_enabled())
-                }
-                PatternRemoval::ShortestSuffix => {
-                    remove_matching_suffix(&value, &pattern, MatchLength::Shortest, self.extglob_enabled())
-                }
-                PatternRemoval::LongestSuffix => {
-                    remove_matching_suffix(&value, &pattern, MatchLength::Longest, self.extglob_enabled())
-                }
+                PatternRemoval::ShortestPrefix => remove_matching_prefix(
+                    &value,
+                    &pattern,
+                    MatchLength::Shortest,
+                    self.extglob_enabled(),
+                ),
+                PatternRemoval::LongestPrefix => remove_matching_prefix(
+                    &value,
+                    &pattern,
+                    MatchLength::Longest,
+                    self.extglob_enabled(),
+                ),
+                PatternRemoval::ShortestSuffix => remove_matching_suffix(
+                    &value,
+                    &pattern,
+                    MatchLength::Shortest,
+                    self.extglob_enabled(),
+                ),
+                PatternRemoval::LongestSuffix => remove_matching_suffix(
+                    &value,
+                    &pattern,
+                    MatchLength::Longest,
+                    self.extglob_enabled(),
+                ),
             })
             .collect::<Vec<_>>();
         Some(self.join_expanded_array_values(values, target_expr))

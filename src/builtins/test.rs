@@ -212,7 +212,11 @@ impl TestParser<'_> {
         if middle == "-a" || middle == "-o" {
             let left = !self.cur().is_empty();
             let right = !self.argv(self.pos + 2).unwrap_or("").is_empty();
-            let value = if middle == "-a" { left && right } else { left || right };
+            let value = if middle == "-a" {
+                left && right
+            } else {
+                left || right
+            };
             self.pos = self.argc();
             return Ok(value);
         }
@@ -329,8 +333,7 @@ impl TestParser<'_> {
             return Ok(value);
         }
         // Binary, then unary, then a plain string term.
-        if self.pos + 3 <= self.argc()
-            && is_binary_operator(self.argv(self.pos + 1).unwrap_or(""))
+        if self.pos + 3 <= self.argc() && is_binary_operator(self.argv(self.pos + 1).unwrap_or(""))
         {
             return self.binary_operator();
         }
@@ -366,7 +369,6 @@ fn eval_expr_with_bracket(
     }
     Ok(value)
 }
-
 
 fn is_unary_operator(op: &str) -> bool {
     matches!(

@@ -10,10 +10,15 @@ pub(super) fn collect_trailing_redirections(
         let Some(token) = tokens.get(*index) else {
             break;
         };
-        if matches!(token.kind, TokenKind::Word | TokenKind::BraceExpand | TokenKind::Keyword)
-            && redirect_fd_var_prefix(tokens, *index + 1).is_some()
+        if matches!(
+            token.kind,
+            TokenKind::Word | TokenKind::BraceExpand | TokenKind::Keyword
+        ) && redirect_fd_var_prefix(tokens, *index + 1).is_some()
             && tokens.get(*index + 1).is_some_and(|next| {
-                matches!(next.kind, TokenKind::RedirectIn | TokenKind::RedirectOut | TokenKind::Append)
+                matches!(
+                    next.kind,
+                    TokenKind::RedirectIn | TokenKind::RedirectOut | TokenKind::Append
+                )
             })
         {
             *index += 1;
@@ -340,7 +345,10 @@ pub(super) fn redirect_fd_var_prefix(tokens: &[Token], redirect_index: usize) ->
     // Same grammar as the executor's dynamic_fd_var_name word path.
     let (array_name, index) = name.split_once('[')?;
     let index = index.strip_suffix(']')?;
-    if is_shell_identifier(array_name) && !index.is_empty() && index.chars().all(|ch| ch.is_ascii_digit()) {
+    if is_shell_identifier(array_name)
+        && !index.is_empty()
+        && index.chars().all(|ch| ch.is_ascii_digit())
+    {
         Some(name.to_string())
     } else {
         None

@@ -163,10 +163,7 @@ impl Executor {
         // while w=([0]=~/a [1]=$p) keeps $p's result literal). Quoted
         // elements stay literal; quoted whole-RHS values skip the pass.
         let tilde_raw_owned;
-        let raw_value = if !quoted
-            && raw_value.starts_with('(')
-            && raw_value.ends_with(')')
-        {
+        let raw_value = if !quoted && raw_value.starts_with('(') && raw_value.ends_with(')') {
             tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
             &tilde_raw_owned
         } else {

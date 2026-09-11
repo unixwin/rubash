@@ -7,10 +7,10 @@ use regex::Regex;
 
 #[path = "cli_tests/bashdb_compat.rs"]
 mod bashdb_compat;
-#[path = "cli_tests/compat_issue_regressions.rs"]
-mod compat_issue_regressions;
 #[path = "cli_tests/compat_issue78_multiline_arrays.rs"]
 mod compat_issue78_multiline_arrays;
+#[path = "cli_tests/compat_issue_regressions.rs"]
+mod compat_issue_regressions;
 #[path = "cli_tests/declare_output.rs"]
 mod declare_output;
 #[path = "cli_tests/examples.rs"]

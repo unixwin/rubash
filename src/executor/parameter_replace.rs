@@ -308,7 +308,11 @@ fn pattern_match_length_bound(pattern: &str) -> Option<usize> {
                     close += 1;
                 }
                 bound += 1;
-                index = if close < chars.len() { close + 1 } else { index + 1 };
+                index = if close < chars.len() {
+                    close + 1
+                } else {
+                    index + 1
+                };
             }
             '\\' => {
                 bound += 1;
@@ -465,7 +469,11 @@ pub(in crate::executor) fn format_key_value_transform_part(
     quoted: bool,
 ) -> String {
     if quoted {
-        format!("{} {}", quote_key_value_transform_key(key), quote_array_value(value))
+        format!(
+            "{} {}",
+            quote_key_value_transform_key(key),
+            quote_array_value(value)
+        )
     } else {
         format!("{key} {value}")
     }
@@ -480,7 +488,10 @@ fn quote_key_value_transform_key(key: &str) -> String {
     if key.is_empty() {
         return key.to_string();
     }
-    if key.chars().any(|ch| (ch as u32) < 0x20 || (ch as u32) == 0x7f) {
+    if key
+        .chars()
+        .any(|ch| (ch as u32) < 0x20 || (ch as u32) == 0x7f)
+    {
         let body = key
             .replace('\\', "\\\\")
             .replace('\'', "\\'")
@@ -562,9 +573,8 @@ pub(in crate::executor) fn shell_reusable_quote(value: &str) -> String {
     // characters; decode them to the byte view first so the ansic form
     // quotes per GNU strtrans.c ansic_quote (one octal escape per
     // non-printable byte, printable multibyte runs verbatim).
-    let sentinel =
-        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
-            .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     if value.contains(sentinel) {
         let bytes =
             crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
@@ -631,9 +641,7 @@ fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = cha
 /// the string contains any character that is not printable in the locale
 /// (ISPRINT for ASCII bytes, iswprint for the rest).
 fn ansic_should_quote_value(value: &str) -> bool {
-    value
-        .chars()
-        .any(|ch| !is_ansic_printable(ch))
+    value.chars().any(|ch| !is_ansic_printable(ch))
 }
 
 fn is_ansic_printable(ch: char) -> bool {
@@ -710,43 +718,73 @@ mod tests {
 
     #[test]
     fn glob_replacement_matches_empty_value() {
-        assert_eq!(replace_parameter_pattern("", "*", "w", false, false, true, false), "w");
+        assert_eq!(
+            replace_parameter_pattern("", "*", "w", false, false, true, false),
+            "w"
+        );
     }
 
     #[test]
     fn ampersand_expansion_follows_shopt() {
         // shopt patsub_replacement on: & copies the match (subst.c:9252).
-        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, true, false), "axbycd");
+        assert_eq!(
+            replace_parameter_pattern("abcd", "b", "x&y", false, false, true, false),
+            "axbycd"
+        );
         // shopt off: & stays literal (no MATCH_EXPREP, subst.c:9430-9431).
-        assert_eq!(replace_parameter_pattern("abcd", "b", "x&y", false, false, false, false), "ax&ycd");
+        assert_eq!(
+            replace_parameter_pattern("abcd", "b", "x&y", false, false, false, false),
+            "ax&ycd"
+        );
     }
 
     #[test]
     fn escaped_ampersand_and_backslash_are_literal() {
         // strcreplace flags=2 (stringlib.c:223-226): \& -> &, \\ -> \.
-        assert_eq!(replace_parameter_pattern("abcd", "b", "\\&", false, false, true, false), "a&cd");
-        assert_eq!(replace_parameter_pattern("abcd", "b", "\\\\", false, false, true, false), "a\\cd");
+        assert_eq!(
+            replace_parameter_pattern("abcd", "b", "\\&", false, false, true, false),
+            "a&cd"
+        );
+        assert_eq!(
+            replace_parameter_pattern("abcd", "b", "\\\\", false, false, true, false),
+            "a\\cd"
+        );
     }
 
     #[test]
     fn global_substitution_treats_hash_anchor_as_literal() {
         // subst.c:9452-9453: MATCH_GLOBREP forces MATCH_ANY, so a leading
         // `#` in a `//` substitution is a literal pattern character.
-        assert_eq!(replace_parameter_pattern("abc", "#abc", "foo", true, false, true, false), "abc");
-        assert_eq!(replace_parameter_pattern("abc", "#a", "foo", false, false, true, false), "foobc");
+        assert_eq!(
+            replace_parameter_pattern("abc", "#abc", "foo", true, false, true, false),
+            "abc"
+        );
+        assert_eq!(
+            replace_parameter_pattern("abc", "#a", "foo", false, false, true, false),
+            "foobc"
+        );
     }
 
     #[test]
     fn anchored_empty_pattern_inserts_replacement() {
         // pat_subst:9197-9229: null pattern + MATCH_BEG prefixes REP with
         // `&` expanding to the empty match.
-        assert_eq!(replace_parameter_pattern("one", "#", "&two", false, false, true, false), "twoone");
-        assert_eq!(replace_parameter_pattern("one", "%", "&two", false, false, true, false), "onetwo");
+        assert_eq!(
+            replace_parameter_pattern("one", "#", "&two", false, false, true, false),
+            "twoone"
+        );
+        assert_eq!(
+            replace_parameter_pattern("one", "%", "&two", false, false, true, false),
+            "onetwo"
+        );
     }
 
     #[test]
     fn shortest_suffix_glob_preserves_quoted_value_apostrophe() {
-        assert_eq!(remove_matching_suffix("x'a'y", "*a*", MatchLength::Shortest, false), "x'");
+        assert_eq!(
+            remove_matching_suffix("x'a'y", "*a*", MatchLength::Shortest, false),
+            "x'"
+        );
     }
 }
 

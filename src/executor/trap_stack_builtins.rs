@@ -105,7 +105,6 @@ impl Executor {
         Ok(())
     }
 
-
     pub(in crate::executor) fn execute_trap(
         &mut self,
         cmd: &CommandNode,

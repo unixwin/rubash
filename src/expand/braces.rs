@@ -101,9 +101,8 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
         // Bash ignores a brace opener at a word boundary when it is followed
         // by whitespace or a closing brace; this keeps `{ a,b}` literal.
         let preceded_by_whitespace = i == 0 || bytes[i - 1].is_ascii_whitespace();
-        let followed_by_whitespace_or_close = i + 1 >= bytes.len()
-            || bytes[i + 1].is_ascii_whitespace()
-            || bytes[i + 1] == b'}';
+        let followed_by_whitespace_or_close =
+            i + 1 >= bytes.len() || bytes[i + 1].is_ascii_whitespace() || bytes[i + 1] == b'}';
         if preceded_by_whitespace && followed_by_whitespace_or_close {
             i += 1;
             continue;
@@ -668,26 +667,15 @@ mod tests {
 
     #[test]
     fn test_invalid_nested_sequences_expand_only_nested_commas() {
-        assert_eq!(
-            expand_braces("{{1,2,3}..4}"),
-            vec!["1..4", "2..4", "3..4"],
-        );
-        assert_eq!(
-            expand_braces("{6..{7,8,9}}"),
-            vec!["6..7", "6..8", "6..9"],
-        );
+        assert_eq!(expand_braces("{{1,2,3}..4}"), vec!["1..4", "2..4", "3..4"],);
+        assert_eq!(expand_braces("{6..{7,8,9}}"), vec!["6..7", "6..8", "6..9"],);
         // GNU braces.c: no comma group among the endpoints -> the whole
         // word stays literal (braces.tests {{a..c}..{1..3}}).
-        assert_eq!(
-            expand_braces("{{a..c}..{1..3}}"),
-            vec!["{{a..c}..{1..3}}"],
-        );
+        assert_eq!(expand_braces("{{a..c}..{1..3}}"), vec!["{{a..c}..{1..3}}"],);
         // A comma group among the endpoints cross-products the sequence.
         assert_eq!(
             expand_braces("{{a..c}..{1,10}}"),
-            vec![
-                "a..1", "a..10", "b..1", "b..10", "c..1", "c..10",
-            ],
+            vec!["a..1", "a..10", "b..1", "b..10", "c..1", "c..10",],
         );
     }
 

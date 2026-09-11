@@ -60,11 +60,7 @@ impl Executor {
         };
 
         let silent = optstring.starts_with(':');
-        let optspec: &str = if silent {
-            &optstring[1..]
-        } else {
-            &optstring
-        };
+        let optspec: &str = if silent { &optstring[1..] } else { &optstring };
         let mut optind = self
             .env_vars
             .get("OPTIND")

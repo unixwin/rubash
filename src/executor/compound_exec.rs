@@ -79,7 +79,11 @@ impl Executor {
         // keys or the background child fires the inherited EXIT trap when
         // its command finishes (trap.tests: three stray "exiting" lines
         // around the monitored `sleep 7 & sleep 6 & sleep 5 & / wait`).
-        for key in self.env_vars.keys().filter(|key| key.starts_with("__RUBASH_TRAP")) {
+        for key in self
+            .env_vars
+            .keys()
+            .filter(|key| key.starts_with("__RUBASH_TRAP"))
+        {
             child.env_remove(key);
         }
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
@@ -287,7 +291,9 @@ impl Executor {
                     Some(0) => break,
                     Some(_) => {}
                     None => {
-                        self.report_arithmetic_error_raw_display(&arithmetic.test_metadata.expression);
+                        self.report_arithmetic_error_raw_display(
+                            &arithmetic.test_metadata.expression,
+                        );
                         self.exit_code = 1;
                         arithmetic_failed = true;
                         break;

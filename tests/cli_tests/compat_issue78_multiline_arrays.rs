@@ -29,7 +29,8 @@ fn multiline_array_assignment_is_not_split_into_commands() {
 
 #[test]
 fn multiline_array_assignment_keeps_elements() {
-    let (stdout, stderr, code) = run("ab=(git\ncompletion)\nprintf '%s|%s\\n' \"${ab[0]}\" \"${ab[1]}\"");
+    let (stdout, stderr, code) =
+        run("ab=(git\ncompletion)\nprintf '%s|%s\\n' \"${ab[0]}\" \"${ab[1]}\"");
     assert_eq!(stdout, "git|completion\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));

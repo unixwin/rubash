@@ -119,10 +119,7 @@ impl Executor {
     /// (expand_string_for_pat); and quote_string_for_repl (subst.c:3891)
     /// turns quoted `&`/backslash into the `\&`/`\\` data consumed by the
     /// strcreplace pass in pat_subst.
-    pub(in crate::executor) fn expand_patsub_replacement_text(
-        &self,
-        replacement: &str,
-    ) -> String {
+    pub(in crate::executor) fn expand_patsub_replacement_text(&self, replacement: &str) -> String {
         let patsub_replacement =
             crate::builtins::shopt::option_enabled(&self.env_vars, "patsub_replacement");
         let chars: Vec<char> = replacement.chars().collect();
@@ -294,11 +291,7 @@ fn push_single_quoted_replacement_char(marked: &mut String, ch: char) {
 /// Copy one char of a double-quoted replacement span; returns the next
 /// index. Backslashes escape only `$`, backtick, `"`, and `\`; every
 /// other backslash is a literal, quoted backslash.
-fn push_double_quoted_replacement_char(
-    marked: &mut String,
-    chars: &[char],
-    index: usize,
-) -> usize {
+fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], index: usize) -> usize {
     match chars[index] {
         '\\' => match chars.get(index + 1) {
             Some('$') => {
@@ -409,7 +402,10 @@ fn push_ansi_c_replacement_span(marked: &mut String, chars: &[char], index: usiz
                         cursor = next;
                     } else {
                         push_single_quoted_replacement_char(marked, '\\');
-                        push_single_quoted_replacement_char(marked, *chars.get(cursor + 1).unwrap_or(&'x'));
+                        push_single_quoted_replacement_char(
+                            marked,
+                            *chars.get(cursor + 1).unwrap_or(&'x'),
+                        );
                         cursor += 2;
                     }
                 }

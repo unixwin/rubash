@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
 use super::marks::{mark_typed, marked_vars, unmark_typed};
+use super::names::valid_nameref_value;
 use super::storage::{
     append_array_value, append_assoc_value, eval_arith_value, format_indexed_array_storage,
     indexed_array_entries, is_noassign_bash_array, parse_array_tokens,
@@ -11,7 +12,6 @@ use super::{
     ARRAY_VARS, ASSOC_VARS, COMPOUND_ASSIGNMENT_MARKER, DECLARED_UNSET_VARS, EXECUTION_FAILURE,
     EXECUTION_SUCCESS, INTEGER_VARS, NAMEREF_VARS, READONLY_VARS,
 };
-use super::names::valid_nameref_value;
 use crate::executor::arithmetic::eval_conditional_arith_value;
 
 pub(super) fn assign_declare_names<W>(
@@ -54,10 +54,8 @@ where
                     let is_array_storage = current.starts_with('\x1d')
                         || (current.starts_with('(') && current.ends_with(')'));
                     if !current.is_empty() && !is_array_storage {
-                        let converted = super::storage::format_assoc_storage(vec![(
-                            "0".to_string(),
-                            current,
-                        )]);
+                        let converted =
+                            super::storage::format_assoc_storage(vec![("0".to_string(), current)]);
                         variables.insert(bare.to_string(), converted);
                     }
                 }
@@ -167,8 +165,7 @@ where
                         if integer || marked_vars(variables, INTEGER_VARS).contains(base) {
                             let left = eval_conditional_arith_value(&current_element, variables)
                                 .unwrap_or(0);
-                            let right =
-                                eval_conditional_arith_value(value, variables).unwrap_or(0);
+                            let right = eval_conditional_arith_value(value, variables).unwrap_or(0);
                             (left + right).to_string()
                         } else {
                             format!("{current_element}{value}")

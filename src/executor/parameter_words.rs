@@ -242,14 +242,13 @@ impl Executor {
         // In POSIX mode, a double-quoted `${...}` may close at a `}` inside
         // the apparent word when a single quote is literal (Interp 221).
         // Expand that braced head separately, then continue with the suffix.
-        if matches!(context, SubstitutionQuoteContext::DoubleQuoted)
-            && self.posix_mode_enabled()
-        {
+        if matches!(context, SubstitutionQuoteContext::DoubleQuoted) && self.posix_mode_enabled() {
             if let Some(rest) = word.strip_prefix("${") {
                 if let Some(close) = matching_parameter_brace_in_context(rest, true, true) {
                     if close + 1 < rest.len() {
                         let braced_end = 2 + close + 1;
-                        let head = self.expand_quoted_parameter_word_mut(&word[..braced_end], context);
+                        let head =
+                            self.expand_quoted_parameter_word_mut(&word[..braced_end], context);
                         let tail = self.expand_embedded_parameters_mut_with_context(
                             &word[braced_end..],
                             context,
@@ -507,8 +506,7 @@ impl Executor {
         let mut consumed = 0usize;
         while let Some(rel) = word[consumed..].find("${") {
             let start = consumed + rel;
-            let (in_double, inside_cs) =
-                scan_word_prefix_quote_state(&word[..start], quoted_word);
+            let (in_double, inside_cs) = scan_word_prefix_quote_state(&word[..start], quoted_word);
             let body_start = start + 2;
             let Some(end) = matching_parameter_brace(&word[body_start..]) else {
                 break;
@@ -622,7 +620,10 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
                 '\\' => index += 2,
                 '"' => stack.last_mut().unwrap().in_double = false,
                 '$' if chars.get(index + 1) == Some(&'(') => {
-                    stack.push(Frame { in_single: false, in_double: false });
+                    stack.push(Frame {
+                        in_single: false,
+                        in_double: false,
+                    });
                     index += 2;
                 }
                 _ => index += 1,
@@ -647,7 +648,10 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
                 break;
             }
             '$' if chars.get(index + 1) == Some(&'(') => {
-                stack.push(Frame { in_single: false, in_double: false });
+                stack.push(Frame {
+                    in_single: false,
+                    in_double: false,
+                });
                 index += 2;
                 continue;
             }
@@ -717,7 +721,6 @@ fn decode_double_quotes_in_quoted_parameter_word(word: &str) -> String {
     output
 }
 
-
 fn unescape_double_quoted_backslashes(value: &str) -> String {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
@@ -746,10 +749,7 @@ fn unescape_double_quoted_backslashes(value: &str) -> String {
 // removal already ran on the raw alternate (decode_double_quotes...); the
 // expansion result itself is data and only needs its remaining escapes
 // resolved (GNU subst.c never quote-removes expansion results).
-fn unescape_parameter_operator_result(
-    word: &str,
-    context: SubstitutionQuoteContext,
-) -> String {
+fn unescape_parameter_operator_result(word: &str, context: SubstitutionQuoteContext) -> String {
     if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
         unescape_double_quoted_backslashes(word)
     } else {

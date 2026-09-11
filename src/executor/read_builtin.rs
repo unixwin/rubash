@@ -1703,7 +1703,10 @@ impl Executor {
                     index += 1;
                 }
                 word if word.starts_with('-')
-                    && matches!(word.as_bytes().get(1).copied(), Some(b'i' | b'n' | b'N' | b't' | b'u'))
+                    && matches!(
+                        word.as_bytes().get(1).copied(),
+                        Some(b'i' | b'n' | b'N' | b't' | b'u')
+                    )
                     && word.len() > 2 =>
                 {
                     if let Some(value) = word.strip_prefix("-i") {
@@ -1850,7 +1853,11 @@ impl Executor {
                 scalar_names.clone()
             };
             if !scalar_names.is_empty() {
-                let ok = self.assign_read_scalar_names(&scalar_names, initial_text.as_deref().unwrap_or(""), raw);
+                let ok = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
                 if !ok {
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
@@ -1873,7 +1880,13 @@ impl Executor {
                 return 0;
             }
 
-            let line = match self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit) {
+            let line = match self.read_input_for_command(
+                cmd,
+                read_fd,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+            ) {
                 Some(l) if l.is_empty() && initial_text.is_some() => None,
                 Some(l) => Some(l),
                 None => None,
@@ -1961,7 +1974,11 @@ impl Executor {
                 }
                 0
             } else if command_closes_stdin(cmd) || self.fd_table.is_closed(0) {
-                let ok = self.assign_read_scalar_names(&scalar_names, initial_text.as_deref().unwrap_or(""), raw);
+                let ok = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
                 if !ok {
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
@@ -1976,25 +1993,49 @@ impl Executor {
                     0
                 }
             } else if read_fd.is_some() || command_redirects_stdin(cmd) {
-                let ok = self.assign_read_scalar_names(&scalar_names, initial_text.as_deref().unwrap_or(""), raw);
+                let ok = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
                 if !ok {
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
-                if initial_text.is_none() { 1 } else { 0 }
+                if initial_text.is_none() {
+                    1
+                } else {
+                    0
+                }
             } else if self.env_vars.contains_key(FUNCTION_STDIN) {
-                let ok = self.assign_read_scalar_names(&scalar_names, initial_text.as_deref().unwrap_or(""), raw);
+                let ok = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
                 if !ok {
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
-                if initial_text.is_none() { 1 } else { 0 }
+                if initial_text.is_none() {
+                    1
+                } else {
+                    0
+                }
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => {
-                        let ok = self.assign_read_scalar_names(&scalar_names, initial_text.as_deref().unwrap_or(""), raw);
+                        let ok = self.assign_read_scalar_names(
+                            &scalar_names,
+                            initial_text.as_deref().unwrap_or(""),
+                            raw,
+                        );
                         if !ok {
                             return self.finish_read_error(cmd, &stderr, 1);
                         }
-                        if initial_text.is_none() { 1 } else { 0 }
+                        if initial_text.is_none() {
+                            1
+                        } else {
+                            0
+                        }
                     }
                     Ok((_, line)) => {
                         let line = if !raw

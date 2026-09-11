@@ -1,6 +1,6 @@
 use super::*;
-use crate::lexer::Token;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
+use crate::lexer::Token;
 
 pub(super) fn compound_assignment_from_word(
     word: &str,
@@ -222,11 +222,7 @@ fn split_compound_assignment_words(inner: &str) -> Vec<String> {
             _ => {}
         }
 
-        if ch.is_ascii_whitespace()
-            && !single
-            && !double
-            && bracket_depth == 0
-            && paren_depth == 0
+        if ch.is_ascii_whitespace() && !single && !double && bracket_depth == 0 && paren_depth == 0
         {
             if !current.is_empty() {
                 words.push(std::mem::take(&mut current));
@@ -313,8 +309,7 @@ pub(super) fn collect_compound_assignment(
             // Re-join lexer-split quoted elements: a raw ending mid-quote
             // continues in the following token(s) until the quotes balance,
             // and the joined raw is the quote-intact element value.
-            let mut merged_raw =
-                tokens[i].raw.split_once('=').map(|(_, r)| r.to_string());
+            let mut merged_raw = tokens[i].raw.split_once('=').map(|(_, r)| r.to_string());
             let mut merged_end = i;
             if let Some(raw) = merged_raw.as_mut() {
                 while compound_raw_quote_unclosed(raw)

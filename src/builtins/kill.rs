@@ -430,8 +430,13 @@ fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
     let base = format!("{pid}.q.{}.{}", std::process::id(), seq);
     let part = signal_mailbox_dir().join(format!("{base}.part"));
     let full = signal_mailbox_dir().join(&base);
-    std::fs::write(&part, format!("{signal}
-"))?;
+    std::fs::write(
+        &part,
+        format!(
+            "{signal}
+"
+        ),
+    )?;
     std::fs::rename(&part, &full)?;
     Ok(true)
 }

@@ -150,13 +150,12 @@ where
     // variable and keeps the nameref itself; an array-reference cell unbinds
     // the referenced element and keeps the nameref; a valueless or invalid
     // cell falls back to unbinding the nameref variable itself.
-    let nameref_cell: Option<String> = if !options.nameref
-        && is_marked_variable(env_vars, NAMEREF_VARS, name)
-    {
-        env_vars.get(name).cloned()
-    } else {
-        None
-    };
+    let nameref_cell: Option<String> =
+        if !options.nameref && is_marked_variable(env_vars, NAMEREF_VARS, name) {
+            env_vars.get(name).cloned()
+        } else {
+            None
+        };
     let (unset_name, _keep_nameref) = match nameref_cell {
         Some(ref cell) if valid_identifier(cell) => (cell.as_str(), true),
         Some(ref cell) if parse_unset_subscript(cell).is_some() => {

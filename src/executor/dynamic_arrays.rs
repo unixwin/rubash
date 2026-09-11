@@ -149,9 +149,7 @@ impl Executor {
             }
             "BASH_ARGC" => return Some(format_indexed_array_values(self.bash_argc_stack.clone())),
             "BASH_ARGV" => return Some(format_indexed_array_values(self.bash_argv_stack.clone())),
-            "BASH_LINENO" => {
-                return Some(format_indexed_array_values(self.bash_lineno_view()))
-            }
+            "BASH_LINENO" => return Some(format_indexed_array_values(self.bash_lineno_view())),
             "BASH_SOURCE" => {
                 return Some(format_indexed_array_values(self.bash_source_stack.clone()))
             }

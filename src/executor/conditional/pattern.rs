@@ -208,10 +208,7 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
             // sm_loop.c BRACKET:527-534+568: the escaped member may anchor a
             // range (`[\a-z]` is the range a-z); the range end may itself be
             // escaped (`[\a-\z]`).
-            if index + 3 < pattern.len()
-                && pattern[index + 2] == '-'
-                && pattern[index + 3] != ']'
-            {
+            if index + 3 < pattern.len() && pattern[index + 2] == '-' && pattern[index + 3] != ']' {
                 let mut end_index = index + 3;
                 if matches!(pattern[end_index], '\\' | '\x18' | '\x11')
                     && end_index + 1 < pattern.len()
@@ -237,9 +234,7 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
         // degenerates to its literal characters (posixpat.tests collating
         // section).
         if pattern[index] == '[' {
-            if let Some((members, next_index)) =
-                parse_collating_or_equivalence(pattern, index)
-            {
+            if let Some((members, next_index)) = parse_collating_or_equivalence(pattern, index) {
                 for member in &members {
                     if chars_match(*member, candidate, nocase) {
                         matched = true;
@@ -247,10 +242,7 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
                 }
                 saw_member = true;
                 if members.len() == 1 {
-                    if let Some((end_char, after)) = collating_range_end(
-                        pattern,
-                        next_index,
-                    ) {
+                    if let Some((end_char, after)) = collating_range_end(pattern, next_index) {
                         let start_cmp = comparable_char(members[0], nocase);
                         let end_cmp = comparable_char(end_char, nocase);
                         if start_cmp <= candidate_cmp && candidate_cmp <= end_cmp {
@@ -282,8 +274,7 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
             // sm_loop.c BRACKET:568-572: the range end may be an escaped
             // character (`[a-\z]` is the range a-z).
             let mut end_index = index + 2;
-            if matches!(pattern[end_index], '\\' | '\x18' | '\x11')
-                && end_index + 1 < pattern.len()
+            if matches!(pattern[end_index], '\\' | '\x18' | '\x11') && end_index + 1 < pattern.len()
             {
                 end_index += 1;
             }
@@ -314,10 +305,7 @@ pub(in crate::executor) fn case_bracket_expression_matches_with_case(
 /// character name resolves through the POSIX portable character set table;
 /// an unrecognized symbol degenerates to its literal characters, matching
 /// bash's sm_loop.c fallback for undefined collating symbols.
-fn parse_collating_or_equivalence(
-    pattern: &[char],
-    index: usize,
-) -> Option<(Vec<char>, usize)> {
+fn parse_collating_or_equivalence(pattern: &[char], index: usize) -> Option<(Vec<char>, usize)> {
     let open = *pattern.get(index + 1)?;
     if open != '.' && open != '=' {
         return None;

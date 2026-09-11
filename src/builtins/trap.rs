@@ -252,7 +252,10 @@ where
     E: Write,
 {
     // GNU builtins/trap.def builtin_usage: "trap: usage: trap [-Plp] [[action] signal_spec ...]"
-    writeln!(stderr, "trap: usage: trap [-Plp] [[action] signal_spec ...]")
+    writeln!(
+        stderr,
+        "trap: usage: trap [-Plp] [[action] signal_spec ...]"
+    )
 }
 
 fn print_signal_list<W>(stdout: &mut W) -> io::Result<()>
@@ -345,7 +348,13 @@ fn is_hard_ignored(env_vars: &HashMap<String, String>, signal: &str) -> bool {
 fn orig_ignored_signals(env_vars: &HashMap<String, String>) -> Vec<String> {
     env_vars
         .get(TRAP_ORIG_IGNORES)
-        .map(|value| value.split(':').filter(|name| !name.is_empty()).map(str::to_string).collect())
+        .map(|value| {
+            value
+                .split(':')
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -361,7 +370,9 @@ pub(crate) fn transport_inherited_ignores(env_vars: &HashMap<String, String>) ->
         .into_iter()
         .filter(|signal| {
             !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERROR" | "RETURN")
-                && env_vars.get(&trap_key(signal)).is_some_and(String::is_empty)
+                && env_vars
+                    .get(&trap_key(signal))
+                    .is_some_and(String::is_empty)
         })
         .collect();
     ignored.extend(orig_ignored_signals(env_vars));
@@ -376,10 +387,7 @@ fn store_orig_ignored_signals(env_vars: &mut HashMap<String, String>, mut signal
     if signals.is_empty() {
         env_vars.remove(TRAP_ORIG_IGNORES);
     } else {
-        env_vars.insert(
-            TRAP_ORIG_IGNORES.to_string(),
-            signals.join(":"),
-        );
+        env_vars.insert(TRAP_ORIG_IGNORES.to_string(), signals.join(":"));
     }
 }
 
@@ -450,7 +458,9 @@ pub(crate) fn mark_startup_ignores(env_vars: &mut HashMap<String, String>) {
         .into_iter()
         .filter(|signal| {
             !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERROR" | "RETURN")
-                && env_vars.get(&trap_key(signal)).is_some_and(String::is_empty)
+                && env_vars
+                    .get(&trap_key(signal))
+                    .is_some_and(String::is_empty)
         })
         .collect();
     for signal in ignored {

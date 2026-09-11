@@ -5,8 +5,8 @@
 //! -p expansion going through histexpand.c history_expand.
 
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::io::Write;
+use std::rc::Rc;
 
 use super::Executor;
 use crate::history::SessionHistory;
@@ -35,7 +35,10 @@ pub(in crate::executor) fn hist_ctx(executor: &Executor) -> HistCtx {
             subst: it.next().unwrap_or('^'),
             comment: it.next().unwrap_or('#'),
         },
-        posix: executor.get_env("__RUBASH_POSIX_MODE").map(|v| v == "1").unwrap_or(false),
+        posix: executor
+            .get_env("__RUBASH_POSIX_MODE")
+            .map(|v| v == "1")
+            .unwrap_or(false),
     }
 }
 
@@ -147,7 +150,11 @@ pub(in crate::executor) fn execute_history_session(
     if mode == HistoryMode::List {
         if let Some(bad) = operands.first() {
             if bad.parse::<i64>().is_err() {
-                let _ = writeln!(stderr, "{}history: {bad}: numeric argument required", executor.diagnostic_prefix());
+                let _ = writeln!(
+                    stderr,
+                    "{}history: {bad}: numeric argument required",
+                    executor.diagnostic_prefix()
+                );
                 return Ok(2);
             }
             count = bad.parse::<usize>().ok();

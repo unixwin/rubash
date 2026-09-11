@@ -322,8 +322,7 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
     single || double || ansi_single
 }
 
-const DECLARATION_COMMAND_WORDS: [&str; 5] =
-    ["declare", "typeset", "local", "export", "readonly"];
+const DECLARATION_COMMAND_WORDS: [&str; 5] = ["declare", "typeset", "local", "export", "readonly"];
 
 fn is_identifier_head(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_'
@@ -435,11 +434,7 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
         if ch.is_whitespace() && !single && !double && !ansi_single {
             comment_start = true;
             if compound_depth == 0 && !word.is_empty() {
-                classify_top_level_word(
-                    &word,
-                    &mut seen_command_word,
-                    &mut declaration_context,
-                );
+                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
                 word.clear();
                 word_pure = true;
             }
@@ -484,8 +479,7 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
                 replacement_context: false,
                 initial_state: crate::lexer::dolbrace::DolbraceState::Param,
             };
-            if let Some(scan) = crate::lexer::dolbrace::scan_braced_parameter_body(&body, context)
-            {
+            if let Some(scan) = crate::lexer::dolbrace::scan_braced_parameter_body(&body, context) {
                 index += 2 + body[..scan.end].chars().count();
             } else {
                 index += 2;
@@ -561,11 +555,7 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
             // A subshell/grouping paren ends the assignment-prefix region:
             // GNU reports `echo a=(b` immediately instead of continuing.
             if !word.is_empty() {
-                classify_top_level_word(
-                    &word,
-                    &mut seen_command_word,
-                    &mut declaration_context,
-                );
+                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
                 word.clear();
                 word_pure = true;
             }
@@ -606,11 +596,7 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
 
         if ch == ';' || ch == '|' || ch == '&' {
             if compound_depth == 0 && !word.is_empty() {
-                classify_top_level_word(
-                    &word,
-                    &mut seen_command_word,
-                    &mut declaration_context,
-                );
+                classify_top_level_word(&word, &mut seen_command_word, &mut declaration_context);
                 word.clear();
                 word_pure = true;
                 seen_command_word = false;

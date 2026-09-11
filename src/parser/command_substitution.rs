@@ -242,10 +242,7 @@ fn braced_command_substitution(
     None
 }
 
-fn skip_command_substitution_heredoc(
-    chars: &[char],
-    start: usize,
-) -> Option<(usize, bool)> {
+fn skip_command_substitution_heredoc(chars: &[char], start: usize) -> Option<(usize, bool)> {
     let mut header_end = start + 2;
     while header_end < chars.len() && chars[header_end] != '\n' {
         header_end += 1;

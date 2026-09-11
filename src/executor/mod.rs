@@ -23,7 +23,6 @@ mod alias_reparse;
 mod alias_select;
 mod alias_set_builtins;
 mod arithmetic_aliases;
-mod history_exec;
 mod array_assignment_exec;
 mod assignment_dispatch;
 mod assignment_expansion;
@@ -42,6 +41,7 @@ mod command_substitution_pipelines;
 mod command_substitution_values;
 mod command_words;
 mod compound_exec;
+mod history_exec;
 pub(crate) mod substitution_metadata;
 use compound_exec::*;
 mod declare_local;
@@ -447,7 +447,8 @@ pub struct Executor {
     /// Error category reported by the most recent arithmetic evaluation that
     /// used the real shell environment (GNU expr.c reports fatality from the
     /// actual evaluation, not from a re-evaluation in a fresh environment).
-    arithmetic_last_error_category: Cell<Option<crate::executor::arithmetic::ArithmeticErrorCategory>>,
+    arithmetic_last_error_category:
+        Cell<Option<crate::executor::arithmetic::ArithmeticErrorCategory>>,
     /// True while an if/elif condition list is executing: word-expansion
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).

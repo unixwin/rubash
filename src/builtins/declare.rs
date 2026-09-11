@@ -138,7 +138,6 @@ pub(crate) fn sync_typed_attributes(
             } else {
                 None
             };
-
         }
     }
 }
@@ -148,8 +147,6 @@ pub fn execute(args: &[String], variables: &mut HashMap<String, String>) -> io::
     let mut stderr = io::stderr();
     execute_with_io(args, variables, &mut stdout, &mut stderr)
 }
-
-
 
 /// Minimal flag scan used by the executor to decide whether a declare/typeset
 /// invocation follows nameref chains (declare.def:704-806 applies when the
@@ -678,7 +675,14 @@ where
     // `declare -n b="1"` followed by `declare -np b`, while an attr pass
     // would leave a nameref mark behind).
     if !print {
-        attr_status = apply_declare_attrs(command_name, &names, variables, options, attr_status, stderr)?;
+        attr_status = apply_declare_attrs(
+            command_name,
+            &names,
+            variables,
+            options,
+            attr_status,
+            stderr,
+        )?;
     }
 
     let plain = names.is_empty() && !had_name_args && !print && !saw_option;

@@ -59,7 +59,12 @@ impl Executor {
         // Measurement escape hatch: when set, every suite runs through the
         // real lexer/parser/executor so the ledger reflects genuine GNU
         // semantics instead of the canned handlers below.
-        if self.env_vars.get("__RUBASH_NO_UPSTREAM_SCRIPTS").map(String::as_str) == Some("1") {
+        if self
+            .env_vars
+            .get("__RUBASH_NO_UPSTREAM_SCRIPTS")
+            .map(String::as_str)
+            == Some("1")
+        {
             return false;
         }
         if !self.current_script_is_bash_upstream_test() {

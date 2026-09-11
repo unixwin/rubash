@@ -796,11 +796,25 @@ impl Executor {
                     }
                     for option in arg[1..].chars() {
                         match option {
-                            'a' => { has_io = true; do_append = true; }
-                            'n' => { has_io = true; do_read_new = true; }
-                            'r' => { has_io = true; do_read = true; }
-                            'w' => { has_io = true; do_write = true; }
-                            'c' => { do_clear = true; }
+                            'a' => {
+                                has_io = true;
+                                do_append = true;
+                            }
+                            'n' => {
+                                has_io = true;
+                                do_read_new = true;
+                            }
+                            'r' => {
+                                has_io = true;
+                                do_read = true;
+                            }
+                            'w' => {
+                                has_io = true;
+                                do_write = true;
+                            }
+                            'c' => {
+                                do_clear = true;
+                            }
                             _ => {}
                         }
                     }
@@ -823,10 +837,18 @@ impl Executor {
                     p.clear()?;
                     let _ = std::fs::write(&file, "");
                 }
-                if do_append { p.append_history(&file)?; }
-                if do_read_new { p.read_new_history(&file)?; }
-                if do_read { p.read_history(&file)?; }
-                if do_write { p.write_history(&file)?; }
+                if do_append {
+                    p.append_history(&file)?;
+                }
+                if do_read_new {
+                    p.read_new_history(&file)?;
+                }
+                if do_read {
+                    p.read_history(&file)?;
+                }
+                if do_write {
+                    p.write_history(&file)?;
+                }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(0);
             }
@@ -869,10 +891,7 @@ impl Executor {
                     let range_pos = arg[search_from..].find('-').map(|pos| pos + search_from);
                     if let Some(pos) = range_pos {
                         let (start_text, end_text) = (&arg[..pos], &arg[pos + 1..]);
-                        match (
-                            history_number(start_text),
-                            history_number(end_text),
-                        ) {
+                        match (history_number(start_text), history_number(end_text)) {
                             (Some(start), Some(end))
                                 if start >= 0
                                     && end >= 0
@@ -989,7 +1008,12 @@ impl Executor {
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         match result {
-            crate::builtins::fc::FcResult::EditWith { editor, start, end, rev } => {
+            crate::builtins::fc::FcResult::EditWith {
+                editor,
+                start,
+                end,
+                rev,
+            } => {
                 // fc.def edit_and_execute_command: write the selected
                 // entries to a temp file, run the editor with inherited
                 // stdio, read the result back, remember and execute it.
@@ -1027,10 +1051,8 @@ impl Executor {
                 }
                 let editor_path =
                     crate::executor::path::find_user_command(&editor_name, &self.env_vars)
-                    .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
-                let edit_status = std::process::Command::new(&editor_path)
-                    .arg(&path)
-                    .status();
+                        .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
+                let edit_status = std::process::Command::new(&editor_path).arg(&path).status();
                 match edit_status {
                     Ok(st) if st.success() => {}
                     Ok(st) => {
@@ -1061,7 +1083,9 @@ impl Executor {
                         .get_env("HISTSIZE")
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(500);
-                    session.borrow_mut().record(&edited, &control, &ignore, histsize);
+                    session
+                        .borrow_mut()
+                        .record(&edited, &control, &ignore, histsize);
                 }
                 let tokens = crate::lexer::tokenize(&edited);
                 let mut ast = crate::parser::parse_with_options(
@@ -1081,9 +1105,7 @@ impl Executor {
                 // fc -s: the substituted command is remembered (the C
                 // parse_and_execute remembers it) and then executed.
                 if let Some(session) = session.as_ref() {
-                    let control = self
-                        .get_env("HISTCONTROL")
-                        .unwrap_or_default();
+                    let control = self.get_env("HISTCONTROL").unwrap_or_default();
                     let ignore = self.get_env("HISTIGNORE").unwrap_or_default();
                     let histsize = self
                         .get_env("HISTSIZE")
@@ -1096,8 +1118,7 @@ impl Executor {
                     if shell.last_line_added && !shell.entries.is_empty() {
                         shell.entries.pop();
                     }
-                    let was_recorded =
-                        shell.record(&command, &control, &ignore, histsize);
+                    let was_recorded = shell.record(&command, &control, &ignore, histsize);
                     shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&command);
@@ -1120,11 +1141,13 @@ impl Executor {
         cmd: &CommandNode,
         builtin: crate::builtins::complete::CompletionBuiltin,
     ) -> Result<i32, ExecuteError> {
-
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
         let diagnostic_prefix = self.diagnostic_prefix();
-        if matches!(builtin, crate::builtins::complete::CompletionBuiltin::Complete) {
+        if matches!(
+            builtin,
+            crate::builtins::complete::CompletionBuiltin::Complete
+        ) {
             let args = &cmd.words[1..];
             // complete_builtin (complete.def:386-489): parse the words once,
             // then -p print / -r remove / register per name against the
@@ -1165,7 +1188,11 @@ impl Executor {
                 if let Some(pseudo) = pseudo {
                     match self.completion_specs.get(pseudo) {
                         Some(cs) => {
-                            crate::builtins::complete::print_compspec_line(pseudo, cs, &mut stdout)?;
+                            crate::builtins::complete::print_compspec_line(
+                                pseudo,
+                                cs,
+                                &mut stdout,
+                            )?;
                         }
                         None => {
                             writeln!(

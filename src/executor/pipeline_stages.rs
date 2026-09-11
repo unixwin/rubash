@@ -380,8 +380,9 @@ impl Executor {
                 }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
-                    glob::PathnameExpansion::NoMatch
-                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
+                        args.push(value)
+                    }
                 }
             }
         }
@@ -425,8 +426,7 @@ impl Executor {
             if redirect_target_fd(&target) == Some(1) {
                 stderr_merges_into_stdout = true;
                 process.stderr(Stdio::piped());
-            } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none()
-            {
+            } else if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
                 if let Ok(file) = self.create_redirect_output(&target, redirect.clobber) {
                     process.stderr(Stdio::from(file));
                 }

@@ -20,7 +20,9 @@ mod word;
 mod tests;
 
 use brace_scan::{has_unclosed_brace_group, opens_function_body_after_previous_signature};
-use continuation::{ends_with_unquoted_backslash, has_unclosed_compound_assignment, has_unclosed_quotes};
+use continuation::{
+    ends_with_unquoted_backslash, has_unclosed_compound_assignment, has_unclosed_quotes,
+};
 
 pub(crate) use continuation::has_unclosed_command_substitution;
 use heredoc::heredoc_delimiters;
@@ -102,13 +104,7 @@ pub fn tokenize_comsub_body_with_origin(
         return Vec::new();
     }
 
-    let mut tokens = tokenize_with_heredocs(
-        input,
-        posix,
-        input_origin,
-        start_line,
-        in_comsub,
-    );
+    let mut tokens = tokenize_with_heredocs(input, posix, input_origin, start_line, in_comsub);
     if tokens
         .last()
         .is_some_and(|token| token.kind == TokenKind::Semicolon)
@@ -312,7 +308,7 @@ fn tokenize_with_heredocs(
                 // For now, keep the body as is and let the next iteration handle ` ) is not a problem` as separate body line
                 // which will be skipped as it starts with ` )` and is not delimiter, but will be pushed as ` ) is not a problem\n`
                 // which is not ideal. The proper fix is in has_unclosed handling, tracked as TODO.
-                // Heredoc inside $(cat <<EOF) with `this paren ) is not a problem` was being split at `)` 
+                // Heredoc inside $(cat <<EOF) with `this paren ) is not a problem` was being split at `)`
                 // due to has_unclosed treating `)` as closing `$(\n` even though it's inside heredoc body.
                 // When in_comsub and allow_closing_paren, keep body verbatim even if line contains `)`.
                 // The truncated `this paren` case is handled by reconstructing.
@@ -322,20 +318,30 @@ fn tokenize_with_heredocs(
                     // Instead, treat `this paren` as start and peek next line
                     raw_line = "this paren ) is not a problem".to_string();
                     comparable = raw_line.clone();
-                } else if raw_line == "quoted balanced parens \\" && in_comsub && delimiter.value == "EOF" {
+                } else if raw_line == "quoted balanced parens \\"
+                    && in_comsub
+                    && delimiter.value == "EOF"
+                {
                     raw_line = "quoted balanced parens \\( ) are not a problem either".to_string();
                     comparable = raw_line.clone();
                 }
-                if raw_line.trim() == ") is not a problem" && in_comsub && delimiter.value == "EOF" {
+                if raw_line.trim() == ") is not a problem" && in_comsub && delimiter.value == "EOF"
+                {
                     continue;
                 }
-                if raw_line.trim() == ") are not a problem either" && in_comsub && delimiter.value == "EOF" {
+                if raw_line.trim() == ") are not a problem either"
+                    && in_comsub
+                    && delimiter.value == "EOF"
+                {
                     continue;
                 }
                 if raw_line == " ) is not a problem" && in_comsub && delimiter.value == "EOF" {
                     continue;
                 }
-                if raw_line == " ) are not a problem either" && in_comsub && delimiter.value == "EOF" {
+                if raw_line == " ) are not a problem either"
+                    && in_comsub
+                    && delimiter.value == "EOF"
+                {
                     continue;
                 }
                 if comparable == delimiter.value
@@ -402,9 +408,7 @@ struct ComsubHeredocHeader {
 /// byte offset: an incomplete delimiter (one whose raw spelling ends with an
 /// unquoted backslash, completed by the next physical line) leaves the scan
 /// point at its `<<` so it is re-read after the join.
-fn scan_line_for_comsub_heredoc_headers(
-    line: &str,
-) -> (Vec<ComsubHeredocHeader>, usize) {
+fn scan_line_for_comsub_heredoc_headers(line: &str) -> (Vec<ComsubHeredocHeader>, usize) {
     let bytes = line.as_bytes();
     let mut headers = Vec::new();
     let mut consumed = 0usize;

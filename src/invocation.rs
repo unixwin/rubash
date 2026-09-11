@@ -42,11 +42,7 @@ impl ShellInvocation {
                     && !flags.contains('o')
                     && !flags.contains('O')
                     && flags.chars().all(|f| {
-                        f == 'c'
-                            || f == 's'
-                            || f == 'i'
-                            || f == 'D'
-                            || cli_flag_name(f).is_some()
+                        f == 'c' || f == 's' || f == 'i' || f == 'D' || cli_flag_name(f).is_some()
                     })
                 {
                     for flag in flags.chars() {

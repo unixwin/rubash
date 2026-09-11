@@ -242,10 +242,8 @@ pub(in crate::executor) fn trim_read_input(
 /// behind. Keep that byte as a raw byte instead of dropping it, which is what
 /// makes intl1.sub print `-абв-(5)` rather than `-абвгд-(5)`.
 fn truncate_read_input_bytes(input: String, limit: usize) -> String {
-    let sentinel = char::from_u32(
-        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
-    )
-    .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     let raw = if input.contains(sentinel) {
         crate::executor::substitution_metadata::decode_raw_byte_markers(input.as_bytes())
     } else {

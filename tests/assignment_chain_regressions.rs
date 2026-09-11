@@ -25,18 +25,12 @@ fn pure_assignment_line_chains() {
 
 #[test]
 fn temporary_assignment_env_chains() {
-    assert_eq!(
-        rubash("a=1 b=$a env | grep '^b='"),
-        "b=1\n"
-    );
+    assert_eq!(rubash("a=1 b=$a env | grep '^b='"), "b=1\n");
 }
 
 #[test]
 fn temporary_assignment_env_does_not_leak() {
-    assert_eq!(
-        rubash("a=1 b=$a true; echo after:$b"),
-        "after:\n"
-    );
+    assert_eq!(rubash("a=1 b=$a true; echo after:$b"), "after:\n");
 }
 
 #[test]

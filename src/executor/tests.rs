@@ -123,7 +123,9 @@ mod unit_tests {
         let ast = parse(&tokens);
         let mut executor = Executor::new();
         executor.stdout_capture = Some(Vec::new());
-        executor.execute_ast(&ast).expect("function pipeline comsub");
+        executor
+            .execute_ast(&ast)
+            .expect("function pipeline comsub");
         let captured = executor.stdout_capture.take().unwrap_or_default();
         let text = String::from_utf8_lossy(&captured);
         assert!(text.contains("x=GOT:ARGS=[a b]"), "got: {text}");
@@ -150,8 +152,7 @@ mod unit_tests {
         // quote is not special in a heredoc body, so a backslash before one is
         // literal data, while double-backslash and backslash-dollar collapse.
         let mut executor = Executor::new();
-        let expanded =
-            executor.expand_heredoc_body_mut("echo \\\"\nnext\\\\\nlast\\$v\n");
+        let expanded = executor.expand_heredoc_body_mut("echo \\\"\nnext\\\\\nlast\\$v\n");
         assert_eq!(expanded, "echo \\\"\nnext\\\nlast$v\n");
     }
 
@@ -161,9 +162,7 @@ mod unit_tests {
         // here-document. The deferred-heredoc reparse origin used to drop the
         // body (lexer/mod.rs AliasReplacementDeferredHeredoc) and execute the
         // body lines as commands (exit 127).
-        let tokens = tokenize(
-            "shopt -s expand_aliases\nalias h='cat <<E\nhello\nworld\nE'\nh\n",
-        );
+        let tokens = tokenize("shopt -s expand_aliases\nalias h='cat <<E\nhello\nworld\nE'\nh\n");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
         executor.stdout_capture = Some(Vec::new());
@@ -178,9 +177,7 @@ mod unit_tests {
     fn alias_invocation_heredoc_body_comes_from_following_commands() {
         // heredoc10.sub case 3: the alias value opens the heredoc and the
         // body follows in the outer input.
-        let tokens = tokenize(
-            "shopt -s expand_aliases\nalias h='cat <<E'\nh\nbody1\nbody2\nE\n",
-        );
+        let tokens = tokenize("shopt -s expand_aliases\nalias h='cat <<E'\nh\nbody1\nbody2\nE\n");
         let ast = parse(&tokens);
         let mut executor = Executor::new();
         executor.stdout_capture = Some(Vec::new());
@@ -195,12 +192,16 @@ mod unit_tests {
     fn command_substitution_operator_words_are_detected() {
         use crate::executor::command_subst_helpers::command_substitution_words_have_operators;
 
-        let words = |source: &str| {
-            crate::executor::split_shell_words(source)
-        };
-        assert!(command_substitution_words_have_operators(&words("f a b | wc -l")));
-        assert!(command_substitution_words_have_operators(&words("f a b 2>/dev/null")));
-        assert!(command_substitution_words_have_operators(&words("gitC | sed -e s/a/b/")));
+        let words = |source: &str| crate::executor::split_shell_words(source);
+        assert!(command_substitution_words_have_operators(&words(
+            "f a b | wc -l"
+        )));
+        assert!(command_substitution_words_have_operators(&words(
+            "f a b 2>/dev/null"
+        )));
+        assert!(command_substitution_words_have_operators(&words(
+            "gitC | sed -e s/a/b/"
+        )));
         assert!(!command_substitution_words_have_operators(&words("f a b")));
     }
 

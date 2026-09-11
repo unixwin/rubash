@@ -19,9 +19,7 @@ impl Executor {
         // script via jump_to_top_level(ERREXIT)).
         let name_raw = function.name_metadata.raw.clone();
         let name_quoted = name_raw != function.name
-            && (name_raw.contains('\'')
-                || name_raw.contains('"')
-                || name_raw.contains('\\'));
+            && (name_raw.contains('\'') || name_raw.contains('"') || name_raw.contains('\\'));
         let procsubst_like = name_raw.starts_with("<(") || name_raw.starts_with(">(");
         let invalid_identifier = function.name.contains('$') || name_quoted || procsubst_like;
         let posix_mode = self.posix_mode_enabled();
@@ -210,7 +208,7 @@ impl Executor {
                 .cloned()
                 .or_else(|| call_cmd.line.map(|line| line.to_string()))
                 .unwrap_or_else(|| "0".to_string());
-// GNU execute_function:5311-5317 pushes the call line onto
+            // GNU execute_function:5311-5317 pushes the call line onto
             // BASH_LINENO (array_push) instead of overwriting the bottom
             // frame: inside fn called at line N, BASH_LINENO=(N, "0"), so
             // ${BASH_LINENO[1]} is "0" ("main()'s file is the same as the first caller",
@@ -255,15 +253,13 @@ impl Executor {
         // restore_default_signal(DEBUG_TRAP) removed it. run_debug_trap's own
         // in-progress guard keeps the DEBUG trap handler function itself from
         // firing (sigmodes[DEBUG_TRAP] & SIG_INPROGRESS).
-        let functrace =
-            crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
+        let functrace = crate::builtins::set::shell_option_enabled(&self.env_vars, "functrace");
         let function_traced = functrace || self.function_has_trace_attribute(name);
         // GNU execute_cmd.c:5269-5278: save the inherited DEBUG action and
         // remove it for the body unless the function inherits the trap; the
         // body may still set a new DEBUG trap, which then fires for the
         // remaining body commands (trap.tests: "func[29] funcdebug").
-        let saved_debug_action =
-            crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG");
+        let saved_debug_action = crate::builtins::trap::get_trap_action(&self.env_vars, "DEBUG");
         if saved_debug_action.is_some() && !function_traced {
             crate::builtins::trap::clear_debug_trap(&mut self.env_vars);
         }
@@ -285,8 +281,7 @@ impl Executor {
                 self.env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
-            let command_text =
-                crate::executor::command_text::bash_command_source_text(call_cmd);
+            let command_text = crate::executor::command_text::bash_command_source_text(call_cmd);
             self.run_debug_trap(&command_text)?;
         }
         let result = self.execute_ast_inner(body_ast);

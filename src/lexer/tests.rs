@@ -61,9 +61,7 @@ fn test_braced_parameter_single_quotes_follow_gnu_pairing() {
     // GNU parse.y pairs the first `'` with the quote inside `$'`, leaving
     // the final `'` unmatched: bash 5.2 reports "unexpected EOF while
     // looking for matching `'" for this input.
-    assert!(has_unclosed_input_syntax(
-        "echo ${IFS+'bar} ${v/$'\\''/x}"
-    ));
+    assert!(has_unclosed_input_syntax("echo ${IFS+'bar} ${v/$'\\''/x}"));
 }
 
 #[test]
@@ -147,7 +145,11 @@ fn posix_quoted_alternate_word_value_keeps_quote_structure() {
         "fully-quoted mixed word must carry the quoted-word marker: {:?}",
         word.value
     );
-    assert!(word.value.contains("\x17"), "literal-in-dquote `'` must be protected: {:?}", word.value);
+    assert!(
+        word.value.contains("\x17"),
+        "literal-in-dquote `'` must be protected: {:?}",
+        word.value
+    );
 }
 
 #[test]
@@ -195,9 +197,15 @@ fn heredoc_body_paren_does_not_close_command_substitution() {
     // GNU make_here_document reads the here-doc body from the input stream,
     // so a ) inside the body never closes the surrounding $(). The fast-path
     // paren balancer must skip the here-doc body like the slow path already does.
-    assert!(has_unclosed_command_substitution("echo $(cat <<eof\nhere doc with )"));
-    assert!(has_unclosed_command_substitution("echo $(cat <<eof\nhere doc with )\neof"));
-    assert!(!has_unclosed_command_substitution("echo $(cat <<eof\nhere doc with )\neof\n)"));
+    assert!(has_unclosed_command_substitution(
+        "echo $(cat <<eof\nhere doc with )"
+    ));
+    assert!(has_unclosed_command_substitution(
+        "echo $(cat <<eof\nhere doc with )\neof"
+    ));
+    assert!(!has_unclosed_command_substitution(
+        "echo $(cat <<eof\nhere doc with )\neof\n)"
+    ));
 }
 
 #[test]
@@ -207,12 +215,22 @@ fn case_pattern_paren_does_not_close_command_substitution() {
     // own line inside $() must stay one logical line, otherwise the sub-word is
     // truncated at the newline and the parser reports
     // `syntax error in command substitution` (comsub-posix line 81).
-    assert!(has_unclosed_command_substitution("echo $(case a in a) echo x"));
-    assert!(has_unclosed_command_substitution("echo $(case a in a) echo x\nesac"));
-    assert!(!has_unclosed_command_substitution("echo $(case a in a) echo x\nesac)"));
-    assert!(!has_unclosed_command_substitution("echo $(case a in a) echo x;; esac)"));
+    assert!(has_unclosed_command_substitution(
+        "echo $(case a in a) echo x"
+    ));
+    assert!(has_unclosed_command_substitution(
+        "echo $(case a in a) echo x\nesac"
+    ));
+    assert!(!has_unclosed_command_substitution(
+        "echo $(case a in a) echo x\nesac)"
+    ));
+    assert!(!has_unclosed_command_substitution(
+        "echo $(case a in a) echo x;; esac)"
+    ));
     // A pattern `)` still leaves an unterminated case open when `esac` is missing.
-    assert!(has_unclosed_command_substitution("echo $(case a in a) echo x)"));
+    assert!(has_unclosed_command_substitution(
+        "echo $(case a in a) echo x)"
+    ));
 }
 
 #[test]

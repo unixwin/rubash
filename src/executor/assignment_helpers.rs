@@ -101,7 +101,7 @@ pub(in crate::executor) fn append_assoc_value(
                         *entry_value = (eval_conditional_arith_value(entry_value, env_vars)
                             .unwrap_or(0)
                             + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
-                            .to_string();
+                        .to_string();
                     } else {
                         *entry_value = append_scalar_value(entry_value, &rhs);
                     }
@@ -395,12 +395,9 @@ fn bash_hash_string(key: &str) -> u32 {
 /// (128). The declared path is the common case, so model 1024 here
 /// (appendop.tests: `typeset -A foo=([one]=bar ...)` enumerates [0] before
 /// [two] at 1024 buckets, [two] before [0] at 128).
-pub(crate) fn bash_assoc_order(
-    entries: &[(String, String)],
-) -> Vec<(usize, (String, String))> {
+pub(crate) fn bash_assoc_order(entries: &[(String, String)]) -> Vec<(usize, (String, String))> {
     // First occurrence fixes the slot; last occurrence supplies the value.
-    let mut first_index: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
+    let mut first_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     let mut unique: Vec<usize> = Vec::new();
     for (index, (key, _)) in entries.iter().enumerate() {
         if first_index.contains_key(key.as_str()) {

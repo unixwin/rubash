@@ -14,10 +14,17 @@ const EX_USAGE: i32 = 2;
 /// must run (fc.def:308 echoes it to stderr, then parse_and_execute runs it).
 pub enum FcResult {
     Status(i32),
-    Reexec { command: String },
+    Reexec {
+        command: String,
+    },
     /// fc -e: open the selected entries in an editor, then execute the
     /// edited result (fc.def edit_and_execute_command).
-    EditWith { editor: Option<String>, start: usize, end: usize, rev: bool },
+    EditWith {
+        editor: Option<String>,
+        start: usize,
+        end: usize,
+        rev: bool,
+    },
 }
 
 enum SpecErr {
@@ -28,7 +35,11 @@ enum SpecErr {
 /// Returns true if arg looks like a history number (possibly negative),
 /// matching bash's fc_number() so that e.g. "-1" is not misread as an option.
 fn is_number_arg(arg: &str) -> bool {
-    let s = if arg.starts_with('-') && arg.len() > 1 { &arg[1..] } else { arg };
+    let s = if arg.starts_with('-') && arg.len() > 1 {
+        &arg[1..]
+    } else {
+        arg
+    };
     !s.is_empty() && s.parse::<isize>().is_ok()
 }
 
@@ -250,26 +261,50 @@ where
 
     // fc.def:345-360: resolve histbeg/histend from one or two arguments.
     let resolved: Result<(usize, usize), SpecErr> = match (pos.first(), pos.get(1)) {
-        (Some(f), Some(l)) => {
-            fc_gethnum(f, entries, history_base, last_hist, real_last, listing, true).and_then(
-                |b| {
-                    fc_gethnum(l, entries, history_base, last_hist, real_last, listing, false)
-                        .map(|e| (b, e))
-                },
+        (Some(f), Some(l)) => fc_gethnum(
+            f,
+            entries,
+            history_base,
+            last_hist,
+            real_last,
+            listing,
+            true,
+        )
+        .and_then(|b| {
+            fc_gethnum(
+                l,
+                entries,
+                history_base,
+                last_hist,
+                real_last,
+                listing,
+                false,
             )
-        }
-        (Some(f), None) => {
-            fc_gethnum(f, entries, history_base, last_hist, real_last, listing, true).map(|b| {
-                let e = if b == real_last {
-                    if listing { real_last } else { b }
-                } else if listing {
-                    last_hist.max(0) as usize
+            .map(|e| (b, e))
+        }),
+        (Some(f), None) => fc_gethnum(
+            f,
+            entries,
+            history_base,
+            last_hist,
+            real_last,
+            listing,
+            true,
+        )
+        .map(|b| {
+            let e = if b == real_last {
+                if listing {
+                    real_last
                 } else {
                     b
-                };
-                (b, e)
-            })
-        }
+                }
+            } else if listing {
+                last_hist.max(0) as usize
+            } else {
+                b
+            };
+            (b, e)
+        }),
         (None, _) => {
             if listing {
                 // fc.def: "The default for listing is the last 16 history items."
@@ -364,7 +399,10 @@ fn write_help<O>(stdout: &mut O) -> io::Result<()>
 where
     O: Write,
 {
-    writeln!(stdout, "fc: display or execute commands from the history list")?;
+    writeln!(
+        stdout,
+        "fc: display or execute commands from the history list"
+    )?;
     writeln!(stdout, "")?;
     writeln!(stdout, "Usage: fc [-e ename] [-lnr] [first] [last]")?;
     writeln!(stdout, "       fc -s [pat=rep ...] [command]")?;
@@ -376,10 +414,16 @@ where
     writeln!(stdout, "  -l          List lines instead of editing.")?;
     writeln!(stdout, "  -n          Omit line numbers when listing.")?;
     writeln!(stdout, "  -r          Reverse the order of the lines.")?;
-    writeln!(stdout, "  -s          Re-execute command after substitution.")?;
+    writeln!(
+        stdout,
+        "  -s          Re-execute command after substitution."
+    )?;
     writeln!(stdout, "")?;
     writeln!(stdout, "FIRST and LAST can be numbers or strings.")?;
-    writeln!(stdout, "Negative numbers count back from the most recent command.")?;
+    writeln!(
+        stdout,
+        "Negative numbers count back from the most recent command."
+    )?;
     Ok(())
 }
 
@@ -534,7 +578,6 @@ mod tests {
         assert_eq!(stderr, "fc: no command found\n");
     }
 
-
     #[test]
     fn test_fc_string_spec_prefix_match() {
         let (out, _, result) = run_fc(&["-ln", "git"], &["a", "git status", "fc"]);
@@ -546,14 +589,16 @@ mod tests {
 
     #[test]
     fn test_fc_s_substitution() {
-        let (_, stderr, result) =
-            run_fc(&["-s", "a=x"], &["echo aa ab ac", "fc"]);
+        let (_, stderr, result) = run_fc(&["-s", "a=x"], &["echo aa ab ac", "fc"]);
         match result {
             FcResult::Reexec { command } => assert_eq!(command, "echo xx xb xc"),
-            other => panic!("expected Reexec, got {:?}", match other {
-                FcResult::Status(s) => s.to_string(),
-                FcResult::Reexec { .. } | FcResult::EditWith { .. } => String::new(),
-            }),
+            other => panic!(
+                "expected Reexec, got {:?}",
+                match other {
+                    FcResult::Status(s) => s.to_string(),
+                    FcResult::Reexec { .. } | FcResult::EditWith { .. } => String::new(),
+                }
+            ),
         }
         assert_eq!(stderr, "echo xx xb xc\n");
     }

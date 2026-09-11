@@ -46,7 +46,6 @@ impl Executor {
                 }
             }
             let message = cmd
-                
                 .get_assignment("__RUBASH_PARSE_ERROR__")
                 .map(String::as_str)
                 .unwrap_or("unexpected token");
@@ -79,7 +78,6 @@ impl Executor {
             .iter()
             .any(|metadata| crate::lexer::has_unclosed_command_substitution(&metadata.raw))
             || cmd
-                
                 .assignment_values()
                 .any(|value| crate::lexer::has_unclosed_command_substitution(value))
         {

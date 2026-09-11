@@ -28,7 +28,12 @@ impl Executor {
         self.env_vars.remove(&fd_closed_key(fd));
     }
 
-    pub(in crate::executor) fn set_fd_output_file(&mut self, fd: u32, target: String, dynamic: bool) {
+    pub(in crate::executor) fn set_fd_output_file(
+        &mut self,
+        fd: u32,
+        target: String,
+        dynamic: bool,
+    ) {
         let path = shell_path_to_windows(&target, &self.env_vars);
         self.fd_table
             .open_output(fd, FdWriteEndpoint::File(path), dynamic);
@@ -99,7 +104,8 @@ impl Executor {
                 let result = self.execute_ast(&ast);
                 match saved_eval_context {
                     Some(previous) => {
-                        self.env_vars.insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
+                        self.env_vars
+                            .insert("__RUBASH_EVAL_CONTEXT".to_string(), previous);
                     }
                     None => {
                         self.env_vars.remove("__RUBASH_EVAL_CONTEXT");
@@ -408,7 +414,10 @@ impl Executor {
     /// failing command that is not part of a &&/|| list, not inverted with
     /// the ! keyword, and not suppressed by errexit handling; functions
     /// inherit it only under "set -o errtrace" (trap.c error_trace_mode).
-    pub(crate) fn maybe_run_error_trap(&mut self, command: &CommandNode) -> Result<(), ExecuteError> {
+    pub(crate) fn maybe_run_error_trap(
+        &mut self,
+        command: &CommandNode,
+    ) -> Result<(), ExecuteError> {
         if self.exit_code == 0
             || command.inverted
             || command.and_or().is_some()
@@ -467,8 +476,7 @@ impl Executor {
         if self.subshell_depth.get() > 0 {
             return Ok(());
         }
-        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "SIGCHLD")
-        else {
+        let Some(action) = crate::builtins::trap::get_trap_action(&self.env_vars, "SIGCHLD") else {
             return Ok(());
         };
         if action.is_empty() {
@@ -957,8 +965,11 @@ impl Executor {
                         target.as_str(),
                         "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0"
                     ) {
-                        self.fd_table
-                            .open_input(fd, FdReadEndpoint::InheritedProcessStdin, fd != 0);
+                        self.fd_table.open_input(
+                            fd,
+                            FdReadEndpoint::InheritedProcessStdin,
+                            fd != 0,
+                        );
                         continue;
                     }
 
@@ -1246,7 +1257,9 @@ impl Executor {
             })
             .collect();
         for name in names {
-            let Some(storage) = self.env_vars.get(&name).cloned() else { continue };
+            let Some(storage) = self.env_vars.get(&name).cloned() else {
+                continue;
+            };
             let mut entries = indexed_array_entries(&storage);
             let mut changed = false;
             for value in entries.values_mut() {
@@ -1256,7 +1269,8 @@ impl Executor {
                 }
             }
             if changed {
-                self.env_vars.insert(name, format_indexed_array_storage(entries));
+                self.env_vars
+                    .insert(name, format_indexed_array_storage(entries));
             }
         }
     }
@@ -1564,9 +1578,8 @@ impl Executor {
                 _ => {}
             }
             let prefix = self.diagnostic_prefix();
-            let payload = format!(
-                "{name}: readonly variable\n{prefix}{name}: cannot assign fd to variable"
-            );
+            let payload =
+                format!("{name}: readonly variable\n{prefix}{name}: cannot assign fd to variable");
             return Err(ExecuteError::IoError(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 payload,

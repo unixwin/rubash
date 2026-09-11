@@ -73,7 +73,8 @@ fn non_posix_brace_body_keeps_quote_operator_pairing() {
 fn assignment_alternate_unquoted_is_quote_removed_and_field_split() {
     // posixexp2.tests case 35: the unquoted `=` alternate is quote-removed
     // before assignment, and the expansion result field-splits.
-    let (stdout, _stderr, code) = rubash(r#"set -o posix; unset v; printf '<%s> ' ${v=a\ b} x ${v=c\ d}"#);
+    let (stdout, _stderr, code) =
+        rubash(r#"set -o posix; unset v; printf '<%s> ' ${v=a\ b} x ${v=c\ d}"#);
     assert_eq!(stdout, "<a> <b> <x> <a> <b> ");
     assert_eq!(code, Some(0));
 }
@@ -83,7 +84,8 @@ fn assignment_alternate_double_quoted_keeps_literal_backslash() {
     // posixexp2.tests case 36: inside double quotes `\` escapes only
     // $, `, ", \, and newline, so `\ ` stays literal in the assigned value
     // and the quoted expansion prints it verbatim.
-    let (stdout, _stderr, code) = rubash(r#"set -o posix; unset v; printf '<%s> ' "${v=a\ b}" x "${v=c\ d}""#);
+    let (stdout, _stderr, code) =
+        rubash(r#"set -o posix; unset v; printf '<%s> ' "${v=a\ b}" x "${v=c\ d}""#);
     assert_eq!(stdout, "<a\\ b> <x> <a\\ b> ");
     assert_eq!(code, Some(0));
 }
@@ -92,7 +94,8 @@ fn assignment_alternate_double_quoted_keeps_literal_backslash() {
 fn word_alternate_unquoted_never_field_splits() {
     // posixexp2.tests case 37: the `-` alternate undergoes quote removal but
     // its quoted-space markers survive, so the result stays one field.
-    let (stdout, _stderr, code) = rubash(r#"set -o posix; unset v; printf '<%s> ' ${v-a\ b} x ${v-c\ d}"#);
+    let (stdout, _stderr, code) =
+        rubash(r#"set -o posix; unset v; printf '<%s> ' ${v-a\ b} x ${v-c\ d}"#);
     assert_eq!(stdout, "<a b> <x> <c d> ");
     assert_eq!(code, Some(0));
 }
@@ -133,8 +136,7 @@ fn posix_interleaved_quotes_case28_mixed_quoted_word() {
 #[test]
 fn posix_interleaved_quotes_case28_dq_segment_alone() {
     // The dq-segment-only sub-case: GNU 5.2.21 prints `'x ~ x'`.
-    let (stdout, stderr, code) =
-        rubash("set -o posix\nprintf '<%s>\n' \"${IFS+\"'\"x ~ x'}\"\n");
+    let (stdout, stderr, code) = rubash("set -o posix\nprintf '<%s>\n' \"${IFS+\"'\"x ~ x'}\"\n");
     assert_eq!(stdout, "<'x ~ x'>\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -144,8 +146,7 @@ fn posix_interleaved_quotes_case28_dq_segment_alone() {
 fn posix_interleaved_quotes_case28_dq_segment_plus_sq_tail() {
     // dq segment followed by an unterminated-looking `'x"` tail: GNU 5.2.21
     // prints `'x ~ x''x` (the trailing `"` closes the double quote).
-    let (stdout, stderr, code) =
-        rubash("set -o posix\nprintf '<%s>\n' \"${IFS+\"'\"x ~ x'}'x\"\n");
+    let (stdout, stderr, code) = rubash("set -o posix\nprintf '<%s>\n' \"${IFS+\"'\"x ~ x'}'x\"\n");
     assert_eq!(stdout, "<'x ~ x''x>\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));

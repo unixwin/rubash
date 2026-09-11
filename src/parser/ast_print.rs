@@ -348,9 +348,7 @@ impl Printer {
     }
 
     fn redirects_present(&self, cmd: &CommandNode) -> bool {
-        !cmd.redirects.is_empty()
-            || !cmd.heredoc_redirects.is_empty()
-            || cmd.here_string.is_some()
+        !cmd.redirects.is_empty() || !cmd.heredoc_redirects.is_empty() || cmd.here_string.is_some()
     }
 
     /// A `;`/newline-separated command list (compound_list). A previous
@@ -376,7 +374,11 @@ impl Printer {
                         self.cprintf(";");
                     }
                 } else {
-                    let connector = if self.inside_function_def > 0 { "" } else { ";" };
+                    let connector = if self.inside_function_def > 0 {
+                        ""
+                    } else {
+                        ";"
+                    };
                     self.print_deferred_heredocs(connector);
                 }
                 if self.inside_function_def > 0 {
@@ -1082,8 +1084,8 @@ impl Printer {
     /// print_deferred_heredocs(connector): print the connector string, then
     /// any deferred heredoc bodies. `;`-only connectors are swallowed.
     fn print_deferred_heredocs(&mut self, connector: &str) {
-        let print_connector = !connector.is_empty()
-            && (connector.as_bytes()[0] != b';' || connector.len() > 1);
+        let print_connector =
+            !connector.is_empty() && (connector.as_bytes()[0] != b';' || connector.len() > 1);
         if print_connector {
             self.cprintf(connector);
         }
@@ -1140,9 +1142,7 @@ fn render_assignment_value(value: &str) -> String {
         return format!("'{quoted_value}'");
     }
     if quoted_value.contains('$') || quoted_value.contains('`') {
-        let escaped = quoted_value
-            .replace('"', "\\\"")
-            .replace('`', "\\`");
+        let escaped = quoted_value.replace('"', "\\\"").replace('`', "\\`");
         return format!("\"{escaped}\"");
     }
     let needs_quoting = quoted_value.is_empty()

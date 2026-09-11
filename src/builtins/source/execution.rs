@@ -63,7 +63,9 @@ fn execute_ast_with_args(
             .unwrap_or("rubash");
         executor.set_env("__RUBASH_TOP_LEVEL_NAME", top_level_name);
     }
-    let old_current_line = executor.get_env("__RUBASH_CURRENT_LINE").map(str::to_string);
+    let old_current_line = executor
+        .get_env("__RUBASH_CURRENT_LINE")
+        .map(str::to_string);
     if let Some(source_name) = source_name {
         // GNU builtins/evalfile.c:253-257 pushes a "source" frame for a
         // sourced file: BASH_SOURCE += filename, BASH_LINENO += the source
@@ -95,8 +97,7 @@ fn execute_ast_with_args(
     // so the sourced file's top-level commands and the RETURN-trap action's
     // own DEBUG fire are suppressed together (dbg-support.tests:98 emits
     // only `debug lineno: 98 main`, no fires inside dbg-support.sub).
-    let functrace =
-        crate::builtins::set::shell_option_enabled(&executor.env_vars(), "functrace");
+    let functrace = crate::builtins::set::shell_option_enabled(&executor.env_vars(), "functrace");
     let old_source_debug_suppressed = executor.source_debug_suppressed();
     if !functrace {
         executor.set_source_debug_suppressed(true);

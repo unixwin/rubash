@@ -46,7 +46,9 @@ impl Executor {
             // restore must also capture the target's previous value or the
             // referenced variable keeps the temporary value after the command.
             let resolved_target: Option<String> = match self.nameref_resolution(base_name) {
-                NamerefResolution::Target(ref target) if *target != *base_name => Some(target.clone()),
+                NamerefResolution::Target(ref target) if *target != *base_name => {
+                    Some(target.clone())
+                }
                 _ => None,
             };
             if let Some(ref target) = resolved_target {
@@ -69,7 +71,6 @@ impl Executor {
         }
         previous
     }
-
 
     /// GNU bind_variable with a nameref cell naming an array element: the
     /// value (and its integer evaluation when either the nameref or the
@@ -101,7 +102,7 @@ impl Executor {
                     // expr.c evaluation (flix=9 -> 9, not the storage-shape 0).
                     (self.eval_integer_assignment_value(&existing)
                         + self.eval_integer_assignment_value(value))
-                        .to_string()
+                    .to_string()
                 } else {
                     append_scalar_value(&existing, value)
                 }
@@ -124,7 +125,11 @@ impl Executor {
                 entries
                     .into_iter()
                     .map(|(key, value)| {
-                        format!("[{}]={}", quote_assoc_key(&key), quote_assoc_storage_value(&value))
+                        format!(
+                            "[{}]={}",
+                            quote_assoc_key(&key),
+                            quote_assoc_storage_value(&value)
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -147,7 +152,7 @@ impl Executor {
             if integer {
                 (self.eval_integer_assignment_value(&current_element)
                     + self.eval_integer_assignment_value(value))
-                    .to_string()
+                .to_string()
             } else {
                 append_scalar_value(&current_element, value)
             }
@@ -215,15 +220,19 @@ impl Executor {
             let cell_valid = is_shell_name(&cell) || parse_array_subscript(&cell).is_some();
             if !append && !cell_valid {
                 // Distinguish valueless (empty) from already-invalid cells.
-                let value_valid =
-                    is_shell_name(value.as_str()) || parse_array_subscript(value.as_str()).is_some();
+                let value_valid = is_shell_name(value.as_str())
+                    || parse_array_subscript(value.as_str()).is_some();
                 if cell.is_empty() && value_valid {
                     // Valueless nameref: set the target to the new value.
                     self.env_vars.insert(base_name.to_string(), value.clone());
                     self.exit_code = 0;
                     return true;
                 }
-                let offender = if cell.is_empty() { value.as_str() } else { cell.as_str() };
+                let offender = if cell.is_empty() {
+                    value.as_str()
+                } else {
+                    cell.as_str()
+                };
                 let line = format!(
                     "{}`{offender}': not a valid identifier\n",
                     self.diagnostic_prefix()

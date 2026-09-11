@@ -19,7 +19,8 @@ impl Executor {
             name,
             body,
             info.and_then(|info| info.body_kind),
-            info.map(|info| info.def_redirects.as_slice()).unwrap_or(&[]),
+            info.map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]),
         );
         writeln!(stdout, "{text}")?;
         Ok(())
@@ -38,7 +39,8 @@ impl Executor {
             name,
             body,
             info.and_then(|info| info.body_kind),
-            info.map(|info| info.def_redirects.as_slice()).unwrap_or(&[]),
+            info.map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]),
         );
         let _ = write!(stdout, "{name} is a function\n{text}\n");
     }

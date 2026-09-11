@@ -49,9 +49,9 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // esac)" -- the empty case list closes at esac and the ')' is
         // unexpected). The parser used to drop the token silently and run
         // the rest of the line as a simple command.
-        if options.stray_close_is_error && command_is_empty(&state.current_cmd)
-            && (tokens[i].value == ")"
-                || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
+        if options.stray_close_is_error
+            && command_is_empty(&state.current_cmd)
+            && (tokens[i].value == ")" || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
         {
             state.current_cmd.insert_assignment(
                 "__RUBASH_PARSE_ERROR__".to_string(),
@@ -85,10 +85,9 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 }
                 joined
             });
-            state.current_cmd.insert_assignment(
-                "__RUBASH_PARSE_SOURCE__".to_string(),
-                source,
-            );
+            state
+                .current_cmd
+                .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
             state.ast.commands.push(state.current_cmd);
             state.current_cmd = CommandNode::new();
             break;
@@ -701,9 +700,13 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let mut close = open;
             for j in open..tokens.len() {
                 let t = &tokens[j];
-                if t.value == "((" || (t.value == "(" && tokens.get(j + 1).is_some_and(|n| n.value == "(")) {
+                if t.value == "(("
+                    || (t.value == "(" && tokens.get(j + 1).is_some_and(|n| n.value == "("))
+                {
                     depth += 1;
-                } else if t.value == "))" || (t.value == ")" && tokens.get(j + 1).is_some_and(|n| n.value == ")")) {
+                } else if t.value == "))"
+                    || (t.value == ")" && tokens.get(j + 1).is_some_and(|n| n.value == ")"))
+                {
                     if depth == 0 {
                         close = j;
                         break;
@@ -739,10 +742,9 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             } else {
                 "syntax error: `;' unexpected".to_string()
             };
-            state.current_cmd.insert_assignment(
-                "__RUBASH_PARSE_ERROR__".to_string(),
-                error_msg,
-            );
+            state
+                .current_cmd
+                .insert_assignment("__RUBASH_PARSE_ERROR__".to_string(), error_msg);
             state.current_cmd.insert_assignment(
                 "__RUBASH_PARSE_SOURCE__".to_string(),
                 format!("(( {} ))", expr_raw.trim()),
@@ -757,8 +759,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
     if ((token.kind == TokenKind::Word)
         || (token.kind == TokenKind::Keyword && token.value == "function")
-        || (token.kind == TokenKind::RedirectIn
-            && matches!(token.value.as_str(), "<" | ">"))
+        || (token.kind == TokenKind::RedirectIn && matches!(token.value.as_str(), "<" | ">"))
         || (token.kind == TokenKind::Keyword && token.value == "!"))
         && command_allows_compound_start(&state.current_cmd)
     {
@@ -898,7 +899,6 @@ fn push_parse_error_until(
 ) -> usize {
     state
         .current_cmd
-        
         .insert_assignment("__RUBASH_PARSE_ERROR__".to_string(), message.to_string());
     let mut next_i = start + 1;
     while tokens.get(next_i).is_some() {
@@ -1161,7 +1161,6 @@ fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usi
     })
 }
 
-
 #[cfg(test)]
 mod stray_close_tests {
     use super::*;
@@ -1169,7 +1168,11 @@ mod stray_close_tests {
     fn marker_source(ast: &Ast) -> String {
         ast.commands
             .iter()
-            .find_map(|command| command.get_assignment("__RUBASH_PARSE_SOURCE__").map(|value| value.clone()))
+            .find_map(|command| {
+                command
+                    .get_assignment("__RUBASH_PARSE_SOURCE__")
+                    .map(|value| value.clone())
+            })
             .unwrap_or_default()
     }
 

@@ -247,10 +247,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                                 collect_compound_assignment(tokens, *i)
                             {
                                 if let Some((lhs, _)) = raw_word.split_once('=') {
-                                    word = format!
-                                        ("{lhs}={}{}",
-                                         crate::executor::types::COMPOUND_ASSIGNMENT_MARKER,
-                                         compound_value);
+                                    word = format!(
+                                        "{lhs}={}{}",
+                                        crate::executor::types::COMPOUND_ASSIGNMENT_MARKER,
+                                        compound_value
+                                    );
                                     *i = next_i;
                                 }
                             }
@@ -686,7 +687,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 if let Some(source) = parse_error_source_line(tokens, *i) {
                     state
                         .current_cmd
-                        
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
                 }
                 state
@@ -731,7 +731,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 if let Some(source) = parse_error_source_line(tokens, *i) {
                     state
                         .current_cmd
-                        
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
                 }
                 state
@@ -750,7 +749,6 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 if let Some(source) = parse_error_source_line(tokens, *i) {
                     state
                         .current_cmd
-                        
                         .insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
                 }
                 *i += 1;
@@ -1041,6 +1039,8 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     };
     let bytes = head.as_bytes();
     !bytes.is_empty()
-        && bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
         && bytes.iter().any(|b| b.is_ascii_alphabetic() || *b == b'_')
 }

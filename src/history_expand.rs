@@ -57,7 +57,11 @@ pub struct HistChars {
 
 impl Default for HistChars {
     fn default() -> Self {
-        Self { expand: '!', subst: '^', comment: '#' }
+        Self {
+            expand: '!',
+            subst: '^',
+            comment: '#',
+        }
     }
 }
 
@@ -467,7 +471,12 @@ fn get_history_event(
 
 /// histexpand.c get_subst_pattern: extract the pattern delimited by
 /// the given char from index i; backslash quotes the delimiter.
-fn get_subst_pattern(chars: &[char], i: usize, delimiter: char, is_rhs: bool) -> (Option<String>, usize) {
+fn get_subst_pattern(
+    chars: &[char],
+    i: usize,
+    delimiter: char,
+    is_rhs: bool,
+) -> (Option<String>, usize) {
     let mut si = i;
     while si < chars.len() && chars[si] != delimiter {
         if chars[si] == BS && chars.get(si + 1) == Some(&delimiter) {
@@ -646,7 +655,11 @@ fn history_expand_internal(
                     i = ni;
                     state.subst_rhs = rhs;
                     if state.subst_lhs.is_some()
-                        && state.subst_rhs.as_deref().map(|r| r.contains('&')).unwrap_or(false)
+                        && state
+                            .subst_rhs
+                            .as_deref()
+                            .map(|r| r.contains('&'))
+                            .unwrap_or(false)
                     {
                         postproc_subst_rhs(state);
                     }
@@ -654,13 +667,27 @@ fn history_expand_internal(
                     i += 2;
                 }
 
-                let lhs_len = state.subst_lhs.as_ref().map(|s| s.chars().count()).unwrap_or(0);
+                let lhs_len = state
+                    .subst_lhs
+                    .as_ref()
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
                 if lhs_len == 0 {
                     *ret_string = Some(hist_error(string, starting_index, i, NO_PREV_SUBST));
                     return -1;
                 }
-                let lhs: Vec<char> = state.subst_lhs.clone().unwrap_or_default().chars().collect();
-                let rhs: Vec<char> = state.subst_rhs.clone().unwrap_or_default().chars().collect();
+                let lhs: Vec<char> = state
+                    .subst_lhs
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .collect();
+                let rhs: Vec<char> = state
+                    .subst_rhs
+                    .clone()
+                    .unwrap_or_default()
+                    .chars()
+                    .collect();
                 let mut work: Vec<char> = temp.chars().collect();
                 if lhs_len > work.len() {
                     *ret_string = Some(hist_error(string, starting_index, i, SUBST_FAILED));
@@ -677,7 +704,9 @@ fn history_expand_internal(
                     if subst_bywords && si > we {
                         let text: String = work.iter().collect();
                         let mut skip = si;
-                        while skip < text.chars().count() && fielddelim(text.chars().nth(skip).unwrap()) {
+                        while skip < text.chars().count()
+                            && fielddelim(text.chars().nth(skip).unwrap())
+                        {
                             skip += 1;
                         }
                         we = history_tokenize_word(&text, skip, ctx.chars.comment);
@@ -774,7 +803,9 @@ fn get_history_word_specifier(
     // (histexpand.c:1342-1347).
     if chars.get(i) == Some(&'*') {
         *caller_index = i + 1;
-        return Ok(Some(history_arg_extract(1, DOLLAR, from, ctx).unwrap_or_default()));
+        return Ok(Some(
+            history_arg_extract(1, DOLLAR, from, ctx).unwrap_or_default(),
+        ));
     }
     // Dollar: last argument (histexpand.c:1350-1354).
     if chars.get(i) == Some(&'$') {
@@ -799,7 +830,11 @@ fn get_history_word_specifier(
     }
 
     if chars.get(i) == Some(&'^') || chars.get(i) == Some(&'*') {
-        last = if chars.get(i) == Some(&'^') { 1 } else { DOLLAR };
+        last = if chars.get(i) == Some(&'^') {
+            1
+        } else {
+            DOLLAR
+        };
         i += 1;
     } else if chars.get(i) != Some(&'-') {
         last = first;
@@ -1009,7 +1044,11 @@ fn get_word_tail(
 
 /// histexpand.c history_tokenize_internal: a token starting with the history
 /// comment char terminates tokenization (histexpand.c:1656).
-fn history_tokenize_internal(string: &str, wind: i64, comment_char: Option<char>) -> (Vec<String>, i64) {
+fn history_tokenize_internal(
+    string: &str,
+    wind: i64,
+    comment_char: Option<char>,
+) -> (Vec<String>, i64) {
     let mut result: Vec<String> = Vec::new();
     let mut result_index: i64 = -1;
     let mut i = 0usize;
@@ -1078,9 +1117,15 @@ pub fn history_expand(
             return result;
         }
         if only_printing {
-            return HistExpandResult { status: 2, text: result.text };
+            return HistExpandResult {
+                status: 2,
+                text: result.text,
+            };
         }
-        return HistExpandResult { status: i32::from(modified), text: result.text };
+        return HistExpandResult {
+            status: i32::from(modified),
+            text: result.text,
+        };
     }
 
     // Pass 1: find the first expansion candidate (histexpand.c:990-1079).
@@ -1134,7 +1179,10 @@ pub fn history_expand(
     }
 
     if candidate.is_none() {
-        return HistExpandResult { status: 0, text: hstring.to_string() };
+        return HistExpandResult {
+            status: 0,
+            text: hstring.to_string(),
+        };
     }
 
     // Pass 2: perform the substitutions (histexpand.c:1105-1290).
@@ -1143,9 +1191,15 @@ pub fn history_expand(
         return result;
     }
     if only_printing {
-        return HistExpandResult { status: 2, text: result.text };
+        return HistExpandResult {
+            status: 2,
+            text: result.text,
+        };
     }
-    HistExpandResult { status: i32::from(modified), text: result.text }
+    HistExpandResult {
+        status: i32::from(modified),
+        text: result.text,
+    }
 }
 
 /// The expansion pass (histexpand.c:1105-1290).
@@ -1271,5 +1325,8 @@ fn expand_pass(
         i += 1;
     }
 
-    HistExpandResult { status: 0, text: result }
+    HistExpandResult {
+        status: 0,
+        text: result,
+    }
 }

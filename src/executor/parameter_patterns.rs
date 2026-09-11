@@ -76,7 +76,9 @@ impl Executor {
             return Some(
                 self.positional_params
                     .iter()
-                    .map(|value| remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled()))
+                    .map(|value| {
+                        remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
+                    })
                     .collect::<Vec<_>>()
                     .join(" "),
             );
@@ -95,7 +97,9 @@ impl Executor {
             return Some(
                 self.positional_params
                     .get(index.saturating_sub(1))
-                    .map(|value| remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled()))
+                    .map(|value| {
+                        remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
+                    })
                     .unwrap_or_default(),
             );
         }
@@ -118,7 +122,14 @@ impl Executor {
                     .map(|value| {
                         let values = array_values(&value)
                             .into_iter()
-                            .map(|value| remove_parameter_pattern(&value, &pattern, operation, self.extglob_enabled()))
+                            .map(|value| {
+                                remove_parameter_pattern(
+                                    &value,
+                                    &pattern,
+                                    operation,
+                                    self.extglob_enabled(),
+                                )
+                            })
                             .collect::<Vec<_>>();
                         self.join_expanded_array_values(values, var_name)
                     })
@@ -127,7 +138,9 @@ impl Executor {
         }
 
         if is_shell_name(var_name) {
-            let value = self.parameter_pattern_scalar_value(var_name).unwrap_or_default();
+            let value = self
+                .parameter_pattern_scalar_value(var_name)
+                .unwrap_or_default();
             return Some(remove_parameter_pattern(
                 &value,
                 &pattern,

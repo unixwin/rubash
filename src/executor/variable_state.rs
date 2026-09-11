@@ -77,10 +77,7 @@ impl Executor {
     /// resolution, without namerefs", variables.c:2036-2046). This only
     /// applies inside a function context (`variable_context && v->context`);
     /// at the global scope the chain resolution returns nothing.
-    pub(in crate::executor) fn nameref_circular_fallback_name(
-        &self,
-        name: &str,
-    ) -> Option<String> {
+    pub(in crate::executor) fn nameref_circular_fallback_name(&self, name: &str) -> Option<String> {
         if self.function_depth == 0 {
             return None;
         }
@@ -228,8 +225,7 @@ impl Executor {
         matches!(command, "export" | "readonly")
             || ((command == "declare" || command == "typeset")
                 && Self::declare_applies_persistent_attribute(cmd))
-            || (command == "eval" && cmd
-.assignment_keys().any(|name| name.ends_with('+')))
+            || (command == "eval" && cmd.assignment_keys().any(|name| name.ends_with('+')))
             || (self.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
                 && matches!(command, "." | "source" | "eval" | ":" | "return"))
     }

@@ -240,9 +240,23 @@ impl Executor {
         let mut status = 0;
         for name in &args[index..] {
             let found = if all {
-                self.describe_name_all_with_io(name, mode, force_path, skip_functions, functions_only, stdout)?
+                self.describe_name_all_with_io(
+                    name,
+                    mode,
+                    force_path,
+                    skip_functions,
+                    functions_only,
+                    stdout,
+                )?
             } else {
-                self.describe_name_with_io(name, mode, force_path, skip_functions, functions_only, stdout)?
+                self.describe_name_with_io(
+                    name,
+                    mode,
+                    force_path,
+                    skip_functions,
+                    functions_only,
+                    stdout,
+                )?
             };
             if !found {
                 status = 1;

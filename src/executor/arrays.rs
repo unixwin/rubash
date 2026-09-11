@@ -20,11 +20,10 @@ use std::env;
 use std::fs;
 
 use super::{
-    apply_parameter_case_mod, assoc_value_at, case_pattern_matches,
-    eval_arith_value, eval_conditional_arith_value,
-    is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
-    parse_parameter_replacement, parse_parameter_transform, pattern_contains_glob, quote_assoc_key,
-    remove_parameter_pattern, split_storage_words,
+    apply_parameter_case_mod, assoc_value_at, case_pattern_matches, eval_arith_value,
+    eval_conditional_arith_value, is_marked_var, is_shell_name, parse_indirect_pattern_removal,
+    parse_parameter_case_mod, parse_parameter_replacement, parse_parameter_transform,
+    pattern_contains_glob, quote_assoc_key, remove_parameter_pattern, split_storage_words,
     strip_matching_quotes, unquote_storage_value, Executor, ParameterTransform,
     ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
@@ -408,8 +407,7 @@ pub(super) fn append_array_value(
         // A compound word quoted with EITHER quote family stays one element
         // ('a b' and "a b" each store a single element; only unquoted
         // whitespace splits). Mirrors the declare storage copy.
-        let quoted_token = (token.starts_with('"') && token.ends_with('"')
-            && !command_subst_token)
+        let quoted_token = (token.starts_with('"') && token.ends_with('"') && !command_subst_token)
             || (token.starts_with('\'') && token.ends_with('\'') && token.len() >= 2);
         if let Some(token) = token.strip_prefix(ARRAY_FIELD_SPLIT_MARKER) {
             let token = unquote_storage_value(token);
@@ -430,8 +428,7 @@ pub(super) fn append_array_value(
         // same field after the closing quote (array6.sub
         // a2=(-iname 'abc -iname 'def) stores (-iname, "abc -iname def")).
         let split_needed = token_has_unquoted_whitespace(&token);
-        let partially_quoted =
-            !quoted_token && (token.contains('\'') || token.contains('"'));
+        let partially_quoted = !quoted_token && (token.contains('\'') || token.contains('"'));
         let token = unquote_storage_value(&token);
         if let Some(expanded_array) = token.strip_prefix('\x1d') {
             for value in field_split_values_with_ifs(expanded_array, ifs) {

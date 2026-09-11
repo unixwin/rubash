@@ -42,7 +42,11 @@ fn ifs_whitespace(ch: char, ifs: &str) -> bool {
 /// boundaries, so callers can slice `line` directly without panicking on
 /// multi-byte characters (GNU read splits at multibyte character boundaries,
 /// mirroring lib/sh/stringlib.c / subst.c).
-fn split_read_field_ranges(line: &str, ifs: &str, interpret_backslashes: bool) -> Vec<(usize, usize)> {
+fn split_read_field_ranges(
+    line: &str,
+    ifs: &str,
+    interpret_backslashes: bool,
+) -> Vec<(usize, usize)> {
     // Track each char's byte offset (char_indices) so the returned ranges
     // slice `line` at UTF-8 boundaries instead of splitting multi-byte
     // sequences mid-character.

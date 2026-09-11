@@ -165,7 +165,10 @@ impl Executor {
         match target_name.as_str() {
             "@" => return Some(self.positional_params.join(" ")),
             "*" => {
-                return Some(self.positional_params.join(&self.ifs_first_char_separator()))
+                return Some(
+                    self.positional_params
+                        .join(&self.ifs_first_char_separator()),
+                )
             }
             _ => {}
         }

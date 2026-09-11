@@ -56,11 +56,10 @@ impl Executor {
             // varassign - it translates to r_err_and_out (>&file == >file
             // 2>&1). Only other redirectors ({var}>&word, 2>&word, <&word)
             // report AMBIGUOUS_REDIRECT (redir.c:839-843).
-            let dup_output_err_and_out = matches!(
-                redirect.kind,
-                crate::parser::RedirectKind::DuplicateOutput
-            ) && redirect.fd.unwrap_or(1) == 1
-                && redirect.fd_var.is_none();
+            let dup_output_err_and_out =
+                matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput)
+                    && redirect.fd.unwrap_or(1) == 1
+                    && redirect.fd_var.is_none();
             let invalid_fd_target = target.starts_with('&')
                 && !is_closed_redirect_target(&target)
                 && redirect_target_fd_and_move(&target).is_none()

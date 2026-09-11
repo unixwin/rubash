@@ -3527,10 +3527,14 @@ fn test_readonly_dynamic_fd_cli_stderr_matches_gnu() {
     let output_path = target_test_path("rubash-readonly-dynamic-fd-stderr-target.txt");
     let _ = fs::remove_file(&script_path);
     let _ = fs::remove_file(&output_path);
-    fs::write(&script_path, format!(
-        "readonly fd=7\nexec {{fd}}>{}\nprintf \"status=%s fd=%s\n\" \"$?\" \"$fd\"\n",
-        shell_test_path(&output_path)
-    )).unwrap();
+    fs::write(
+        &script_path,
+        format!(
+            "readonly fd=7\nexec {{fd}}>{}\nprintf \"status=%s fd=%s\n\" \"$?\" \"$fd\"\n",
+            shell_test_path(&output_path)
+        ),
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)
         .output()
@@ -3538,9 +3542,10 @@ fn test_readonly_dynamic_fd_cli_stderr_matches_gnu() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status=1 fd=7\n");
     let stderr = String::from_utf8_lossy(&output.stderr);
     let prefix = format!("{}: line 2: fd: ", shell_test_path(&script_path));
-    assert_eq!(stderr, format!(
-        "{prefix}readonly variable\n{prefix}cannot assign fd to variable\n"
-    ));
+    assert_eq!(
+        stderr,
+        format!("{prefix}readonly variable\n{prefix}cannot assign fd to variable\n")
+    );
     assert!(!output_path.exists());
     let _ = fs::remove_file(script_path);
 }
@@ -3569,6 +3574,9 @@ split ':::' > target/rubash-ifs-set-shift-pipeline.txt
     let result = executor.execute_ast(&ast);
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(std::fs::read_to_string(output_path).unwrap(), "<><::>\n<><::>\n");
+    assert_eq!(
+        std::fs::read_to_string(output_path).unwrap(),
+        "<><::>\n<><::>\n"
+    );
     let _ = std::fs::remove_file(output_path);
 }

@@ -27,7 +27,10 @@ impl Executor {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
             // Check for locale environment changes (LC_ALL, LC_CTYPE, LANG)
             for word in &cmd.words[1..] {
-                if word.starts_with("LC_ALL=") || word.starts_with("LC_CTYPE=") || word.starts_with("LANG=") {
+                if word.starts_with("LC_ALL=")
+                    || word.starts_with("LC_CTYPE=")
+                    || word.starts_with("LANG=")
+                {
                     crate::locale::check_setlocale_warning();
                     break;
                 }

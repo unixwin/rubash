@@ -66,7 +66,12 @@ impl Executor {
     // mirrors GNU subst.c here-string handling, where the word is expanded
     // without re-parsing quotes.
     pub(in crate::executor) fn expand_here_string_mut(&mut self, word: &str) -> String {
-        self.expand_embedded_parameters_mut_inner(word, SubstitutionQuoteContext::Unquoted, true, false)
+        self.expand_embedded_parameters_mut_inner(
+            word,
+            SubstitutionQuoteContext::Unquoted,
+            true,
+            false,
+        )
     }
 
     fn expand_embedded_parameters_mut_inner(
@@ -179,10 +184,7 @@ impl Executor {
             // only in unquoted expansions; a double-quoted expansion keeps
             // them in its result (`"${IFS+'}'z}"` -> `'}'z`). Heredoc text
             // treats quotes as data.
-            if !heredoc
-                && matches!(context, SubstitutionQuoteContext::Unquoted)
-                && ch == '"'
-            {
+            if !heredoc && matches!(context, SubstitutionQuoteContext::Unquoted) && ch == '"' {
                 let closing = in_double;
                 in_double = !in_double;
                 // A double-quoted span whose expansion produced nothing is a
@@ -409,53 +411,49 @@ impl Executor {
                         && self.posix_mode_enabled()
                     {
                         let remainder: String = chars.clone().collect();
-                        if let Some(close) = matching_parameter_brace_in_context(&remainder, true, true) {
+                        if let Some(close) =
+                            matching_parameter_brace_in_context(&remainder, true, true)
+                        {
                             let consumed = word.len() - remainder.len();
                             let name = remainder[..close].to_string();
                             chars = word[consumed + close + 1..].chars().peekable();
-                            let value = self.expand_with_parameter_env(
-                                saved_parameter_state,
-                                |executor| {
+                            let value =
+                                self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
                                         context,
                                     )
-                                },
-                            );
-                        if alternate && in_double {
-                            output.push_str(&mark_alternate_whitespace(&value));
-                        } else {
-                            output.push_str(&value);
-                        }
+                                });
+                            if alternate && in_double {
+                                output.push_str(&mark_alternate_whitespace(&value));
+                            } else {
+                                output.push_str(&value);
+                            }
                         } else {
                             let name = collect_braced_parameter_name(&mut chars);
-                            let value = self.expand_with_parameter_env(
-                                saved_parameter_state,
-                                |executor| {
+                            let value =
+                                self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
                                         &format!("${{{name}}}"),
                                         context,
                                     )
-                                },
-                            );
-                        if alternate && in_double {
-                            output.push_str(&mark_alternate_whitespace(&value));
-                        } else {
-                            output.push_str(&value);
-                        }
+                                });
+                            if alternate && in_double {
+                                output.push_str(&mark_alternate_whitespace(&value));
+                            } else {
+                                output.push_str(&value);
+                            }
                         }
                     } else {
                         let name = collect_braced_parameter_name(&mut chars);
-                        let value = self.expand_with_parameter_env(
-                            saved_parameter_state,
-                            |executor| {
+                        let value =
+                            self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                 // Propagate the outer quote context so a
                                 // double-quoted "${v:-~}" keeps its quoted
                                 // default-word semantics (no tilde expansion).
                                 executor
                                     .expand_word_mut_with_context(&format!("${{{name}}}"), context)
-                            },
-                        );
+                            });
                         if alternate && in_double {
                             output.push_str(&mark_alternate_whitespace(&value));
                         } else {
@@ -473,19 +471,31 @@ impl Executor {
                             if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
                                 output.push_str(&value.to_string());
                             } else {
-                                let actual_fatal = self.arithmetic_last_error_category.take().is_some();
+                                let actual_fatal =
+                                    self.arithmetic_last_error_category.take().is_some();
                                 if (actual_fatal
-                                    || crate::executor::arithmetic::arithmetic_expansion_is_fatal(&expression))
-                                    && !embedded_command_substitution_expression(&expression) {
+                                    || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
+                                        &expression,
+                                    ))
+                                    && !embedded_command_substitution_expression(&expression)
+                                {
                                     self.arithmetic_fatal_error.set(true);
                                     if !self.arithmetic_expansion_error.replace(true) {
-                                        if let Some(message) = crate::executor::arithmetic::arithmetic_error_message(&expression, true) {
+                                        if let Some(message) =
+                                            crate::executor::arithmetic::arithmetic_error_message(
+                                                &expression,
+                                                true,
+                                            )
+                                        {
                                             eprintln!("{}{}", self.diagnostic_prefix(), message);
                                         }
                                     }
                                 } else {
                                     let value = protect_command_substitution_output(
-                                        &self.expand_command_substitution_mut_with_context(&expression, context),
+                                        &self.expand_command_substitution_mut_with_context(
+                                            &expression,
+                                            context,
+                                        ),
                                     );
                                     if alternate && in_double {
                                         output.push_str(&mark_alternate_whitespace(&value));
@@ -712,7 +722,10 @@ impl Executor {
                 scope.insert("REPLY".to_string(), saved_reply.clone());
             }
             if let Some(typed) = self.local_typed_scopes.last_mut() {
-                typed.insert("REPLY".to_string(), self.shell_state.variables.get("REPLY").cloned());
+                typed.insert(
+                    "REPLY".to_string(),
+                    self.shell_state.variables.get("REPLY").cloned(),
+                );
             }
         }
         let result = if pipe_output {
@@ -754,7 +767,9 @@ impl Executor {
             // (comsub26.sub: `inside1-inside2-outside`).
             body_reply.unwrap_or_default()
         } else {
-            bytes_to_shell_text(&captured).trim_end_matches('\n').to_string()
+            bytes_to_shell_text(&captured)
+                .trim_end_matches('\n')
+                .to_string()
         }
     }
 
@@ -763,10 +778,7 @@ impl Executor {
     /// function-like variable frame — `local` scopes to the body and `return`
     /// ends only the body, while plain assignments still mutate the current
     /// environment (comsub2.tests: `outside: 42` vs `outside:` empty).
-    fn execute_current_shell_body(
-        &mut self,
-        ast: &crate::parser::Ast,
-    ) -> Result<(), ExecuteError> {
+    fn execute_current_shell_body(&mut self, ast: &crate::parser::Ast) -> Result<(), ExecuteError> {
         self.local_var_scopes.push(HashMap::new());
         self.local_attr_scopes.push(HashMap::new());
         self.local_typed_scopes.push(HashMap::new());

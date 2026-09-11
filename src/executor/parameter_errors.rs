@@ -518,7 +518,10 @@ impl Executor {
                 _ => true,
             };
         }
-        matches!(first, '-' | '+' | '=' | '?' | '@' | '^' | ',' | '/' | '%' | '#') && name.len() > 1
+        matches!(
+            first,
+            '-' | '+' | '=' | '?' | '@' | '^' | ',' | '/' | '%' | '#'
+        ) && name.len() > 1
     }
 
     pub(in crate::executor) fn parameter_expansion_error(
@@ -681,11 +684,7 @@ impl Executor {
                                     } else {
                                         value.clone()
                                     };
-                                return Some((
-                                    display,
-                                    "invalid variable name".to_string(),
-                                    1,
-                                ));
+                                return Some((display, "invalid variable name".to_string(), 1));
                             }
                         }
                     }

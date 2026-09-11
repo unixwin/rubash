@@ -82,7 +82,6 @@ fn command_starts_if(executor: &Executor, command: &CommandNode) -> bool {
 fn command_first_word_is(executor: &Executor, command: &CommandNode, word: &str) -> bool {
     if command.words.is_empty()
         && command
-            
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .and_then(parse_unexpected_token)
             .is_some_and(|token| token == word)

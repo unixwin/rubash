@@ -58,8 +58,7 @@ impl Executor {
         if let Some(home) = self.env_vars.get("HOME").cloned() {
             let logout_file = format!("{home}/.bash_logout");
             if !self.bash_logout_sourced
-                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.env_vars))
-                    .is_ok()
+                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.env_vars)).is_ok()
             {
                 self.bash_logout_sourced = true;
                 let mut node = CommandNode::default();
@@ -199,10 +198,7 @@ impl Executor {
             )?);
         }
 
-        let status = crate::builtins::cd::execute(
-            &cmd.words[1..],
-            &mut self.env_vars,
-        )?;
+        let status = crate::builtins::cd::execute(&cmd.words[1..], &mut self.env_vars)?;
         self.sync_cd_variables();
         Ok(status)
     }

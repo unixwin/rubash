@@ -281,9 +281,10 @@ pub(super) fn matching_brace_group_end(tokens: &[Token], start: usize) -> Option
     // the caller's last-'}' fallback silently absorbed the rest of the
     // script into a dead function body (GNU parse.y reads the reserved
     // word '{' and treats the blanks as a token separator).
-    if !tokens.get(start).is_some_and(|token| {
-        token.kind == TokenKind::Keyword && token.value.trim() == "{"
-    }) {
+    if !tokens
+        .get(start)
+        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value.trim() == "{")
+    {
         return None;
     }
 

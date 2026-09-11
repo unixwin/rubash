@@ -468,10 +468,7 @@ fn arithmetic_empty_quoted_array_subscript_fails_outside_let() {
         .expect("run empty quoted arithmetic expansion subscript probe");
 
     assert_eq!(expansion_output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&expansion_output.stdout),
-        "after\n"
-    );
+    assert_eq!(String::from_utf8_lossy(&expansion_output.stdout), "after\n");
 }
 
 #[test]
@@ -1728,12 +1725,30 @@ fn arithmetic_trailing_increment_after_number_token_is_single_plus() {
 #[test]
 fn arithmetic_trailing_operator_tokens_match_gnu() {
     for (expr, expected) in [
-        ("3**", "3**: syntax error: operand expected (error token is \"** \")"),
-        ("7<=", "7<=: syntax error: operand expected (error token is \"<= \")"),
-        ("7&&", "7&&: syntax error: operand expected (error token is \"&& \")"),
-        ("j==", "j==: syntax error: operand expected (error token is \"== \")"),
-        ("j+=", "j+=: syntax error: operand expected (error token is \"+= \")"),
-        ("7+=", "7+=: attempted assignment to non-variable (error token is \"+= \")"),
+        (
+            "3**",
+            "3**: syntax error: operand expected (error token is \"** \")",
+        ),
+        (
+            "7<=",
+            "7<=: syntax error: operand expected (error token is \"<= \")",
+        ),
+        (
+            "7&&",
+            "7&&: syntax error: operand expected (error token is \"&& \")",
+        ),
+        (
+            "j==",
+            "j==: syntax error: operand expected (error token is \"== \")",
+        ),
+        (
+            "j+=",
+            "j+=: syntax error: operand expected (error token is \"+= \")",
+        ),
+        (
+            "7+=",
+            "7+=: attempted assignment to non-variable (error token is \"+= \")",
+        ),
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
             .arg("-c")

@@ -178,10 +178,7 @@ impl Executor {
         // (trap.c original_signals -> SIG_HARD_IGNORE in the child).
         let inherited_ignores = crate::builtins::trap::transport_inherited_ignores(&self.env_vars);
         if !inherited_ignores.is_empty() {
-            process.env(
-                crate::builtins::trap::TRAP_ORIG_IGNORES,
-                inherited_ignores,
-            );
+            process.env(crate::builtins::trap::TRAP_ORIG_IGNORES, inherited_ignores);
         }
         apply_required_windows_child_environment(process, &self.env_vars);
         self.apply_exported_functions_to_child(process);

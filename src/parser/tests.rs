@@ -3,7 +3,9 @@ use crate::lexer::{tokenize, Token};
 
 #[test]
 fn dynamic_fd_loop_redirect_attaches_to_compound_command() {
-    let ast = parse(&tokenize("while read -r -u ${fd}; do echo ok; done {fd}</tmp/x"));
+    let ast = parse(&tokenize(
+        "while read -r -u ${fd}; do echo ok; done {fd}</tmp/x",
+    ));
     assert_eq!(ast.commands.len(), 1);
     let command = &ast.commands[0];
     assert!(command.loop_command.is_some());
@@ -27,7 +29,6 @@ fn test_extglob_enabled_after_parse_is_rejected() {
     assert_eq!(ast.commands.len(), 2);
     assert_eq!(
         ast.commands[1]
-            
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str),
         Some("unexpected token `('")
@@ -336,9 +337,7 @@ fn test_parse_compact_arithmetic_for_empty_test() {
 #[test]
 fn spaced_compound_assignment_is_marked_as_syntax_error() {
     let ast = parse(&tokenize("a= (1 2)"));
-    assert!(ast.commands[0]
-        
-        .has_assignment("__RUBASH_PARSE_ERROR__"));
+    assert!(ast.commands[0].has_assignment("__RUBASH_PARSE_ERROR__"));
 }
 
 #[test]

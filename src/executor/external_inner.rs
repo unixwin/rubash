@@ -744,7 +744,11 @@ impl Executor {
 /// otherwise the first line (two lines when the sample starts with a #!
 /// interpreter specifier) must be NUL-free.
 fn check_binary_file(sample: &[u8]) -> bool {
-    if sample.len() >= 4 && sample[0] == 0x7f && sample[1] == b'E' && sample[2] == b'L' && sample[3] == b'F'
+    if sample.len() >= 4
+        && sample[0] == 0x7f
+        && sample[1] == b'E'
+        && sample[2] == b'L'
+        && sample[3] == b'F'
     {
         return true;
     }

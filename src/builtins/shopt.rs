@@ -361,9 +361,9 @@ mod tests {
     fn bashopts_lists_both_expand_once_names_when_enabled() {
         let mut env_vars = fresh_env();
 
-        assert!(!bashopts_value(&env_vars).split(':').any(|name| name
-            == "assoc_expand_once"
-            || name == "array_expand_once"));
+        assert!(!bashopts_value(&env_vars)
+            .split(':')
+            .any(|name| name == "assoc_expand_once" || name == "array_expand_once"));
 
         set_option(&mut env_vars, "assoc_expand_once", true);
 

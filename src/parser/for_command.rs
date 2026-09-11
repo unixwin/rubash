@@ -32,10 +32,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     // be ambiguous with the loop syntax. This mirrors GNU parse.y which
     // accepts any WORD as loop variable.
     if tokens.get(start + 1)?.kind == TokenKind::Keyword
-        && matches!(
-            tokens.get(start + 1)?.value.as_str(),
-            "do" | "done" | "in"
-        )
+        && matches!(tokens.get(start + 1)?.value.as_str(), "do" | "done" | "in")
     {
         return None;
     }
@@ -243,9 +240,10 @@ fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
 }
 
 fn skip_newline_list(tokens: &[Token], mut index: usize) -> usize {
-    while tokens.get(index).is_some_and(|token| {
-        token.kind == TokenKind::Semicolon && token.line_break
-    }) {
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon && token.line_break)
+    {
         index += 1;
     }
     index

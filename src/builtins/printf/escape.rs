@@ -83,12 +83,16 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
             Some('x') => {
                 push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 2), "\\x")
             }
-            Some('u') => {
-                push_unicode_escape(&mut output, read_escape_digits_raw(&mut chars, 16, 4), "\\u")
-            }
-            Some('U') => {
-                push_unicode_escape(&mut output, read_escape_digits_raw(&mut chars, 16, 8), "\\U")
-            }
+            Some('u') => push_unicode_escape(
+                &mut output,
+                read_escape_digits_raw(&mut chars, 16, 4),
+                "\\u",
+            ),
+            Some('U') => push_unicode_escape(
+                &mut output,
+                read_escape_digits_raw(&mut chars, 16, 8),
+                "\\U",
+            ),
             Some('0') => {
                 let value = read_escape_digits(&mut chars, 8, 3).or(Some(0));
                 push_escape_byte(&mut output, value, "");
@@ -235,9 +239,9 @@ fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str
     // Same GNU u32cconv table as the format-string path (printf.def uses one
     // decode for \u/\U in both the format and %b argument expansion).
     match value {
-        Some(value) => {
-            output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(value))
-        }
+        Some(value) => output.push_str(
+            &crate::executor::substitution_metadata::u32cconv_utf8_text(value),
+        ),
         None => output.push_str(fallback),
     }
 }
@@ -264,9 +268,8 @@ pub(super) fn shell_quote(value: &str) -> String {
     // ansic_quote over the byte string; unicode3.sub payload
     // $'5\247@3\231+...'). The marker chars themselves are private-use and
     // never is_control(), so they must be decoded before the quote decision.
-    let sentinel =
-        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
-            .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     if value.contains(sentinel) {
         let bytes =
             crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
@@ -330,9 +333,7 @@ fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = cha
             '\r' => quoted.push_str("\\r"),
             '\t' => quoted.push_str("\\t"),
             '\x0b' => quoted.push_str("\\v"),
-            ch if ch.is_ascii_control() => {
-                quoted.push_str(&format!("\\{:03o}", ch as u32))
-            }
+            ch if ch.is_ascii_control() => quoted.push_str(&format!("\\{:03o}", ch as u32)),
             ch => quoted.push(ch),
         }
     }

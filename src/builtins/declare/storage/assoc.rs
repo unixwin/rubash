@@ -115,14 +115,15 @@ pub(in crate::builtins::declare) fn append_assoc_value(
                 {
                     if integer {
                         *entry_value = (crate::executor::arithmetic::eval_conditional_arith_value(
-                            entry_value, variables,
+                            entry_value,
+                            variables,
                         )
                         .unwrap_or(0)
                             + crate::executor::arithmetic::eval_conditional_arith_value(
                                 &rhs, variables,
                             )
                             .unwrap_or(0))
-                            .to_string();
+                        .to_string();
                     } else {
                         entry_value.push_str(&rhs);
                         *entry_value = eval_element(entry_value);
@@ -146,7 +147,10 @@ pub(in crate::builtins::declare) fn append_assoc_value(
             }
             continue;
         }
-        entries.push(("0".to_string(), eval_element(&unquote_storage_value(&token))));
+        entries.push((
+            "0".to_string(),
+            eval_element(&unquote_storage_value(&token)),
+        ));
     }
 
     format_assoc_storage(entries)
@@ -247,9 +251,7 @@ fn merge_assoc_subscript_tokens(tokens: Vec<String>) -> Vec<String> {
     out
 }
 
-pub(in crate::builtins::declare) fn format_assoc_storage(
-    entries: Vec<(String, String)>,
-) -> String {
+pub(in crate::builtins::declare) fn format_assoc_storage(entries: Vec<(String, String)>) -> String {
     format!(
         "({})",
         entries

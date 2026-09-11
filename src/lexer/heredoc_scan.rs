@@ -1,7 +1,4 @@
-pub(super) fn skip_heredoc_in_chars_with_closure(
-    chars: &[char],
-    start: usize,
-) -> (usize, bool) {
+pub(super) fn skip_heredoc_in_chars_with_closure(chars: &[char], start: usize) -> (usize, bool) {
     let mut index = start + 2;
     let strip_tabs = if chars.get(index) == Some(&'-') {
         index += 1;

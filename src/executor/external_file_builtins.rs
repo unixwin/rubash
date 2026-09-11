@@ -66,10 +66,7 @@ impl Executor {
                 no_more_flags = true;
                 continue;
             }
-            if !no_more_flags
-                && !mode_value_pending
-                && expanded.starts_with('-')
-                && expanded != "-"
+            if !no_more_flags && !mode_value_pending && expanded.starts_with('-') && expanded != "-"
             {
                 if expanded == "-m" {
                     mode_value_pending = true;
@@ -80,8 +77,7 @@ impl Executor {
                 mode_value_pending = false;
                 continue;
             }
-            fs::create_dir_all(shell_path_to_windows(&expanded, &self.env_vars))?
-                ;
+            fs::create_dir_all(shell_path_to_windows(&expanded, &self.env_vars))?;
         }
         self.exit_code = 0;
         Ok(true)
@@ -164,12 +160,10 @@ impl Executor {
                     "update" => update_only = true,
                     "remove-destination" => remove_dest = true,
                     "force" | "link" | "symbolic-link" | "parents" | "backup"
-                    | "no-dereference" | "no-preserve"
-                    | "suffix" | "context" => {}
+                    | "no-dereference" | "no-preserve" | "suffix" | "context" => {}
                     "target-directory" | "target-dir" => {
-                        target_dir = value.or_else(|| {
-                            words.next().map(|next| self.expand_word(next))
-                        });
+                        target_dir =
+                            value.or_else(|| words.next().map(|next| self.expand_word(next)));
                     }
                     "help" => {
                         let _ = writeln!(stderr, "{}", cp_usage_text());
@@ -178,11 +172,7 @@ impl Executor {
                         return Ok(true);
                     }
                     other => {
-                        let _ = writeln!(
-                            stderr,
-                            "{}cp: unknown option '--{}'",
-                            prefix, other
-                        );
+                        let _ = writeln!(stderr, "{}cp: unknown option '--{}'", prefix, other);
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
@@ -212,11 +202,7 @@ impl Executor {
                         break;
                     }
                     other => {
-                        let _ = writeln!(
-                            stderr,
-                            "{}cp: invalid option -- '{}'",
-                            prefix, other
-                        );
+                        let _ = writeln!(stderr, "{}cp: invalid option -- '{}'", prefix, other);
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
@@ -286,9 +272,7 @@ impl Executor {
         // and the write goes nowhere, so `cp FILE /dev/null` succeeds without
         // creating anything. Windows has no device CopyFileExW can stat, so
         // model both directions explicitly.
-        if effective.len() == 2
-            && crate::executor::path::is_shell_null_device(destination_word)
-        {
+        if effective.len() == 2 && crate::executor::path::is_shell_null_device(destination_word) {
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             self.exit_code = 0;
             return Ok(true);
@@ -327,7 +311,9 @@ impl Executor {
                     let _ = writeln!(
                         stderr,
                         "{}cp: cannot create '{}': {}",
-                        prefix, target_path.display(), crate::posix_errors::message(&error)
+                        prefix,
+                        target_path.display(),
+                        crate::posix_errors::message(&error)
                     );
                 }
                 continue;
@@ -414,7 +400,9 @@ impl Executor {
                     let _ = writeln!(
                         stderr,
                         "{}cp: cannot create '{}': {}",
-                        prefix, target.display(), crate::posix_errors::message(&error)
+                        prefix,
+                        target.display(),
+                        crate::posix_errors::message(&error)
                     );
                     status = 1;
                 }
@@ -660,9 +648,9 @@ fn cp_confirm_overwrite(target_display: &str) -> bool {
     let mut answer = String::new();
     match std::io::stdin().lock().read_line(&mut answer) {
         Ok(0) => false,
-        Ok(_) => {
-            answer.trim_start().starts_with(|c: char| c == 'y' || c == 'Y')
-        }
+        Ok(_) => answer
+            .trim_start()
+            .starts_with(|c: char| c == 'y' || c == 'Y'),
         Err(_) => false,
     }
 }
@@ -755,7 +743,11 @@ fn cp_source_not_newer(source: &std::path::Path, target: &std::path::Path) -> bo
 /// result is deterministic. Symlinks are followed, which is cp's default
 /// (without -d); the depth cap turns a link cycle into an error instead of
 /// a stack overflow.
-fn cp_copy_tree(source: &std::path::Path, target: &std::path::Path, depth: usize) -> io::Result<()> {
+fn cp_copy_tree(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    depth: usize,
+) -> io::Result<()> {
     if depth > 40 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -771,7 +763,11 @@ fn cp_copy_tree(source: &std::path::Path, target: &std::path::Path, depth: usize
         let mut entries: Vec<_> = fs::read_dir(source)?.filter_map(Result::ok).collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            cp_copy_tree(entry.path().as_path(), &target.join(entry.file_name()), depth + 1)?;
+            cp_copy_tree(
+                entry.path().as_path(),
+                &target.join(entry.file_name()),
+                depth + 1,
+            )?;
         }
         return Ok(());
     }
@@ -852,7 +848,9 @@ impl Executor {
                 {
                     continue;
                 }
-                if arg.starts_with('-') && arg.len() > 1 && arg[1..].chars().all(|ch| "fRvc".contains(ch))
+                if arg.starts_with('-')
+                    && arg.len() > 1
+                    && arg[1..].chars().all(|ch| "fRvc".contains(ch))
                 {
                     continue;
                 }
@@ -907,7 +905,12 @@ impl Executor {
         let executable = std::path::Path::new(windows)
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "exe" | "com" | "bat" | "cmd"))
+            .map(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "exe" | "com" | "bat" | "cmd"
+                )
+            })
             .unwrap_or(false);
         let mut mode = 0o600u32;
         if executable {
@@ -920,10 +923,11 @@ impl Executor {
 /// Apply one chmod MODE operand (octal or symbolic clauses) to BASE.
 fn apply_chmod_mode(base: u32, mode: &str) -> Option<u32> {
     let trimmed = mode.trim();
-    if !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit()) && trimmed.len() <= 4
-        {
-            return u32::from_str_radix(trimmed, 8).ok().map(|value| value & 0o777);
-        }
+    if !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit()) && trimmed.len() <= 4 {
+        return u32::from_str_radix(trimmed, 8)
+            .ok()
+            .map(|value| value & 0o777);
+    }
     let mut current = base;
     for clause in trimmed.split(',') {
         let mut chars = clause.chars().peekable();
@@ -990,7 +994,10 @@ fn store_emulated_file_mode(env_vars: &mut HashMap<String, String>, windows: &st
         .split('\x1f')
         .filter(|entry| {
             !entry.is_empty()
-                && entry.rsplit_once('=').map(|(path, _)| path != windows).unwrap_or(true)
+                && entry
+                    .rsplit_once('=')
+                    .map(|(path, _)| path != windows)
+                    .unwrap_or(true)
         })
         .map(str::to_string)
         .collect();

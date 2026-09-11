@@ -710,9 +710,11 @@ pub(crate) fn apply_completion_actions(
             "arrayvar" => candidates.extend(array_variable_completion_candidates(env_vars)),
             "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
             "builtin" => candidates.extend(SHELL_BUILTINS.iter().map(|s| s.to_string())),
-            "command" => {
-                candidates.extend(command_completion_candidates(env_vars, aliases, function_names))
-            }
+            "command" => candidates.extend(command_completion_candidates(
+                env_vars,
+                aliases,
+                function_names,
+            )),
             "directory" => {
                 candidates.extend(path_completion_candidates(
                     word,
@@ -739,7 +741,9 @@ pub(crate) fn apply_completion_actions(
             "service" => candidates.extend(service_completion_candidates(env_vars)),
             "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
-            "signal" => candidates.extend(crate::builtins::trap::SIGNALS.iter().map(|s| s.to_string())),
+            "signal" => {
+                candidates.extend(crate::builtins::trap::SIGNALS.iter().map(|s| s.to_string()))
+            }
             "stopped" => {}
             "user" => candidates.extend(user_completion_candidates(env_vars)),
             "variable" => candidates.extend(variable_completion_candidates(env_vars)),
@@ -878,12 +882,15 @@ where
         return Ok(EXECUTION_SUCCESS);
     }
 
-    let parsed =
-        match parse_completion_options(CompletionBuiltin::Compgen, args, diagnostic_prefix, stderr)?
-        {
-            Err(status) => return Ok(status),
-            Ok(parsed) => parsed,
-        };
+    let parsed = match parse_completion_options(
+        CompletionBuiltin::Compgen,
+        args,
+        diagnostic_prefix,
+        stderr,
+    )? {
+        Err(status) => return Ok(status),
+        Ok(parsed) => parsed,
+    };
 
     let mut candidates = apply_completion_actions(
         parsed.actions,
@@ -1078,7 +1085,6 @@ fn exported_variable_completion_candidates(env_vars: &HashMap<String, String>) -
     candidates
 }
 
-
 fn marked_completion_names(env_vars: &HashMap<String, String>, key: &str) -> Vec<String> {
     env_vars
         .get(key)
@@ -1236,7 +1242,8 @@ where
                     // Short action letter: OR the action bit in (build_actions
                     // cases a/b/c/d/e/f/g/j/k/s/u/v).
                     _ => {
-                        if let Some(bit) = COMPACTS.iter().find(|c| c.2 == Some(option)).map(|c| c.1)
+                        if let Some(bit) =
+                            COMPACTS.iter().find(|c| c.2 == Some(option)).map(|c| c.1)
                         {
                             parsed.actions |= bit;
                         }
@@ -1443,8 +1450,14 @@ where
                         // Validate option name (GNU complete.def compopts[])
                         if !matches!(
                             option_name.as_str(),
-                            "bashdefault" | "default" | "dirnames" | "filenames"
-                                | "fullquote" | "noquote" | "nosort" | "nospace"
+                            "bashdefault"
+                                | "default"
+                                | "dirnames"
+                                | "filenames"
+                                | "fullquote"
+                                | "noquote"
+                                | "nosort"
+                                | "nospace"
                                 | "plusdirs"
                         ) {
                             writeln!(
@@ -1675,7 +1688,10 @@ mod completion_hook_tests {
             },
         );
         let out = complete_line_candidates("y g", 4, &specs, &env, &aliases, &fns, &jobs);
-        assert!(out.iter().any(|c| c == "gamma"), "expected gamma in {out:?}");
+        assert!(
+            out.iter().any(|c| c == "gamma"),
+            "expected gamma in {out:?}"
+        );
         assert!(
             !out.iter().any(|c| c == "alpha"),
             "alpha should be filtered out by prefix g: {out:?}"
@@ -1713,6 +1729,3 @@ mod completion_hook_tests {
         );
     }
 }
-
-
-

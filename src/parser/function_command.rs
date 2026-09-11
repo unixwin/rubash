@@ -135,7 +135,9 @@ pub(super) fn parse_function_command(
             FunctionBodyKind::CompoundCommand,
             Some(i),
             body_end.checked_sub(1),
-            tokens.get(body_end.saturating_sub(1)).map(|token| token.position),
+            tokens
+                .get(body_end.saturating_sub(1))
+                .map(|token| token.position),
             tokens
                 .get(i)
                 .map(|token| token.position + token.raw.matches('\n').count()),
@@ -188,7 +190,9 @@ pub(super) fn parse_function_command(
             FunctionBodyKind::CommandSequence,
             Some(i),
             body_end.checked_sub(1),
-            tokens.get(body_end.saturating_sub(1)).map(|token| token.position),
+            tokens
+                .get(body_end.saturating_sub(1))
+                .map(|token| token.position),
             tokens
                 .get(i)
                 .map(|token| token.position + token.raw.matches('\n').count()),
@@ -446,18 +450,24 @@ pub(super) fn parse_parenthesized_function_body(
 /// grammar accepts `!! () { ...; }'; the executor rejects the name under
 /// POSIX mode via err_invalidid). Returns (name, raw, next_token_index).
 fn bang_group_function_name(tokens: &[Token], start: usize) -> Option<(String, String, usize)> {
-    if !tokens.get(start).is_some_and(|token| {
-        token.kind == TokenKind::Keyword && token.value == "!"
-    }) || !tokens.get(start + 1).is_some_and(|token| {
-        token.kind == TokenKind::Keyword && token.value == "!"
-    }) {
+    if !tokens
+        .get(start)
+        .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "!")
+        || !tokens
+            .get(start + 1)
+            .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == "!")
+    {
         return None;
     }
     let compact = tokens
         .get(start + 2)
         .is_some_and(|token| token.value == "()");
-    let separated = tokens.get(start + 2).is_some_and(|token| token.value == "(")
-        && tokens.get(start + 3).is_some_and(|token| token.value == ")");
+    let separated = tokens
+        .get(start + 2)
+        .is_some_and(|token| token.value == "(")
+        && tokens
+            .get(start + 3)
+            .is_some_and(|token| token.value == ")");
     if !compact && !separated {
         return None;
     }
@@ -474,7 +484,9 @@ fn bang_group_function_name(tokens: &[Token], start: usize) -> Option<(String, S
 fn lt_group_function_name(tokens: &[Token], start: usize) -> Option<(String, String, usize)> {
     if tokens.get(start)?.kind != TokenKind::RedirectIn
         || tokens.get(start)?.value != "<"
-        || !tokens.get(start + 1).is_some_and(|token| token.value == "(")
+        || !tokens
+            .get(start + 1)
+            .is_some_and(|token| token.value == "(")
     {
         return None;
     }
@@ -486,8 +498,12 @@ fn lt_group_function_name(tokens: &[Token], start: usize) -> Option<(String, Str
             depth += 1;
         } else if value == ")" {
             if depth == 1 {
-                if tokens.get(index + 1).is_some_and(|token| token.value == "(")
-                    && tokens.get(index + 2).is_some_and(|token| token.value == ")")
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.value == "(")
+                    && tokens
+                        .get(index + 2)
+                        .is_some_and(|token| token.value == ")")
                 {
                     let name = tokens[start..=index]
                         .iter()

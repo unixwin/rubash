@@ -42,7 +42,10 @@ impl Executor {
     /// Restore flags saved by [`Self::snapshot_arithmetic_error_flags`].
     /// Returns true when a `set -u` unbound-variable error was raised inside
     /// the bounded region (it was clear on entry and is set now).
-    pub(crate) fn restore_arithmetic_error_flags(&self, saved: &(bool, bool, bool, bool, Option<ArithmeticErrorCategory>)) -> bool {
+    pub(crate) fn restore_arithmetic_error_flags(
+        &self,
+        saved: &(bool, bool, bool, bool, Option<ArithmeticErrorCategory>),
+    ) -> bool {
         let nounset_hit = self.arithmetic_nounset_error.get() && !saved.3;
         self.arithmetic_expansion_error.set(saved.0);
         self.arithmetic_nonfatal_error.set(saved.1);
@@ -61,9 +64,7 @@ impl Executor {
         let routed = self.route_current_shell_substitutions(expression);
         let expanded = self.expand_arithmetic_special_parameters(&routed);
         crate::executor::execution_misc::restore_command_substitution_output(
-            &crate::executor::execution_misc::decode_command_substitution_payload(
-                &expanded,
-            ),
+            &crate::executor::execution_misc::decode_command_substitution_payload(&expanded),
         )
     }
 
@@ -81,13 +82,11 @@ impl Executor {
             let ch = expression[index..].chars().next().unwrap();
             if ch == '$' && bytes.get(index + 1) == Some(&b'{') {
                 let after = &expression[index + 2..];
-                let is_funsub = after.starts_with('|')
-                    || after.starts_with(|c: char| c.is_whitespace());
+                let is_funsub =
+                    after.starts_with('|') || after.starts_with(|c: char| c.is_whitespace());
                 if is_funsub {
                     let mut inner = after.chars().peekable();
-                    if let Some(value) =
-                        self.expand_current_shell_braced_substitution(&mut inner)
-                    {
+                    if let Some(value) = self.expand_current_shell_braced_substitution(&mut inner) {
                         output.push_str(&value);
                         let remainder: String = inner.collect();
                         index = expression.len() - remainder.len();
@@ -111,9 +110,8 @@ impl Executor {
         // so the ordinary expansion below cannot expand them a second time and
         // the parser stores the key verbatim.
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
-        let expression = normalize_arithmetic_quotes(
-            &self.expand_arithmetic_expression_mut(&with_assoc_keys),
-        );
+        let expression =
+            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -171,9 +169,8 @@ impl Executor {
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
-        let expression = normalize_arithmetic_quotes(
-            &self.expand_arithmetic_expression_mut(&with_assoc_keys),
-        );
+        let expression =
+            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -298,7 +295,8 @@ impl Executor {
             }
             let start = index;
             index += 1;
-            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
             {
                 index += 1;
             }
@@ -360,9 +358,7 @@ impl Executor {
         // (`\"`) must also survive as literal `"` — the walker strips bare
         // `"` via toggle mode, so `\"` → `\` + removed quote. \x18 is the
         // walker's literal-double-quote marker.
-        let protected = expression
-            .replace("\\\"", "\x18")
-            .replace('\'', "\x17");
+        let protected = expression.replace("\\\"", "\x18").replace('\'', "\x17");
         self.expand_embedded_parameters(&protected)
     }
 }
@@ -845,9 +841,7 @@ pub(in crate::executor) fn arithmetic_error_message(
         // appear truncated at the token itself: `$(( 3425#56 ))` reports
         // `3425#56:`, with no trailing blank.
         let display = expression.trim_end();
-        return Some(format!(
-            "{display}: {error} (error token is \"{token}\")"
-        ));
+        return Some(format!("{display}: {error} (error token is \"{token}\")"));
     }
 
     // GNU Bash rejects a bare assignment target behind && / || even when
@@ -902,17 +896,13 @@ pub(in crate::executor) fn arithmetic_error_message(
             "{display_expression}: syntax error: operand expected (error token is \"{token}\")"
         ));
     }
-    let assignment_lvalue_is_digit = trimmed
-        .split_once('=')
-        .is_some_and(|(left, _)| {
-            let left = left.trim();
-            !left.ends_with(['=', '<', '>', '!'])
-                && left.chars().all(|ch| ch.is_ascii_digit())
-        })
-        || trimmed
-            .strip_suffix("++")
-            .or_else(|| trimmed.strip_suffix("--"))
-            .is_some_and(|value| value.trim().chars().all(|ch| ch.is_ascii_digit()));
+    let assignment_lvalue_is_digit = trimmed.split_once('=').is_some_and(|(left, _)| {
+        let left = left.trim();
+        !left.ends_with(['=', '<', '>', '!']) && left.chars().all(|ch| ch.is_ascii_digit())
+    }) || trimmed
+        .strip_suffix("++")
+        .or_else(|| trimmed.strip_suffix("--"))
+        .is_some_and(|value| value.trim().chars().all(|ch| ch.is_ascii_digit()));
     if assignment_lvalue_is_digit {
         // GNU raises these from expassign/expvalue with lasttp pointing at
         // the operator token that has no valid left side (`=` for `7=4`, the
@@ -1447,8 +1437,24 @@ fn trailing_operator_error(expression: &str, _trailing_space: bool) -> Option<St
                 index += 3;
             } else if matches!(
                 two,
-                "**" | "==" | "!=" | "<=" | ">=" | "<<" | ">>" | "&&" | "||" | "++" | "--" | "+="
-                    | "-=" | "*=" | "/=" | "%=" | "&=" | "^=" | "|="
+                "**" | "=="
+                    | "!="
+                    | "<="
+                    | ">="
+                    | "<<"
+                    | ">>"
+                    | "&&"
+                    | "||"
+                    | "++"
+                    | "--"
+                    | "+="
+                    | "-="
+                    | "*="
+                    | "/="
+                    | "%="
+                    | "&="
+                    | "^="
+                    | "|="
             ) {
                 if two == "++" || two == "--" {
                     // expr.c readtok: `id++` / `id--` (post) only follows a

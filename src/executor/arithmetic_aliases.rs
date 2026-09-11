@@ -100,10 +100,7 @@ impl Executor {
         self.report_arithmetic_error_with_label("let", expression, true);
     }
 
-    pub(in crate::executor) fn report_conditional_arithmetic_error(
-        &self,
-        expression: &str,
-    ) {
+    pub(in crate::executor) fn report_conditional_arithmetic_error(&self, expression: &str) {
         // [[ ]] conditional context: GNU expr.c omits the trailing space
         // in the error token (e.g. "+" not "+ ").
         self.report_arithmetic_error_with_label("[[", expression, false);
@@ -130,8 +127,7 @@ impl Executor {
                 let raw_division = raw_expression
                     .map(|raw| raw.trim_start_matches([' ', '\t']))
                     .and_then(|display| {
-                        arithmetic_division_by_zero_token(display)
-                            .map(|token| (display, token))
+                        arithmetic_division_by_zero_token(display).map(|token| (display, token))
                     });
                 match raw_division {
                     Some((display, token)) => {

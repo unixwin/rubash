@@ -713,9 +713,7 @@ impl Executor {
             // through the fast path; bail out so the sequential stage
             // executor reports it (it applies the same classification).
             if crate::executor::path::should_run_with_shell(&program)
-                && self
-                    .exec_format_refusal(command, &program)
-                    .is_some()
+                && self.exec_format_refusal(command, &program).is_some()
             {
                 return Ok(None);
             }
@@ -735,8 +733,9 @@ impl Executor {
                 }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
-                    glob::PathnameExpansion::NoMatch
-                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
+                        args.push(value)
+                    }
                 }
             }
             specs.push((program, args));
@@ -919,8 +918,9 @@ impl Executor {
                 }
                 match glob::pathname_expand_word(&value, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => args.extend(matches),
-                    glob::PathnameExpansion::NoMatch
-                    | glob::PathnameExpansion::Fail(_) => args.push(value),
+                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
+                        args.push(value)
+                    }
                 }
             }
             specs.push((program, args));
@@ -1056,7 +1056,10 @@ impl Executor {
         let Some(first) = command.words.first().cloned() else {
             return command.clone();
         };
-        let raw = command.word_metadata.first().map(|metadata| metadata.raw.clone());
+        let raw = command
+            .word_metadata
+            .first()
+            .map(|metadata| metadata.raw.clone());
         let fields = self.expand_command_word(command, 0, &first, raw.as_deref());
         if fields.len() <= 1 {
             return command.clone();
@@ -1121,8 +1124,9 @@ impl Executor {
                 }
                 match glob::pathname_expand_word(&expanded, &self.env_vars) {
                     glob::PathnameExpansion::Matches(matches) => out.extend(matches),
-                    glob::PathnameExpansion::NoMatch
-                    | glob::PathnameExpansion::Fail(_) => out.push(expanded),
+                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
+                        out.push(expanded)
+                    }
                 }
             }
         }
@@ -1339,8 +1343,9 @@ impl Executor {
                     }
                     match glob::pathname_expand_word(&value, &self.env_vars) {
                         glob::PathnameExpansion::Matches(matches) => file_operands.extend(matches),
-                        glob::PathnameExpansion::NoMatch
-                        | glob::PathnameExpansion::Fail(_) => file_operands.push(value),
+                        glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
+                            file_operands.push(value)
+                        }
                     }
                 }
                 if !file_operands.is_empty() {
@@ -1867,7 +1872,6 @@ fn time_pipeline_prefix(command: &CommandNode) -> Option<TimePipelinePrefix> {
     })
 }
 
-
 /// Parse the inline grep fast-path argument list: options from the set
 /// [-cinvq] (bundled or separate), an optional -- terminator, exactly one
 /// non-option PATTERN, and no file operands. Returns None when anything
@@ -1901,11 +1905,12 @@ fn inline_grep_args(args: &[String]) -> Option<InlineGrepSpec> {
             // pattern carrying a regex met character must run the real
             // external grep, or `grep -c .` counts a line that has no
             // literal dots as 0 instead of 1 (probe 2026-09-09).
-            if candidate.chars().any(|ch| matches!(
-                ch,
-                '.' | '*' | '[' | ']' | '\\' | '?' | '+' | '|' | '(' | ')'
-                    | '{' | '}' | '$'
-            )) {
+            if candidate.chars().any(|ch| {
+                matches!(
+                    ch,
+                    '.' | '*' | '[' | ']' | '\\' | '?' | '+' | '|' | '(' | ')' | '{' | '}' | '$'
+                )
+            }) {
                 return None;
             }
             pattern = Some(candidate);

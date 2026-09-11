@@ -280,9 +280,8 @@ impl Executor {
 /// before counting (intl.tests: a=$'\303\251' is 1, not the 4 chars of two
 /// marker pairs).
 fn parameter_char_length(value: &str) -> usize {
-    let sentinel =
-        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
-            .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     let bytes = if value.contains(sentinel) {
         crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
     } else {
@@ -313,4 +312,3 @@ fn parameter_char_length(value: &str) -> usize {
     }
     count
 }
-

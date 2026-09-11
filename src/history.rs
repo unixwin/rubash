@@ -13,7 +13,9 @@ use std::fs;
 use std::io;
 use std::rc::Rc;
 
-use crate::history_expand::{history_expand, HistCtx, HistExpandResult, HistEngineState, HistLookup};
+use crate::history_expand::{
+    history_expand, HistCtx, HistEngineState, HistExpandResult, HistLookup,
+};
 
 /// A host-owned command history used by Rubash's history-facing builtins.
 pub trait HistoryProvider: Debug {
@@ -64,19 +66,31 @@ pub struct SessionHistory {
 
 impl SessionHistory {
     pub fn new() -> Self {
-        Self { base: 1, ..Default::default() }
+        Self {
+            base: 1,
+            ..Default::default()
+        }
     }
 
     /// Expand one line with this session's list and engine state
     /// (histexpand.c history_expand).
     pub fn expand(&mut self, line: &str, ctx: HistCtx) -> HistExpandResult {
-        let snapshot = HistSnapshot { base: self.base, lines: self.entries.clone() };
+        let snapshot = HistSnapshot {
+            base: self.base,
+            lines: self.entries.clone(),
+        };
         history_expand(line, &snapshot, &mut self.engine, ctx)
     }
 
     /// bashhist.c check_history_control + history_should_ignore, then
     /// add_history with HISTSIZE stifling. Returns true when recorded.
-    pub fn record(&mut self, line: &str, histcontrol: &str, histignore: &str, histsize: usize) -> bool {
+    pub fn record(
+        &mut self,
+        line: &str,
+        histcontrol: &str,
+        histignore: &str,
+        histsize: usize,
+    ) -> bool {
         if line.trim().is_empty() {
             return false;
         }
@@ -144,7 +158,12 @@ impl SessionHistory {
 
     /// builtins/history.def -w: write every entry (truncate).
     pub fn write_file(&self, path: &str) -> io::Result<usize> {
-        let joined = self.entries.iter().map(|e| e.as_str()).collect::<Vec<_>>().join("\n");
+        let joined = self
+            .entries
+            .iter()
+            .map(|e| e.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         fs::write(path, joined + "\n")?;
         Ok(self.entries.len())
     }
@@ -158,7 +177,10 @@ impl SessionHistory {
         let start = self.entries.len() - n;
         let pending: Vec<String> = self.entries[start..].to_vec();
         if !pending.is_empty() {
-            let mut file = fs::OpenOptions::new().create(true).append(true).open(path)?;
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
             for entry in &pending {
                 writeln!(file, "{entry}")?;
             }

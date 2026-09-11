@@ -152,11 +152,7 @@ impl Executor {
                     self.fd_table.entries.remove(&saved.fd);
                 }
             }
-            restore_optional_env_var(
-                &mut self.env_vars,
-                &fd_stdin_key(saved.fd),
-                saved.fd_stdin,
-            );
+            restore_optional_env_var(&mut self.env_vars, &fd_stdin_key(saved.fd), saved.fd_stdin);
             restore_optional_env_var(
                 &mut self.env_vars,
                 &fd_stdin_offset_key(saved.fd),

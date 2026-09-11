@@ -293,7 +293,6 @@ fn command_is_control_word(command: &CommandNode, word: &str) -> bool {
     command.words.first().map(String::as_str) == Some(word)
         || (command.words.is_empty()
             && command
-                
                 .get_assignment("__RUBASH_PARSE_ERROR__")
                 .and_then(|message| message.split_once("unexpected token `"))
                 .is_some_and(|(_, token)| token.trim_end_matches(['`', '\'']) == word))

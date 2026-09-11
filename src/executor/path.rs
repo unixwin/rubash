@@ -448,9 +448,7 @@ fn windows_external_absolute_argument_needs_translation(
     // Must be exactly /mnt/X or /mnt/X/... to avoid false matches like /mnt/cfoo.
     if normalized.starts_with("/mnt/") && normalized.len() >= 6 {
         let bytes = normalized.as_bytes();
-        if bytes[5].is_ascii_alphabetic()
-            && (normalized.len() == 6 || bytes[6] == b'/')
-        {
+        if bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/') {
             return true;
         }
     }
@@ -768,9 +766,7 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     // Must be exactly /mnt/X or /mnt/X/... to avoid false matches like /mnt/cfoo.
     if cfg!(windows) && normalized.starts_with("/mnt/") && normalized.len() >= 6 {
         let bytes = normalized.as_bytes();
-        if bytes[5].is_ascii_alphabetic()
-            && (normalized.len() == 6 || bytes[6] == b'/')
-        {
+        if bytes[5].is_ascii_alphabetic() && (normalized.len() == 6 || bytes[6] == b'/') {
             let drive = bytes[5] as char;
             let rest = if normalized.len() > 6 {
                 normalized[7..].trim_start_matches('/')
@@ -1954,7 +1950,8 @@ mod tests {
             "/mnt/c", &env_vars
         ));
         assert!(windows_external_absolute_argument_needs_translation(
-            "/mnt/d/some/path", &env_vars
+            "/mnt/d/some/path",
+            &env_vars
         ));
         assert!(windows_external_absolute_argument_needs_translation(
             "/mnt/z", &env_vars
@@ -1972,7 +1969,8 @@ mod tests {
         ));
         // /mnt/cfoo should NOT match (letter not followed by / or end-of-string)
         assert!(!windows_external_absolute_argument_needs_translation(
-            "/mnt/cfoo", &env_vars
+            "/mnt/cfoo",
+            &env_vars
         ));
     }
 

@@ -518,12 +518,8 @@ mod tests {
         // quotes is ordinary data, carried with the same protected marker
         // as an escaped quote so expansion never re-reads it as a
         // single-quote delimiter.
-        assert_eq!(
-            remove_shell_quotes("\"a:'b' c\""),
-            "a:\x17b\x17 c"
-        );
+        assert_eq!(remove_shell_quotes("\"a:'b' c\""), "a:\x17b\x17 c");
     }
-
 }
 
 // Source-mapped to subst.c::extract_dollar_brace_string: quote removal
@@ -634,5 +630,3 @@ mod probe_tests {
         eprintln!("PROBE-OUT={out:?}");
     }
 }
-
-

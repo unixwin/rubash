@@ -14,10 +14,7 @@ impl Executor {
     // Variant for `${var-word}` style alternate words: whitespace that was
     // inside quotes is marked \x1c so the field splitter keeps it glued
     // (posixexp2 37), while bare spaces stay splittable.
-    pub(in crate::executor) fn expand_embedded_parameters_protect_ifs(
-        &self,
-        word: &str,
-    ) -> String {
+    pub(in crate::executor) fn expand_embedded_parameters_protect_ifs(&self, word: &str) -> String {
         self.expand_embedded_parameters_with_context_inner(word, false, true)
     }
 
@@ -253,8 +250,7 @@ impl Executor {
                             // unconditionally: a readonly diagnostic may have
                             // consumed the print gate, but the evaluation
                             // error still decides list abandonment.
-                            let actual_fatal =
-                                self.arithmetic_last_error_category.take().is_some();
+                            let actual_fatal = self.arithmetic_last_error_category.take().is_some();
                             if !actual_fatal
                                 && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                     &expression,
@@ -468,10 +464,7 @@ fn decode_backtick_substitution_source(source: &str) -> String {
     source
         .replace('\x1a', "`")
         .replace('\x11', "")
-        .replace(
-            crate::lexer::PARAM_NAME_END_MARKER,
-            "",
-        )
+        .replace(crate::lexer::PARAM_NAME_END_MARKER, "")
         .replace('\x1f', "$")
         .replace('\x15', "\\")
 }

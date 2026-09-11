@@ -205,7 +205,10 @@ impl Executor {
     /// Apply pathname expansion to one already-expanded word from a command
     /// substitution body. Returns the match list when the word is a pattern,
     /// or the word itself when it is not.
-    pub(in crate::executor) fn apply_command_substitution_pathname_expansion(&self, word: &str) -> Vec<String> {
+    pub(in crate::executor) fn apply_command_substitution_pathname_expansion(
+        &self,
+        word: &str,
+    ) -> Vec<String> {
         match glob::pathname_expand_word(word, &self.env_vars) {
             glob::PathnameExpansion::Matches(matches) => matches,
             glob::PathnameExpansion::NoMatch => vec![word.to_string()],
@@ -235,7 +238,14 @@ impl Executor {
         let mut status = 0;
         for name in &words[1 + first_name..] {
             let name = self.expand_word(name);
-            match self.describe_name_with_io(&name, mode, use_standard_path, false, false, &mut stdout) {
+            match self.describe_name_with_io(
+                &name,
+                mode,
+                use_standard_path,
+                false,
+                false,
+                &mut stdout,
+            ) {
                 Ok(true) => {}
                 Ok(false) => status = 1,
                 Err(_) => status = 1,
@@ -283,9 +293,9 @@ impl Executor {
                         return Some(self.positional_params.clone());
                     }
                     if indirect == "*" {
-                        return Some(vec![
-                            self.positional_params.join(&self.ifs_first_char_separator()),
-                        ]);
+                        return Some(vec![self
+                            .positional_params
+                            .join(&self.ifs_first_char_separator())]);
                     }
                     if is_shell_name(indirect) {
                         if let Some(target) = self.env_vars.get(indirect).map(String::as_str) {
@@ -293,9 +303,9 @@ impl Executor {
                                 return Some(self.positional_params.clone());
                             }
                             if target == "*" {
-                                return Some(vec![
-                                    self.positional_params.join(&self.ifs_first_char_separator()),
-                                ]);
+                                return Some(vec![self
+                                    .positional_params
+                                    .join(&self.ifs_first_char_separator())]);
                             }
                         }
                     }
@@ -597,7 +607,11 @@ impl Executor {
         // Don't route shell builtins through the external-command path.
         // On Windows, "fc" resolves to system32\fc.exe (file compare),
         // not the shell's "fc" builtin. Also respect "enable -n".
-        let first_word = stdio.expanded_words.first().map(String::as_str).unwrap_or("");
+        let first_word = stdio
+            .expanded_words
+            .first()
+            .map(String::as_str)
+            .unwrap_or("");
         if is_shell_builtin_name(first_word)
             && !crate::builtins::enable::is_disabled(&self.env_vars, first_word)
         {
@@ -864,7 +878,10 @@ enum QuotedPositionalAtSegment {
     /// protected data, so they attach to the adjacent word and never field-
     /// split. Text collected between quoted spans is `quoted == false` and
     /// keeps the historic unquoted-literal split behavior.
-    Literal { text: String, quoted: bool },
+    Literal {
+        text: String,
+        quoted: bool,
+    },
     PositionalAt,
 }
 
@@ -981,10 +998,7 @@ fn quoted_body_positional_at_segments(body: &[char]) -> Option<Vec<QuotedPositio
     Some(segments)
 }
 
-fn push_body_piece(
-    segments: &mut Vec<QuotedPositionalAtSegment>,
-    chars: &[char],
-) -> Option<()> {
+fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]) -> Option<()> {
     if chars.is_empty() {
         return Some(());
     }

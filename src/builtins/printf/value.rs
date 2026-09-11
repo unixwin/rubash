@@ -11,8 +11,8 @@ pub(super) fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Opt
     // two bytes and %lc returns one byte (intl4.sub under LC_CTYPE=C). The
     // numeric specifiers render ASCII in either mode, so only the string forms
     // switch unit.
-    let byte_mode = !crate::locale::is_multi_byte()
-        && matches!(spec.specifier, 's' | 'b' | 'q' | 'Q' | 'c');
+    let byte_mode =
+        !crate::locale::is_multi_byte() && matches!(spec.specifier, 's' | 'b' | 'q' | 'Q' | 'c');
     let rendered = match spec.specifier {
         's' => truncate_precision_locale(value.to_string(), spec.precision, byte_mode),
         'b' => {
@@ -171,10 +171,8 @@ fn apply_width_locale(value: String, spec: &FormatSpec, byte_mode: bool) -> Stri
 /// The byte view of a word: raw-byte marker pairs (substitution_metadata)
 /// decode back to the bytes they carry, everything else keeps its UTF-8 bytes.
 fn locale_byte_span(value: &str) -> Vec<u8> {
-    let sentinel = char::from_u32(
-        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
-    )
-    .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     if value.contains(sentinel) {
         crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
     } else {

@@ -346,7 +346,7 @@ impl Executor {
                 crate::builtins::set::set_shell_option(&mut self.env_vars, "xtrace", false);
                 if index + 1 < args.len() {
                     self.dollar_vars_changed_by_set = true;
-                self.set_positional_params(args[index + 1..].to_vec());
+                    self.set_positional_params(args[index + 1..].to_vec());
                 }
                 return true;
             }
@@ -381,10 +381,7 @@ impl Executor {
                 // reported instead of being silently applied here.
                 if option_name == "restricted"
                     && prefix == '+'
-                    && crate::builtins::set::shell_option_enabled(
-                        &self.env_vars,
-                        "restricted",
-                    )
+                    && crate::builtins::set::shell_option_enabled(&self.env_vars, "restricted")
                 {
                     return false;
                 }

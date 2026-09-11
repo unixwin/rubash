@@ -308,6 +308,9 @@ fn test_for_loop_function_assignment_preserves_remaining_values() {
     let result = executor.execute_ast(&ast);
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "n=1 first=x\nn=2 first=x\nn=2 first=x\nn=3 first=x\n");
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "n=1 first=x\nn=2 first=x\nn=2 first=x\nn=3 first=x\n"
+    );
     let _ = fs::remove_file(output_path);
 }

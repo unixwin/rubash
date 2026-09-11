@@ -180,12 +180,7 @@ pub(super) fn unquoted_brace_group_depth(input: &str) -> usize {
             index += 2;
             continue;
         }
-        if ch == '#'
-            && !single
-            && !double
-            && !ansi_single
-            && comment_start
-        {
+        if ch == '#' && !single && !double && !ansi_single && comment_start {
             in_comment = true;
             index += 1;
             continue;

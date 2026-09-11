@@ -24,8 +24,12 @@ fn capcase_attribute_transforms_assignments_and_prints() {
         &mut variables,
         &mut stdout,
         &mut stderr,
-    ).unwrap();
-    assert_eq!(variables.get("name").map(String::as_str), Some("Hello world"));
+    )
+    .unwrap();
+    assert_eq!(
+        variables.get("name").map(String::as_str),
+        Some("Hello world")
+    );
     stdout.clear();
     execute_with_io_named(
         "declare",
@@ -33,6 +37,10 @@ fn capcase_attribute_transforms_assignments_and_prints() {
         &mut variables,
         &mut stdout,
         &mut stderr,
-    ).unwrap();
-    assert_eq!(String::from_utf8(stdout).unwrap(), "declare -c name=\"Hello world\"\n");
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(stdout).unwrap(),
+        "declare -c name=\"Hello world\"\n"
+    );
 }

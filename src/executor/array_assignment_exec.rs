@@ -21,8 +21,8 @@ impl Executor {
         let name = assignment.name.as_str();
         let raw_subscript = assignment.subscript_metadata.raw.as_str();
         let key = self.expand_subscript_string(raw_subscript);
-        let associative = is_marked_var(&self.env_vars, ASSOC_VARS, name)
-            || self.is_assoc_parameter_array(name);
+        let associative =
+            is_marked_var(&self.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name);
         if !associative || !key.contains(['[', ']', '=']) {
             return None;
         }
@@ -32,10 +32,8 @@ impl Executor {
             return None;
         }
         let synthetic = format!("{name}={}", assignment.raw_value);
-        let expanded = self.expand_word_mut_with_context(
-            &synthetic,
-            SubstitutionQuoteContext::Unquoted,
-        );
+        let expanded =
+            self.expand_word_mut_with_context(&synthetic, SubstitutionQuoteContext::Unquoted);
         let prefix = format!("{name}=");
         let value = expanded.strip_prefix(prefix.as_str()).unwrap_or(&expanded);
         Some(format!(
@@ -241,7 +239,7 @@ impl Executor {
                     // wheat[foo bar]=9 stores 16, not the concat-eval 97).
                     (self.eval_integer_assignment_value(current)
                         + self.eval_integer_assignment_value(value))
-                        .to_string()
+                    .to_string()
                 } else {
                     append_scalar_value(current, value)
                 }

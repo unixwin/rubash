@@ -43,7 +43,6 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
     output
 }
 
-
 pub(in crate::executor) fn restore_protected_replacement_quotes(value: &str) -> String {
     value.replace('\x16', "\\'")
 }
@@ -318,11 +317,7 @@ pub(in crate::executor) fn parameter_substring(
 /// Byte-indexed form of GNU subst.c substring expansion: with MB_CUR_MAX of 1
 /// the offset and length are raw byte counts, so `${V:0:2}` takes two bytes
 /// and can cut a multibyte sequence in half (intl4.sub under LC_CTYPE=C).
-fn parameter_substring_bytes(
-    value: &str,
-    offset: isize,
-    length: Option<isize>,
-) -> String {
+fn parameter_substring_bytes(value: &str, offset: isize, length: Option<isize>) -> String {
     let byte_count = locale_byte_span(value).len();
     let Some(start) = parameter_substring_start(byte_count, offset) else {
         return String::new();
@@ -343,10 +338,8 @@ fn parameter_substring_bytes(
 /// The byte view of a word: raw-byte marker pairs (substitution_metadata)
 /// decode back to the bytes they carry, everything else keeps its UTF-8 bytes.
 fn locale_byte_span(value: &str) -> Vec<u8> {
-    let sentinel = char::from_u32(
-        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
-    )
-    .expect("raw-byte sentinel is a valid char");
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
     if value.contains(sentinel) {
         crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
     } else {

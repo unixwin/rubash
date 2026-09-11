@@ -72,10 +72,18 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
             Some('u') => {
                 // GNU strtrans.c ansicstr requires exactly 4 hex digits
                 // for \uNNNN; a short run is literal \u followed by digits.
-                push_unicode_ansi_c(&mut output, read_ansi_c_digits_raw(&mut chars, 16, 4), "\\u");
+                push_unicode_ansi_c(
+                    &mut output,
+                    read_ansi_c_digits_raw(&mut chars, 16, 4),
+                    "\\u",
+                );
             }
             Some('U') => {
-                push_unicode_ansi_c(&mut output, read_ansi_c_digits_raw(&mut chars, 16, 8), "\\U");
+                push_unicode_ansi_c(
+                    &mut output,
+                    read_ansi_c_digits_raw(&mut chars, 16, 8),
+                    "\\U",
+                );
             }
             Some('c') => {
                 // Control character: backslash c X
@@ -193,8 +201,7 @@ fn push_ansi_c_byte(output: &mut String, byte: u32) {
             output.push(ch);
         }
     } else {
-        output.push_str(&crate::executor::substitution_metadata::encode_raw_byte_marker(
-            byte as u8,
-        ));
+        output
+            .push_str(&crate::executor::substitution_metadata::encode_raw_byte_marker(byte as u8));
     }
 }

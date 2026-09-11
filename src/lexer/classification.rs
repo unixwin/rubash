@@ -35,7 +35,6 @@ pub(super) fn is_assignment(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-
 pub(super) fn is_brace_expansion(word: &str) -> bool {
     word.starts_with('{')
         && word.ends_with('}')

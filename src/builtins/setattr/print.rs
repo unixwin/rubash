@@ -33,7 +33,9 @@ where
         // lists every readonly variable. The -a/-A attribute flags double as
         // listing filters.
         let is_array = arrays.contains(&name)
-            || env_vars.get(&name).is_some_and(|value| is_array_value(value));
+            || env_vars
+                .get(&name)
+                .is_some_and(|value| is_array_value(value));
         let is_assoc = assocs.contains(&name);
         if array_filter && !is_array {
             continue;
@@ -67,11 +69,7 @@ where
                 // "readonly -a name=value" for arrays instead of the
                 // declare-format listing (array.tests readonly -a probe).
                 if posix_mode {
-                    writeln!(
-                        stdout,
-                        "readonly -a {name}={}",
-                        format_array_value(value)
-                    )?;
+                    writeln!(stdout, "readonly -a {name}={}", format_array_value(value))?;
                     continue;
                 }
                 let attrs = setattr_array_attrs(

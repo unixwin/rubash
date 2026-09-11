@@ -8,8 +8,8 @@ use rubash::parser::parse;
 use std::cell::RefCell;
 use std::env;
 use std::fs;
-use std::rc::Rc;
 use std::io::{self, BufRead, IsTerminal, Read, Write};
+use std::rc::Rc;
 
 fn main() {
     let handle = std::thread::Builder::new()
@@ -482,7 +482,11 @@ bash [GNU long option] [option] script-file ...
 /// otherwise the first line (two lines when the sample starts with a #!
 /// interpreter specifier) must be NUL-free.
 fn check_binary_file(sample: &[u8]) -> bool {
-    if sample.len() >= 4 && sample[0] == 0x7f && sample[1] == b'E' && sample[2] == b'L' && sample[3] == b'F'
+    if sample.len() >= 4
+        && sample[0] == 0x7f
+        && sample[1] == b'E'
+        && sample[2] == b'L'
+        && sample[3] == b'F'
     {
         return true;
     }
@@ -528,7 +532,8 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let mut last_was_newline = false;
     for line in contents.lines() {
         if line.trim().is_empty() && !has_unclosed_input_syntax(&pending) {
-            last_was_newline = flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
+            last_was_newline =
+                flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
             pending.clear();
             if !last_was_newline {
                 output.push('\n');
@@ -934,8 +939,14 @@ fn run_history_group(
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
     let lithist = shopt_state_enabled(executor, "lithist", false);
-    let control = executor.get_env("HISTCONTROL").unwrap_or_default().to_string();
-    let ignore = executor.get_env("HISTIGNORE").unwrap_or_default().to_string();
+    let control = executor
+        .get_env("HISTCONTROL")
+        .unwrap_or_default()
+        .to_string();
+    let ignore = executor
+        .get_env("HISTIGNORE")
+        .unwrap_or_default()
+        .to_string();
     let histsize = executor
         .get_env("HISTSIZE")
         .and_then(|v| v.trim().parse::<usize>().ok())
@@ -1024,13 +1035,16 @@ fn run_history_group(
             let was_recorded = if record.trim().is_empty() {
                 false
             } else {
-                session.borrow_mut().record(&record, &control, &ignore, histsize)
+                session
+                    .borrow_mut()
+                    .record(&record, &control, &ignore, histsize)
             };
             session.borrow_mut().last_line_added = was_recorded;
         } else {
             for text in record_texts.iter().flatten() {
-                let was_recorded =
-                    session.borrow_mut().record(text, &control, &ignore, histsize);
+                let was_recorded = session
+                    .borrow_mut()
+                    .record(text, &control, &ignore, histsize);
                 session.borrow_mut().last_line_added = was_recorded;
             }
         }
@@ -1041,7 +1055,11 @@ fn run_history_group(
     let exec_text = if modified_any {
         exec_parts.join("\n")
     } else {
-        group.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n")
+        group
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
@@ -1059,8 +1077,8 @@ fn build_recorded_entry(
     lithist: bool,
 ) -> String {
     const NO_SEMI: &[&str] = &[
-        "{", "(", ")", "[", ";", "&", "|", "case", "do", "else", "if",
-        "in", "then", "until", "while", "time",
+        "{", "(", ")", "[", ";", "&", "|", "case", "do", "else", "if", "in", "then", "until",
+        "while", "time",
     ];
     let mut out = String::new();
     let mut prev_kept: Option<usize> = None;
@@ -1136,7 +1154,9 @@ fn advance_quote_state(state: Option<char>, text: &str) -> Option<char> {
                 }
             }
             Some('"') => {
-                if c == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '"' | '\\' | '$' | '`' | '\n')
+                if c == '\\'
+                    && i + 1 < chars.len()
+                    && matches!(chars[i + 1], '"' | '\\' | '$' | '`' | '\n')
                 {
                     i += 1;
                 } else if c == '"' {

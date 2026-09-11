@@ -95,11 +95,11 @@ fn test_kill_translates_realtime_signals() {
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
-            fs::read_to_string(output_path).unwrap(),
-            // Linux signal table (GNU 5.3.0 contract, byte-verified):
-            // RTMIN=34, 32/33 unassigned so `kill -l 32` / `kill -l 160`
-            // produce no stdout lines; 49 = RTMIN+15.
-            "34\n35\n35\nRTMIN+15\n63\n64\nRTMAX\n"
+        fs::read_to_string(output_path).unwrap(),
+        // Linux signal table (GNU 5.3.0 contract, byte-verified):
+        // RTMIN=34, 32/33 unassigned so `kill -l 32` / `kill -l 160`
+        // produce no stdout lines; 49 = RTMIN+15.
+        "34\n35\n35\nRTMIN+15\n63\n64\nRTMAX\n"
     );
     let _ = fs::remove_file(output_path);
 }

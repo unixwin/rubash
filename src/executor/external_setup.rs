@@ -214,7 +214,8 @@ impl Executor {
                 && !assignment_word.contains(' ')
                 && is_shell_name(&assignment_word[..assignment_word.len() - 1]);
             let procsub_word = rewritten.words[merge_index + 1].clone();
-            let is_whole_procsub = (procsub_word.starts_with("<(") || procsub_word.starts_with(">("))
+            let is_whole_procsub = (procsub_word.starts_with("<(")
+                || procsub_word.starts_with(">("))
                 && procsub_word.ends_with(')');
             if is_bare_assignment && is_whole_procsub {
                 let next_metadata = rewritten.word_metadata.get(merge_index + 1).cloned();

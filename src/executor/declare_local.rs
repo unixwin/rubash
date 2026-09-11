@@ -162,7 +162,6 @@ impl Executor {
             && !declare_args_request_print(&args)
         {
             let prefix_assignment_names = cmd
-                
                 .assignment_keys()
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
@@ -345,7 +344,6 @@ impl Executor {
             }
             if !declare_args_request_print(&args) {
                 let prefix_assignment_names = cmd
-                    
                     .assignment_keys()
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();

@@ -97,7 +97,6 @@ pub(super) fn quote_declare_value(value: &str) -> String {
     format!("\"{}\"", quote_double(value))
 }
 
-
 /// array.c array_to_assign element rule (964-968, same pair in
 /// array_to_kvpair 911-915): $'...' for values holding non-printing
 /// characters (ansic_shouldquote), sh_double_quote otherwise. Indexed

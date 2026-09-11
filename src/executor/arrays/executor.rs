@@ -1,5 +1,7 @@
 use super::*;
-use crate::executor::{assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, NAMEREF_VARS};
+use crate::executor::{
+    assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, NAMEREF_VARS,
+};
 
 impl Executor {
     pub(in crate::executor) fn indexed_array_stack(&self, name: &str) -> Vec<String> {
@@ -446,12 +448,12 @@ impl Executor {
     /// ${!1} sees the function's own arguments) and a shell name reads its
     /// value. The result is the parameter expression the indirection
     /// points at.
-    pub(in crate::executor) fn resolve_indirect_target_expr(&self, indirect_name: &str) -> Option<String> {
+    pub(in crate::executor) fn resolve_indirect_target_expr(
+        &self,
+        indirect_name: &str,
+    ) -> Option<String> {
         if let Ok(index) = indirect_name.parse::<usize>() {
-            return self
-                .positional_params
-                .get(index.saturating_sub(1))
-                .cloned();
+            return self.positional_params.get(index.saturating_sub(1)).cloned();
         }
         if !is_shell_name(indirect_name) {
             return None;
@@ -489,7 +491,9 @@ impl Executor {
             }
             "*" => {
                 return Some(if quoted_array_word {
-                    vec![self.positional_params.join(&self.ifs_first_char_separator())]
+                    vec![self
+                        .positional_params
+                        .join(&self.ifs_first_char_separator())]
                 } else {
                     field_split_positional_values_with_ifs(
                         self.positional_params.clone(),

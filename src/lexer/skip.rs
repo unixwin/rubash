@@ -68,7 +68,7 @@ impl<'a> Lexer<'a> {
                     if self.skip_heredoc_in_command_substitution() {
                         break;
                     }
-                },
+                }
                 _ => {}
             }
         }

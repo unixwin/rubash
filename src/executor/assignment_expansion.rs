@@ -94,7 +94,8 @@ impl Executor {
             return self.expand_assignment_value_inner(value);
         }
         const DQ_DATA: &str = "\u{E001}";
-        let expanded = self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
+        let expanded =
+            self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
         expanded.replace(DQ_DATA, "\"")
     }
 
@@ -130,10 +131,7 @@ impl Executor {
         } else {
             ("", token)
         };
-        if element.starts_with('\'')
-            || element.starts_with('"')
-            || element.starts_with(DQ_DATA)
-        {
+        if element.starts_with('\'') || element.starts_with('"') || element.starts_with(DQ_DATA) {
             return token.to_string();
         }
         if !tilde_expand::assignment_value_needs_tilde_expansion(element, true) {
@@ -170,15 +168,12 @@ impl Executor {
         // re-expanded (array.tests: aa=([0]=~/a:~/b) expands both segments
         // while w=([0]=~/a [1]=$p) keeps $p's result literal). Quoted
         // elements stay literal; quoted whole-RHS values skip the pass.
-        let tilde_value = if compound_assignment
-            && !quoted
-            && value.starts_with('(')
-            && value.ends_with(')')
-        {
-            std::borrow::Cow::Owned(self.expand_tilde_in_compound_assignment(value))
-        } else {
-            std::borrow::Cow::Borrowed(value)
-        };
+        let tilde_value =
+            if compound_assignment && !quoted && value.starts_with('(') && value.ends_with(')') {
+                std::borrow::Cow::Owned(self.expand_tilde_in_compound_assignment(value))
+            } else {
+                std::borrow::Cow::Borrowed(value)
+            };
         let value: &str = &tilde_value;
         if value.contains("\\$(") {
             let literal = if quoted {
@@ -447,7 +442,9 @@ impl Executor {
             // under W_ASSIGNRHS; expand_no_split_dollar_star, Posix interp
             // 888). IFS unset joins with space, IFS empty joins with
             // nothing.
-            b'@' | b'*' => self.positional_params.join(&self.ifs_first_char_separator()),
+            b'@' | b'*' => self
+                .positional_params
+                .join(&self.ifs_first_char_separator()),
             b'#' => self.positional_params.len().to_string(),
             b'?' => self.exit_code.to_string(),
             b'$' => self.shell_pid_value().to_string(),
@@ -552,13 +549,21 @@ impl Executor {
         // re-parsed string looks like versus GNU (gg7.sh E1/E2 divergence).
         macro_rules! store {
             ($v:expr) => {
-                if bare { $v.to_string() } else { quote_array_value($v) }
+                if bare {
+                    $v.to_string()
+                } else {
+                    quote_array_value($v)
+                }
             };
             // Literal fallback element: bare mode keeps the raw storage
             // token (quotes intact) so eval's reparse sees the same
             // quoting GNU's verbatim flatten produces.
             ($v:expr, $raw:expr) => {
-                if bare { $raw.clone() } else { quote_array_value($v) }
+                if bare {
+                    $raw.clone()
+                } else {
+                    quote_array_value($v)
+                }
             };
         }
         // Bare (eval-argument) flatten keeps the RAW token text: literal
@@ -568,11 +573,7 @@ impl Executor {
             let token = unquote_storage_value(&token_raw);
             if token.strip_prefix('\x1d') == Some("${@}") || token == "$@" {
                 changed = true;
-                values.extend(
-                    self.positional_params
-                        .iter()
-                        .map(|value| store!(value)),
-                );
+                values.extend(self.positional_params.iter().map(|value| store!(value)));
             } else if let Some(array_name) = token
                 .strip_prefix('\x1d')
                 .and_then(|token| token.strip_prefix("${"))
@@ -593,11 +594,7 @@ impl Executor {
             {
                 if let Some(storage) = self.parameter_array_storage(array_name) {
                     changed = true;
-                    values.extend(
-                        array_values(&storage)
-                            .iter()
-                            .map(|value| store!(value)),
-                    );
+                    values.extend(array_values(&storage).iter().map(|value| store!(value)));
                 } else {
                     values.push(store!(""));
                 }
@@ -686,12 +683,7 @@ impl Executor {
                         let joined = element_values
                             .iter()
                             .map(|value| {
-                                self.replace_patsub_pattern(
-                                    value,
-                                    &pattern,
-                                    &replacement,
-                                    global,
-                                )
+                                self.replace_patsub_pattern(value, &pattern, &replacement, global)
                             })
                             .collect::<Vec<_>>()
                             .join(&self.ifs_first_char_separator());
@@ -805,7 +797,9 @@ impl Executor {
             }
             "*" => {
                 return Some(vec![quote_array_value(
-                    &self.positional_params.join(&self.ifs_first_char_separator()),
+                    &self
+                        .positional_params
+                        .join(&self.ifs_first_char_separator()),
                 )])
             }
             _ => {}

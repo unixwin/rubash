@@ -29,7 +29,7 @@ impl Executor {
                     // (`$(echo {a,b}*)` expands `a*` and `b*` separately).
                     if unquoted {
                         expanded_args.extend(
-                            self.expand_command_substitution_arg_values_quoted(&item, false)
+                            self.expand_command_substitution_arg_values_quoted(&item, false),
                         );
                     } else {
                         expanded_args.push(expanded);
@@ -49,16 +49,14 @@ impl Executor {
                     // expanded independently. `$(echo *)` yields the
                     // directory listing, `$(echo $a)` yields the IFS fields.
                     for value in split {
-                        expanded_args.extend(
-                            self.apply_command_substitution_pathname_expansion(&value),
-                        );
+                        expanded_args
+                            .extend(self.apply_command_substitution_pathname_expansion(&value));
                     }
                 } else if unquoted {
                     // No unquoted parameter expansion, but the word may still
                     // be a literal glob pattern (`echo *`, `echo *.sh`).
-                    expanded_args.extend(
-                        self.apply_command_substitution_pathname_expansion(&expanded),
-                    );
+                    expanded_args
+                        .extend(self.apply_command_substitution_pathname_expansion(&expanded));
                 } else {
                     expanded_args.push(expanded);
                 }
@@ -327,44 +325,41 @@ impl Executor {
         }
 
         if words.first().map(String::as_str) == Some("printf") {
-            let expanded_args: Vec<String> =
-                words[1..]
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(index, word)| {
-                        if let Some(values) = self.array_at_word_values(word) {
-                            return values;
-                        }
-                        if let Some(values) = self.quoted_positional_at_word_values(word, None) {
-                            return values;
-                        }
-                        let was_quoted = word_parts.get(index + 1).map(|(_, q)| *q);
-                        let unquoted = was_quoted != Some(true);
-                        let expanded = strip_matching_quotes(&self.expand_protected_tilde(
-                            word,
-                            was_quoted,
-                        ))
-                        .to_string();
-                        // Same expand_words semantics as the echo/recho/zecho
-                        // paths: unquoted expansion words split on $IFS, fully
-                        // quoted words stay one field.
-                        let values = if unquoted && for_word_has_unquoted_expansion(word, None) {
-                            self.field_split_values(&expanded)
-                        } else {
-                            vec![expanded]
-                        };
-                        // Pathname expansion (subst.c expand_words): each
-                        // unquoted field is expanded independently.
-                        if unquoted {
-                            values
-                                .into_iter()
-                                .flat_map(|v| self.apply_command_substitution_pathname_expansion(&v))
-                                .collect::<Vec<_>>()
-                        } else {
-                            values
-                        }
-                    })
-                    .collect();
+            let expanded_args: Vec<String> = words[1..]
+                .iter()
+                .enumerate()
+                .flat_map(|(index, word)| {
+                    if let Some(values) = self.array_at_word_values(word) {
+                        return values;
+                    }
+                    if let Some(values) = self.quoted_positional_at_word_values(word, None) {
+                        return values;
+                    }
+                    let was_quoted = word_parts.get(index + 1).map(|(_, q)| *q);
+                    let unquoted = was_quoted != Some(true);
+                    let expanded =
+                        strip_matching_quotes(&self.expand_protected_tilde(word, was_quoted))
+                            .to_string();
+                    // Same expand_words semantics as the echo/recho/zecho
+                    // paths: unquoted expansion words split on $IFS, fully
+                    // quoted words stay one field.
+                    let values = if unquoted && for_word_has_unquoted_expansion(word, None) {
+                        self.field_split_values(&expanded)
+                    } else {
+                        vec![expanded]
+                    };
+                    // Pathname expansion (subst.c expand_words): each
+                    // unquoted field is expanded independently.
+                    if unquoted {
+                        values
+                            .into_iter()
+                            .flat_map(|v| self.apply_command_substitution_pathname_expansion(&v))
+                            .collect::<Vec<_>>()
+                    } else {
+                        values
+                    }
+                })
+                .collect();
             let mut env_vars = self.env_vars.clone();
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();

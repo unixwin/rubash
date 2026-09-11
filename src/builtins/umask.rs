@@ -340,10 +340,7 @@ mod tests {
 
     #[test]
     fn symbolic_mode_empty_action_clears_who_for_equals() {
-        for (mode, expected) in [
-            ("u=", "u=,g=rx,o=rx"),
-            ("u==r", "u=r,g=rx,o=rx"),
-        ] {
+        for (mode, expected) in [("u=", "u=,g=rx,o=rx"), ("u==r", "u=r,g=rx,o=rx")] {
             let (status, stdout, _stderr) = run(mode, "022");
             assert_eq!(status, EXECUTION_SUCCESS, "mode {mode}");
             assert_eq!(stdout, format!("{expected}\n"), "mode {mode}");

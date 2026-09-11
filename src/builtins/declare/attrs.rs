@@ -8,8 +8,8 @@ use super::storage::{
     eval_arith_value, format_indexed_array_storage, indexed_array_entries, parse_array_words,
 };
 use super::{
-    ARRAY_VARS, ASSOC_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS, LOWERCASE_VARS,
-    CAPCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
+    ARRAY_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS,
+    LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
 };
 
 #[derive(Clone, Copy)]
@@ -218,35 +218,32 @@ where
             // ([0]="0"). An explicit `name=` still evaluates ([0]="0"), and
             // pre-existing non-empty values keep evaluating.
             let has_assignment = attr_names_owned[name_index].contains('=');
-            let marking_cell_empty = variables
-                .get(name)
-                .map(String::is_empty)
-                .unwrap_or(true);
+            let marking_cell_empty = variables.get(name).map(String::is_empty).unwrap_or(true);
             if has_assignment || !marking_cell_empty {
-            if !marked_vars(variables, NAMEREF_VARS).contains(name) {
-            if let Some(value) = variables.get(name).cloned() {
-                let value = if value.starts_with('\x1d') {
-                    let mut entries = indexed_array_entries(&value);
-                    for element in entries.values_mut() {
-                        *element = eval_arith_value(element).to_string();
+                if !marked_vars(variables, NAMEREF_VARS).contains(name) {
+                    if let Some(value) = variables.get(name).cloned() {
+                        let value = if value.starts_with('\x1d') {
+                            let mut entries = indexed_array_entries(&value);
+                            for element in entries.values_mut() {
+                                *element = eval_arith_value(element).to_string();
+                            }
+                            format_indexed_array_storage(entries)
+                        } else if value.starts_with('(') && value.ends_with(')') {
+                            format!(
+                                "({})",
+                                parse_array_words(&value)
+                                    .into_iter()
+                                    .map(|value| eval_arith_value(&value).to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            )
+                        } else {
+                            eval_arith_value(&value).to_string()
+                        };
+                        variables.insert(name.to_string(), value.clone());
+                        env::set_var(name, value);
                     }
-                    format_indexed_array_storage(entries)
-                } else if value.starts_with('(') && value.ends_with(')') {
-                    format!(
-                        "({})",
-                        parse_array_words(&value)
-                            .into_iter()
-                            .map(|value| eval_arith_value(&value).to_string())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                } else {
-                    eval_arith_value(&value).to_string()
-                };
-                variables.insert(name.to_string(), value.clone());
-                env::set_var(name, value);
-            }
-            }
+                }
             }
         }
     }
@@ -278,8 +275,10 @@ where
                     // lowercased (variables.c capcase, casemod.tests:99-103).
                     let mut chars = value.chars();
                     match chars.next() {
-                        Some(first) => first.to_uppercase().collect::<String>()
-                            + &chars.as_str().to_lowercase(),
+                        Some(first) => {
+                            first.to_uppercase().collect::<String>()
+                                + &chars.as_str().to_lowercase()
+                        }
                         None => value,
                     }
                 };

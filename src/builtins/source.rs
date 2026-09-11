@@ -147,10 +147,7 @@ where
         }
     }
 
-    if matches!(
-        filename,
-        "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0"
-    ) {
+    if matches!(filename, "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0") {
         // GNU source.def opens /dev/stdin, which in a pipeline is the pipe
         // read end inherited as stdin ("echo x | . /dev/stdin" from
         // source6.sub). Read the shell's stdin instead of resolving a

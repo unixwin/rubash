@@ -89,10 +89,7 @@ impl Executor {
             // `n=([0]=~/a [1]=$p)` keeps $p's result literal). Quoted
             // elements stay literal.
             let tilde_raw_owned;
-            let raw_value = if !quoted
-                && raw_value.starts_with('(')
-                && raw_value.ends_with(')')
-            {
+            let raw_value = if !quoted && raw_value.starts_with('(') && raw_value.ends_with(')') {
                 tilde_raw_owned = self.expand_tilde_in_compound_assignment(raw_value);
                 &tilde_raw_owned
             } else {
@@ -106,7 +103,8 @@ impl Executor {
                 };
                 return format!("{name}={marker}{expanded}");
             }
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted) {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
+            {
                 let marker = if compound_assignment {
                     COMPOUND_ASSIGNMENT_MARKER.to_string()
                 } else {
@@ -123,15 +121,16 @@ impl Executor {
             // the declare -a d='(...)' whole-single-quoted form) need a
             // parser-side marker instead; do NOT widen this guard, it would
             // suppress glob and brace expansion inside compound values.
-            if compound_assignment
-                && !value.contains('$')
-                && !value.contains('`')
-            {
+            if compound_assignment && !value.contains('$') && !value.contains('`') {
                 return format!("{name}={COMPOUND_ASSIGNMENT_MARKER}{raw_value}");
             }
             let expanded = self.expand_embedded_parameters_mut(&format!(
                 "{}{raw_value}",
-                if compound_assignment { COMPOUND_ASSIGNMENT_MARKER } else { "" }
+                if compound_assignment {
+                    COMPOUND_ASSIGNMENT_MARKER
+                } else {
+                    ""
+                }
             ));
             if !quoted
                 && !expanded.contains('=')
@@ -158,7 +157,9 @@ impl Executor {
                 return self.expand_command_substitution_mut_with_context(&command_source, context);
             }
             let actual_fatal = self.arithmetic_last_error_category.take().is_some();
-            if actual_fatal || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression) {
+            if actual_fatal
+                || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
+            {
                 self.arithmetic_fatal_error.set(true);
                 if !self.arithmetic_expansion_error.replace(true) {
                     let message = crate::executor::arithmetic::arithmetic_error_message(expression, true)
@@ -189,8 +190,7 @@ impl Executor {
         // whole-word braced-parameter path. A funsub nested inside an outer
         // parameter form (`${word-${ echo x; }}`) stays on the parameter
         // path, whose alternate expansion executes it.
-        if word_contains_current_shell_command_substitution(word)
-            && funsub_span_is_top_level(word)
+        if word_contains_current_shell_command_substitution(word) && funsub_span_is_top_level(word)
         {
             return self.expand_embedded_parameters_mut_with_context(word, context);
         }

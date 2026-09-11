@@ -259,9 +259,8 @@ fn contains_shell_metas(value: &str) -> bool {
     let bytes = value.as_bytes();
     for (index, ch) in value.char_indices() {
         match ch {
-            ' ' | '\t' | '\n' | '\'' | '"' | '\\' | '|' | '&' | ';'
-            | '(' | ')' | '<' | '>' | '!' | '{' | '}' | '*' | '[' | '?'
-            | ']' | '^' | '$' | '\u{60}' => return true,
+            ' ' | '\t' | '\n' | '\'' | '"' | '\\' | '|' | '&' | ';' | '(' | ')' | '<' | '>'
+            | '!' | '{' | '}' | '*' | '[' | '?' | ']' | '^' | '$' | '\u{60}' => return true,
             '~' => {
                 if index == 0 || (index > 0 && matches!(bytes[index - 1], b'=' | b':')) {
                     return true;

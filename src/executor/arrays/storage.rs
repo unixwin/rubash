@@ -227,18 +227,16 @@ fn ansic_quote(value: &str) -> String {
                 out.push(byte as char);
                 index += 1;
             }
-            _ if byte >= 0x80 => {
-                match decode_utf8_char(&bytes[index..]) {
-                    Some(ch) if is_printable_wide(ch) => {
-                        out.push(ch);
-                        index += ch.len_utf8();
-                    }
-                    _ => {
-                        push_octal_escape(&mut out, byte);
-                        index += 1;
-                    }
+            _ if byte >= 0x80 => match decode_utf8_char(&bytes[index..]) {
+                Some(ch) if is_printable_wide(ch) => {
+                    out.push(ch);
+                    index += ch.len_utf8();
                 }
-            }
+                _ => {
+                    push_octal_escape(&mut out, byte);
+                    index += 1;
+                }
+            },
             _ => {
                 push_octal_escape(&mut out, byte);
                 index += 1;

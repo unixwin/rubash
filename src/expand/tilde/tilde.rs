@@ -211,7 +211,10 @@ mod tests {
         assert!(assignment_value_needs_tilde_expansion("~", true));
         assert!(assignment_value_needs_tilde_expansion("~/bin", true));
         assert!(assignment_value_needs_tilde_expansion("bin:~/tools", true));
-        assert!(assignment_value_needs_tilde_expansion("bin:~user/tools", true));
+        assert!(assignment_value_needs_tilde_expansion(
+            "bin:~user/tools",
+            true
+        ));
         assert!(!assignment_value_needs_tilde_expansion(
             "bin:~/tools",
             false
@@ -222,11 +225,8 @@ mod tests {
     /// file is ever committed to the repository — the fixture lives in the
     /// process temp directory and each test removes its own root.
     fn fixture_env(user: &str, home: &str) -> (std::path::PathBuf, HashMap<String, String>) {
-        let root = std::env::temp_dir().join(format!(
-            "rubash-tilde-user-{}-{}",
-            user,
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("rubash-tilde-user-{}-{}", user, std::process::id()));
         std::fs::create_dir_all(root.join("etc")).unwrap();
         std::fs::write(
             root.join("etc").join("passwd"),
