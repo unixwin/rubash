@@ -248,6 +248,19 @@ pub fn external_command_for_named_program(
         }
     }
     command.args(&native_args);
+    // For `sh -c '...'` without an explicit $0, Bash sets $0 to the shell
+    // name (e.g. "/bin/sh" for `/bin/sh -c 'echo $0'`). WinuxCmd's sh.exe
+    // defaults to "niu" in that case, so inject the logical name as $0
+    // (histexp.tests: `!2` expands to `/bin/sh -c 'echo this is $0'` and
+    // expects "this is /bin/sh").
+    if let Some(name) = command_name {
+        let lower = name.replace('\\', "/").to_ascii_lowercase();
+        let is_sh =
+            lower == "sh" || lower == "bash" || lower.ends_with("/sh") || lower.ends_with("/bash");
+        if is_sh && native_args.len() == 2 && native_args[0] == "-c" {
+            command.arg(name);
+        }
+    }
     (command, false)
 }
 

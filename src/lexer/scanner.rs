@@ -116,6 +116,16 @@ impl<'a> Lexer<'a> {
                     Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else if self.peek() == Some('(') {
                     Some(self.finish_word_token(start, false))
+                } else if self
+                    .peek()
+                    .is_some_and(|ch| !is_word_delimiter(ch) && !ch.is_whitespace())
+                {
+                    // `!!`, `!2`, `!$`, history word designators and `!foo` are
+                    // words when not isolated as the `!` pipeline negation
+                    // keyword. Splitting `!!` into two `!` keywords makes
+                    // `eval echo '!!'` print `! !` (histexp).
+                    self.skip_word_at(start);
+                    Some(Token::new(TokenKind::Word, self.slice(start), start))
                 } else {
                     Some(Token::new(TokenKind::Keyword, "!", start))
                 }

@@ -35,6 +35,31 @@ pub use token::{Token, TokenKind};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
 
+/// Set when a command carries more than `HEREDOC_MAX` (16) here-documents.
+/// GNU treats that as a fatal parse error: it reports
+/// `maximum here-document count exceeded` and calls `exit_shell(EX_BADUSAGE)`
+/// (bash exits 2). The lexer only returns tokens, so the condition is parked
+/// here for `main` to turn into the EX_BADUSAGE exit status. Holds the line
+/// number to print in the diagnostic.
+static HEREDOC_OVERFLOW_LINE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Record a here-document overflow on `line` (1-based). Keeps the first line
+/// reported, matching GNU's already-fatal parse state.
+pub(crate) fn record_heredoc_overflow(line: usize) {
+    use std::sync::atomic::Ordering;
+    let _ = HEREDOC_OVERFLOW_LINE.compare_exchange(0, line, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+/// Returns the recorded here-document overflow line, if any.
+pub fn heredoc_overflow_line() -> Option<usize> {
+    use std::sync::atomic::Ordering;
+    match HEREDOC_OVERFLOW_LINE.load(Ordering::SeqCst) {
+        0 => None,
+        line => Some(line),
+    }
+}
+
 /// Identifies where lexer input came from; alias handling is reserved for later.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InputOrigin {
@@ -260,6 +285,20 @@ fn tokenize_with_heredocs(
             token.position = logical_start_line;
         }
         let delimiters = heredoc_delimiters(&line_tokens, &logical_line, in_comsub);
+        // GNU parse.y push_heredoc (shell.h HEREDOC_MAX 16): the 17th heredoc
+        // on one command is a fatal parse error. GNU runs report_syntax_error
+        // then exit_shell(EX_BADUSAGE), so the shell dies with status 2 and
+        // nothing after the bad command runs. exportfunc1.sub line 14 (18
+        // heredocs) relies on that: its golden output has the diagnostic and
+        // the sub-shell exits 2, while the parent exportfunc.tests continues.
+        //
+        // The lexer cannot return an error, so record the fatal condition with
+        // its script-relative line and stop tokenizing. `main` converts the
+        // recorded flag into the EX_BADUSAGE exit status.
+        if delimiters.len() > 16 {
+            crate::lexer::record_heredoc_overflow(logical_start_line);
+            break;
+        }
         output.append(&mut line_tokens);
         logical_line.clear();
         header_scan_from = 0;
@@ -347,7 +386,10 @@ fn tokenize_with_heredocs(
                 }
                 // heredoc7: `cat <<EOF && grep $(` with ` foobar`/`EOF`/`echo notthereanywhere) *.c` inside grep's $( should not be cat's body/delimiter
                 if !in_comsub && delimiter.value == "EOF" && logical_line.contains("grep $(") {
-                    if raw_line == " foobar" || raw_line == "EOF" || raw_line.contains("notthereanywhere") {
+                    if raw_line == " foobar"
+                        || raw_line == "EOF"
+                        || raw_line.contains("notthereanywhere")
+                    {
                         continue;
                     }
                 }

@@ -41,6 +41,26 @@ fn forward_coproc_stderr(
 }
 
 impl Executor {
+    /// Allocate a coproc pipe fd the way GNU exposes it: the parent keeps
+    /// `rpipe[0]` and `wpipe[1]` from `sh_openpipe`, which moves the pipe
+    /// ends to the highest free fds below 64 via `move_to_high_fd(maxfd 64)`.
+    /// That yields rpipe 63/62 and wpipe 61/60, of which the parent retains
+    /// 63 and 60 — the pair `${COPROC[@]}` prints as "63 60" for every
+    /// coproc in coproc.tests. `slot` 0 requests the read end (63) and
+    /// `slot` 1 the write end (60). Falls back to the low-first allocator
+    /// when the preferred fd is already taken.
+    fn allocate_coproc_fd(&mut self, slot: usize) -> u32 {
+        let want = if slot == 0 { 63u32 } else { 60u32 };
+        let free = self.fd_table.entries.get(&want).map_or(true, |e| {
+            e.closed || (e.read.is_none() && e.write.is_none())
+        });
+        if free {
+            want
+        } else {
+            self.fd_table.allocate_dynamic()
+        }
+    }
+
     pub(in crate::executor) fn execute_inverted_ast_command(
         &mut self,
         inverted_command: &InvertedCommand,
@@ -832,13 +852,18 @@ impl Executor {
                     self.background_job_order.push(pid);
                     self.coproc_stdin_writers.insert(pid, stdin_writer);
                     self.coproc_stdout_readers.insert(pid, stdout_reader);
-                    let coproc_read_fd = self.fd_table.allocate_dynamic();
+                    // GNU sh_openpipe moves the pipe ends to the highest free
+                    // fds below 64 (move_to_high_fd with maxfd 64): rpipe
+                    // 63/62 and wpipe 61/60, of which the parent keeps 63 and
+                    // 60. All three coprocs in coproc.tests reuse that same
+                    // pair, so `${COPROC[@]}` is literally "63 60".
+                    let coproc_read_fd = self.allocate_coproc_fd(0);
                     self.fd_table.open_input(
                         coproc_read_fd,
                         FdReadEndpoint::CoprocStdout(pid),
                         true,
                     );
-                    let coproc_write_fd = self.fd_table.allocate_dynamic();
+                    let coproc_write_fd = self.allocate_coproc_fd(1);
                     self.fd_table.open_output(
                         coproc_write_fd,
                         FdWriteEndpoint::CoprocStdin(pid),

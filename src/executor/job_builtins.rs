@@ -352,6 +352,29 @@ impl Executor {
         self.background_children.remove(&pid);
         self.background_jobs.remove(&pid);
         self.background_job_order.retain(|job_pid| *job_pid != pid);
+        // Close the coproc endpoint fds for this pid before dropping the
+        // pipe maps, mirroring retire_completed_coproc's fd cleanup so the
+        // high fds 63/60 become reusable for the next coproc (coproc.tests
+        // expects 63 60 for each of the three coprocs after wait).
+        let endpoint_fds = self
+            .fd_table
+            .entries
+            .iter()
+            .filter_map(|(fd, entry)| {
+                let matches_read = matches!(
+                    entry.read.as_ref(),
+                    Some(FdReadEndpoint::CoprocStdout(endpoint_pid)) if *endpoint_pid == pid
+                );
+                let matches_write = matches!(
+                    entry.write.as_ref(),
+                    Some(FdWriteEndpoint::CoprocStdin(endpoint_pid)) if *endpoint_pid == pid
+                );
+                (matches_read || matches_write).then_some(*fd)
+            })
+            .collect::<Vec<_>>();
+        for fd in endpoint_fds {
+            self.fd_table.close(fd);
+        }
         self.coproc_stdin_writers.remove(&pid);
         self.coproc_stdout_readers.remove(&pid);
         self.fd_table.close(pid);
