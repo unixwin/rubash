@@ -688,6 +688,175 @@ where
 }
 
 /// compgen_builtin (complete.def:669): with no arguments, success and no
+/// Generate candidates for the action bitmask `actions` (the compgen
+/// `-a`/`-b`/`-c`/`-d`/`-f`/... flags packed into a `u64`). Shared by
+/// `execute_compgen` and the host `complete_line` hook so both behave
+/// identically for the static action set.
+pub(crate) fn apply_completion_actions(
+    actions: u64,
+    word: &str,
+    env_vars: &HashMap<String, String>,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[String],
+) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for &(actname, actbit, _) in COMPACTS {
+        if actions & actbit == 0 {
+            continue;
+        }
+        match actname {
+            "alias" => candidates.extend(alias_completion_candidates(aliases)),
+            "arrayvar" => candidates.extend(array_variable_completion_candidates(env_vars)),
+            "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
+            "builtin" => candidates.extend(SHELL_BUILTINS.iter().map(|s| s.to_string())),
+            "command" => {
+                candidates.extend(command_completion_candidates(env_vars, aliases, function_names))
+            }
+            "directory" => {
+                candidates.extend(path_completion_candidates(
+                    word,
+                    PathCompletionKind::Directory,
+                    env_vars,
+                ));
+            }
+            "file" => {
+                candidates.extend(path_completion_candidates(
+                    word,
+                    PathCompletionKind::File,
+                    env_vars,
+                ));
+            }
+            "disabled" => candidates.extend(disabled_builtin_completion_candidates(env_vars)),
+            "enabled" => candidates.extend(enabled_builtin_completion_candidates(env_vars)),
+            "export" => candidates.extend(exported_variable_completion_candidates(env_vars)),
+            "helptopic" => candidates.extend(HELP_TOPIC_COMPLETIONS.iter().map(|s| s.to_string())),
+            "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
+            "function" => candidates.extend(function_completion_candidates(function_names)),
+            "group" => candidates.extend(group_completion_candidates(env_vars)),
+            "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
+            "keyword" => candidates.extend(SHELL_KEYWORDS.iter().map(|s| s.to_string())),
+            "service" => candidates.extend(service_completion_candidates(env_vars)),
+            "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
+            "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
+            "signal" => candidates.extend(crate::builtins::trap::SIGNALS.iter().map(|s| s.to_string())),
+            "stopped" => {}
+            "user" => candidates.extend(user_completion_candidates(env_vars)),
+            "variable" => candidates.extend(variable_completion_candidates(env_vars)),
+            _ => {}
+        }
+    }
+    candidates
+}
+
+/// Split `line[..cursor]` into words for completion purposes, returning the
+/// word list, the index of the word currently being completed, and that word's
+/// partial text. A trailing separator means a fresh (empty) word is being
+/// completed; an interior cursor completes the partial last word.
+fn split_for_completion(line: &str, cursor: usize) -> (Vec<String>, usize, String) {
+    let cursor = cursor.min(line.len());
+    let prefix = &line[..cursor];
+    let ends_with_ws = prefix
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(true);
+    let words: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
+    let n = words.len();
+    if ends_with_ws {
+        (words, n, String::new())
+    } else {
+        let idx = words.len().saturating_sub(1);
+        let cur = words.last().cloned().unwrap_or_default();
+        (words, idx, cur)
+    }
+}
+
+/// Host completion hook. Given the in-progress command `line` and the `cursor`
+/// position, return completion candidates for the word under the cursor,
+/// honoring the compspec registered for the command (if any) and falling back
+/// to command completion (first word) or file completion (later words).
+///
+/// This is the entry point niubash's interactive completer delegates to, so the
+/// GNU programmable-completion engine (compspec + compgen) lives in rubash
+/// while the UI stays in the host (mirroring how `HistoryProvider` keeps the
+/// storage contract on the host).
+///
+/// Dynamic compspec actions `-C` (external command) and `-F` (shell function
+/// filling `COMPREPLY`) are resolved by the executor; see
+/// `Executor::complete_line`, which calls this with the registry and merges any
+/// dynamic candidates.
+pub(crate) fn complete_line_candidates(
+    line: &str,
+    cursor: usize,
+    specs: &CompletionRegistry,
+    env_vars: &HashMap<String, String>,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[String],
+) -> Vec<String> {
+    let (words, cur_idx, cur_word) = split_for_completion(line, cursor);
+    let command = words.first().cloned().unwrap_or_default();
+
+    let mut candidates: Vec<String> = if let Some(cs) = specs.get(&command) {
+        let mut c = Vec::new();
+        if cs.actions != 0 {
+            c.extend(apply_completion_actions(
+                cs.actions,
+                &cur_word,
+                env_vars,
+                aliases,
+                function_names,
+                job_names,
+            ));
+        }
+        if let Some(globpat) = cs.globpat.as_deref() {
+            if let crate::executor::glob::PathnameExpansion::Matches(matches) =
+                crate::executor::glob::pathname_expand_word(globpat, env_vars)
+            {
+                c.extend(matches);
+            }
+        }
+        if let Some(wordlist) = cs.words.as_deref() {
+            c.extend(wordlist.split_whitespace().map(str::to_string));
+        }
+        // -C command / -F function candidates are contributed by the executor.
+        c
+    } else if cur_idx == 0 {
+        command_completion_candidates(env_vars, aliases, function_names)
+    } else {
+        path_completion_candidates(&cur_word, PathCompletionKind::File, env_vars)
+    };
+
+    // Apply the compspec prefix/suffix and the -X filter, then keep only
+    // candidates that extend the partial word (same rule compgen uses).
+    let (prefix, suffix, filterpat) = if let Some(cs) = specs.get(&command) {
+        (cs.prefix.clone(), cs.suffix.clone(), cs.filterpat.clone())
+    } else {
+        (None, None, None)
+    };
+    if let Some(filter) = filterpat.as_deref() {
+        let keep = |candidate: &str| -> bool {
+            if let Some(pattern) = filter.strip_prefix('!') {
+                !crate::executor::conditional::shell_pattern_matches(pattern, candidate)
+            } else {
+                crate::executor::conditional::shell_pattern_matches(filter, candidate)
+            }
+        };
+        candidates.retain(|c| !keep(c));
+    }
+    candidates.retain(|c| c.starts_with(&cur_word));
+    if let (Some(p), Some(s)) = (prefix, suffix) {
+        candidates = candidates
+            .into_iter()
+            .map(|c| format!("{p}{c}{s}"))
+            .collect();
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 /// output; otherwise generate candidates from every set action (plus the -G
 /// globpat and -W wordlist), filter by the word prefix and the -X filter
 /// pattern, then print them (or store them into the -V array at the executor
@@ -716,54 +885,14 @@ where
             Ok(parsed) => parsed,
         };
 
-    let mut candidates: Vec<String> = Vec::new();
-    for &(actname, actbit, _) in COMPACTS {
-        if parsed.actions & actbit == 0 {
-            continue;
-        }
-        match actname {
-            "alias" => candidates.extend(alias_completion_candidates(aliases)),
-            "arrayvar" => candidates.extend(array_variable_completion_candidates(env_vars)),
-            "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
-            "builtin" => candidates.extend(SHELL_BUILTINS.iter().map(|s| s.to_string())),
-            "command" => {
-                candidates.extend(command_completion_candidates(env_vars, aliases, function_names))
-            }
-            "directory" => {
-                candidates.extend(path_completion_candidates(
-                    parsed.word(),
-                    PathCompletionKind::Directory,
-                    env_vars,
-                ));
-            }
-            "file" => {
-                candidates.extend(path_completion_candidates(
-                    parsed.word(),
-                    PathCompletionKind::File,
-                    env_vars,
-                ));
-            }
-            "disabled" => candidates.extend(disabled_builtin_completion_candidates(env_vars)),
-            "enabled" => candidates.extend(enabled_builtin_completion_candidates(env_vars)),
-            "export" => candidates.extend(exported_variable_completion_candidates(env_vars)),
-            "helptopic" => candidates.extend(HELP_TOPIC_COMPLETIONS.iter().map(|s| s.to_string())),
-            "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
-            "function" => candidates.extend(function_completion_candidates(function_names)),
-            "group" => candidates.extend(group_completion_candidates(env_vars)),
-            "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
-            "keyword" => candidates.extend(SHELL_KEYWORDS.iter().map(|s| s.to_string())),
-            "service" => candidates.extend(service_completion_candidates(env_vars)),
-            "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
-            "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
-            "signal" => candidates.extend(crate::builtins::trap::SIGNALS.iter().map(|s| s.to_string())),
-            // CA_STOPPED has no modeled stopped-job table (matches the prior
-            // behavior of listing no candidates).
-            "stopped" => {}
-            "user" => candidates.extend(user_completion_candidates(env_vars)),
-            "variable" => candidates.extend(variable_completion_candidates(env_vars)),
-            _ => {}
-        }
-    }
+    let mut candidates = apply_completion_actions(
+        parsed.actions,
+        parsed.word(),
+        env_vars,
+        aliases,
+        function_names,
+        job_names,
+    );
 
     if let Some(glob_pattern) = parsed.globpat.as_deref() {
         if let crate::executor::glob::PathnameExpansion::Matches(matches) =
@@ -1504,5 +1633,86 @@ where
     };
     writeln!(stderr, "{usage}")
 }
+
+#[cfg(test)]
+mod completion_hook_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn empty_context() -> (
+        HashMap<String, String>,
+        HashMap<String, crate::builtins::alias::Alias>,
+        Vec<String>,
+        Vec<String>,
+    ) {
+        (HashMap::new(), HashMap::new(), Vec::new(), Vec::new())
+    }
+
+    #[test]
+    fn default_command_completion_finds_echo() {
+        let (env, aliases, fns, jobs) = empty_context();
+        let specs = CompletionRegistry::new();
+        let out = complete_line_candidates("ec", 2, &specs, &env, &aliases, &fns, &jobs);
+        assert!(out.iter().any(|c| c == "echo"), "expected echo in {out:?}");
+    }
+
+    #[test]
+    fn compspec_wordlist_filters_by_prefix() {
+        let (env, aliases, fns, jobs) = empty_context();
+        let mut specs = CompletionRegistry::new();
+        specs.insert(
+            "y",
+            Compspec {
+                actions: 0,
+                options: 0,
+                globpat: None,
+                words: Some("alpha beta gamma".to_string()),
+                prefix: None,
+                suffix: None,
+                filterpat: None,
+                command: None,
+                funcname: None,
+            },
+        );
+        let out = complete_line_candidates("y g", 4, &specs, &env, &aliases, &fns, &jobs);
+        assert!(out.iter().any(|c| c == "gamma"), "expected gamma in {out:?}");
+        assert!(
+            !out.iter().any(|c| c == "alpha"),
+            "alpha should be filtered out by prefix g: {out:?}"
+        );
+    }
+
+    #[test]
+    fn compspec_file_action_lists_root() {
+        let (env, aliases, fns, jobs) = empty_context();
+        let mut specs = CompletionRegistry::new();
+        let file_bit = COMPACTS
+            .iter()
+            .find(|(n, _, _)| *n == "file")
+            .map(|(_, b, _)| *b)
+            .expect("file action bit");
+        specs.insert(
+            "z",
+            Compspec {
+                actions: file_bit,
+                options: 0,
+                globpat: None,
+                words: None,
+                prefix: None,
+                suffix: None,
+                filterpat: None,
+                command: None,
+                funcname: None,
+            },
+        );
+        let out = complete_line_candidates("z /", 3, &specs, &env, &aliases, &fns, &jobs);
+        assert!(!out.is_empty(), "expected directory entries under /");
+        assert!(
+            out.iter().all(|c| c.starts_with('/')),
+            "entries should be absolute paths: {out:?}"
+        );
+    }
+}
+
 
 

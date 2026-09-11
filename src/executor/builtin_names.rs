@@ -108,6 +108,13 @@ const BUILTIN_NAMES: &[&str] = &[
     "wait",
 ];
 
+/// The canonical, sorted list of shell builtin command names. Host completion
+/// (and the `compgen -b` action) read builtins from here instead of
+/// hardcoding their own copy, so the lists never drift when builtins change.
+pub fn builtin_names() -> &'static [&'static str] {
+    BUILTIN_NAMES
+}
+
 pub(in crate::executor) fn is_shell_builtin_name(name: &str) -> bool {
     BUILTIN_NAMES.binary_search(&name).is_ok() || (cfg!(windows) && name == "sudo")
 }
