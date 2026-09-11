@@ -671,3 +671,66 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
   - history2.sub 的 132/139 两行空白差异（GNU 多两个空行，来源待考）与 146 行空 entry（同 comsub 根因链）
   - history7/test-glue $'\r' 块：GNU 拒绝 CRLF glue 文件、rubash 静默接受——两侧行为分叉但根因是 Windows checkout 的 CRLF 文件（host 伪影）
   - `-i` 子 shell 的 \cR/\cO readline 回放控制字符未实现（history4 后两个 block），交互/readline 域，另行立项
+
+
+## 十一、locale 单字节模式接线（2026-09-11）
+
+GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale 下一个
+字符 = 一条多字节序列；`setlocale()` 无法激活的 locale 回落到 C，每个字节 =
+一个字符（variables.c:1466-1490、lib/sh/utf8.c:167-184）。`src/locale.rs`
+（`44ab54d3` 移植）此前有 `effective_length()` 却无调用方，而且只判断「locale
+名是否含 utf-8」，既不探测 `setlocale` 是否真的成功，也把空 locale 环境变量
+当作单字节处理。本批次把它接上，并修掉空 locale 的误判。
+
+### 语义归属与改动
+
+- **`locale.rs`**：`is_multi_byte()` 为唯一判定入口。空 locale 保持 rubash 的
+  UTF-8 默认（Windows-first，无 locale 注册表）；`C`/`POSIX` 与已命名的单字节
+  locale（`ru_RU.CP1251`、`en_US.ISO-8859-1`）→ 字节语义；UTF-8 命名 locale
+  仅在 C 库能激活时生效——`#[cfg(unix)]` 下用 `libc::setlocale(LC_CTYPE, name)`
+  探测并立即恢复，Windows 侧接受名称。结果按 locale 名缓存在 thread-local，
+  脚本内 `LC_ALL=...` 重赋值自动失效。
+- **`expand_braced_indices.rs` `parameter_char_length`**（`${#var}` 的唯一
+  归属，约 14 个调用方）：单字节 locale 下返回字节数，保留 U+E000 原始字节
+  标记解码。
+- **`parameter_ops.rs` `parameter_substring`**：单字节 locale 下 `${V:0:2}` 按
+  字节切，可切到多字节序列中间并保留悬挂引导字节。
+- **`read_helpers.rs` `trim_read_input`**：`read -n N` 在单字节 locale 下按
+  N 字节封顶，且不回退到字符边界。
+- **`printf/escape.rs` `\u`/`\U`**：单字节 locale 下把解析出的值重排为规范
+  字面转义（≤0xFFFF 用 `\u%04X`，更大用 `\U%08X`，>0x10FFFF 输出空），
+  因此 `\U000000FF` 折叠成 `\u00FF`、部分数字 `\uff` 也规范成 `\u00FF`；
+  UTF-8 locale 下仍走 `u32cconv` 输出真实字节。格式串与 `%b` 两条路径共用。
+- **`printf/value.rs`**：`%ls`/`%lc` 的精度与宽度在单字节 locale 下按字节计。
+  数值型说明符两种模式下都是 ASCII，故不切换单位。
+
+### 验证（WSL GNU Bash 5.3.0 唯一基线，脚本文件入参）
+
+- 18 例配对探针 `LC_ALL=C`（两侧都真正安装的 locale）：**diffs=0**，14 行逐
+  字节一致。覆盖 `${#v}`、`read -n 5`、`\u00FF`/`\uff`/`\uffff`/
+  `\U000000FF`/`\U0001F600`/`\Ufffffffe`/`\u0041`/`\u0152`、`%b` 转义、
+  `%.2ls`、`%lc`、`${V:0:2}`、`%.4f`。
+- `LC_ALL=C.utf8`（glibc 唯一已安装的 UTF-8 locale）：同样逐字节一致，证明
+  UTF-8 分支未被回退。
+- 回归六套件与台账数字完全一致，零翻转：printf **0**、read 42、exp 58、
+  nquote 59、new-exp 63、more-exp 33。
+- 新增单元测试：`locale::tests` 2 例、`parameter_ops::tests` 字节子串 2 例；
+  `cargo test --lib` 373/374。唯一失败
+  `export_assignment_arg_preserves_quoted_spaces` 由 `2e3cbe82`/`b2ebef50`
+  引入（二者都改了 `assignment_expansion.rs`/`parameter_words.rs` 的 export
+  PATH 路径），与本批次无关。
+
+### intl 残余 77 行 = 平台归属，不是 rubash 语义缺口
+
+`intl.tests` 第 14 行 `export LC_ALL=en_US.UTF-8`，但 WSL glibc 的 locale
+归档里没有该 locale（`locale -a` 只有 C、C.utf8、POSIX），GNU 报
+`warning: setlocale: LC_ALL: cannot change locale (en_US.UTF-8)` 并降级为字节
+语义；而 `rubash.exe` 是 Windows 进程，其 CRT 接受 `en_US.UTF-8` 名称，走字符
+语义。两侧 C 库不同，「`en_US.UTF-8` 是否可用」无法一致，且 `rubash.exe` 也
+无法 exec glibc 的 locale 归档。77 行全部落在此前缀下（11-13、20、24-36、
+45-55、57、60-68），与既有的 intl/history 平台归属分类一致。同一探针在
+`LC_ALL=C` 下 0 差已证明语义本身正确。
+
+产物：`target/issue-suites/results/locale-c-probe/`（GNU/rubash 双侧 + diff）、
+`target/issue-suites/results/intl-now-baseline/intl/`；探针脚本
+`target/locale-c-probe.sh`。

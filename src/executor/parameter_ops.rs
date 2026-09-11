@@ -296,6 +296,9 @@ pub(in crate::executor) fn parameter_substring(
     offset: isize,
     length: Option<isize>,
 ) -> String {
+    if !crate::locale::is_multi_byte() {
+        return parameter_substring_bytes(value, offset, length);
+    }
     let char_count = value.chars().count();
     let Some(start) = parameter_substring_start(char_count, offset) else {
         return String::new();
@@ -310,6 +313,45 @@ pub(in crate::executor) fn parameter_substring(
     };
 
     value.chars().skip(start).take(take).collect()
+}
+
+/// Byte-indexed form of GNU subst.c substring expansion: with MB_CUR_MAX of 1
+/// the offset and length are raw byte counts, so `${V:0:2}` takes two bytes
+/// and can cut a multibyte sequence in half (intl4.sub under LC_CTYPE=C).
+fn parameter_substring_bytes(
+    value: &str,
+    offset: isize,
+    length: Option<isize>,
+) -> String {
+    let byte_count = locale_byte_span(value).len();
+    let Some(start) = parameter_substring_start(byte_count, offset) else {
+        return String::new();
+    };
+    let take = match length {
+        Some(length) if length < 0 => {
+            let remaining = byte_count.saturating_sub(start);
+            remaining.saturating_sub(length.unsigned_abs())
+        }
+        Some(length) => usize::try_from(length).unwrap_or(usize::MAX),
+        None => usize::MAX,
+    };
+    let raw = locale_byte_span(value);
+    let end = byte_count.min(start.saturating_add(take));
+    crate::executor::substitution_metadata::bytes_to_shell_text(&raw[start..end])
+}
+
+/// The byte view of a word: raw-byte marker pairs (substitution_metadata)
+/// decode back to the bytes they carry, everything else keeps its UTF-8 bytes.
+fn locale_byte_span(value: &str) -> Vec<u8> {
+    let sentinel = char::from_u32(
+        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
+    )
+    .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
+    } else {
+        value.as_bytes().to_vec()
+    }
 }
 
 pub(in crate::executor) fn parameter_substring_start(
@@ -453,6 +495,38 @@ mod tests {
         assert_eq!(
             parse_parameter_replacement("v///r/-"),
             Some(("v", "/r", "-", true))
+        );
+    }
+
+    #[test]
+    fn substring_byte_mode_indexes_in_bytes() {
+        assert_eq!(parameter_substring_bytes("abcdef", 1, Some(3)), "bcd");
+        assert_eq!(parameter_substring_bytes("abcdef", -2, None), "ef");
+        assert_eq!(parameter_substring_bytes("abcdef", 0, Some(-2)), "abcd");
+        assert_eq!(parameter_substring_bytes("abcdef", 6, None), "");
+        assert_eq!(parameter_substring_bytes("abcdef", 9, None), "");
+    }
+
+    #[test]
+    fn substring_byte_mode_cuts_mid_sequence() {
+        // A 3-byte character sequence: cutting two bytes must land mid-way
+        // through the first character rather than back off to a boundary.
+        let value = "ಇಳಿಕೆ";
+        let byte_total = value.as_bytes().len();
+        let cut = parameter_substring_bytes(value, 0, Some(2));
+        assert_eq!(
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&cut),
+            value.as_bytes()[..2].to_vec(),
+        );
+        let whole = parameter_substring_bytes(value, 0, Some(byte_total as isize));
+        assert_eq!(
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&whole),
+            value.as_bytes().to_vec(),
+        );
+        let past_end = parameter_substring_bytes(value, 1, Some(byte_total as isize));
+        assert_eq!(
+            crate::executor::substitution_metadata::shell_text_to_raw_bytes(&past_end),
+            value.as_bytes()[1..].to_vec(),
         );
     }
 }

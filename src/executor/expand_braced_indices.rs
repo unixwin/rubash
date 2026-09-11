@@ -266,21 +266,33 @@ impl Executor {
 }
 
 /// GNU subst.c ${#name} length: MB_STRLEN over the value (subst.c:8308) with
-/// the UTF-8 locale byte walk of lib/sh/utf8.c:167-184 utf8_mbstrlen -- one
-/// character per valid multibyte sequence, one per byte of an invalid
-/// sequence (MB_INVALIDCH -> clen = 1). Raw bytes >= 0x80 travel inside
-/// rubash words as U+E000 marker pairs (substitution_metadata), so the value
-/// must be decoded to its byte view before counting
-/// (intl.tests: a=$'\303\251' is 1, not the 4 chars of two marker pairs).
+/// the locale byte walk of lib/sh/utf8.c:167-184 utf8_mbstrlen.
+///
+/// In a multibyte locale this is one character per valid multibyte sequence,
+/// one per byte of an invalid sequence (MB_INVALIDCH -> clen = 1). In a
+/// single-byte locale MB_CUR_MAX is 1 and every byte is one character,
+/// including a byte that only starts a multibyte sequence, so intl1.sub
+/// reports 31/30 instead of 16/15 once setlocale() has fallen back to the C
+/// locale.
+///
+/// Raw bytes >= 0x80 travel inside rubash words as U+E000 marker pairs
+/// (substitution_metadata), so the value must be decoded to its byte view
+/// before counting (intl.tests: a=$'\303\251' is 1, not the 4 chars of two
+/// marker pairs).
 fn parameter_char_length(value: &str) -> usize {
     let sentinel =
         char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
             .expect("raw-byte sentinel is a valid char");
-    if !value.contains(sentinel) {
-        return value.chars().count();
+    let bytes = if value.contains(sentinel) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
+    } else {
+        value.as_bytes().to_vec()
+    };
+
+    if !crate::locale::is_multi_byte() {
+        return bytes.len();
     }
-    let bytes =
-        crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes());
+
     let mut count = 0usize;
     let mut rest: &[u8] = &bytes;
     while !rest.is_empty() {

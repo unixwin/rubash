@@ -6,16 +6,27 @@ use super::FormatSpec;
 pub(super) fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Option<String>) {
     let mut stop_output = false;
     let mut invalid_number = None;
+    // GNU printf measures width and precision in bytes when the locale is
+    // single-byte (MB_CUR_MAX == 1): %.2ls of a three-byte character returns
+    // two bytes and %lc returns one byte (intl4.sub under LC_CTYPE=C). The
+    // numeric specifiers render ASCII in either mode, so only the string forms
+    // switch unit.
+    let byte_mode = !crate::locale::is_multi_byte()
+        && matches!(spec.specifier, 's' | 'b' | 'q' | 'Q' | 'c');
     let rendered = match spec.specifier {
-        's' => truncate_precision(value.to_string(), spec.precision),
+        's' => truncate_precision_locale(value.to_string(), spec.precision, byte_mode),
         'b' => {
             let (expanded, stop) = expand_percent_b(value);
             stop_output = stop;
-            truncate_precision(expanded, spec.precision)
+            truncate_precision_locale(expanded, spec.precision, byte_mode)
         }
-        'q' => truncate_precision(shell_quote(value), spec.precision),
-        'Q' => shell_quote(&truncate_precision(value.to_string(), spec.precision)),
-        'c' => value.chars().next().unwrap_or('\0').to_string(),
+        'q' => truncate_precision_locale(shell_quote(value), spec.precision, byte_mode),
+        'Q' => shell_quote(&truncate_precision_locale(
+            value.to_string(),
+            spec.precision,
+            byte_mode,
+        )),
+        'c' => first_char_or_byte(value, byte_mode),
         'd' | 'i' => {
             let parsed = parse_i64(value);
             invalid_number = parsed.invalid;
@@ -78,7 +89,7 @@ pub(super) fn format_value(value: &str, spec: &FormatSpec) -> (String, bool, Opt
         width_spec.zero_pad = false;
     }
     (
-        apply_width(rendered, &width_spec),
+        apply_width_locale(rendered, &width_spec, byte_mode),
         stop_output,
         invalid_number.map(|value| invalid_number_error(&value)),
     )
@@ -89,6 +100,86 @@ pub(super) fn truncate_precision(value: String, precision: Option<usize>) -> Str
         return value;
     };
     value.chars().take(precision).collect()
+}
+
+/// Locale-aware precision: character count in a multibyte locale, raw byte
+/// count otherwise. Byte truncation is not rewound to a character boundary,
+/// which is why a cut can leave a dangling multibyte lead byte behind.
+fn truncate_precision_locale(value: String, precision: Option<usize>, byte_mode: bool) -> String {
+    let Some(precision) = precision else {
+        return value;
+    };
+    if !byte_mode {
+        return value.chars().take(precision).collect();
+    }
+    let raw = locale_byte_span(&value);
+    if raw.len() <= precision {
+        return value;
+    }
+    crate::executor::substitution_metadata::bytes_to_shell_text(&raw[..precision])
+}
+
+/// `%c`/`%lc`: the first character, or the first raw byte in a single-byte
+/// locale.
+fn first_char_or_byte(value: &str, byte_mode: bool) -> String {
+    if !byte_mode {
+        return value.chars().next().unwrap_or('\0').to_string();
+    }
+    let raw = locale_byte_span(value);
+    if raw.is_empty() {
+        return String::new();
+    }
+    crate::executor::substitution_metadata::bytes_to_shell_text(&raw[..1])
+}
+
+/// Locale-aware width: counts bytes in a single-byte locale so the padding
+/// reaches the byte target, not the character target.
+fn apply_width_locale(value: String, spec: &FormatSpec, byte_mode: bool) -> String {
+    let Some(width) = spec.width else {
+        return value;
+    };
+
+    let len = if byte_mode {
+        locale_byte_span(&value).len()
+    } else {
+        value.chars().count()
+    };
+    if len >= width {
+        return value;
+    }
+
+    let pad = width - len;
+    let pad_char = if spec.zero_pad && !spec.left_adjust {
+        '0'
+    } else {
+        ' '
+    };
+    let padding: String = std::iter::repeat(pad_char).take(pad).collect();
+
+    if spec.left_adjust {
+        format!("{value}{padding}")
+    } else if spec.zero_pad && matches!(value.chars().next(), Some('+' | '-' | ' ')) {
+        let mut chars = value.chars();
+        let sign = chars.next().unwrap_or_default();
+        let rest: String = chars.collect();
+        format!("{sign}{padding}{rest}")
+    } else {
+        format!("{padding}{value}")
+    }
+}
+
+/// The byte view of a word: raw-byte marker pairs (substitution_metadata)
+/// decode back to the bytes they carry, everything else keeps its UTF-8 bytes.
+fn locale_byte_span(value: &str) -> Vec<u8> {
+    let sentinel = char::from_u32(
+        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
+    )
+    .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers(value.as_bytes())
+    } else {
+        value.as_bytes().to_vec()
+    }
 }
 
 fn format_unsigned_integer(value: u64, radix: u32, uppercase: bool, spec: &FormatSpec) -> String {

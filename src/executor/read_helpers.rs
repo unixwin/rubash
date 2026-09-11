@@ -226,10 +226,35 @@ pub(in crate::executor) fn trim_read_input(
     }
 
     if let Some(limit) = char_limit {
-        return input.chars().take(limit).collect();
+        if crate::locale::is_multi_byte() {
+            return input.chars().take(limit).collect();
+        }
+        return truncate_read_input_bytes(input, limit);
     }
 
     input
+}
+
+/// `read -n N` caps the read at N *bytes* in a single-byte locale (GNU
+/// builtins/read.def + lib/sh/input.c: maxchars is a byte count while
+/// MB_CUR_MAX is 1), and unlike the character walk it does not back off to a
+/// character boundary, so the cut can leave a dangling multibyte lead byte
+/// behind. Keep that byte as a raw byte instead of dropping it, which is what
+/// makes intl1.sub print `-абв-(5)` rather than `-абвгд-(5)`.
+fn truncate_read_input_bytes(input: String, limit: usize) -> String {
+    let sentinel = char::from_u32(
+        crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE,
+    )
+    .expect("raw-byte sentinel is a valid char");
+    let raw = if input.contains(sentinel) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers(input.as_bytes())
+    } else {
+        input.as_bytes().to_vec()
+    };
+    if raw.len() <= limit {
+        return input;
+    }
+    crate::executor::substitution_metadata::bytes_to_shell_text(&raw[..limit])
 }
 
 pub(in crate::executor) fn unescape_read_backslashes(input: &str) -> String {

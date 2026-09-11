@@ -154,9 +154,8 @@ where
 }
 
 /// Read up to `max` hex digits, returning both the parsed value and the
-/// raw digit string. This preserves partial reads so that when `\u` is
-/// followed by fewer than 4 hex digits (e.g. `\uff`), the consumed digits
-/// can be re-emitted as literal text after the `\u` prefix.
+/// raw digit string. The value is what printf encodes, so a partial digit
+/// run (`\uff`) still yields a code point and is canonicalized on output.
 fn read_escape_digits_raw<I>(
     chars: &mut std::iter::Peekable<I>,
     radix: u32,
@@ -183,25 +182,51 @@ where
     }
 }
 
-/// Format a `\u`/`\U` escape: exact digit count is required for Unicode
-/// conversion; fewer digits fall back to literal `\u` + the raw digits.
+/// Format a `\u`/`\U` escape (format string).
 fn format_unicode_escape(value: Option<(u32, String)>, prefix: &str) -> String {
     match value {
-        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
-            crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint)
-        }
-        Some((_, raw)) => format!("{prefix}{raw}"),
+        Some((codepoint, _raw)) => unicode_escape_text(codepoint),
         None => prefix.to_string(),
     }
+}
+
+/// Encode a parsed `\u`/`\U` code point under the active locale.
+///
+/// GNU printf.def walks the value through u32cconv() (lib/sh/unicode.c) with
+/// the locale active. In a multibyte locale the result is the UTF-8 encoding
+/// (`\u00FF` -> C3 BF under C.utf8). In a single-byte locale a value that does
+/// not fit in one ASCII byte is re-emitted as a literal escape in canonical
+/// form: `\u%04X` up to 0xFFFF, `\U%08X` above, so `\U000000FF` folds onto
+/// `\u00FF` and `\U0001F600` stays `\U0001F600`. The canonical form is chosen
+/// from the parsed value, not the digit run as typed, which is why a partial
+/// `\uff` also becomes `\u00FF` (unicode2.sub, LC_CTYPE=C).
+/// Values above the Unicode range convert to nothing in either mode.
+fn unicode_escape_text(codepoint: u32) -> String {
+    if codepoint > 0x10_FFFF {
+        return String::new();
+    }
+    if codepoint <= 0x7F || crate::locale::is_multi_byte() {
+        return crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint);
+    }
+    // Emit the escape literally: backslash + u/U + canonical hex. The
+    // backslash is built from its code point so the format strings below stay
+    // free of backslash escapes.
+    let mut out = String::new();
+    out.push(char::from_u32(0x5c).expect("ASCII backslash is a valid char"));
+    if codepoint <= 0xFFFF {
+        out.push('u');
+        out.push_str(&format!("{:04X}", codepoint));
+    } else {
+        out.push('U');
+        out.push_str(&format!("{:08X}", codepoint));
+    }
+    out
 }
 
 /// Push a `\u`/`\U` escape result into an output buffer (for `%b` expansion).
 fn push_unicode_escape(output: &mut String, value: Option<(u32, String)>, prefix: &str) {
     match value {
-        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
-            output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint))
-        }
-        Some((_, raw)) => output.push_str(&format!("{prefix}{raw}")),
+        Some((codepoint, _raw)) => output.push_str(&unicode_escape_text(codepoint)),
         None => output.push_str(prefix),
     }
 }
