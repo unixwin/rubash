@@ -26,7 +26,11 @@ impl Executor {
         }
 
         let values = if for_command.default_positional {
-            self.positional_params.clone()
+            if self.positional_params.is_empty() {
+                Vec::new()
+            } else {
+                self.positional_params.clone()
+            }
         } else {
             let mut values = Vec::new();
             for (index, word) in for_command.words.iter().enumerate() {

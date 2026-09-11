@@ -7,7 +7,11 @@ pub(super) struct HereDocDelimiter {
     pub(super) allow_closing_paren: bool,
 }
 
-pub(super) fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocDelimiter> {
+pub(super) fn heredoc_delimiters(
+    tokens: &[Token],
+    source: &str,
+    in_comsub: bool,
+) -> Vec<HereDocDelimiter> {
     tokens
         .windows(2)
         .filter(|pair| pair[0].kind == TokenKind::HereDoc)
@@ -32,7 +36,7 @@ pub(super) fn heredoc_delimiters(tokens: &[Token], source: &str) -> Vec<HereDocD
                 value,
                 quoted: context.quoted,
                 strip_tabs,
-                allow_closing_paren: context.in_command_substitution,
+                allow_closing_paren: context.in_command_substitution || in_comsub,
             }
         })
         .collect()
@@ -65,12 +69,26 @@ fn heredoc_operator_context(source: &str, delimiter_raw: &str) -> HereDocOperato
     while chars.peek().is_some_and(|ch| ch.is_ascii_whitespace()) {
         chars.next();
     }
+    // GNU make_cmd.c: heredoc inside command substitution needs PST_EOFTOKEN
+    // handling for `EOF)` closing. The original depth check via
+    // command_substitution_depth_before could miss `$(` when source is a
+    // truncated logical_line slice (e.g., `cat <<EOF` without the `$(` prefix).
+    // Fall back to a simple `$(` scan when depth is 0.
+    let depth = command_substitution_depth_before(source, index);
+    let in_sub = if depth > 0 {
+        true
+    } else {
+        // Fallback: check if `$(` appears before `<<` in the source, even if
+        // the depth counter missed it due to truncated source or quote handling.
+        let prefix = &source[..index];
+        prefix.contains("$(") || prefix.contains("`")
+    };
     HereDocOperatorContext {
         quoted: delimiter_raw
             .chars()
             .any(|ch| matches!(ch, '\'' | '"' | '\\'))
             || heredoc_delimiter_word_is_quoted(chars),
-        in_command_substitution: command_substitution_depth_before(source, index) > 0,
+        in_command_substitution: in_sub,
     }
 }
 

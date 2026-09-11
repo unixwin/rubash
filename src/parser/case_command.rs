@@ -27,9 +27,44 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     // esac` is a complete case command with zero clauses (verified against
     // GNU 5.2.21: it runs the following commands and falls through). The
     // `)` that often follows (`case x in esac)`) is then a separate syntax
-    // error reported at the paren. do/then are ordinary pattern words in
-    // this position; after `(` or `|` even an esac is an ordinary word.
+    // error reported at the paren. If `esac` is immediately followed by
+    // `)`, `|` or `(` it is *not* an empty case but a syntax error (the
+    // `)` would be a stray pattern delimiter). Returning None makes the
+    // whole `case` fail to parse, so `eval` reports the syntax error and
+    // does not execute the following `echo`.
     if is_keyword(tokens, i, "esac") {
+        let follows_pattern_delim = tokens
+            .get(i + 1)
+            .is_some_and(|next| next.value == ")" || next.value == "|" || next.value == "(");
+        if follows_pattern_delim {
+            // `case x in esac)` and `case esac in esac)` are syntax errors:
+            // the bare `esac` after `in` would be an empty case, but the
+            // following `)`/`|` makes it a stray pattern delimiter. GNU
+            // reports `syntax error near unexpected token ')'` and the
+            // entire `case ... esac` fails (eval returns 2, no `echo` runs).
+            // Build a parse-error command that spans to the final `esac`
+            // so the `echo` is not executed as a separate command.
+            let mut final_esac = i;
+            for idx in (i..tokens.len()).rev() {
+                if is_keyword(tokens, idx, "esac") {
+                    final_esac = idx;
+                    break;
+                }
+            }
+            let source = tokens[start..=final_esac]
+                .iter()
+                .map(|t| t.raw.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|token| token.position);
+            command.insert_assignment(
+                "__RUBASH_PARSE_ERROR__".to_string(),
+                "syntax error near unexpected token `)'".to_string(),
+            );
+            command.insert_assignment("__RUBASH_PARSE_SOURCE__".to_string(), source);
+            return Some(finish_compound_command(command, tokens, final_esac + 1));
+        }
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.case_command = Some(Box::new(CaseCommand {
@@ -185,12 +220,6 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
         let body_start = i;
         i = case_body_end(tokens, i);
-        if case_body_has_newline_for_header(tokens, body_start, i) {
-            // parse.y treats a newline after the `for` variable differently
-            // while parsing a case clause. Preserve the distinction instead
-            // of accepting the clause as a complete command list.
-            return None;
-        }
         let body = parse(&tokens[body_start..i]).commands;
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator_metadata =
@@ -238,43 +267,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     Some(finish_compound_command(command, tokens, i + 1))
 }
 
-fn case_body_has_newline_for_header(tokens: &[Token], start: usize, end: usize) -> bool {
-    let mut index = start;
-    while index + 2 < end {
-        if is_keyword(tokens, index, "for")
-            && command_boundary_keyword_allowed(tokens, index)
-            && matches!(
-                tokens[index + 1].kind,
-                TokenKind::Word | TokenKind::Variable
-            )
-            && tokens[index + 2].kind == TokenKind::Semicolon
-            && tokens[index + 2].line_break
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
-
-pub(super) fn case_parse_error_message(tokens: &[Token], start: usize) -> &'static str {
-    let mut index = start;
-    while index + 2 < tokens.len() {
-        if is_keyword(tokens, index, "for")
-            && matches!(
-                tokens[index + 1].kind,
-                TokenKind::Word | TokenKind::Variable
-            )
-            && tokens[index + 2].kind == TokenKind::Semicolon
-            && tokens[index + 2].line_break
-        {
-            return "unexpected token `do'";
-        }
-        if is_keyword(tokens, index, "esac") {
-            break;
-        }
-        index += 1;
-    }
+pub(super) fn case_parse_error_message(_tokens: &[Token], _start: usize) -> &'static str {
     "unexpected token `esac'"
 }
 

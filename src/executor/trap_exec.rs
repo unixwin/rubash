@@ -1338,7 +1338,10 @@ impl Executor {
             let Some(input) = self.stdin_string_for_command_mut(cmd) else {
                 return Ok(None);
             };
-            let fd = self.allocate_dynamic_fd();
+            let Some(fd) = self.allocate_dynamic_fd() else {
+                self.report_fd_dup_error("here-string");
+                return Ok(Some(1));
+            };
             self.set_dynamic_fd_variable(name, fd);
             self.set_fd_input_text(fd, input, true);
             return Ok(Some(0));
@@ -1352,7 +1355,10 @@ impl Executor {
             }
 
             if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                let fd = self.allocate_dynamic_fd();
+                let Some(fd) = self.allocate_dynamic_fd() else {
+                    self.report_fd_dup_error(&target);
+                    return Ok(Some(1));
+                };
                 self.copy_persistent_input_fd(fd, source_fd);
                 if readonly_blocked {
                     self.report_readonly_fd_assignment(name);
@@ -1370,7 +1376,10 @@ impl Executor {
                 .and_then(|target| target.strip_suffix(')'))
             {
                 if let Some(input) = self.process_substitution_output(source) {
-                    let fd = self.allocate_dynamic_fd();
+                    let Some(fd) = self.allocate_dynamic_fd() else {
+                        self.report_fd_dup_error(&target);
+                        return Ok(Some(1));
+                    };
                     self.fd_table.open_input(
                         fd,
                         FdReadEndpoint::process_substitution(&input),
@@ -1390,7 +1399,10 @@ impl Executor {
                 target.as_str(),
                 "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0"
             ) {
-                let fd = self.allocate_dynamic_fd();
+                let Some(fd) = self.allocate_dynamic_fd() else {
+                    self.report_fd_dup_error(&target);
+                    return Ok(Some(1));
+                };
                 self.fd_table
                     .open_input(fd, FdReadEndpoint::InheritedProcessStdin, true);
                 if readonly_blocked {
@@ -1411,7 +1423,10 @@ impl Executor {
             }
             let input = crate::executor::substitution_metadata::read_shell_input_file(path)
                 .map_err(|io| crate::posix_errors::path_error(&target, io))?;
-            let fd = self.allocate_dynamic_fd();
+            let Some(fd) = self.allocate_dynamic_fd() else {
+                self.report_fd_dup_error(&target);
+                return Ok(Some(1));
+            };
             if readonly_blocked {
                 self.report_readonly_fd_assignment(name);
                 return Ok(Some(1));
@@ -1438,7 +1453,10 @@ impl Executor {
                 return Ok(Some(0));
             }
 
-            let fd = self.allocate_dynamic_fd();
+            let Some(fd) = self.allocate_dynamic_fd() else {
+                self.report_fd_dup_error(&target);
+                return Ok(Some(1));
+            };
             if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                 self.copy_persistent_output_fd(fd, source_fd);
                 if readonly_blocked {
@@ -1475,7 +1493,10 @@ impl Executor {
                 self.close_dynamic_output_fd(name)?;
                 return Ok(Some(0));
             }
-            let fd = self.allocate_dynamic_fd();
+            let Some(fd) = self.allocate_dynamic_fd() else {
+                self.report_fd_dup_error(&target);
+                return Ok(Some(1));
+            };
             if self.open_persistent_output_process_substitution(fd, &target)? {
                 if readonly_blocked {
                     self.report_readonly_fd_assignment(name);
@@ -1575,7 +1596,12 @@ impl Executor {
                     if !self.fd_table.is_open_for_read(source_fd) {
                         return Ok(true);
                     }
-                    let fd = self.allocate_dynamic_fd();
+                    let Some(fd) = self.allocate_dynamic_fd() else {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            self.fd_dup_error_payload(&target),
+                        )));
+                    };
                     self.copy_persistent_input_fd(fd, source_fd);
                     self.set_dynamic_fd_variable(name, fd);
                     if move_source {
@@ -1590,7 +1616,12 @@ impl Executor {
                     if !self.fd_table.is_open_for_write(source_fd) {
                         return Ok(true);
                     }
-                    let fd = self.allocate_dynamic_fd();
+                    let Some(fd) = self.allocate_dynamic_fd() else {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            self.fd_dup_error_payload(&target),
+                        )));
+                    };
                     self.copy_persistent_output_fd(fd, source_fd);
                     self.set_dynamic_fd_variable(name, fd);
                     if move_source {
@@ -1606,7 +1637,12 @@ impl Executor {
                     .and_then(|target| target.strip_suffix(')'))
                 {
                     if let Some(input) = self.process_substitution_output(source) {
-                        let fd = self.allocate_dynamic_fd();
+                        let Some(fd) = self.allocate_dynamic_fd() else {
+                            return Err(ExecuteError::IoError(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                self.fd_dup_error_payload(&target),
+                            )));
+                        };
                         self.fd_table.open_input(
                             fd,
                             FdReadEndpoint::process_substitution(&input),
@@ -1628,7 +1664,12 @@ impl Executor {
                 } else {
                     crate::executor::substitution_metadata::read_shell_input_file(&path)?
                 };
-                let fd = self.allocate_dynamic_fd();
+                let Some(fd) = self.allocate_dynamic_fd() else {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        self.fd_dup_error_payload(&target),
+                    )));
+                };
                 self.set_fd_input_text(fd, input, true);
                 if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                     self.set_fd_output_file(fd, target.clone(), true);
@@ -1640,7 +1681,12 @@ impl Executor {
             crate::parser::RedirectKind::Output
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
-                let fd = self.allocate_dynamic_fd();
+                let Some(fd) = self.allocate_dynamic_fd() else {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        self.fd_dup_error_payload(&target),
+                    )));
+                };
                 if let Some(source) = target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
@@ -1727,8 +1773,34 @@ impl Executor {
         self.close_persistent_input_fd(target_fd);
     }
 
-    fn allocate_dynamic_fd(&mut self) -> u32 {
-        self.fd_table.allocate_dynamic()
+    fn open_files_limit(&self) -> Option<u32> {
+        let value = self.env_vars.get("__RUBASH_ULIMIT_N")?;
+        if value == "unlimited" {
+            return None;
+        }
+        value.parse::<u32>().ok()
+    }
+
+    fn allocate_dynamic_fd(&mut self) -> Option<u32> {
+        let limit = self.open_files_limit();
+        self.fd_table.allocate_dynamic_with_limit(limit)
+    }
+
+    fn report_fd_dup_error(&mut self, target: &str) {
+        eprintln!(
+            "{}redirection error: cannot duplicate fd: Invalid argument",
+            self.diagnostic_prefix()
+        );
+        eprintln!("{}{}: Invalid argument", self.diagnostic_prefix(), target);
+        self.exit_code = 1;
+    }
+
+    fn fd_dup_error_payload(&self, target: &str) -> String {
+        format!(
+            "redirection error: cannot duplicate fd: Invalid argument\n{}{}: Invalid argument",
+            self.diagnostic_prefix(),
+            target
+        )
     }
 
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {
