@@ -2,7 +2,7 @@
 //!
 //! Transforms raw input strings into tokens for the parser.
 
-mod ansi;
+pub(crate) mod ansi;
 mod brace_scan;
 mod classification;
 mod continuation;

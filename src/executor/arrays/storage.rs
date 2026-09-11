@@ -147,7 +147,7 @@ pub(in crate::executor) fn quote_array_value(value: &str) -> String {
     )
 }
 
-/// strtrans.c ansic_shouldquote (341-361): $'' quoting is needed when the
+/// strtrans.c ansic_shouldquote (341-361): dollar-single-quote quoting is
 /// value holds a non-printing byte. High-bit bytes follow the UTF-8-locale
 /// multibyte path (351-354): a printable decoded character is fine, an
 /// undecodable or non-printing one forces quoting.

@@ -8,6 +8,7 @@ pub(in crate::executor) fn collect_braced_parameter_name(
     let mut in_bracket_expression = false;
     let mut single = false;
     let mut double = false;
+    let mut ansi_c = false;
     while let Some(ch) = chars.next() {
         // Inside single quotes everything is literal, including backslashes;
         // only the next single quote ends the quoted region.
@@ -16,6 +17,22 @@ pub(in crate::executor) fn collect_braced_parameter_name(
                 single = false;
             }
             name.push(ch);
+            continue;
+        }
+        // Inside a $'...' ANSI-C span a backslash escapes the following
+        // character, so '\'' is data rather than the closing quote (GNU parse.y
+        // extract_dollar_brace_string). Without this the escaped quote ends the span
+        // early and the trailing '}' is swallowed, leaving a heredoc body
+        // such as 7: ${x%'$'a\t\\'b'}' unexpanded.
+        if ansi_c {
+            name.push(ch);
+            if ch == '\\' {
+                if let Some(escaped) = chars.next() {
+                    name.push(escaped);
+                }
+            } else if ch == '\'' {
+                ansi_c = false;
+            }
             continue;
         }
         if double {
@@ -44,6 +61,15 @@ pub(in crate::executor) fn collect_braced_parameter_name(
             } else {
                 name.push('\\');
             }
+            continue;
+        }
+        if ch == '$' && chars.peek().copied() == Some('\'') {
+            // $'...' is an ANSI-C quoted span, a quoting mode distinct
+            // from a plain single quote: backslashes inside it escape data.
+            chars.next();
+            ansi_c = true;
+            name.push('$');
+            name.push('\'');
             continue;
         }
         if ch == '\'' {

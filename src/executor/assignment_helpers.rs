@@ -558,12 +558,28 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             .replace('\x1a', "`")
             .replace('\x17', "'")
             .replace('\x14', "\\")
+            .replace("\u{E002}", "'")
+            .replace("\u{E003}", "\"")
     }
 
     if value == "\\\"\\" {
         return "\"\"".to_string();
     }
 
+    if let Some(inner) = value
+        .strip_prefix("$'")
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        // quote_array_value -> ansic_quote (arrays/storage.rs) emits the
+        // dollar-single-quoted form for an element value holding a
+        // non-printing character, using the same ANSI-C escape grammar as a
+        // shell dollar-single-quoted word. decode_ansi_c_quoted is exactly
+        // its inverse. No marker restore is needed: ansic_quote
+        // octal-escapes every byte below 0x20 instead of substituting one
+        // of the marker characters, so a marker byte can never appear
+        // inside the quoted span.
+        return crate::lexer::ansi::decode_ansi_c_quoted(inner);
+    }
     if let Some(inner) = value
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))
@@ -575,7 +591,13 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
     else {
-        return restore_quote_markers(value);
+        // Bare storage values carry no marker: array literals reach here via
+        // remove_compound_assignment_quotes, which emits real characters, and
+        // quote_array_value always wraps non-trivial values in a quoted form.
+        // Restoring markers on a bare value corrupted genuine data bytes
+        // U+0014 / U+0017 / U+001A / U+001F, which are indistinguishable from
+        // the backslash / quote / backtick / dollar carriers.
+        return value.to_string();
     };
 
     let mut unquoted = String::new();

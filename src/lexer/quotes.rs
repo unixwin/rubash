@@ -411,7 +411,7 @@ fn copy_ansi_c_single_quoted_raw(
 /// lexer emits for backslash-escaped quotes in source words, so every
 /// consumer already restores them.
 fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
-    decoded.replace('\'', "\u{17}").replace('"', "\u{18}")
+    decoded.replace('\'', "\u{E002}").replace('"', "\u{E003}")
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

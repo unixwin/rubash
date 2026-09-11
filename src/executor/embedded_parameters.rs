@@ -88,6 +88,14 @@ impl Executor {
                 output.push('"');
                 continue;
             }
+            if ch == '\u{E002}' {
+                output.push('\'');
+                continue;
+            }
+            if ch == '\u{E003}' {
+                output.push('"');
+                continue;
+            }
 
             // GNU parse.y word scanner: outside double quotes a backslash
             // escapes the following quote, producing a quoted literal that

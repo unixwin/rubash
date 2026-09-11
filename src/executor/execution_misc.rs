@@ -362,7 +362,9 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         .replace(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER, "")
         .replace('\x1c', "")
         .replace('\x1f', "$")
-        .replace('\x17', "'");
+        .replace('\x17', "'")
+        .replace("\u{E002}", "'")
+        .replace("\u{E003}", "\"");
     protect_unmatched_double_quoted_backticks(&source)
 }
 

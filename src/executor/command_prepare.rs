@@ -3,7 +3,9 @@ use super::*;
 
 fn materialize_expanded_command_word(word: &str) -> String {
     decode_command_substitution_payload(&restore_pathname_escape_markers(
-        &word.replace('\x15', "\\").replace('\x14', "\\"),
+        &word.replace('\x15', "\\").replace('\x14', "\\")
+            .replace("\u{E002}", "'")
+            .replace("\u{E003}", "\""),
     ))
 }
 
@@ -618,6 +620,19 @@ impl Executor {
         // builtin arguments (dstack2/tilde `printf %q '~'`).
         if raw_word_is_fully_single_quoted(raw) {
             let word = word.strip_prefix('\x1b').unwrap_or(word);
+            // The \x1c quoted-assignment-value marker (word.rs) is placed
+            // after the first '=' to suppress tilde expansion on the RHS.
+            // It must be stripped here so it does not leak into builtin
+            // arguments (issue: `printf 'foo=abc\n' | grep ^foo=`).
+            let word = if let Some((name, value)) = word.split_once('=') {
+                if let Some(stripped) = value.strip_prefix('\x1c') {
+                    format!("{name}={stripped}")
+                } else {
+                    word.to_string()
+                }
+            } else {
+                word.to_string()
+            };
             return vec![word.replace('\x1f', "$")];
         }
         if !word.starts_with('\x1d') {
