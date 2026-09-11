@@ -15,8 +15,8 @@ where
         Some('v') => "\x0b".to_string(),
         Some('\\') => "\\".to_string(),
         Some('x') => format_escape_codepoint(read_escape_digits(chars, 16, 2), "\\x"),
-        Some('u') => format_escape_codepoint(read_exact_escape_digits(chars, 16, 4), "\\u"),
-        Some('U') => format_escape_codepoint(read_exact_escape_digits(chars, 16, 8), "\\U"),
+        Some('u') => format_unicode_escape(read_escape_digits_raw(chars, 16, 4), "\\u"),
+        Some('U') => format_unicode_escape(read_escape_digits_raw(chars, 16, 8), "\\U"),
         Some('0') => format_escape_byte(read_escape_digits(chars, 8, 3).or(Some(0)), ""),
         Some(octal @ '1'..='7') => {
             format_escape_byte(read_prefixed_escape_digits(chars, octal, 8, 3), "")
@@ -84,10 +84,10 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
                 push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 2), "\\x")
             }
             Some('u') => {
-                push_escape_codepoint(&mut output, read_exact_escape_digits(&mut chars, 16, 4), "\\u")
+                push_unicode_escape(&mut output, read_escape_digits_raw(&mut chars, 16, 4), "\\u")
             }
             Some('U') => {
-                push_escape_codepoint(&mut output, read_exact_escape_digits(&mut chars, 16, 8), "\\U")
+                push_unicode_escape(&mut output, read_escape_digits_raw(&mut chars, 16, 8), "\\U")
             }
             Some('0') => {
                 let value = read_escape_digits(&mut chars, 8, 3).or(Some(0));
@@ -153,26 +153,57 @@ where
     }
 }
 
-/// Read exactly `count` digits in the given radix. Returns `None` if
-/// fewer than `count` digits are available. GNU printf.def requires
-/// exactly 4 hex digits for `\u` and exactly 8 for `\U`; a short run
-/// is a literal backslash, not a Unicode escape.
-fn read_exact_escape_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, count: usize) -> Option<u32>
+/// Read up to `max` hex digits, returning both the parsed value and the
+/// raw digit string. This preserves partial reads so that when `\u` is
+/// followed by fewer than 4 hex digits (e.g. `\uff`), the consumed digits
+/// can be re-emitted as literal text after the `\u` prefix.
+fn read_escape_digits_raw<I>(
+    chars: &mut std::iter::Peekable<I>,
+    radix: u32,
+    max: usize,
+) -> Option<(u32, String)>
 where
     I: Iterator<Item = char>,
 {
-    let mut value = String::new();
-    for _ in 0..count {
+    let mut raw = String::new();
+    while raw.len() < max {
         let Some(ch) = chars.peek().copied() else {
-            return None;
+            break;
         };
         if ch.to_digit(radix).is_none() {
-            return None;
+            break;
         }
-        value.push(ch);
+        raw.push(ch);
         chars.next();
     }
-    u32::from_str_radix(&value, radix).ok()
+    if raw.is_empty() {
+        None
+    } else {
+        u32::from_str_radix(&raw, radix).ok().map(|v| (v, raw))
+    }
+}
+
+/// Format a `\u`/`\U` escape: exact digit count is required for Unicode
+/// conversion; fewer digits fall back to literal `\u` + the raw digits.
+fn format_unicode_escape(value: Option<(u32, String)>, prefix: &str) -> String {
+    match value {
+        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
+            crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint)
+        }
+        Some((_, raw)) => format!("{prefix}{raw}"),
+        None => prefix.to_string(),
+    }
+}
+
+/// Push a `\u`/`\U` escape result into an output buffer (for `%b` expansion).
+fn push_unicode_escape(output: &mut String, value: Option<(u32, String)>, prefix: &str) {
+    match value {
+        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
+            output.push_str(&crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint))
+        }
+        Some((_, raw)) => output.push_str(&format!("{prefix}{raw}")),
+        None => output.push_str(prefix),
+    }
 }
 
 fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str) {

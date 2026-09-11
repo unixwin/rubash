@@ -71,21 +71,11 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
             }
             Some('u') => {
                 // GNU strtrans.c ansicstr requires exactly 4 hex digits
-                // for \uNNNN; a short run is a literal backslash.
-                if let Some(value) = read_exact_ansi_c_digits(&mut chars, 16, 4) {
-                    push_ansi_c_codepoint(&mut output, value);
-                } else {
-                    output.push('\\');
-                    output.push('u');
-                }
+                // for \uNNNN; a short run is literal \u followed by digits.
+                push_unicode_ansi_c(&mut output, read_ansi_c_digits_raw(&mut chars, 16, 4), "\\u");
             }
             Some('U') => {
-                if let Some(value) = read_exact_ansi_c_digits(&mut chars, 16, 8) {
-                    push_ansi_c_codepoint(&mut output, value);
-                } else {
-                    output.push('\\');
-                    output.push('U');
-                }
+                push_unicode_ansi_c(&mut output, read_ansi_c_digits_raw(&mut chars, 16, 8), "\\U");
             }
             Some('c') => {
                 // Control character: backslash c X
@@ -135,29 +125,49 @@ where
     }
 }
 
-/// Read exactly `count` hex digits. GNU strtrans.c ansicstr requires
-/// exactly 4 digits for `\uNNNN` and exactly 8 for `\UNNNNNNNN`; a
-/// short run is a literal backslash, not a Unicode escape.
-fn read_exact_ansi_c_digits<I>(
+/// Read up to `max` hex digits, returning both the parsed value and the
+/// raw digit string. Preserves partial reads so that `\u` followed by
+/// fewer than 4 hex digits re-emits the consumed digits as literal text.
+fn read_ansi_c_digits_raw<I>(
     chars: &mut std::iter::Peekable<I>,
     radix: u32,
-    count: usize,
-) -> Option<u32>
+    max: usize,
+) -> Option<(u32, String)>
 where
     I: Iterator<Item = char>,
 {
-    let mut value = String::new();
-    for _ in 0..count {
+    let mut raw = String::new();
+    while raw.len() < max {
         let Some(next) = chars.peek().copied() else {
-            return None;
+            break;
         };
         if next.to_digit(radix).is_none() {
-            return None;
+            break;
         }
-        value.push(next);
+        raw.push(next);
         chars.next();
     }
-    u32::from_str_radix(&value, radix).ok()
+    if raw.is_empty() {
+        None
+    } else {
+        u32::from_str_radix(&raw, radix).ok().map(|v| (v, raw))
+    }
+}
+
+/// Push a `\u`/`\U` escape result into an ANSI-C output buffer.
+/// Exact digit count is required for Unicode conversion; fewer digits
+/// fall back to literal `\u` + the raw digits.
+fn push_unicode_ansi_c(output: &mut String, value: Option<(u32, String)>, prefix: &str) {
+    match value {
+        Some((codepoint, raw)) if raw.len() == 4 || raw.len() == 8 => {
+            push_ansi_c_codepoint(output, codepoint)
+        }
+        Some((_, raw)) => {
+            output.push_str(prefix);
+            output.push_str(&raw);
+        }
+        None => output.push_str(prefix),
+    }
 }
 
 fn push_ansi_c_codepoint(output: &mut String, value: u32) {
