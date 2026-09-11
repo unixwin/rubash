@@ -558,8 +558,8 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             .replace('\x1a', "`")
             .replace('\x17', "'")
             .replace('\x14', "\\")
-            .replace("\u{E002}", "'")
-            .replace("\u{E003}", "\"")
+            .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
     }
 
     if value == "\\\"\\" {
@@ -591,13 +591,19 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
     else {
-        // Bare storage values carry no marker: array literals reach here via
-        // remove_compound_assignment_quotes, which emits real characters, and
-        // quote_array_value always wraps non-trivial values in a quoted form.
-        // Restoring markers on a bare value corrupted genuine data bytes
-        // U+0014 / U+0017 / U+001A / U+001F, which are indistinguishable from
-        // the backslash / quote / backtick / dollar carriers.
-        return value.to_string();
+        // A bare storage value still carries the ANSI-C quote markers: a
+        // value that the lexer decoded from $'...' reaches this fallthrough
+        // without quote delimiters of its own, so the PUA markers must come
+        // back as ' and ". The C0 carriers (U+0014/17/1A/1F) are
+        // deliberately NOT restored here -- on this path they are
+        // indistinguishable from genuine data bytes that ANSI-C decoding
+        // produced ($'\027' is a real U+0017), and restoring them corrupted
+        // those values. The quoted paths above keep the full
+        // restore_quote_markers because there the C0 bytes are
+        // unambiguously walker markers.
+        return value
+            .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
     };
 
     let mut unquoted = String::new();

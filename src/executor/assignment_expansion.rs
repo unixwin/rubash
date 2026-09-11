@@ -162,18 +162,53 @@ impl Executor {
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
         // A quoted value with no expansion syntax is already fully decoded
-        // (e.g. from $'...' ANSI-C quoting). It must not go through the
-        // general expansion walker, which restores C0 marker bytes
-        // (U+0014 to backslash, U+0011 to empty, U+0017 to quote) that
-        // collide with real data bytes produced by ANSI-C decoding. Only
-        // the private-use area quote markers placed by
-        // escape_decoded_ansi_c_quotes are restored here.
-        if quoted && !compound_assignment
-            && !value.contains('$') && !value.contains('`') && !value.contains("$(")
+        // and must not go through the general expansion walker, which would
+        // also run quote removal on quote syntax that the value legitimately
+        // carries as DATA.
+        //
+        // The pending markers are NOT the same in both sub-cases, so the
+        // restore below is not uniform:
+        //   * A single-quoted word (`FOO='$$'`) reaches here with the
+        //     walker's C0 carriers still in place -- the lexer stores `$`
+        //     as U+001F, backtick as U+001A, backslash as U+0014. They are
+        //     markers here, not data, and must be restored to the real
+        //     characters. Skipping this is what leaked U+001F into storage
+        //     and made `declare -x FOO` print the value as $'\037\037':
+        //     declare/storage.rs::quote_declare_value emits ansic_quote for
+        //     any value holding a control character, and a leaked carrier
+        //     satisfied that test. GNU stores real `24 24` here, so the
+        //     restore keeps rubash's storage byte-compatible with GNU's.
+        //   * A $'...' word has already been ANSI-C decoded, so a byte in
+        //     the C0 range is genuine DATA (`$'\037'` is a real U+001F) and
+        //     restoring it would corrupt the value. Those words carry the
+        //     PUA quote markers from escape_decoded_ansi_c_quotes instead.
+        // The two families are disjoint, so restoring the C0 carriers
+        // unconditionally is safe: a $'...' value never contains one,
+        // because the decoder octal-escapes every control byte rather than
+        // substituting a carrier for it.
+        if quoted
+            && !compound_assignment
+            && !value.contains('$')
+            && !value.contains('`')
+            && !value.contains("$(")
         {
-            return value
-                .replace("\u{E002}", "'")
-                .replace("\u{E003}", "\"");
+            // Order matters. The carriers are restored while the ANSI-C
+            // data bytes are still tagged: a byte that survived decoding is
+            // held as the U+E000 raw-byte marker pair, not as its literal
+            // code point, so it cannot be mistaken for a carrier. Only
+            // after the carriers are gone are the tags decoded into real
+            // bytes (that final step is what makes $'\037' store a genuine
+            // U+001F and render as $'\037', while '$$' stores 24 24 and
+            // renders as "\$\$", both matching GNU).
+            let restored = value
+                .replace('\x1f', "$")
+                .replace('\x1a', "`")
+                .replace('\x14', "\\")
+                .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+                .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+            return crate::executor::substitution_metadata::bytes_to_shell_text(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&restored),
+            );
         }
         // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
         // subst.c:11432): unquoted element values of a compound assignment

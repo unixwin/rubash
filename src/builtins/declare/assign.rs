@@ -366,23 +366,20 @@ fn declare_indexed_element(name: &str) -> Option<(&str, &str)> {
 /// a parenthesized value like `(${d[@]})`, it re-parses and expands the inner
 /// words. This function handles the common case of `${var[@]}` / `${var[*]}`
 /// in compound array assignment values (array.tests:115).
-fn expand_compound_array_value(
-    value: &str,
-    variables: &HashMap<String, String>,
-) -> String {
+fn expand_compound_array_value(value: &str, variables: &HashMap<String, String>) -> String {
     let inner = value
         .strip_prefix('(')
         .and_then(|v| v.strip_suffix(')'))
         .unwrap_or(value);
-    
+
     let mut result = String::from("(");
     let mut remaining = inner;
-    
+
     while let Some(dollar_pos) = remaining.find("${") {
         // Append everything before ${
         result.push_str(&remaining[..dollar_pos]);
         let expr_start = dollar_pos;
-        
+
         // Find the matching closing brace
         let mut depth = 1;
         let mut i = expr_start + 2;
@@ -395,10 +392,10 @@ fn expand_compound_array_value(
             }
             i += 1;
         }
-        
+
         let expr = &remaining[expr_start..i.min(remaining.len())];
         remaining = &remaining[i.min(remaining.len())..];
-        
+
         // Try to expand as array parameter
         if let Some(expanded) = expand_array_parameter(expr, variables) {
             result.push_str(&expanded);
@@ -406,11 +403,11 @@ fn expand_compound_array_value(
             result.push_str(expr);
         }
     }
-    
+
     // Append the rest
     result.push_str(remaining);
     result.push(')');
-    
+
     // Restore marker characters (array.tests:408 declare -a x=(\$0)
     // stores \x1f0 literally without this restore).
     result
@@ -418,15 +415,15 @@ fn expand_compound_array_value(
         .replace('\x1a', "`")
         .replace('\x17', "'")
         .replace('\x14', "\\")
-        .replace("\u{E002}", "'")
-        .replace("\u{E003}", "\"")
+        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }
 
 /// Expand `${var[@]}` or `${var[*]}` using the variables HashMap.
 /// Returns a space-separated list of quoted array elements.
 fn expand_array_parameter(expr: &str, variables: &HashMap<String, String>) -> Option<String> {
     let inner = expr.strip_prefix("${")?.strip_suffix("}")?;
-    
+
     // Look for [@] or [*] suffix
     let name = if let Some(at) = inner.rfind("[@]") {
         &inner[..at]
@@ -435,19 +432,19 @@ fn expand_array_parameter(expr: &str, variables: &HashMap<String, String>) -> Op
     } else {
         return None;
     };
-    
+
     // Look up the array variable
     let array_value = variables.get(name)?;
-    
+
     // Parse the array elements
     let entries = indexed_array_entries(array_value);
-    
+
     // Format the expanded elements as a space-separated list with quotes
     // (append_array_value expects this format for parse_array_tokens)
     let elements: Vec<String> = entries
         .values()
         .map(|v| format!("'{}'", v.replace('\'', "\\'")))
         .collect();
-    
+
     Some(elements.join(" "))
 }

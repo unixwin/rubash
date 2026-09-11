@@ -88,11 +88,11 @@ impl Executor {
                 output.push('"');
                 continue;
             }
-            if ch == '\u{E002}' {
+            if ch == crate::lexer::ANSI_C_QUOTE_MARKER {
                 output.push('\'');
                 continue;
             }
-            if ch == '\u{E003}' {
+            if ch == crate::lexer::ANSI_C_DQUOTE_MARKER {
                 output.push('"');
                 continue;
             }

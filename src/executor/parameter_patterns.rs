@@ -1,5 +1,30 @@
 use super::*;
 
+/// subst.c::dequote_string (4807-4841): strip quote-protection marks and
+/// return the plain value. The pattern-matching code cannot interpret
+/// CTLESC, so `get_var_and_type` hands pat_subst a dequoted value
+/// (subst.c:8598 `*valp = value ? dequote_string (value) : NULL`), and the
+/// C source says so directly at parameter_brace_patsub:9468-9473:
+/// "The pattern matching code doesn't understand CTLESC quoting CTLESC and
+/// CTLNUL so we use the dequoted variable values passed in (VT_VARIABLE)".
+///
+/// Rubash carries the same information in the walker's C0 marks, so the
+/// equivalent is restoring them to the characters they stand for. Without
+/// this, `t="a'b"` keeps U+0017 in the value handed to the matcher, the
+/// pattern `'` (a real U+0027) never matches, and `${t//"'"</* replacement */>}`
+/// silently does nothing -- the quote1.sub failure where `'weferfds'\''dsfsdf'`
+/// came out as `'weferfds'dsfsdf'`.
+fn dequote_storage_marks(value: &str) -> String {
+    value
+        .replace('\x1f', "$")
+        .replace('\x1a', "`")
+        .replace('\x17', "'")
+        .replace('\x18', "\"")
+        .replace('\x14', "\\")
+        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
+}
+
 impl Executor {
     pub(in crate::executor) fn indirect_parameter_transform(
         &self,
@@ -166,11 +191,13 @@ impl Executor {
 
     pub(in crate::executor) fn parameter_pattern_scalar_value(&self, name: &str) -> Option<String> {
         if is_special_parameter_name(name) {
-            return Some(self.expand_parameter_named_value(name));
+            return Some(dequote_storage_marks(
+                &self.expand_parameter_named_value(name),
+            ));
         }
 
         if let Some(value) = self.dynamic_parameter_value(name) {
-            return Some(value);
+            return Some(dequote_storage_marks(&value));
         }
 
         let resolved = self.resolved_variable_name(name)?;
@@ -181,18 +208,20 @@ impl Executor {
         // the raw storage marker here leaks ([FOO]=BAR) where GNU prints the
         // element value or empty when key "0" is absent.
         if is_marked_var(&self.env_vars, ASSOC_VARS, &resolved) {
-            return Some(assoc_value_at(value, "0").unwrap_or_default());
+            return Some(dequote_storage_marks(
+                &assoc_value_at(value, "0").unwrap_or_default(),
+            ));
         }
 
         if is_marked_var(&self.env_vars, ARRAY_VARS, &resolved) {
-            return Some(
-                array_value_at(value, 0)
+            return Some(dequote_storage_marks(
+                &array_value_at(value, 0)
                     .or_else(|| assoc_value_at(value, "0"))
                     .unwrap_or_default(),
-            );
+            ));
         }
 
-        Some(value.clone())
+        Some(dequote_storage_marks(value))
     }
 
     pub(in crate::executor) fn expand_parameter_pattern_word(&self, pattern: &str) -> String {

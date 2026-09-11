@@ -91,8 +91,19 @@ impl Parenthesized for String {
 }
 
 pub(super) fn quote_declare_value(value: &str) -> String {
-    if value.chars().any(|ch| ch.is_control()) {
-        return format!("$'{}'", quote_ansi_c(value));
+    // setattr.def:528-531 (show_var_attributes):
+    //   if (ansic_shouldquote (value_cell (var)))
+    //     x = ansic_quote (value_cell (var), 0, (int *)0);
+    //   else
+    //     x = sh_double_quote (value_cell (var));
+    // gnu_ansic_quote is the faithful port of strtrans.c::ansic_quote and
+    // already carries the $'...' shell, so there is no separate private
+    // renderer here. A previous version had its own quote_ansi_c copy whose
+    // named-escape arm pushed the real character instead of the escape
+    // spelling ('\n' -> push "\n" rather than "\\n"), so `n=$'a\nb'` was
+    // printed with a literal newline where GNU prints $'a\nb'.
+    if gnu_ansic_shouldquote(value) {
+        return gnu_ansic_quote(value);
     }
     format!("\"{}\"", quote_double(value))
 }
@@ -162,23 +173,6 @@ fn decode_ansic_escapes(value: &str) -> String {
         index += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn quote_ansi_c(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\"),
-            '\n' => out.push_str("\n"),
-            '\r' => out.push_str("\r"),
-            '\'' => out.push_str("\'"),
-            c if c.is_control() => {
-                out.push_str(&format!("\\{:03o}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 pub(super) fn quote_double(value: &str) -> String {

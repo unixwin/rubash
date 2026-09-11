@@ -363,8 +363,8 @@ pub(in crate::executor) fn eval_source_for_reparse(source: &str) -> String {
         .replace('\x1c', "")
         .replace('\x1f', "$")
         .replace('\x17', "'")
-        .replace("\u{E002}", "'")
-        .replace("\u{E003}", "\"");
+        .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+        .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
     protect_unmatched_double_quoted_backticks(&source)
 }
 

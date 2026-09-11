@@ -9,6 +9,29 @@ use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
 /// collection stops at it, and the expansion walkers drop it from output.
 pub(crate) const PARAM_NAME_END_MARKER: char = '\u{13}';
 
+/// Quote markers emitted by `escape_decoded_ansi_c_quotes` for quote
+/// characters produced by ANSI-C decoding of a `$'...'` word. They travel
+/// through assignment storage and are restored to `'` / `"` by the
+/// consumers that end the assignment path.
+///
+/// The C0 range and the first three private-use code points are all taken:
+/// U+0011/14/17/1F carry the walker's protection markers, U+0013 is
+/// PARAM_NAME_END_MARKER, and U+E000/E001 are the assignment data-quote
+/// sentinels while U+E002 is QUOTED_NULL_MARKER (embedded_mutations.rs).
+/// Using U+E002 here is what made `recho "\a"` print garbage in the
+/// builtins/quote/tilde2/trap suites: `recho` (tests/recho.c) renders every
+/// byte below 0x20 as `^X`, and U+E002 is a three-byte UTF-8 sequence
+/// (EE 80 82) whose bytes all pass the `>= ' '` check, so it printed raw
+/// instead of as the `^W` that U+0017 produces. Start at U+E010 to keep a
+/// margin between the two marker families.
+pub(crate) const ANSI_C_QUOTE_MARKER: char = '\u{E010}';
+pub(crate) const ANSI_C_DQUOTE_MARKER: char = '\u{E011}';
+
+/// `&str` forms for the `.replace(...)` restore sites, whose receivers are
+/// already `String` and therefore require `&str` arguments.
+pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
+pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
+
 pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     remove_shell_quotes_with_posix(raw, false)
 }
@@ -411,7 +434,9 @@ fn copy_ansi_c_single_quoted_raw(
 /// lexer emits for backslash-escaped quotes in source words, so every
 /// consumer already restores them.
 fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
-    decoded.replace('\'', "\u{E002}").replace('"', "\u{E003}")
+    decoded
+        .replace('\'', &ANSI_C_QUOTE_MARKER.to_string())
+        .replace('"', &ANSI_C_DQUOTE_MARKER.to_string())
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

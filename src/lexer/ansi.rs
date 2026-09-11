@@ -1,3 +1,11 @@
+/// C0 bytes the assignment walker uses as data-quote carriers
+/// (U+0014 backslash, U+0017 quote, U+001A backtick, U+001F dollar). A byte
+/// with one of these values that came out of ANSI-C decoding is DATA, not a
+/// carrier, and must be tagged so the carrier restore cannot claim it.
+fn is_assignment_carrier_byte(byte: u32) -> bool {
+    matches!(byte, 0x14 | 0x17 | 0x1a | 0x1f)
+}
+
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
     let mut output = String::new();
     let mut chars = value.chars().peekable();
@@ -195,10 +203,29 @@ fn push_ansi_c_codepoint(output: &mut String, value: u32) {
 /// >= 0x80 travel as the owner-tagged U+E000 raw-byte marker pair and are
 /// decoded exactly once at the output boundary
 /// (write_buffered_builtin_output / pipeline materialization).
+///
+/// A decoded control byte that collides with one of the assignment walker's
+/// C0 carriers must be tagged the same way. `$'\037'` is a genuine U+001F
+/// data byte, but U+001F is also how the lexer stores a literal `$` inside a
+/// single-quoted word (`'$$'` -> 1f 1f). Both reach the assignment expander
+/// as the same bytes with the same `\x1c` quoted prefix, so no downstream
+/// pass can tell them apart by inspection -- verified by dumping the value
+/// at expand_assignment_value_inner, where `a='$$'` and `x=$'\037'` are
+/// byte-identical (`1c 1f 1f` vs `1c 1f`). Restoring the carrier is correct
+/// for the single-quote case and corrupts the ANSI-C case; tagging the
+/// decoded byte keeps the two distinguishable so the carrier restore can
+/// run unconditionally. GNU stores 24 24 for `'$$'` (real dollars), so the
+/// restore is what makes rubash's storage bytes match GNU's.
 fn push_ansi_c_byte(output: &mut String, byte: u32) {
     if byte < 0x80 {
         if let Some(ch) = char::from_u32(byte) {
-            output.push(ch);
+            if is_assignment_carrier_byte(byte) {
+                output.push_str(
+                    &crate::executor::substitution_metadata::encode_raw_byte_marker(byte as u8),
+                );
+            } else {
+                output.push(ch);
+            }
         }
     } else {
         output

@@ -3,9 +3,11 @@ use super::*;
 
 fn materialize_expanded_command_word(word: &str) -> String {
     decode_command_substitution_payload(&restore_pathname_escape_markers(
-        &word.replace('\x15', "\\").replace('\x14', "\\")
-            .replace("\u{E002}", "'")
-            .replace("\u{E003}", "\""),
+        &word
+            .replace('\x15', "\\")
+            .replace('\x14', "\\")
+            .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
+            .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\""),
     ))
 }
 

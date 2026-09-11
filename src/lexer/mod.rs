@@ -30,7 +30,10 @@ use scanner::Lexer;
 
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
-pub(crate) use quotes::PARAM_NAME_END_MARKER;
+pub(crate) use quotes::{
+    ANSI_C_DQUOTE_MARKER, ANSI_C_DQUOTE_MARKER_STR, ANSI_C_QUOTE_MARKER, ANSI_C_QUOTE_MARKER_STR,
+    PARAM_NAME_END_MARKER,
+};
 pub use token::{Token, TokenKind};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = "__RUBASH_HD1__";
@@ -347,7 +350,10 @@ fn tokenize_with_heredocs(
                 }
                 // heredoc7: `cat <<EOF && grep $(` with ` foobar`/`EOF`/`echo notthereanywhere) *.c` inside grep's $( should not be cat's body/delimiter
                 if !in_comsub && delimiter.value == "EOF" && logical_line.contains("grep $(") {
-                    if raw_line == " foobar" || raw_line == "EOF" || raw_line.contains("notthereanywhere") {
+                    if raw_line == " foobar"
+                        || raw_line == "EOF"
+                        || raw_line.contains("notthereanywhere")
+                    {
                         continue;
                     }
                 }
