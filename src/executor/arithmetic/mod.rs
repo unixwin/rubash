@@ -124,8 +124,11 @@ impl Executor {
         }
         // In arithmetic command context Bash removes double quotes, but a
         // single-quoted operand is not a numeric literal. Preserve it as an
-        // evaluation error so `(( '1' ))` is not silently accepted as 1.
-        if expression.contains('\'') {
+        // evaluation error so `(( '1' ))` is not silently accepted as 1. A
+        // single quote inside an associative-array subscript is a different
+        // thing: there it delimits a string key, which GNU accepts
+        // (`(( A['a b']++ ))`), so only bare quotes are rejected.
+        if has_bare_single_quote(&expression, &self.env_vars) {
             return None;
         }
         if empty_quoted_operand_has_operator(&expression) {
@@ -262,9 +265,22 @@ impl Executor {
             if index < bytes.len()
                 && bytes[index] == 91
                 && is_marked_var(&self.env_vars, ASSOC_VARS, &expression[start..index])
-                && expression[index..].contains("[$")
             {
-                return true;
+                if expression[index..].contains("[$") {
+                    return true;
+                }
+                // A single-quoted subscript is literal data: the ordinary
+                // expansion path would treat the quotes as ordinary
+                // characters and expand `$` inside them, but GNU keeps a
+                // single-quoted subscript verbatim (`assoc['$var']` keys on
+                // `$var`). Route those through the assoc-subscript parser too.
+                let end = assoc_subscript_end(bytes, index);
+                let subscript = expression
+                    .get(index + 1..end.saturating_sub(1))
+                    .unwrap_or("");
+                if subscript.trim_start().starts_with('\'') {
+                    return true;
+                }
             }
         }
         false
@@ -512,6 +528,75 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
         }
     }
     output
+}
+
+/// Byte index just past the `]` that closes the subscript opened at `open`
+/// (`bytes[open] == b'['`), honoring single/double quotes and `\` escapes so a
+/// `]` inside a quoted key does not terminate the subscript.
+fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut index = open;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        index += 1;
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == b'\\' && !single {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            b'[' if !single && !double => depth += 1,
+            b']' if !single && !double => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    index
+}
+
+/// A single quote in `expression` that is not part of an associative-array
+/// subscript. GNU rejects `(( '1' ))` — a quoted operand is not a number — but
+/// accepts a quoted assoc subscript (`(( A['a b']++ ))`), which is a string
+/// key, so those quotes must not trigger the operand error.
+fn has_bare_single_quote(expression: &str, env_vars: &HashMap<String, String>) -> bool {
+    let bytes = expression.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            return true;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            if index < bytes.len()
+                && bytes[index] == b'['
+                && is_marked_var(env_vars, ASSOC_VARS, &expression[start..index])
+            {
+                index = assoc_subscript_end(bytes, index);
+                continue;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    false
 }
 
 fn normalize_arithmetic_quotes(input: &str) -> String {

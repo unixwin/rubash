@@ -132,9 +132,12 @@ impl ConditionalArithParser<'_> {
                     self.pos += 1;
                 }
                 b']' if depth == 0 => {
+                    // The raw subscript is data: GNU expand_subscript_string
+                    // keeps IFS whitespace that surrounds or makes up the key
+                    // (`k=$'\t'; A[$k]=2` keys on the tab, and `A[ $k ]` keys
+                    // on ` x `), so it must not be trimmed away.
                     let key = std::str::from_utf8(&self.input[start..self.pos])
                         .ok()?
-                        .trim()
                         .to_string();
                     self.pos += 1;
                     return Some(self.expand_assoc_subscript_key(&key));
@@ -150,6 +153,14 @@ impl ConditionalArithParser<'_> {
     }
 
     pub(super) fn expand_assoc_subscript_key(&self, key: &str) -> String {
+        // A wholly single-quoted subscript is literal data: GNU's
+        // expand_subscript_string removes the quotes but runs no expansion
+        // inside a single-quoted span, so `A['$var']` keys on the text `$var`
+        // and `A['a b']` keys on `a b`.
+        if let Some(literal) = wholly_single_quoted_literal(key) {
+            return literal;
+        }
+
         let mut output = String::new();
         let mut chars = key.chars().peekable();
 
@@ -183,7 +194,9 @@ impl ConditionalArithParser<'_> {
             }
         }
 
-        strip_matching_quotes(output.trim()).to_string()
+        // Quote removal only: an associative subscript is a string key, so
+        // surrounding IFS whitespace is data, not padding (GNU keeps it).
+        strip_matching_quotes(&output).to_string()
     }
 
     pub(super) fn consume_assignment_operator(&mut self) -> Option<&'static str> {
@@ -191,4 +204,22 @@ impl ConditionalArithParser<'_> {
         self.pos += op.len();
         Some(op)
     }
+}
+
+/// The concatenated contents of `text` when it is covered entirely by
+/// single-quoted spans (`'a b'`, `'a''b'`); `None` when any character sits
+/// outside a single-quoted span, in which case the subscript still has to be
+/// expanded.
+fn wholly_single_quoted_literal(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    let mut saw_span = false;
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('\'')?;
+        let end = inner.find('\'')?;
+        out.push_str(&inner[..end]);
+        rest = &inner[end + 1..];
+        saw_span = true;
+    }
+    saw_span.then_some(out)
 }
