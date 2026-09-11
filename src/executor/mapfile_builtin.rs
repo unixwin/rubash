@@ -7,7 +7,7 @@ impl Executor {
         let command_name = cmd.words.first().map(String::as_str).unwrap_or("mapfile");
         let mut trim_newline = false;
         let mut count = None;
-        let mut delimiter = None;
+        let mut delimiter: Option<u8> = None;
         let mut origin = None;
         let mut skip = 0;
         let mut callback = None;
@@ -88,12 +88,24 @@ impl Executor {
                             &mut stderr,
                         );
                     };
-                    delimiter = Some(word.chars().next().unwrap_or('\0'));
+                    delimiter = Some(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(word)
+                            .first()
+                            .copied()
+                            .unwrap_or(0),
+                    );
                     index += 2;
                 }
                 word if word.starts_with("-td") && word.len() > 3 => {
                     trim_newline = true;
-                    delimiter = Some(word[3..].chars().next().unwrap_or('\0'));
+                    delimiter = Some(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &word[3..],
+                        )
+                        .first()
+                        .copied()
+                        .unwrap_or(0),
+                    );
                     index += 1;
                 }
                 "-tO" => {
@@ -240,7 +252,12 @@ impl Executor {
                             &mut stderr,
                         );
                     };
-                    delimiter = Some(word.chars().next().unwrap_or('\0'));
+                    delimiter = Some(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(word)
+                            .first()
+                            .copied()
+                            .unwrap_or(0),
+                    );
                     index += 2;
                 }
                 "-n" => {
@@ -346,7 +363,14 @@ impl Executor {
                     index += 2;
                 }
                 word if word.starts_with("-d") && word.len() > 2 => {
-                    delimiter = Some(word[2..].chars().next().unwrap_or('\0'));
+                    delimiter = Some(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &word[2..],
+                        )
+                        .first()
+                        .copied()
+                        .unwrap_or(0),
+                    );
                     index += 1;
                 }
                 word if word.starts_with("-n") && word.len() > 2 => {

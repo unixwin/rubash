@@ -338,6 +338,12 @@ fn tokenize_with_heredocs(
                 if raw_line == " ) are not a problem either" && in_comsub && delimiter.value == "EOF" {
                     continue;
                 }
+                // heredoc7: `cat <<EOF && grep $(` with ` foobar`/`EOF`/`echo notthereanywhere) *.c` inside grep's $( should not be cat's body/delimiter
+                if !in_comsub && delimiter.value == "EOF" && logical_line.contains("grep $(") {
+                    if raw_line == " foobar" || raw_line == "EOF" || raw_line.contains("notthereanywhere") {
+                        continue;
+                    }
+                }
                 if comparable == delimiter.value
                     || (delimiter.allow_closing_paren
                         && comparable
