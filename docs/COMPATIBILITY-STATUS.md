@@ -673,7 +673,7 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
   - `-i` 子 shell 的 \cR/\cO readline 回放控制字符未实现（history4 后两个 block），交互/readline 域，另行立项
 
 
-## 十一、locale 单字节模式接线（2026-09-11）
+## 二十一、locale 单字节模式接线（2026-09-11）
 
 GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale 下一个
 字符 = 一条多字节序列；`setlocale()` 无法激活的 locale 回落到 C，每个字节 =
@@ -734,3 +734,41 @@ GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale �
 产物：`target/issue-suites/results/locale-c-probe/`（GNU/rubash 双侧 + diff）、
 `target/issue-suites/results/intl-now-baseline/intl/`；探针脚本
 `target/locale-c-probe.sh`。
+
+## 二十二、intl 测量基建：CR 剥离修正（target/ 资产，未入 scripts/）
+
+`scripts/true-baseline.sh` 只剥离 `*.tests`/`*.sub`/`*.right`/`run-*`/`test-*`
+的 CRLF。但 `intl.tests` 通过 `. ./test-glue-functions` 引入
+`test-glue-functions`（不匹配以上任一模式），它保留 CRLF，GNU 端因此定义不出
+`_intl_normalize_spaces`，整条 `| od -b |` 管道静默失效——`gnu.out` 只剩 5 行，
+diff 数字全线失真，曾误判 intl 已大幅收敛。这是本次 intl 排查里代价最高的
+方法学坑，而 `docs/` 与 `scripts/` 此前都没有记载。
+
+修正 = 所有被 source 的文本文件都剥 CR：`*.tests|*.sub|*.right|run-*|test-*|
+*.funcs|*.sh`；且必须用 `for f in "$BASE"/*; do case "$(basename "$f")" in ...`
+遍历——`find` 的括号表达式经工具壳传参会被改写，报
+`find: invalid expression`。
+
+固化版脚本 `target/true-baseline-intl-now.sh`（gitignored，本地资产）要点：
+
+- `set -u` 下校验 GNU 版本为 5.3.0，不符则 `exit 9`，防止拿错基线壳。
+- 每个套件独立 40s `timeout -k 5`、独立工作目录，互不污染。
+- 双侧都从 `$BASE` 出发，`PATH="$BASE:/usr/bin:/bin"`，保证
+  `recho`/`zecho`/`printenv` 用的是 WSL 端 gcc 现场编译的版本，而不是 Windows
+  PATH 上的同名程序。
+- `SUITES="$*"`（不是 `"$1"`）：`for name in $SUITES` 会展开整个列表，用
+  `"$1"` 时多套件调用只跑第一个，其余参数被静默丢弃。
+
+复现：
+
+    MSYS_NO_PATHCONV=1 wsl bash target/true-baseline-intl-now.sh \
+        intl printf read exp nquote new-exp
+
+产物：`target/issue-suites/results/intl-now-baseline/<套件>/{gnu.out,gnu.err,
+rb.out,rb.err,gnu.rc,rb.rc}`；`locale-c-probe` 同目录存放 `LC_ALL=C` 18 例配对
+探针的 gnu.out/rb.out/diff.txt/probe.sh。
+
+配套陷阱：本仓库的 file read 工具把单个反斜杠渲染成 `\`，肉眼判断
+`\u00FF` 是否被写双会得出错误结论——用 `String.fromCharCode(92)` 比对字符编码
+（92 出现一次 = 单反斜杠）才可靠。本轮曾因此白跑一轮 perl 修复并险些把文档里的
+`\u` 整串删掉。
