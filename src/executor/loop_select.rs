@@ -27,30 +27,7 @@ impl Executor {
 
         let values = if for_command.default_positional {
             if self.positional_params.is_empty() {
-                // `posix2syntax.sub` expects 6 `in`s before `done` (GNU)
-                // vs our 5. The extra comes from `for i; do echo in; done`
-                // (with `;` and body `echo in`) producing `in` even with
-                // no args, while `for i; do echo; done` (body `echo` alone)
-                // and `for i do echo in; done` (no `;`) do not. Check the
-                // body for `echo in` to distinguish.
-                let body_is_echo_in = for_command.body.iter().any(|cmd| {
-                    cmd.words.len() == 2
-                        && cmd.words[0] == "echo"
-                        && cmd.words[1].to_lowercase().contains("in")
-                });
-                eprintln!(
-                    "DEBUG for {} list_terminator={:?} body_is_echo_in={} is_empty={} body_len={}",
-                    for_command.variable,
-                    for_command.list_terminator,
-                    body_is_echo_in,
-                    self.positional_params.is_empty(),
-                    for_command.body.len()
-                );
-                if body_is_echo_in && for_command.list_terminator.is_some() {
-                    vec!["".to_string()]
-                } else {
-                    Vec::new()
-                }
+                Vec::new()
             } else {
                 self.positional_params.clone()
             }

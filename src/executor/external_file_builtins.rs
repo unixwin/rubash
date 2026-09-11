@@ -870,11 +870,18 @@ impl Executor {
             let windows = crate::executor::path::shell_path_to_windows(file, &self.env_vars)
                 .to_string_lossy()
                 .to_string();
-            // DrvFs (D: or \\wsl$ UNC) does not support POSIX chmod bits;
-            // GNU on WSL leaves files on DrvFs 0777 after `chmod -x`, so
-            // `test -x` stays true. To match GNU baseline, skip emulation
-            // for those paths and let `test -x` fall back to existence.
-            if windows.starts_with("D:") || windows.starts_with("\\\\wsl$") {
+            // DrvFs (any Windows drive or \\wsl$ UNC) does not support POSIX
+            // chmod bits; GNU on WSL leaves files on DrvFs 0777 after
+            // `chmod -x`, so `test -x` stays true. To match GNU baseline
+            // (posix2 negative -x expects failure when run as root on DrvFs),
+            // skip emulation for any Windows drive path and let `test -x`
+            // fall back to existence. This also covers the per-suite TMPDIR
+            // when WSL does not forward TMPDIR to the Windows child (it
+            // becomes C:\Users\...\Temp).
+            let is_drive = windows.len() >= 2
+                && windows.as_bytes()[1] == b':'
+                && windows.as_bytes()[0].is_ascii_alphabetic();
+            if is_drive || windows.starts_with("\\\\wsl$") || windows.starts_with("//wsl$") {
                 continue;
             }
             let base = crate::builtins::test::emulated_file_mode(file, &self.env_vars)
