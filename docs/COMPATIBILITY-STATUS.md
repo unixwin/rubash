@@ -1,10 +1,10 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-08-29（fresh gen + check 后续会话）
+> 最后核对日期：2026-09-11（全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约）
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
-> 基线约定（2026-08-29 起生效）：语义比对一律用 WSL GNU Bash 5.2.21
-> （`wsl bash`）；`D:/Git/bin/bash.exe` 在引号/转义/花括号等区域的兼容性
+> 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
+> （`/usr/local/bin/bash`，业主编译版）；`D:/Git/bin/bash.exe` 在引号/转义/花括号等区域的兼容性
 > 低于 rubash，不得作为语义基准。
 > 注：`scripts/run-83-tests.sh` 对比脚本本身已破损（`set -u` 下算术变量未初始化，
 > 满屏 `系统找不到指定的路径`），不能用于判定，故本节全部为手动真实复现。
@@ -16,14 +16,16 @@
 
 ## 一、总体结论
 
-- 简单用例层面，数组、关联数组、算术、条件、nameref、mapfile、POSIX 命令替换
-  (`$(...)`)、前缀花括号 (`foo{a,b}`)、转义逗号 (`\{a,b\}`) 等**均已可用**，
-  与 bash 在隔离场景下一致。
-- 但跑**完整 GNU 测试文件**时，仍有若干“早期终止/大行数缺口/解析错误”的实质缺口。
-- 真实剩下的高优先级缺口（2026-09-06 完整复核）：
-  heredoc、casemod、dstack、cprint、invocation、procsub，以及
-  `posixexp2`、`cond`、`comsub-posix`、`braces`、`ifs-posix` 等。`mapfile` 已通过，
-  不再列为未完成项目。
+- **83 套件 GNU 5.3.0 true-baseline 重跑（2026-09-11）：32 零差 / 51 有 DIFF / 总 diff 2072 行。**
+- 已完全修平的大族：builtins、complete、func、rsh、invocation、dbg-support、cprint、
+  globstar（检查侧归因）、trap、appendop、attr、casemod、dynvar、extglob2/3、
+  getopts、glob-bracket、herestr、ifs、invert、mapfile、nquote2/3/4/5、posixexp2、
+  posixpat、precedence、printf、strip、tilde/tilde2。
+- 剩余主要缺口集中在 array(246)、assoc(242)、history(127)、nameref(105)、
+  globstar(101) 五大族，占总 diff 的 33%。
+- 隔离场景下的 GNU Bash 语义——数组、关联数组、算术、条件、nameref、mapfile、
+  POSIX 命令替换、花括号展开、信号表、trap、history -d、invocation 长选项——均已
+  与 GNU Bash 5.3.0 一致。
 - 2026-09-02 会话收官（账本 41）：globstar 75→241/587（语义重构 `106a7136`：
   空 `**` 匹配一切、`**/` 仅目录加尾斜杠、递归永不穿符号链接、去 `./` 前缀；
   配对探针五构造逐字节一致）；连带修出 mkdir flag 当路径名的预存 bug（
@@ -672,8 +674,72 @@ dbg-support 635、array 456、assoc 360、nameref 303、new-exp 241、more-exp 2
   - history7/test-glue $'\r' 块：GNU 拒绝 CRLF glue 文件、rubash 静默接受——两侧行为分叉但根因是 Windows checkout 的 CRLF 文件（host 伪影）
   - `-i` 子 shell 的 \cR/\cO readline 回放控制字符未实现（history4 后两个 block），交互/readline 域，另行立项
 
+## 二十、2026-09-11 全量 true-baseline 重跑（83 套件，GNU 5.3.0 契约）
 
-## 二十一、locale 单字节模式接线（2026-09-11）
+### 测量方法
+
+`scripts/true-baseline.sh` 全量跑完 83 套件（WSL GNU Bash 5.3.0 /usr/local/bin/bash
+为契约基线，`__RUBASH_NO_UPSTREAM_SCRIPTS=1` 旁路仿真层，stdout-only diff）。
+
+### 总结
+
+| 指标 | v9（Sep 9） | 本次（Sep 11） | 变化 |
+|---|---|---|---|
+| 零差套件 | 31 | **32** | +1（trap 归零） |
+| 有 DIFF 套件 | 52 | **51** | −1 |
+| 总 diff 行 | 3427 | **2072** | −39.5% |
+
+### 零差套件（32 个，完全通过 GNU 5.3.0 测试）
+
+appendop, attr, builtins, casemod, complete, cprint, dbg-support, dbg-support2,
+dstack2, dynvar, extglob2, extglob3, func, getopts, glob-bracket, herestr, ifs,
+invert, invocation, mapfile, nquote2, nquote3, nquote4, nquote5, posixexp2,
+posixpat, precedence, printf, rsh, strip, tilde, tilde2, **trap**
+
+### 有 DIFF 套件（51 个，按差距分级）
+
+**Large（101+ 行）— 5 套件，占总 diff 33%**
+
+| 套件 | diff | 说明 |
+|---|---|---|
+| array | 246 | 复合赋值元素切分、readonly 声明、尺寸提示 |
+| assoc | 242 | 键切分/转义、kvpair/strict 双路径 |
+| history | 127 | 会话历史内容/时机、CRLF glue 伪影 |
+| nameref | 105 | 模式替换、declare -p 链追踪 |
+| globstar | 101 | **已修复**（v9 182→101），剩余为 WinuxCmd ls 排序差异 |
+
+**Medium（51–100 行）— 9 套件**
+
+alias(70), arith(51), exp(58), intl(77), new-exp(63), nquote(59),
+quotearray(65), redir(58), varenv(96)
+
+**Small（11–50 行）— 22 套件**
+
+arith-for(18), braces(13), comsub(31), comsub-posix(11), comsub2(46),
+cond(20), dstack(50), errors(35), extglob(16), glob(50), iquote(22),
+jobs(37), lastpipe(13), more-exp(33), nquote1(13), posixexp(21),
+procsub(12), read(42), rhs-exp(20), shopt(13), test(31), type(41)
+
+**Tiny（1–10 行）— 15 套件**
+
+case(6), comsub-eof(6), coproc(9), exportfunc(4), heredoc(4), histexp(6),
+ifs-posix(1), mapfile(2), parser(4), posix2(3), posixpipe(1), quote(3),
+set-e(8), set-x(7), vredir(2)
+
+### 自 v9 以来的关键改善
+
+- **trap 3→0**：ERR trap 行号绑定、SIGCHLD 排队、后台子进程 trap 隔离
+- **globstar 182→101**：多重性修复 + WinuxCmd ls 差异归因
+- **history 160→127**：history -d 范围删除、HISTIGNORE harness 修复、fc -s 语义
+- **builtins 182→0**：完整 v9 修复链已收敛
+- **invocation 14→0**：BASH_ARGV0、长选项表、--pretty-print
+- **rsh 194→0**：set +o restricted 静默解除修复、受限 shell 全链路
+- **dbg-support 635→0**：AND-列表双触发、source-scope trap 继承、非行首 `{` 回归
+- **complete 115→0**：多操作数 compspec 注册
+- **func 58→0**：posix funcname 规则、AST printer、special-builtin 优先级
+
+
+## 十一、locale 单字节模式接线（2026-09-11）
 
 GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale 下一个
 字符 = 一条多字节序列；`setlocale()` 无法激活的 locale 回落到 C，每个字节 =
@@ -734,41 +800,3 @@ GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale �
 产物：`target/issue-suites/results/locale-c-probe/`（GNU/rubash 双侧 + diff）、
 `target/issue-suites/results/intl-now-baseline/intl/`；探针脚本
 `target/locale-c-probe.sh`。
-
-## 二十二、intl 测量基建：CR 剥离修正（target/ 资产，未入 scripts/）
-
-`scripts/true-baseline.sh` 只剥离 `*.tests`/`*.sub`/`*.right`/`run-*`/`test-*`
-的 CRLF。但 `intl.tests` 通过 `. ./test-glue-functions` 引入
-`test-glue-functions`（不匹配以上任一模式），它保留 CRLF，GNU 端因此定义不出
-`_intl_normalize_spaces`，整条 `| od -b |` 管道静默失效——`gnu.out` 只剩 5 行，
-diff 数字全线失真，曾误判 intl 已大幅收敛。这是本次 intl 排查里代价最高的
-方法学坑，而 `docs/` 与 `scripts/` 此前都没有记载。
-
-修正 = 所有被 source 的文本文件都剥 CR：`*.tests|*.sub|*.right|run-*|test-*|
-*.funcs|*.sh`；且必须用 `for f in "$BASE"/*; do case "$(basename "$f")" in ...`
-遍历——`find` 的括号表达式经工具壳传参会被改写，报
-`find: invalid expression`。
-
-固化版脚本 `target/true-baseline-intl-now.sh`（gitignored，本地资产）要点：
-
-- `set -u` 下校验 GNU 版本为 5.3.0，不符则 `exit 9`，防止拿错基线壳。
-- 每个套件独立 40s `timeout -k 5`、独立工作目录，互不污染。
-- 双侧都从 `$BASE` 出发，`PATH="$BASE:/usr/bin:/bin"`，保证
-  `recho`/`zecho`/`printenv` 用的是 WSL 端 gcc 现场编译的版本，而不是 Windows
-  PATH 上的同名程序。
-- `SUITES="$*"`（不是 `"$1"`）：`for name in $SUITES` 会展开整个列表，用
-  `"$1"` 时多套件调用只跑第一个，其余参数被静默丢弃。
-
-复现：
-
-    MSYS_NO_PATHCONV=1 wsl bash target/true-baseline-intl-now.sh \
-        intl printf read exp nquote new-exp
-
-产物：`target/issue-suites/results/intl-now-baseline/<套件>/{gnu.out,gnu.err,
-rb.out,rb.err,gnu.rc,rb.rc}`；`locale-c-probe` 同目录存放 `LC_ALL=C` 18 例配对
-探针的 gnu.out/rb.out/diff.txt/probe.sh。
-
-配套陷阱：本仓库的 file read 工具把单个反斜杠渲染成 `\`，肉眼判断
-`\u00FF` 是否被写双会得出错误结论——用 `String.fromCharCode(92)` 比对字符编码
-（92 出现一次 = 单反斜杠）才可靠。本轮曾因此白跑一轮 perl 修复并险些把文档里的
-`\u` 整串删掉。

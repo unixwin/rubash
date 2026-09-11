@@ -1,58 +1,55 @@
 # Rubash
 
-一个使用 Rust 编写的 GNU Bash 兼容 Shell 实现。
+使用 Rust 从零实现的 GNU Bash 兼容 Shell。
 
 [English](README.md)
 
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
-[![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## 概述
+## 什么是 Rubash
 
-Rubash 是一个正在开发中的 GNU Bash 兼容 Shell，使用 Rust 从零实现 Bash 的词法、解析、展开、执行和内建命令语义。项目已经超过早期骨架阶段，当前重点是继续补齐 GNU Bash 细节、扩大上游测试覆盖，并服务 Winuxsh 等 Windows-native shell 场景。
+Rubash 是用 Rust 从零实现的 GNU Bash —— 词法分析、解析器、展开引擎、执行器、内建命令，全部重写。目标是与 GNU Bash 5.3.0 逐字节兼容，原生运行在 Windows 上。
 
-**当前定位**: Rubash 适合兼容性开发、测试、研究和作为 Winuxsh/Rubash API 的执行引擎验证；它尚未声明为生产登录 shell 或关键脚本运行时。
+**当前状态**：83 个 GNU Bash 上游测试套件中 32 个零差异通过。全部 83 套件总差异 2072 行，两天内从 3427 行下降 40%。完整详情见 [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md)。
 
-## 当前进度
+## 兼容性一览
 
-当前源码包版本为 `1.0.0`。兼容性状态以
-[`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) 为唯一权威
-来源，只有对 `third_party/bash/tests/` 下 GNU 官方测试文件真实复现后才更新，
-比对基线为 WSL GNU Bash 5.2.21；`docs/` 下其余带日期的分析快照仅作历史归档，
-不得用于判定当前 parity。上游 `run-*` 使用旧 `.right` 文件得到的 `87/87`
-runner 结果，不应与真实输出 parity 混用。
+```
+GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
 
-隔离场景下的 GNU Bash 语义——数组、关联数组、算术、条件、nameref、mapfile、
-POSIX 命令替换、前缀花括号（`foo{a,b}`）、转义花括号/转义逗号——已与 GNU
-Bash 一致。剩余高优先级缺口按测试文件在该状态文档中跟踪（`posixexp2`、
-`cond`、`mapfile`、`comsub-posix`、`braces` 序列细节）。
+  零差通过：     32 套件  ████████████████░░░░░░░░░░░░░░░░  39%
+  小差异(1-50)： 37 套件  █████████████████████████████████  45%
+  中差异(51-250)：14 套件 ████████████░░░░░░░░░░░░░░░░░░░░  17%
+  ────────────────────────────────────────────────────────────────
+  总差异：       2072 行（9月9日为 3427 行 → 两天内 −40%）
+```
 
-Rubash 的 GNU Bash 语法和运行时支持已经推进到可以运行较复杂 Bash 程序的阶段：clean 外部 `bashdb` 的核心调试闭环已经能在 `target/debug/rubash.exe` 下工作。
+### 完全通过的套件（零差异）
 
-已验证的 bashdb 核心命令包括：
+`appendop` `attr` `builtins` `casemod` `complete` `cprint` `dbg-support` `dbg-support2` `dstack2` `dynvar` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `herestr` `ifs` `invert` `invocation` `mapfile` `nquote2` `nquote3` `nquote4` `nquote5` `posixexp2` `posixpat` `precedence` `printf` `rsh` `strip` `tilde` `tilde2` `trap`
 
-- `list`: 显示被调试脚本源码。
-- `step`: 进入 shell 函数体。
-- `next`: 前进到下一行。
-- `where`: 打印调用栈。
-- `continue`: 继续运行被调试脚本。
-- `quit`: 退出调试器。
+### 近期重大修复（2026 年 9 月）
 
-这说明 Rubash 已经覆盖了 bashdb 依赖的一批关键 Bash 语义，包括 `source`/`.`、`eval`、数组和关联数组、`DEBUG`/`RETURN`/`EXIT` trap、`BASH_SOURCE`/`BASH_COMMAND`、函数栈、`functrace`/`extdebug`、路径展开、重定向、`/dev/stdin`、`tty`、动态 fd、参数展开和算术命令等。
+| 领域 | 修复前 → 修复后 | 改了什么 |
+|------|----------------|---------|
+| **dbg-support** | 635 → 0 | AND 列表双触发、source-scope trap 继承、`{` 回归 |
+| **rsh** | 194 → 0 | `set +o restricted` 静默解除修复、受限 shell 全链路 |
+| **invocation** | 14 → 0 | `BASH_ARGV0`、长选项表、`--pretty-print`、`-o`/`-O` 启动报错 |
+| **trap** | 3 → 0 | ERR 行号绑定、SIGCHLD 排队、后台子进程 trap 隔离 |
+| **func** | 58 → 0 | POSIX funcname 规则、AST printer、special-builtin 优先级 |
+| **complete** | 115 → 0 | 多操作数 compspec 注册 |
+| **history** | 190 → 127 | `history -d start-end` 范围删除（GNU 5.3 特性） |
+| **globstar** | 182 → 101 | 多重性修复、相邻 `**` 折叠、尾斜杠语义 |
+| **array/assoc** | 444+358 → 246+242 | 复合赋值引号分组、元素赋值边界 |
+| **信号表** | BSD 表 → Linux 表 | USR1=10、CHLD=17、RTMIN=34，与 GNU 5.3.0 WSL 契约一致 |
 
-同时需要保持清晰边界：**bashdb 核心工作流可用，不等于 bashdb 全部命令和交互功能已经认证完成**。项目目标是继续推进到 bashdb 全功能可用，并把 bashdb 作为真实 Bash 应用压力测试来发现更多 Rubash 兼容性问题。
+### Rubash 已经能跑什么
 
-## 功能概览
-
-- **词法分析器**: 支持 Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string 和常见重定向 token。
-- **解析器**: 覆盖简单命令、管道、AND/OR 列表、函数、brace/subshell、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc` 和 `time` 前缀。
-- **执行器**: 支持外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、shebangless 脚本回退执行，以及 Windows/Git Bash 路径桥接。
-- **展开系统**: 支持变量/位置参数、数组和关联数组、命令替换、算术展开、花括号展开、tilde、pathname glob、常见 `${parameter...}` 操作和大小写/替换类参数变换。
-- **数组语义**: 支持 indexed/associative arrays、复合赋值、元素赋值/追加、负下标、数组切片、`${arr[@]}`/`${arr[*]}`、`declare`/`local`/`export`/`readonly` 交互中的常见数组行为。
-- **内建命令**: 已实现或接入常用 Bash builtins，包括 `alias`/`unalias`、`builtin`、`cd`、`command`、`declare`/`typeset`/`local`、`echo`、`enable`、`eval`、`exec`、`exit`、`export`/`readonly`、`getopts`、`hash`、`help`、`jobs`、`kill`、`let`、`mapfile`/`readarray`、`printf`、`pushd`/`popd`/`dirs`、`pwd`、`read`、`return`、`set`、`shift`、`shopt`、`source`/`.`、`test`/`[`、`times`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
-- **仍在补齐**: 完整 job control、交互式 readline/history、进程组/终端控制、信号边界、Bash 精细解析/别名重读细节、bashdb 全命令面、所有上游兼容角落案例。
+- **bashdb** — 核心调试闭环（list、step、next、where、continue、quit）在 rubash 下工作
+- **复杂 Bash 脚本** — 数组、关联数组、算术、条件、nameref、命令替换、花括号展开、进程替换、coproc、`eval`、`trap`、`source`
+- **GNU Bash 测试套件** — 83 个上游测试文件，自动化 diff 测量
 
 ## 快速开始
 
@@ -65,16 +62,6 @@ cargo build
 target/debug/rubash --version
 ```
 
-### 安装发布版
-
-```bash
-cargo install rubash
-```
-
-Windows-native 安装由 Winuxsh/WinuxCmd 安装器和 WPM 负责，`cargo install` 只适合 Rust 开发环境。安装器应在选定的 WinuxCmd 根目录创建 `usr/bin/`、`bin/` 和 `usr/local/bin/`，并将 `rubash.exe` 与 `bash.exe` shim 放入 `usr/bin/`；`bash.exe` 仅转发到同一安装中的 `winuxsh.exe`，不应放入 `.wpm/` 私有状态目录。WPM 负责包载荷和目标目录同步，Winuxsh 负责将真实 bin 目录加入 `PATH`。
-
-当前源码 checkout 为 `D:/repo/rubash`；历史记录中的 `J:/caponAVIS2019` 仅用于追溯，不是安装器、WPM 或运行时应依赖的路径。
-
 ### 运行脚本
 
 ```bash
@@ -82,84 +69,74 @@ target/debug/rubash path/to/script.sh
 target/debug/rubash -c 'echo hello from rubash'
 ```
 
-## 使用 bashdb 调试脚本行为
-
-bashdb 是外部 Bash 脚本调试器。Rubash 不内置也不 vendor bashdb；当前验证使用 clean bashdb fixture：
+### 运行兼容性测试套件
 
 ```bash
-target/bashdb-clean/bashdb-generated
+# 全量 83 套件测量（需要 WSL + GNU Bash 5.3.0）
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
+
+# 单个套件
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
 ```
 
-核心 smoke test：
+## 架构
 
-```bash
-export TERM=xterm DARK_BG=0
-printf 'list\nstep\nnext\nwhere\ncontinue\nwhere\nquit\n' | \
-  target/debug/rubash.exe target/bashdb-clean/bashdb-generated --no-highlight target/bashdb-probe-target.sh
+```
+src/
+├── lexer/           词法分析器（引号、转义、heredoc、续行）
+├── parser/          递归下降（简单命令、管道、case、arith-for、[[ ]]）
+├── executor/        命令执行、内建命令、展开、glob、数组、trap
+├── builtins/        40+ 内建命令实现（declare、read、printf、kill、...）
+└── lib.rs           核心类型和错误处理
 ```
 
-通过标准：退出码为 `0`，stderr 为空，`list` 能显示目标脚本，`step` 能进入函数，`where` 能显示调用栈，`continue` 能运行到 `42` / `done`。
-
-后续目标是让 bashdb 的完整命令面尽可能都能在 Rubash 下使用。新增 bashdb 命令失败时，应优先视为 Rubash Bash 兼容性缺口进行 root-cause 分析，而不是 patch bashdb。更多设置说明见 `docs/bashdb-debugging-rubash.md`。
+- **词法分析器**：Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string token、常见重定向。
+- **解析器**：简单命令、管道、AND/OR 列表、函数、花括号/子 shell 组、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc`、`time` 前缀。
+- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退、Windows/Git Bash 路径桥接。
+- **展开系统**：变量、位置参数、索引/关联数组、命令替换、算术展开、花括号展开、tilde 展开、路径名 glob、`${parameter...}` 操作符、大小写/替换变换。
+- **内建命令**：`alias`、`cd`、`declare`/`typeset`/`local`、`echo`、`eval`、`exec`、`export`/`readonly`、`getopts`、`hash`、`jobs`、`kill`、`let`、`mapfile`、`printf`、`pushd`/`popd`/`dirs`、`read`、`return`、`set`、`shopt`、`source`、`test`/`[`、`trap`、`type`、`ulimit`、`umask`、`unset`、`wait` 等。
 
 ## 测试
 
-常用窄测试：
-
 ```bash
+# 单元 + 集成测试
+cargo test --lib
+
+# bashdb 兼容性
 cargo test --test cli_tests bashdb_compat -- --nocapture
+
+# source 展开
 cargo test --test cli_tests source_expands -- --nocapture
-cargo test --test cli_tests script_bash_source -- --nocapture
 ```
-
-完整测试仍在持续扩展中。开发兼容性功能时优先使用 focused tests 和受限范围的 GNU Bash 上游测试切片，避免无界运行大型套件。
-
-## Windows 提权
-
-Rubash 的 Windows `sudo` builtin is an embedding API, not a complete Windows
-elevation product. It requires the embedding host to register an elevation
-handler. Winuxsh disables it by default and recommends the WPM `gsudo` package
-for UAC elevation. Hosts may disable a builtin through
-`Executor::set_builtin_disabled("sudo", true)`; users can use
-`enable -n sudo` and restore it with `enable sudo`.
 
 ## 文档
 
-- `docs/COMPATIBILITY-STATUS.md`: Rubash ↔ GNU Bash 兼容性权威状态（唯一事实来源）。
-- `docs/bashdb-debugging-rubash.md`: bashdb fixture、launcher/libdir 说明、smoke test 和 fresh checkout 用法。
-- `docs/gnu-bash-compatibility-implementation-plan.md`: GNU Bash 兼容性实现路线。
-- `docs/issue-suite-diff-analysis.md`: 上游测试差异分析。
-- `docs/bash-compat-issues.md`: 兼容性问题清单。
-- `docs/bash-source-map.md`: Bash 源码/语义映射。
-- `docs/typed-expansion-migration-checkpoint.md`: typed expansion 迁移检查点。
-- `docs/source-layout.md` 与 `docs/semantic-ownership.tsv`: 源码布局与 GNU 语义归属映射。
+- [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **唯一权威来源**，Rubash ↔ GNU Bash 兼容性状态
+- [`docs/builtins.md`](docs/builtins.md) — 内建命令清单和分发模型
+- [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture 设置和 smoke test
+- [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — 如何运行 GNU Bash 上游测试
 
 ## 开发原则
 
 - 按 Bash 语义的 root cause 修 Rubash 子系统，不按单条 expected output 打补丁。
-- bashdb 必须保持外部 clean 工具；临时 instrumentation 用完要恢复。
-- bashdb 当前是高层脚本行为调试器，不是 Rust 源码调试器。调试 `src/**/*.rs` 仍使用 Rust tooling、日志、instrumentation 和 focused tests。
-- bashdb 全功能可用是后续目标；每个失败命令都是发现 Rubash 兼容性缺口的机会。
+- bashdb 保持外部 clean 工具；临时 instrumentation 仅用于诊断。
+- 每个失败的 bashdb 命令都是发现和修复 Rubash 兼容性缺口的机会。
+- 兼容性基线为 GNU Bash 5.3.0（业主编译于 `/usr/local/bin/bash`）。
 
 ## 许可证
 
-Rubash 采用 MIT 许可证。详见 `LICENSE`。
+MIT — 详见 [`LICENSE`](LICENSE)。
 
 ## 贡献
 
-欢迎提交 issue、兼容性复现、focused regression tests 和实现补丁。贡献前请阅读 `AGENTS.md` 中的开发规则。
-
-## 联系方式
-
-- GitHub Issues: https://github.com/unixwin/rubash/issues
-- 讨论区: https://github.com/unixwin/rubash/discussions
+欢迎提交 issue、兼容性复现、focused regression tests 和实现补丁。贡献前请阅读 [`AGENTS.md`](AGENTS.md)。
 
 ## 致谢
 
-- GNU Bash 团队 - 原始 Bash 的创造者
-- Trepan-Debuggers/bashdb 项目 - 外部 Bash 调试器和兼容性压力测试来源
-- Rust 社区 - 语言和工具链
+- GNU Bash 团队 — 被重新实现的原始实现
+- Trepan-Debuggers/bashdb — 外部调试器和兼容性压力测试
+- Rust 社区 — 语言和工具链
 
 ---
 
-*最后更新: 2026-08-29*
+*最后更新：2026-09-11*

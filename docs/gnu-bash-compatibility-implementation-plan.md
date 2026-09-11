@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. Current compatibility status is in
+> [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-22.
+
 # GNU Bash Compatibility Implementation Plan
 
 > Date: 2026-08-12

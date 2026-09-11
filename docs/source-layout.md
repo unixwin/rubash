@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. The actual source layout has
+> diverged. See `src/` for current structure. Last current: 2026-08-28.
+
 # Rubash Source Layout
 
 Rubash targets GNU Bash 5.3 observable behavior, but it should not mirror the

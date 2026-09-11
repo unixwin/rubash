@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. For current development practices,
+> see `AGENTS.md`. Last current: 2026-08-10.
+
 # Rubash Performance Debugging Process
 
 This document records the concrete process used to diagnose and optimize the

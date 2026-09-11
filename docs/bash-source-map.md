@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. Current compatibility status is in
+> [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-14.
+
 # Bash Source Map
 
 ## Semantic Map v2

@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. The typed-expansion migration is
+> complete. Last current: 2026-08-27.
+
 # Typed Expansion Migration Checkpoint
 
 Updated: 2026-08-24

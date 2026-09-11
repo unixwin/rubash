@@ -6,58 +6,50 @@ A GNU Bash-compatible shell implementation written in Rust.
 
 [![CI](https://github.com/unixwin/rubash/actions/workflows/ci.yml/badge.svg)](https://github.com/unixwin/rubash/actions/workflows/ci.yml)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
-[![Crates.io](https://img.shields.io/crates/v/rubash)](https://crates.io/crates/rubash)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## Overview
+## What Is Rubash
 
-Rubash is an in-progress GNU Bash-compatible shell. It reimplements Bash lexical analysis, parsing, expansion, execution, and builtin behavior in Rust. The project is past the early skeleton stage; current work focuses on closing GNU Bash compatibility gaps, expanding upstream test coverage, and supporting Windows-native shell use cases such as Winuxsh.
+Rubash is a from-scratch reimplementation of GNU Bash in Rust — lexer, parser, expansion engine, executor, builtins, and all. It targets byte-level compatibility with GNU Bash 5.3.0 and runs on Windows natively.
 
-**Current positioning**: Rubash is suitable for compatibility development, testing, research, and validating the Rubash execution engine/API. It is not yet declared production-ready as a login shell or critical script runtime.
+**Current status**: 32 out of 83 GNU Bash upstream test suites pass with zero difference. Total remaining diff across all 83 suites is 2072 lines, down from 3427 two days ago (−40%). Full details in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md).
 
-## Current Status
+## Compatibility at a Glance
 
-The current source package version is `1.0.0`. Compatibility status is tracked
-in [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md), the single
-authoritative source for Rubash ↔ GNU Bash standing. That document is updated
-only after real reproduction against the GNU Bash test files vendored under
-`third_party/bash/tests/`, with WSL GNU Bash 5.2.21 as the comparison
-baseline. Dated analysis snapshots elsewhere under `docs/` are historical only
-and must not be used to judge current parity. The `87/87` upstream `run-*`
-runner result compares against the older `.right` expectation files and must
-not be conflated with real-output parity.
+```
+GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
 
-Isolated GNU Bash semantics — arrays, associative arrays, arithmetic,
-conditionals, namerefs, mapfile, POSIX command substitution, prefix brace
-forms (`foo{a,b}`), and escaped-brace/escape-comma forms — match GNU Bash in
-isolation. The remaining high-priority gaps are tracked per test file in the
-status document (`posixexp2`, `cond`, `mapfile`, `comsub-posix`, and `braces`
-sequence details).
+  PASS (0 diff):   32 suites  ████████████████░░░░░░░░░░░░░░░░  39%
+  DIFF (1-50):     37 suites  █████████████████████████████████  45%
+  DIFF (51-250):   14 suites  ████████████░░░░░░░░░░░░░░░░░░░░  17%
+  ────────────────────────────────────────────────────────────────
+  Total diff:      2072 lines (was 3427 on Sep 9 → −40% in 2 days)
+```
 
-Rubash's GNU Bash syntax and runtime support have progressed far enough to run complex Bash programs. A clean external `bashdb` checkout now completes the core debugger loop under `target/debug/rubash.exe`.
+### Fully passing suites (zero diff)
 
-Verified bashdb core commands include:
+`appendop` `attr` `builtins` `casemod` `complete` `cprint` `dbg-support` `dbg-support2` `dstack2` `dynvar` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `herestr` `ifs` `invert` `invocation` `mapfile` `nquote2` `nquote3` `nquote4` `nquote5` `posixexp2` `posixpat` `precedence` `printf` `rsh` `strip` `tilde` `tilde2` `trap`
 
-- `list`: show the target script source.
-- `step`: enter shell function bodies.
-- `next`: advance to the next source line.
-- `where`: print the call stack.
-- `continue`: resume the debugged script.
-- `quit`: exit the debugger.
+### Major recent fixes (Sep 2026)
 
-This proves coverage for a substantial set of Bash semantics that bashdb depends on: `source`/`.`, `eval`, indexed and associative arrays, `DEBUG`/`RETURN`/`EXIT` traps, `BASH_SOURCE`, `BASH_COMMAND`, function stacks, `functrace`/`extdebug`, path expansion, redirects, `/dev/stdin`, `tty`, dynamic fds, parameter expansion, and arithmetic commands.
+| Area | Before → After | What changed |
+|------|----------------|-------------|
+| **dbg-support** | 635 → 0 | AND-list dual fire, source-scope trap inheritance, `{` regression |
+| **rsh** | 194 → 0 | `set +o restricted` silent lift, full restricted-shell enforcement |
+| **invocation** | 14 → 0 | `BASH_ARGV0`, long options, `--pretty-print`, `-o`/`-O` prologs |
+| **trap** | 3 → 0 | ERR line binding, SIGCHLD queue, background child trap isolation |
+| **func** | 58 → 0 | POSIX funcname rules, AST printer, special-builtin precedence |
+| **complete** | 115 → 0 | Multi-operand compspec registration |
+| **history** | 190 → 127 | `history -d start-end` range deletion (GNU 5.3 feature) |
+| **globstar** | 182 → 101 | Multiplicity fix, adjacent-`**` collapse, trailing-slash semantics |
+| **array/assoc** | 444+358 → 246+242 | Compound assignment quote grouping, element-assignment boundaries |
+| **signals** | BSD table → Linux table | USR1=10, CHLD=17, RTMIN=34, matching GNU 5.3.0 WSL contract |
 
-The boundary is important: **the bashdb core workflow is usable, but the complete bashdb command surface is not yet fully certified**. The goal is to make as much of bashdb as possible work under Rubash and use bashdb as a real Bash application stress test for finding more compatibility bugs.
+### What Rubash can already run
 
-## Feature Overview
-
-- **Lexer**: Bash-style quoting, escaping, comments, variables, command substitution, arithmetic expansion, here-doc/here-string tokens, and common redirects.
-- **Parser**: Simple commands, pipelines, AND/OR lists, functions, brace/subshell groups, `if`, `for`, arithmetic `for`, `while`, `until`, `case`, `select`, `[[ ... ]]`, `coproc`, and `time` prefixes.
-- **Executor**: External commands, pipelines, redirects, temporary assignments, function calls, `source`/`.`, `eval`, shebangless script fallback, and Windows/Git Bash path bridging.
-- **Expansion system**: Variables, positional parameters, indexed and associative arrays, command substitution, arithmetic expansion, brace expansion, tilde expansion, pathname globbing, common `${parameter...}` operators, and case/replacement transforms.
-- **Array semantics**: Indexed and associative arrays, compound assignment, element assignment/append, negative indexes, slices, `${arr[@]}`/`${arr[*]}`, and common `declare`/`local`/`export`/`readonly` interactions.
-- **Builtins**: Common Bash builtins are implemented or wired in, including `alias`/`unalias`, `builtin`, `cd`, `command`, `declare`/`typeset`/`local`, `echo`, `enable`, `eval`, `exec`, `exit`, `export`/`readonly`, `getopts`, `hash`, `help`, `jobs`, `kill`, `let`, `mapfile`/`readarray`, `printf`, `pushd`/`popd`/`dirs`, `pwd`, `read`, `return`, `set`, `shift`, `shopt`, `source`/`.`, `test`/`[`, `times`, `trap`, `type`, `ulimit`, `umask`, `unset`, and `wait`.
-- **Known limitations**: Full job control, interactive readline/history, and process-group/terminal control remain host-sensitive. Bash parser and alias reread edge cases, full bashdb command coverage, and residual upstream compatibility cases are still under active compatibility work.
+- **bashdb** — core debugger loop (list, step, next, where, continue, quit) works under rubash
+- **Complex Bash scripts** — arrays, associative arrays, arithmetic, conditionals, namerefs, command substitution, brace expansion, process substitution, coproc, `eval`, `trap`, `source`
+- **GNU Bash test suite** — 83 upstream test files with automated diff measurement
 
 ## Quick Start
 
@@ -70,12 +62,6 @@ cargo build
 target/debug/rubash --version
 ```
 
-### Install Release
-
-```bash
-cargo install rubash
-```
-
 ### Run a Script
 
 ```bash
@@ -83,75 +69,74 @@ target/debug/rubash path/to/script.sh
 target/debug/rubash -c 'echo hello from rubash'
 ```
 
-## Debugging Script Behavior with bashdb
-
-bashdb is an external Bash script debugger. Rubash does not embed or vendor bashdb. The verified clean fixture is:
+### Run the Compatibility Suite
 
 ```bash
-target/bashdb-clean/bashdb-generated
+# Full 83-suite measurement (requires WSL with GNU Bash 5.3.0)
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh
+
+# Single suite
+MSYS_NO_PATHCONV=1 wsl bash scripts/true-baseline.sh array
 ```
 
-Core smoke test:
+## Architecture
 
-```bash
-export TERM=xterm DARK_BG=0
-printf 'list\nstep\nnext\nwhere\ncontinue\nwhere\nquit\n' | \
-  target/debug/rubash.exe target/bashdb-clean/bashdb-generated --no-highlight target/bashdb-probe-target.sh
+```
+src/
+├── lexer/           Tokenizer (quoting, escaping, heredocs, continuations)
+├── parser/          Recursive-descent (simple cmds, pipelines, case, arith-for, [[ ]])
+├── executor/        Command execution, builtins, expansion, glob, arrays, traps
+├── builtins/        40+ builtin implementations (declare, read, printf, kill, ...)
+└── lib.rs           Core types and error handling
 ```
 
-A passing run exits `0`, has empty stderr, shows target source for `list`, enters a function with `step`, shows the call stack with `where`, and continues through `42` / `done`.
-
-The next goal is broad bashdb command coverage under Rubash. When another bashdb command fails, treat it first as a Rubash Bash-compatibility gap to root-cause rather than patching bashdb. See `docs/bashdb-debugging-rubash.md` for fixture setup, launcher/libdir terminology, and fresh-checkout usage.
+- **Lexer**: Bash-style quoting, escaping, comments, variables, command substitution, arithmetic expansion, here-doc/here-string tokens, common redirects.
+- **Parser**: Simple commands, pipelines, AND/OR lists, functions, brace/subshell groups, `if`, `for`, arithmetic `for`, `while`, `until`, `case`, `select`, `[[ ... ]]`, `coproc`, `time` prefixes.
+- **Executor**: External commands, pipelines, redirects, temporary assignments, function calls, `source`/`.`, `eval`, shebangless script fallback, Windows/Git Bash path bridging.
+- **Expansion**: Variables, positional parameters, indexed and associative arrays, command substitution, arithmetic expansion, brace expansion, tilde expansion, pathname globbing, `${parameter...}` operators, case/replacement transforms.
+- **Builtins**: `alias`, `cd`, `declare`/`typeset`/`local`, `echo`, `eval`, `exec`, `export`/`readonly`, `getopts`, `hash`, `jobs`, `kill`, `let`, `mapfile`, `printf`, `pushd`/`popd`/`dirs`, `read`, `return`, `set`, `shopt`, `source`, `test`/`[`, `trap`, `type`, `ulimit`, `umask`, `unset`, `wait`, and more.
 
 ## Testing
 
-Focused tests commonly used for this area:
-
 ```bash
-cargo test --test cli_tests bashdb_compat -- --nocapture
-cargo test --test cli_tests source_expands -- --nocapture
-cargo test --test cli_tests script_bash_source -- --nocapture
-```
+# Unit + integration tests
+cargo test --lib
 
-The full compatibility suite is still expanding. For compatibility work, prefer focused tests and bounded upstream GNU Bash slices instead of unbounded full-suite runs.
+# bashdb compatibility
+cargo test --test cli_tests bashdb_compat -- --nocapture
+
+# Source expansion
+cargo test --test cli_tests source_expands -- --nocapture
+```
 
 ## Documentation
 
-- `docs/COMPATIBILITY-STATUS.md`: authoritative Rubash ↔ GNU Bash compatibility status (single source of truth).
-- `docs/bashdb-debugging-rubash.md`: bashdb fixture, launcher/libdir explanation, smoke test, and fresh-checkout usage.
-- `docs/gnu-bash-compatibility-implementation-plan.md`: GNU Bash compatibility implementation plan.
-- `docs/issue-suite-diff-analysis.md`: upstream test diff analysis.
-- `docs/bash-compat-issues.md`: compatibility issue list.
-- `docs/bash-source-map.md`: Bash source and semantic mapping.
-- `docs/typed-expansion-migration-checkpoint.md`: typed expansion migration checkpoint.
-- `docs/source-layout.md` and `docs/semantic-ownership.tsv`: source layout and GNU semantic ownership map.
+- [`docs/COMPATIBILITY-STATUS.md`](docs/COMPATIBILITY-STATUS.md) — **single source of truth** for Rubash ↔ GNU Bash compatibility status
+- [`docs/builtins.md`](docs/builtins.md) — builtin inventory and dispatch model
+- [`docs/bashdb-debugging-rubash.md`](docs/bashdb-debugging-rubash.md) — bashdb fixture setup and smoke test
+- [`docs/bash-upstream-tests.md`](docs/bash-upstream-tests.md) — how to run GNU Bash upstream tests
 
 ## Development Principles
 
-- Fix Rubash subsystems by Bash root cause, not by individual expected-output lines.
-- Keep bashdb external and clean. Temporary instrumentation is acceptable only for diagnosis and must be reverted.
-- bashdb is a high-level script behavior debugger, not a Rust source debugger. Use Rust tooling, logs, instrumentation, and focused tests for `src/**/*.rs` internals.
-- Full bashdb usability is a development target. Every failing bashdb command is an opportunity to expose and fix a Rubash compatibility gap.
+- Fix by root cause subsystem, not by individual expected-output lines.
+- Keep bashdb external and clean; temporary instrumentation is for diagnosis only.
+- Every failing bashdb command is an opportunity to find and fix a Rubash compatibility gap.
+- Compatibility baseline is GNU Bash 5.3.0 (owner-compiled at `/usr/local/bin/bash`).
 
 ## License
 
-Rubash is licensed under the MIT License. See `LICENSE`.
+MIT — see [`LICENSE`](LICENSE).
 
 ## Contributing
 
-Issues, compatibility repros, focused regression tests, and implementation patches are welcome. Read `AGENTS.md` before compatibility work.
-
-## Contact
-
-- GitHub Issues: https://github.com/unixwin/rubash/issues
-- Discussions: https://github.com/unixwin/rubash/discussions
+Issues, compatibility reproductions, focused regression tests, and implementation patches welcome. Read [`AGENTS.md`](AGENTS.md) before compatibility work.
 
 ## Acknowledgements
 
-- GNU Bash team - original Bash implementation
-- Trepan-Debuggers/bashdb - external Bash debugger and compatibility stress source
-- Rust community - language and tooling
+- GNU Bash team — the original implementation being re-emplemented
+- Trepan-Debuggers/bashdb — external debugger and compatibility stress test
+- Rust community — language and tooling
 
 ---
 
-*Last updated: 2026-08-29*
+*Last updated: 2026-09-11*

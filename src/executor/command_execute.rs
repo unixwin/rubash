@@ -168,6 +168,20 @@ impl Executor {
             return Ok(());
         }
 
+        // GNU subst.c:12494-12535 (expand_word_list) with `set -k`
+        // (flags.c `place_keywords_in_env`): once the leading assignment run
+        // is split off, every remaining `name=value` word is moved onto the
+        // assignment list, so it reaches the temporary environment instead of
+        // the command's argument list. When the harvest leaves no command word
+        // behind the command is assignment-only and the assignments persist in
+        // the shell (varenv.tests lines 42-49 and 70-88: `set -k` then
+        // `a=5 b=6 $CHMOD c=7 $MODE d=8 $FN e=9`).
+        let keep_temporary_cmd = self.command_with_keep_temporary_assignments(cmd);
+        let cmd = match keep_temporary_cmd {
+            Some(ref materialized) => materialized,
+            None => cmd,
+        };
+
         let expanded = self.expand_command_words(cmd)?;
         if let Some(code) = self.current_shell_substitution_exit.take() {
             // A `${ ...; exit N; }` body aborts the enclosing (sub)shell with
@@ -291,6 +305,58 @@ impl Executor {
         let (materialized_cmd, process_substitution_files) =
             self.command_with_process_substitution_files(&cmd)?;
         self.execute_materialized_command(&materialized_cmd, process_substitution_files)
+    }
+
+    /// `set -k` harvest, mirroring GNU subst.c:12479-12535. The parser only
+    /// recognises assignment words while the command still has no words
+    /// (token_actions.rs, matching GNU's leading-run `subst_assign_varlist`),
+    /// so every trailing `name=value` word sits in `cmd.words`. Under
+    /// `set -k` each of them is moved to the end of the assignment list and
+    /// dropped from the word list; the caller then sees either an
+    /// assignment-only command (all assignments become permanent) or a command
+    /// whose arguments no longer contain the assignments (they become the
+    /// temporary environment, GNU execute_cmd.c tempenv path).
+    fn command_with_keep_temporary_assignments(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<CommandNode> {
+        if !crate::builtins::set::shell_option_enabled(&self.env_vars, "keyword") {
+            return None;
+        }
+
+        let mut harvested: Vec<(String, String)> = Vec::new();
+        let mut indexes: Vec<usize> = Vec::new();
+        for (index, word) in cmd.words.iter().enumerate() {
+            let Some((name, value)) = split_assignment_word(word) else {
+                continue;
+            };
+            // `name=(...)` keeps its own storage path (compound_assignments)
+            // and GNU rejects it in this position as a syntax error, so it is
+            // never harvested.
+            if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                continue;
+            }
+            harvested.push((name.to_string(), value.to_string()));
+            indexes.push(index);
+        }
+        if harvested.is_empty() {
+            return None;
+        }
+
+        let mut materialized = cmd.clone();
+        for index in indexes.into_iter().rev() {
+            if index < materialized.words.len() {
+                materialized.words.remove(index);
+            }
+            if index < materialized.word_metadata.len() {
+                materialized.word_metadata.remove(index);
+            }
+            if index < materialized.word_kinds.len() {
+                materialized.word_kinds.remove(index);
+            }
+        }
+        materialized.assignments.extend(harvested);
+        Some(materialized)
     }
 }
 

@@ -177,6 +177,62 @@ kills WSL-side test runs, and inflated PASS claims from wrong baselines.
   ship a partial change that flips a couple of lines while claiming the family
   is done.
 
+
+## WinuxCmd / Winuxsh Tooling Issues
+
+WinuxCmd (`D:/repo/unixwin-winuxcmd`, C++ toolchain providing GNU-compatible
+external commands: `sed`, `cp`, `grep`, `awk`, `ls`, ...) and Winuxsh
+(`D:/repo/unixwin-winuxsh`, the Rust shell shim that is `$0` in these sessions)
+are **separate projects from rubash**. A suite diff whose cause is one of their
+binaries is not a rubash bug and must not be fixed by patching rubash.
+
+**Required handling when a diff is traced to a WinuxCmd binary:**
+
+1. File an issue at `https://github.com/unixwin/WinuxCmd/issues` with
+   reproduction steps, expected vs actual output, and the exact binary/version
+   (e.g. WinuxCmd 1.0.3).
+2. Apply the repository's real labels (check `gh label list --repo
+   unixwin/WinuxCmd` — do not invent new ones):
+   - `compat-gap` — 与 GNU 行为不一致，已复现待修. Use when the difference is
+     reproduced byte-for-byte and is fixable on Windows (e.g. `sed` brace
+     syntax). Pair with `bug`.
+   - `compat-candidate` — 疑似兼容差距，待差分验证. Use only while the
+     difference is suspected but not yet byte-verified.
+   - `noise-platform` — 平台特定噪声. Use when the difference cannot be
+     fixed without Linux interop, so it is noise rather than a gap.
+   - `wording` / `compat-wording` — same semantics, different message text.
+3. Link back to the rubash artifacts in the issue body so the fix can be
+   verified: `target/issue-suites/results/true-baseline/<suite>/diff.txt`
+   (raw artifacts) and the classifying probe.
+4. **Do not count these lines in the rubash compatibility ledger.** Report
+   suite numbers split into rubash-caused vs WinuxCmd-caused, and say which
+   issue number covers the environment-bound lines.
+
+**Verified examples (WSL GNU Bash 5.3.0 as sole baseline, single
+`scripts/true-baseline.sh` harness):**
+
+- `posixexp`: 169 diff lines — 145 from WinuxCmd `sed` rejecting brace `{ }
+  scripts (`trim_od()` in `posixexp5.sub`), 1 from WinuxCmd `cp` printing the
+  source path on success. **23 lines are true rubash gaps.**
+- `globstar`: 101 diff lines — **root cause ESTABLISHED, it is WinuxCmd
+  `ls`, not rubash.** `globstar.tests` line 41 is `ls lib/**`. In a rebuilt
+  fixture both shells produce a byte-identical 17-word expansion
+  (`echo lib/**` → same list, same order, same 4 directories), so rubash
+  globstar is correct. The difference is `ls` argument grouping: GNU
+  coreutils 9.4 sorts ALL non-directory args before directory args
+  (`compare_qsort` uses S_ISDIR as the primary key) and prints the `dir:`
+  header blocks after, while WinuxCmd `ls.exe` 1.0.3 groups each directory
+  with its own contents inline — which both drops the flat up-front file
+  list and duplicates every file (once relative inside its dir block, once
+  as the full glob path). A lane agent first called this "dirs-first
+  ordering", which is wrong: plain `ls` sort order is identical on both.
+  Fix target: `compare_qsort` files-before-dirs grouping.
+
+**Do not use the niubash/winuxsh tool shell for measurement.** It mangles
+glob expansion, `printf` glob args, inline `awk`/`sed` one-liners, and
+command-substitution pipelines containing `od`/`tr`/`wc`. Write the probe to
+an LF-terminated `.sh` file and run it with `wsl bash <file>` on the GNU side.
+
 ## Compatibility Push Handoff (2026-09-02)
 
 - Current high-value globstar evidence: `target/multi-gnu.out`,

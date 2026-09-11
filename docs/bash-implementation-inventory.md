@@ -1,3 +1,6 @@
+> **ARCHIVED** — This document is historical. Current compatibility status is in
+> [`COMPATIBILITY-STATUS.md`](COMPATIBILITY-STATUS.md). Last current: 2026-08-14.
+
 # Bash Implementation Inventory
 
 The durable semantic classification is in `docs/semantic-ownership.tsv` and
