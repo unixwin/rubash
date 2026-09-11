@@ -70,7 +70,9 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
                 output.push(c);
             }
             Some('u') => {
-                if let Some(value) = read_ansi_c_digits(&mut chars, 16, 4) {
+                // GNU strtrans.c ansicstr requires exactly 4 hex digits
+                // for \uNNNN; a short run is a literal backslash.
+                if let Some(value) = read_exact_ansi_c_digits(&mut chars, 16, 4) {
                     push_ansi_c_codepoint(&mut output, value);
                 } else {
                     output.push('\\');
@@ -78,7 +80,7 @@ pub(super) fn decode_ansi_c_quoted(value: &str) -> String {
                 }
             }
             Some('U') => {
-                if let Some(value) = read_ansi_c_digits(&mut chars, 16, 8) {
+                if let Some(value) = read_exact_ansi_c_digits(&mut chars, 16, 8) {
                     push_ansi_c_codepoint(&mut output, value);
                 } else {
                     output.push('\\');
@@ -131,6 +133,31 @@ where
     } else {
         u32::from_str_radix(&value, radix).ok()
     }
+}
+
+/// Read exactly `count` hex digits. GNU strtrans.c ansicstr requires
+/// exactly 4 digits for `\uNNNN` and exactly 8 for `\UNNNNNNNN`; a
+/// short run is a literal backslash, not a Unicode escape.
+fn read_exact_ansi_c_digits<I>(
+    chars: &mut std::iter::Peekable<I>,
+    radix: u32,
+    count: usize,
+) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = String::new();
+    for _ in 0..count {
+        let Some(next) = chars.peek().copied() else {
+            return None;
+        };
+        if next.to_digit(radix).is_none() {
+            return None;
+        }
+        value.push(next);
+        chars.next();
+    }
+    u32::from_str_radix(&value, radix).ok()
 }
 
 fn push_ansi_c_codepoint(output: &mut String, value: u32) {

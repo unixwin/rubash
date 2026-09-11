@@ -15,8 +15,8 @@ where
         Some('v') => "\x0b".to_string(),
         Some('\\') => "\\".to_string(),
         Some('x') => format_escape_codepoint(read_escape_digits(chars, 16, 2), "\\x"),
-        Some('u') => format_escape_codepoint(read_escape_digits(chars, 16, 4), "\\u"),
-        Some('U') => format_escape_codepoint(read_escape_digits(chars, 16, 8), "\\U"),
+        Some('u') => format_escape_codepoint(read_exact_escape_digits(chars, 16, 4), "\\u"),
+        Some('U') => format_escape_codepoint(read_exact_escape_digits(chars, 16, 8), "\\U"),
         Some('0') => format_escape_byte(read_escape_digits(chars, 8, 3).or(Some(0)), ""),
         Some(octal @ '1'..='7') => {
             format_escape_byte(read_prefixed_escape_digits(chars, octal, 8, 3), "")
@@ -84,10 +84,10 @@ pub(super) fn expand_percent_b(value: &str) -> (String, bool) {
                 push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 2), "\\x")
             }
             Some('u') => {
-                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 4), "\\u")
+                push_escape_codepoint(&mut output, read_exact_escape_digits(&mut chars, 16, 4), "\\u")
             }
             Some('U') => {
-                push_escape_codepoint(&mut output, read_escape_digits(&mut chars, 16, 8), "\\U")
+                push_escape_codepoint(&mut output, read_exact_escape_digits(&mut chars, 16, 8), "\\U")
             }
             Some('0') => {
                 let value = read_escape_digits(&mut chars, 8, 3).or(Some(0));
@@ -151,6 +151,28 @@ where
     } else {
         u32::from_str_radix(&value, radix).ok()
     }
+}
+
+/// Read exactly `count` digits in the given radix. Returns `None` if
+/// fewer than `count` digits are available. GNU printf.def requires
+/// exactly 4 hex digits for `\u` and exactly 8 for `\U`; a short run
+/// is a literal backslash, not a Unicode escape.
+fn read_exact_escape_digits<I>(chars: &mut std::iter::Peekable<I>, radix: u32, count: usize) -> Option<u32>
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = String::new();
+    for _ in 0..count {
+        let Some(ch) = chars.peek().copied() else {
+            return None;
+        };
+        if ch.to_digit(radix).is_none() {
+            return None;
+        }
+        value.push(ch);
+        chars.next();
+    }
+    u32::from_str_radix(&value, radix).ok()
 }
 
 fn push_escape_codepoint(output: &mut String, value: Option<u32>, fallback: &str) {
