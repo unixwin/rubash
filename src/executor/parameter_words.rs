@@ -9,7 +9,7 @@ impl Executor {
         let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
             &self.expand_embedded_parameters(word),
         ));
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.home_value(), false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
     }
 
     // Alternate word of the `-`/`+`/`:-`/`:+` operators. GNU expands the
@@ -22,14 +22,14 @@ impl Executor {
     // and their own whitespace stays protected (more-exp ${B:-"$A"}).
     pub(in crate::executor) fn expand_alternate_parameter_word(&mut self, word: &str) -> String {
         let expanded = self.expand_embedded_parameters_alternate_mut(word);
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.home_value(), false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
     }
 
     pub(in crate::executor) fn expand_parameter_word_mut(&mut self, word: &str) -> String {
         let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
             &self.expand_embedded_parameters_mut(word),
         ));
-        tilde_expand::expand_assignment_tilde_value(&expanded, &self.home_value(), false)
+        tilde_expand::expand_assignment_tilde_value(&expanded, &self.env_vars, false)
     }
 
     pub(in crate::executor) fn expand_quoted_parameter_word(&self, word: &str) -> String {
@@ -209,7 +209,7 @@ impl Executor {
         if word.starts_with('"') || word.starts_with('\'') || word.starts_with('\\') {
             return word.to_string();
         }
-        tilde_expand::expand_assignment_tilde_value(word, &self.home_value(), false)
+        tilde_expand::expand_assignment_tilde_value(word, &self.env_vars, false)
     }
 
     pub(in crate::executor) fn expand_quoted_parameter_word_mut(

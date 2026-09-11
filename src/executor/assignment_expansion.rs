@@ -141,7 +141,7 @@ impl Executor {
         }
         format!(
             "{prefix}{}",
-            tilde_expand::expand_assignment_tilde_value(element, &self.home_value(), true)
+            tilde_expand::expand_assignment_tilde_value(element, &self.env_vars, true)
         )
     }
 

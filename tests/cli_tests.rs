@@ -3219,3 +3219,71 @@ fn assoc_key_list_star_assignment_rhs_joins_with_ifs_first_char() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c:a b]");
 }
+
+fn tilde_user_passwd_fixture_root(tag: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "rubash-cli-tilde-user-{tag}-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(root.join("etc")).expect("create fixture etc");
+    std::fs::write(
+        root.join("etc").join("passwd"),
+        "root:x:0:0:root:/root:/bin/bash\nniu:x:1000:1000::/c/Users/niu-home:/bin/rubash\n",
+    )
+    .expect("write fixture passwd");
+    root
+}
+
+#[test]
+fn tilde_user_expands_passwd_home_via_rubash_root() {
+    let root = tilde_user_passwd_fixture_root("word");
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("RUBASH_ROOT", &root)
+        .arg("-c")
+        .arg("echo ~niu; echo ~niu/docs; echo ~missinguser; echo ~missinguser/x")
+        .output()
+        .expect("run rubash");
+    let _ = std::fs::remove_dir_all(root);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/c/Users/niu-home\n/c/Users/niu-home/docs\n~missinguser\n~missinguser/x\n"
+    );
+}
+
+#[test]
+fn tilde_user_assignment_value_expands_and_missing_stays_literal() {
+    let root = tilde_user_passwd_fixture_root("assign");
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("RUBASH_ROOT", &root)
+        .arg("-c")
+        .arg("A=~niu/bin; B=bin:~niu/tools; C=~missing/x; echo \"$A|$B|$C\"")
+        .output()
+        .expect("run rubash");
+    let _ = std::fs::remove_dir_all(root);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/c/Users/niu-home/bin|bin:/c/Users/niu-home/tools|~missing/x\n"
+    );
+}
+
+#[test]
+fn tilde_user_colon_terminated_word_glues_verbatim() {
+    let root = tilde_user_passwd_fixture_root("colon");
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .env("RUBASH_ROOT", &root)
+        .arg("-c")
+        .arg("echo ~niu:sub; echo ~niu:~niu2")
+        .output()
+        .expect("run rubash");
+    let _ = std::fs::remove_dir_all(root);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "/c/Users/niu-home:sub\n/c/Users/niu-home:~niu2\n"
+    );
+}
