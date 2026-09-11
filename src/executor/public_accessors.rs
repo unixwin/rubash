@@ -86,6 +86,14 @@ impl Executor {
         crate::executor::builtin_names::builtin_names()
     }
 
+    /// Whether a compspec is registered for `command` (via the `complete`
+    /// builtin). Hosts use this as a cheap gate before calling
+    /// [`Executor::complete_line`], so they only pay for GNU-engine candidate
+    /// generation when a compspec actually applies.
+    pub fn has_compspec(&self, command: &str) -> bool {
+        self.completion_specs.get(command).is_some()
+    }
+
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
         self.external_file_builtins_enabled = enabled;
     }
