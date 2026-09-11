@@ -113,6 +113,59 @@ pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {
     false
 }
 
+/// True when every character of an assignment word's right-hand side lies
+/// inside single quotes (`x='...'`). GNU runs no expansion at all inside a
+/// single-quoted span (subst.c copies a single-quoted region verbatim), so
+/// such an RHS is literal data and must not be scanned for `$(...)` or
+/// backticks by the assignment expander — otherwise `x='$(date)'` stores the
+/// substitution output instead of the text `$(date)`.
+///
+/// Quote-aware tiling: `'a'$x`, `'a'"b"` and `'a'\'b'` are *not* fully single
+/// quoted, because a character (or escape) sits outside the single-quoted
+/// spans and would be expanded by GNU.
+pub(super) fn assignment_rhs_is_fully_single_quoted(raw: &str) -> bool {
+    let Some((_, rhs)) = raw.split_once('=') else {
+        return false;
+    };
+    let mut in_single = false;
+    let mut saw_span = false;
+    for ch in rhs.chars() {
+        if ch == '\'' {
+            in_single = !in_single;
+            saw_span = true;
+            continue;
+        }
+        if !in_single {
+            return false;
+        }
+    }
+    saw_span && !in_single
+}
+
+/// Rewrite a wholly single-quoted assignment RHS into protected literal data:
+/// drop the quote delimiters and carry `$`/backtick as the walker's literal
+/// markers (\x1f / \x1a), which the parameter-expansion and storage layers
+/// restore on the way out. The `name=` prefix is copied verbatim.
+pub(super) fn protect_fully_single_quoted_assignment(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = raw.chars();
+    for ch in chars.by_ref() {
+        out.push(ch);
+        if ch == '=' {
+            break;
+        }
+    }
+    for ch in chars {
+        match ch {
+            '\'' => {}
+            '$' => out.push('\x1f'),
+            '`' => out.push('\x1a'),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub(super) fn mark_quoted_assignment_value(raw: &str, value: &str) -> String {
     let Some((name, rhs)) = value.split_once('=') else {
         return value.to_string();

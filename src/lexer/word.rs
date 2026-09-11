@@ -1,6 +1,6 @@
 use super::classification::{
-    assignment_value_is_quoted, is_assignment, is_keyword, mark_quoted_assignment_value,
-    quoted_literal_tilde,
+    assignment_rhs_is_fully_single_quoted, assignment_value_is_quoted, is_assignment, is_keyword,
+    mark_quoted_assignment_value, protect_fully_single_quoted_assignment, quoted_literal_tilde,
 };
 use super::quotes::{remove_shell_quotes_outside_backticks, remove_shell_quotes_with_posix};
 use super::scanner::Lexer;
@@ -18,7 +18,14 @@ impl<'a> Lexer<'a> {
         // that merely contain `=` and `$(` (e.g. `echo "B: $(printf 'v=[%s]'
         // "$(printf 'mid')")"`) must still go through quote removal, otherwise
         // the trailing `"` leaks into the expanded argument.
-        let value = if is_assignment(&raw) && raw.contains("$(") {
+        let value = if is_assignment(&raw) && assignment_rhs_is_fully_single_quoted(&raw) {
+            // GNU subst.c never scans a single-quoted span: a wholly
+            // single-quoted RHS is literal data, so `x='$(date)'` stores the
+            // text `$(date)` and `x='$(date)'` must not reach the expander's
+            // `$(`/backtick fast paths. Strip the quoting here and mark the
+            // dollars/backticks as literal (restored on the way out).
+            protect_fully_single_quoted_assignment(&raw)
+        } else if is_assignment(&raw) && raw.contains("$(") {
             // TODO(parse.y/subst.c): Preserve quotes inside `$()` while
             // assignment-word quote removal is still token-local.
             raw.to_string()
