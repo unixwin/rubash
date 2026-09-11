@@ -166,11 +166,20 @@ fn decode_ansic_escapes(value: &str) -> String {
 }
 
 fn quote_ansi_c(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\'', "\\'")
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\"),
+            '\n' => out.push_str("\n"),
+            '\r' => out.push_str("\r"),
+            '\'' => out.push_str("\'"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\{:03o}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub(super) fn quote_double(value: &str) -> String {
