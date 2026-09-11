@@ -711,7 +711,7 @@ posixpat, precedence, printf, rsh, strip, tilde, tilde2, **trap**
 **Medium（51–100 行）— 9 套件**
 
 alias(70), arith(51), exp(58), intl(77), new-exp(63), nquote(59),
-quotearray(65), redir(58), varenv(96)
+quotearray(65), redir(58), varenv(86)
 
 **Small（11–50 行）— 22 套件**
 
@@ -737,6 +737,7 @@ set-e(8), set-x(7), vredir(2)
 - **dbg-support 635→0**：AND-列表双触发、source-scope trap 继承、非行首 `{` 回归
 - **complete 115→0**：多操作数 compspec 注册
 - **func 58→0**：posix funcname 规则、AST printer、special-builtin 优先级
+- **varenv 96→86**：`set -k`（GNU subst.c:12494-12535 / flags.c place_keywords_in_env）补齐——尾随 `name=value` 词在词展开前收入赋值列表；argv 清空时全部永久生效。varenv.tests 是唯一用 `set -k` 的套件，故无跨套件回归（builtins 仍 0 差）。余 86 行中 9 行为 `global1:` 一族，根因是 Windows 进程环境大小写不敏感：`export a` 与 `export A` 经 `env::set_var` 互相覆盖，子进程只看到一个名字
 
 
 ## 十一、locale 单字节模式接线（2026-09-11）
