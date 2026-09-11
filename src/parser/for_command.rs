@@ -23,8 +23,20 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
     let variable = variable_token.value.clone();
     if !matches!(
         tokens.get(start + 1)?.kind,
-        TokenKind::Word | TokenKind::Variable
+        TokenKind::Word | TokenKind::Variable | TokenKind::Keyword
     ) {
+        return None;
+    }
+    // `for` loop variable may be a reserved word used as a name
+    // (`for for in for; do ...`); reject only `in`/`do`/`done` that would
+    // be ambiguous with the loop syntax. This mirrors GNU parse.y which
+    // accepts any WORD as loop variable.
+    if tokens.get(start + 1)?.kind == TokenKind::Keyword
+        && matches!(
+            tokens.get(start + 1)?.value.as_str(),
+            "do" | "done" | "in"
+        )
+    {
         return None;
     }
     let mut i = skip_newline_list(tokens, start + 2);
@@ -231,10 +243,9 @@ fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
 }
 
 fn skip_newline_list(tokens: &[Token], mut index: usize) -> usize {
-    while tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::Semicolon)
-    {
+    while tokens.get(index).is_some_and(|token| {
+        token.kind == TokenKind::Semicolon && token.line_break
+    }) {
         index += 1;
     }
     index

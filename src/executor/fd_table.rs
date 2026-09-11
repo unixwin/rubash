@@ -118,15 +118,28 @@ impl FdTable {
     pub(crate) fn allocate_dynamic(&mut self) -> u32 {
         // Bash's F_DUPFD requests the lowest available descriptor at or above
         // SHELL_FD_BASE. Closed dynamic entries are reusable immediately.
-        let fd = (10..1024)
-            .find(|fd| {
-                self.entries
-                    .get(fd)
-                    .map_or(true, |entry| !Self::occupied(entry))
-            })
-            .unwrap_or(10);
+        self.allocate_dynamic_with_limit(None).unwrap_or(10)
+    }
+
+    pub(crate) fn allocate_dynamic_with_limit(&mut self, limit: Option<u32>) -> Option<u32> {
+        let upper = limit.map(|value| value as usize).unwrap_or(1024);
+        // GNU fcntl F_DUPFD with SHELL_FD_BASE=10 fails with EINVAL when the
+        // requested base is beyond RLIMIT_NOFILE (redir.c fcntl(...10) path).
+        // Mirror that by treating no fd >=10 and <limit as allocation failure
+        // (vredir6.sub: ulimit -n 6 then exec {v}</dev/null leaves v unset).
+        let fd = (10..1024).find(|fd| {
+            if limit.is_some_and(|lim| *fd >= lim) {
+                return false;
+            }
+            if (*fd as usize) >= upper {
+                return false;
+            }
+            self.entries
+                .get(fd)
+                .map_or(true, |entry| !Self::occupied(entry))
+        })?;
         self.next_dynamic_fd = fd.saturating_add(1).max(10);
-        fd
+        Some(fd)
     }
 
     pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {

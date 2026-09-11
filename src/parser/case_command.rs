@@ -185,12 +185,6 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
         let body_start = i;
         i = case_body_end(tokens, i);
-        if case_body_has_newline_for_header(tokens, body_start, i) {
-            // parse.y treats a newline after the `for` variable differently
-            // while parsing a case clause. Preserve the distinction instead
-            // of accepting the clause as a complete command list.
-            return None;
-        }
         let body = parse(&tokens[body_start..i]).commands;
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator_metadata =
@@ -238,43 +232,7 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
     Some(finish_compound_command(command, tokens, i + 1))
 }
 
-fn case_body_has_newline_for_header(tokens: &[Token], start: usize, end: usize) -> bool {
-    let mut index = start;
-    while index + 2 < end {
-        if is_keyword(tokens, index, "for")
-            && command_boundary_keyword_allowed(tokens, index)
-            && matches!(
-                tokens[index + 1].kind,
-                TokenKind::Word | TokenKind::Variable
-            )
-            && tokens[index + 2].kind == TokenKind::Semicolon
-            && tokens[index + 2].line_break
-        {
-            return true;
-        }
-        index += 1;
-    }
-    false
-}
-
-pub(super) fn case_parse_error_message(tokens: &[Token], start: usize) -> &'static str {
-    let mut index = start;
-    while index + 2 < tokens.len() {
-        if is_keyword(tokens, index, "for")
-            && matches!(
-                tokens[index + 1].kind,
-                TokenKind::Word | TokenKind::Variable
-            )
-            && tokens[index + 2].kind == TokenKind::Semicolon
-            && tokens[index + 2].line_break
-        {
-            return "unexpected token `do'";
-        }
-        if is_keyword(tokens, index, "esac") {
-            break;
-        }
-        index += 1;
-    }
+pub(super) fn case_parse_error_message(_tokens: &[Token], _start: usize) -> &'static str {
     "unexpected token `esac'"
 }
 

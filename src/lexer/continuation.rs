@@ -1,24 +1,153 @@
 use super::heredoc_scan::skip_heredoc_in_chars_with_closure;
 
 pub(super) fn ends_with_unquoted_backslash(input: &str) -> bool {
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    for ch in input.chars() {
-        if escaped {
-            escaped = false;
+    // GNU parse.y shell_getc remove_quoted_newline: backslash-newline is ignored
+    // unless the current delimiter is a single quote (qc == '\''). The dstack
+    // correctly nests quotes inside command substitutions: a single quote
+    // inside $(...) is quoted even when the substitution itself is inside
+    // double quotes (quote.tests: echo "$(echo 'foo\↵bar')" must keep the
+    // backslash). The old boolean single/double tracker treated '\'' as
+    // literal when double==true, so the trailing '\' inside that nested
+    // single was misclassified as unquoted and the logical line was joined
+    // with the backslash removed (foobar instead of foo\↵bar).
+    // Track a delimiter stack mirroring parse.y dstack for the cases that
+    // affect this probe: ' " ` and $(.
+    let chars: Vec<char> = input.chars().collect();
+    let mut stack: Vec<char> = Vec::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        let top = stack.last().copied();
+        if top == Some('\'') {
+            if ch == '\'' {
+                stack.pop();
+            }
+            i += 1;
             continue;
         }
-        match ch {
-            '\\' if !single => escaped = true,
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            _ => {}
+        if top == Some('"') {
+            if ch == '\\' {
+                // Inside double quotes a backslash escapes the next char
+                // (parse.y parse_matched_pair LEX_PASSNEXT). Consume both
+                // so a trailing '\' inside double is correctly seen as
+                // an escaped newline that should be removed.
+                if i + 1 < chars.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if ch == '"' {
+                stack.pop();
+                i += 1;
+                continue;
+            }
+            if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                stack.push('(');
+                i += 2;
+                continue;
+            }
+            if ch == '`' {
+                stack.push('`');
+                i += 1;
+                continue;
+            }
+            // Single quote inside double quotes is literal (POSIX).
+            i += 1;
+            continue;
         }
+        if top == Some('`') {
+            if ch == '\\' {
+                if i + 1 < chars.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if ch == '`' {
+                stack.pop();
+            }
+            i += 1;
+            continue;
+        }
+        if top == Some('(') {
+            // Inside command substitution quoting resets: ' " ` and nested $(
+            // are delimiters again (parse.y read_token_word / parse_matched_pair).
+            if ch == '\'' {
+                stack.push('\'');
+                i += 1;
+                continue;
+            }
+            if ch == '"' {
+                stack.push('"');
+                i += 1;
+                continue;
+            }
+            if ch == '`' {
+                stack.push('`');
+                i += 1;
+                continue;
+            }
+            if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                stack.push('(');
+                i += 2;
+                continue;
+            }
+            if ch == ')' {
+                stack.pop();
+                i += 1;
+                continue;
+            }
+            if ch == '\\' {
+                if i + 1 < chars.len() {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        // Top-level (no quote or other)
+        if ch == '\'' {
+            stack.push('\'');
+            i += 1;
+            continue;
+        }
+        if ch == '"' {
+            stack.push('"');
+            i += 1;
+            continue;
+        }
+        if ch == '`' {
+            stack.push('`');
+            i += 1;
+            continue;
+        }
+        if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+            stack.push('(');
+            i += 2;
+            continue;
+        }
+        if ch == '\\' {
+            if i + 1 < chars.len() {
+                i += 2;
+            } else {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
     }
 
+    if stack.last() == Some(&'\'') {
+        return false;
+    }
     let trailing_backslashes = input.chars().rev().take_while(|ch| *ch == '\\').count();
-    !single && trailing_backslashes % 2 == 1
+    trailing_backslashes % 2 == 1
 }
 
 pub(super) fn has_unclosed_quotes(input: &str) -> bool {
