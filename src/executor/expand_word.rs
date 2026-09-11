@@ -51,7 +51,7 @@ impl Executor {
             return self.expand_embedded_parameters(word);
         }
 
-        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {
+        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name, true) {
             return value;
         }
 

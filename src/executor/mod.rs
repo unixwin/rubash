@@ -452,6 +452,14 @@ pub struct Executor {
     /// failures must pierce function frames so the enclosing compound
     /// command can abandon itself entirely (GNU probe f4).
     pub(crate) inside_compound_condition: Cell<bool>,
+    /// True while a scalar assignment RHS is expanding: GNU param_expand
+    /// carries PF_ASSIGNRHS into `${!arr[@]}` so the unquoted `@` key list
+    /// takes the dollar_at path (elements quoted, space-joined, never
+    /// field-split) instead of the dollar_star IFS[0] join used for plain
+    /// command words (subst.c string_list_pos_params). Fresh Executor
+    /// instances (command substitution, subshells) start false, matching
+    /// GNU dropping PF_ASSIGNRHS across a nested substitution boundary.
+    pub(crate) inside_assignment_rhs: Cell<bool>,
     last_command_substitution_status: Cell<Option<i32>>,
     /// A current-shell (`${ ...; }` / `${| ...; }`) body that ran `exit N`
     /// aborts the enclosing (sub)shell with status N (GNU subst.c: the

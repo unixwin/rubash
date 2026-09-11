@@ -3148,3 +3148,74 @@ fn command_substitution_break_uses_subshell_loop_context() {
         2
     );
 }
+
+// GNU subst.c string_list_pos_params over arrayfunc.c array_keys: the
+// ${!arr[@]}/${!arr[*]} key list joins with IFS[0] when the word is an
+// unquoted command word (the joined string then field-splits normally),
+// takes the dollar_at space-join inside double quotes and on assignment
+// RHS (PF_ASSIGNRHS), and `*` always uses the IFS[0] join.
+#[test]
+fn assoc_key_list_at_unquoted_joins_with_ifs_first_char_then_splits() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; set -- ${!A[@]}; echo $#")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+}
+
+#[test]
+fn assoc_key_list_star_unquoted_joins_with_ifs_first_char_then_splits() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; set -- ${!A[*]}; echo $#")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2");
+}
+
+#[test]
+fn assoc_key_list_at_double_quoted_stays_space_joined() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; echo \"[${!A[@]}]\"")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c a b]");
+}
+
+#[test]
+fn assoc_key_list_star_double_quoted_joins_with_ifs_first_char() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; echo \"[${!A[*]}]\"")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c:a b]");
+}
+
+#[test]
+fn assoc_key_list_at_assignment_rhs_stays_space_joined() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; x=${!A[@]}; echo [$x]")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c a b]");
+}
+
+#[test]
+fn assoc_key_list_star_assignment_rhs_joins_with_ifs_first_char() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("IFS=:; declare -A A; A[c]=1; A[\"a b\"]=2; x=${!A[*]}; echo \"[$x]\"")
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "[c:a b]");
+}

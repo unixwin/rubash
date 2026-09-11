@@ -679,6 +679,7 @@ impl Executor {
             arithmetic_nounset_error: Cell::new(false),
             arithmetic_last_error_category: Cell::new(None),
             inside_compound_condition: Cell::new(false),
+            inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
             background_jobs: HashMap::new(),
             background_job_order: Vec::new(),

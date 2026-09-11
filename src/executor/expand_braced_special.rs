@@ -4,6 +4,7 @@ impl Executor {
     pub(in crate::executor) fn expand_braced_special_or_indirect_parameter(
         &self,
         name: &str,
+        unquoted: bool,
     ) -> Option<String> {
         match name {
             "#" => return Some(self.positional_params.len().to_string()),
@@ -74,6 +75,25 @@ impl Executor {
             .or_else(|| indirect_name.strip_suffix("[*]"))
         {
             let storage_name = self.resolved_variable_name(array_name);
+            // GNU subst.c string_list_pos_params over the key list from
+            // arrayfunc.c array_keys:
+            //   *  -> string_list_dollar_star, IFS[0] join (empty IFS joins
+            //         with the empty string) in EVERY context;
+            //   @  -> dollar_star IFS[0] join for unquoted command words
+            //         ("separated by the first character of $IFS for later
+            //         splitting"), but dollar_at (elements quoted,
+            //         space-joined, never split) inside double quotes /
+            //         here-docs and on assignment RHS (PF_ASSIGNRHS).
+            // The returned string then undergoes the caller's normal
+            // split/glob pass, which reproduces the GNU observable result.
+            let ifs_first = self.ifs_first_char_separator();
+            let separator = if indirect_name.ends_with("[*]") {
+                ifs_first
+            } else if !unquoted || self.inside_assignment_rhs.get() || ifs_first.is_empty() {
+                " ".to_string()
+            } else {
+                ifs_first
+            };
             return Some(
                 self.parameter_array_storage(array_name)
                     .map(|value| {
@@ -81,9 +101,9 @@ impl Executor {
                             .as_deref()
                             .is_some_and(|name| is_marked_var(&self.env_vars, ASSOC_VARS, name))
                         {
-                            assoc_keys(&value).join(" ")
+                            assoc_keys(&value).join(&separator)
                         } else {
-                            array_indices(&value).join(" ")
+                            array_indices(&value).join(&separator)
                         }
                     })
                     .unwrap_or_default(),

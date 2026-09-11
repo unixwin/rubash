@@ -71,6 +71,19 @@ impl Executor {
     /// internal DATA_DOUBLE_QUOTE marker across expansion and restore them on
     /// the way out (assignment_expansion hoist/restore contract).
     pub(in crate::executor) fn expand_assignment_value(&mut self, value: &str) -> String {
+        // GNU subst.c param_expand carries PF_ASSIGNRHS through the whole
+        // assignment value expansion (W_ASSIGNMENT words); key-list `@`
+        // expansions read this flag to pick the dollar_at join. Command
+        // substitution and subshells run on fresh Executor instances, so
+        // the flag does not leak past a substitution boundary, matching
+        // GNU dropping PF_ASSIGNRHS there.
+        let saved_assignment_rhs = self.inside_assignment_rhs.replace(true);
+        let expanded = self.expand_assignment_value_hoisting(value);
+        self.inside_assignment_rhs.set(saved_assignment_rhs);
+        expanded
+    }
+
+    fn expand_assignment_value_hoisting(&mut self, value: &str) -> String {
         // Only hoist when no command-substitution payload is present: quotes
         // inside a $()/backtick body are syntax for the nested parse, not data.
         if !value.contains('"')

@@ -191,7 +191,7 @@ impl Executor {
             return value;
         }
 
-        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {
+        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name, false) {
             return value;
         }
 
@@ -444,7 +444,10 @@ impl Executor {
             return value;
         }
 
-        if let Some(value) = self.expand_braced_special_or_indirect_parameter(name) {
+        if let Some(value) = self.expand_braced_special_or_indirect_parameter(
+            name,
+            matches!(context, SubstitutionQuoteContext::Unquoted),
+        ) {
             return value;
         }
 
