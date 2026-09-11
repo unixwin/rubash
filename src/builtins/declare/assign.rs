@@ -400,7 +400,16 @@ fn expand_compound_array_value(
     // Append the rest
     result.push_str(remaining);
     result.push(')');
+    
+    // Restore marker characters (array.tests:408 declare -a x=(\$0)
+    // stores \x1f0 literally without this restore).
     result
+        .replace('\x1f', "$")
+        .replace('\x1a', "`")
+        .replace('\x17', "'")
+        .replace('\x14', "\\")
+        .replace("\u{E002}", "'")
+        .replace("\u{E003}", "\"")
 }
 
 /// Expand `${var[@]}` or `${var[*]}` using the variables HashMap.
