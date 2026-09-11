@@ -118,6 +118,14 @@ impl FdTable {
     pub(crate) fn allocate_dynamic(&mut self) -> u32 {
         // Bash's F_DUPFD requests the lowest available descriptor at or above
         // SHELL_FD_BASE. Closed dynamic entries are reusable immediately.
+        //
+        // NOTE: this low-first policy is what GNU uses for `{v}` redirection
+        // allocation (`exec {a}</dev/null; exec {b}</dev/null` -> 10, 11, and
+        // after closing both the next `{c}` goes back to 10). Coproc does NOT
+        // use this path: GNU moves coproc pipe ends to the highest free fd
+        // below 64 (move_to_high_fd, maxfd 64) giving the stable `63 60` that
+        // coproc.tests golden output shows. Coproc's high-fd choice lives in
+        // compound_exec.rs so this general allocator stays low-first.
         self.allocate_dynamic_with_limit(None).unwrap_or(10)
     }
 

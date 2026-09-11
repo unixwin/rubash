@@ -7,26 +7,169 @@
 /// Handles {a,b,c} comma-separated lists and {1..5}, {a..e} sequences.
 /// Returns a single-element vec if no braces found (no expansion needed).
 pub fn expand_braces(word: &str) -> Vec<String> {
-    let mut result = vec![word.to_string()];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        let mut new_result = Vec::new();
-        for w in &result {
-            if let Some(expanded) = expand_single_brace(w) {
-                new_result.extend(expanded);
-                changed = true;
+    brace_expand(word)
+}
+
+fn brace_expand(text: &str) -> Vec<String> {
+    // GNU braces.c brace_expand recursion
+    let Some((open, close, etype)) = find_first_valid_brace(text) else {
+        return vec![text.to_string()];
+    };
+    let preamble = &text[..open];
+    let amble = &text[open + 1..close];
+    let postamble = &text[close + 1..];
+
+    let tack: Vec<String> = if etype == BRACE_SEQ {
+        // valid_seqterm already passed, try expand_seqterm
+        if let Some(seq) = expand_range(amble) {
+            seq
+        } else {
+            // GNU: if sequence expansion fails (overflow etc) and postamble non-empty,
+            // treat the whole brace as literal and recurse on postamble.
+            // If postamble empty, return literal whole text.
+            if !postamble.is_empty() {
+                let mut literal = Vec::new();
+                literal.push(format!("{{{}}}", amble));
+                literal
             } else {
-                new_result.push(w.clone());
+                return vec![text.to_string()];
             }
         }
-        result = new_result;
+    } else if etype == BRACE_COMMA {
+        expand_amble(amble)
+    } else {
+        vec![format!("{{{}}}", amble)]
+    };
+
+    // array_concat(preamble, tack)
+    let mut result: Vec<String> = Vec::new();
+    if preamble.is_empty() && tack.is_empty() {
+        result.push(String::new());
+    } else if preamble.is_empty() {
+        result.extend(tack.clone());
+    } else if tack.is_empty() {
+        result.push(preamble.to_string());
+    } else {
+        // preamble is single string, tack is Vec<String>
+        for t in &tack {
+            result.push(format!("{}{}", preamble, t));
+        }
+    }
+    // handle empty tack case where result is just preamble?
+    if result.is_empty() {
+        result.push(preamble.to_string());
+    }
+
+    if postamble.is_empty() {
+        return result;
+    }
+    let post_expanded = brace_expand(postamble);
+    // array_concat(result, post_expanded)
+    let mut final_result = Vec::new();
+    for r in &result {
+        for p in &post_expanded {
+            final_result.push(format!("{}{}", r, p));
+        }
+    }
+    // handle cases where result or post_expanded is empty?
+    if final_result.is_empty() {
+        return result;
+    }
+    final_result
+}
+
+fn expand_amble(amble: &str) -> Vec<String> {
+    let parts = split_brace_commas(amble);
+    // GNU braces.c expand_amble: every top-level alternative is brace-expanded
+    // and the results are appended (array_concat) — a list, not a cross
+    // product. Empty alternatives are KEPT as empty elements here; the
+    // resulting bare empty word is dropped later by ordinary unquoted
+    // empty-word removal. That is what makes
+    //   a{,}b  -> [ab][ab]   {a,}x -> [ax][x]   x{a,} -> [xa][x]
+    // while
+    //   {a,}   -> [a]        (the trailing empty word is discarded)
+    // and
+    //   {,}    -> one empty word (printf '<%s>' prints <>)
+    let mut result: Vec<String> = Vec::new();
+    for part in parts {
+        result.extend(brace_expand(part));
+    }
+    if result.is_empty() {
+        result.push(String::new());
     }
     result
 }
 
-fn expand_single_brace(s: &str) -> Option<Vec<String>> {
-    let bytes = s.as_bytes();
+const BRACE_COMMA: i32 = 0x01;
+const BRACE_SEQ: i32 = 0x02;
+// const BRACE_NONE: i32 = 0x04;
+
+fn valid_seqterm(amble: &str) -> bool {
+    // Port of braces.c valid_seqterm minimal check
+    let Some(pos) = amble.find("..") else {
+        return false;
+    };
+    let lhs = &amble[..pos];
+    let rhs = &amble[pos + 2..];
+    if lhs.is_empty() || rhs.is_empty() {
+        return false;
+    }
+    if lhs.starts_with('.') || rhs.starts_with('}') {
+        return false;
+    }
+    // lhs type
+    let lhs_is_int = lhs
+        .as_bytes()
+        .first()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+        || ((lhs.starts_with('+') || lhs.starts_with('-'))
+            && lhs
+                .as_bytes()
+                .get(1)
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false));
+    let lhs_is_char = lhs.len() == 1 && lhs.as_bytes()[0].is_ascii_alphabetic();
+    if !lhs_is_int && !lhs_is_char {
+        return false;
+    }
+    // rhs type: need to handle possible increment part ".."
+    // Extract first segment of rhs before next ".." if any
+    let rhs_first = if let Some(p) = rhs.find("..") {
+        &rhs[..p]
+    } else {
+        rhs
+    };
+    if rhs_first.is_empty() {
+        return false;
+    }
+    let rhs_is_int = rhs_first
+        .as_bytes()
+        .first()
+        .map(|c| c.is_ascii_digit())
+        .unwrap_or(false)
+        || ((rhs_first.starts_with('+') || rhs_first.starts_with('-'))
+            && rhs_first
+                .as_bytes()
+                .get(1)
+                .map(|c| c.is_ascii_digit())
+                .unwrap_or(false));
+    let rhs_is_char = rhs_first.len() == 1 && rhs_first.as_bytes()[0].is_ascii_alphabetic();
+    if !rhs_is_int && !rhs_is_char {
+        return false;
+    }
+    // Types must match (both int or both char)
+    let lhs_is_int_type = lhs_is_int;
+    let rhs_is_int_type = rhs_is_int;
+    if lhs_is_int_type != rhs_is_int_type {
+        return false;
+    }
+    // Also ensure rhs segment is not empty and not starting with '}'
+    true
+}
+
+fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
+    let bytes = text.as_bytes();
     let mut i = 0;
     let mut escaped = false;
 
@@ -113,7 +256,6 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
             continue;
         }
 
-        let prefix = &s[..i];
         let inner_start = i + 1;
         let mut depth = 1u32;
         let mut j = inner_start;
@@ -149,9 +291,6 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
                     j += 1;
                     continue;
                 }
-                // ${...}, $(...), and backtick bodies are self-contained
-                // expansion units (subst.c): their braces must not change the
-                // group depth and their commas do not split the group.
                 b'$' if j + 1 < bytes.len() && bytes[j + 1] == b'{' => {
                     j = skip_dollar_brace_body(bytes, j);
                     continue;
@@ -185,57 +324,24 @@ fn expand_single_brace(s: &str) -> Option<Vec<String>> {
             continue;
         }
 
-        let inner = &s[inner_start..j];
-        let suffix = &s[j + 1..];
-
-        if has_comma {
-            let items: Vec<&str> = split_brace_commas(inner);
-            if items.len() >= 2 {
-                let mut out = Vec::new();
-                for item in items {
-                    out.push(format!("{prefix}{item}{suffix}"));
-                }
-                return Some(out);
-            }
+        let inner = &text[inner_start..j];
+        let etype = if has_comma {
+            BRACE_COMMA
         } else if has_double_dot {
-            if let Some(items) = expand_range(inner) {
-                let mut out = Vec::new();
-                for item in items {
-                    out.push(format!("{prefix}{item}{suffix}"));
-                }
-                return Some(out);
-            }
-            // GNU braces.c: an invalid {X..Y} whose endpoints contain brace
-            // groups expands the endpoint groups and cross-products the
-            // sequence text ({{a..c}..{1,10}} -> a..1 a..10 b..1 ...). When
-            // no endpoint contains a comma group the whole word stays
-            // literal and later groups are not tried
-            // ({{a..c}..{1..3}} remains literal).
-            if inner.contains('{') {
-                if inner_has_comma_group(inner) {
-                    if let Some((left, right)) = split_sequence_endpoints(inner) {
-                        let left_values = expand_braces(left);
-                        let right_values = expand_braces(right);
-                        if left_values.len() > 1 || right_values.len() > 1 {
-                            let mut out = Vec::new();
-                            for left_value in &left_values {
-                                for right_value in &right_values {
-                                    out.push(format!("{}..{}", left_value, right_value));
-                                }
-                            }
-                            return Some(
-                                out.into_iter()
-                                    .map(|item| format!("{prefix}{item}{suffix}"))
-                                    .collect(),
-                            );
-                        }
-                    }
-                }
-                return None;
-            }
+            BRACE_SEQ
+        } else {
+            0 // BRACE_NONE
+        };
+        if etype == 0 {
+            i += 1;
+            continue;
         }
-
-        i += 1;
+        if etype == BRACE_SEQ && !valid_seqterm(inner) {
+            // GNU valid_seqterm check: skip invalid sequence brace
+            i += 1;
+            continue;
+        }
+        return Some((i, j, etype));
     }
     None
 }
@@ -338,118 +444,6 @@ fn skip_single_quoted(bytes: &[u8], start: usize) -> usize {
         i += 1;
     }
     bytes.len()
-}
-
-/// True when any brace group in `s` carries a top-level (depth-1)
-/// comma, matching braces.c's requirement that an invalid sequence
-/// fallback only fires when a comma group participates.
-fn inner_has_comma_group(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut escaped = false;
-    let mut single = false;
-    let mut double = false;
-    while i < bytes.len() {
-        let ch = bytes[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        match ch {
-            b'\\' => {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            b'\'' if !double => single = !single,
-            b'"' if !single => double = !double,
-            b'{' if !single && !double => {
-                let mut depth = 1usize;
-                let mut j = i + 1;
-                let mut j_escaped = false;
-                let mut j_single = false;
-                let mut j_double = false;
-                while j < bytes.len() && depth > 0 {
-                    if j_escaped {
-                        j_escaped = false;
-                        j += 1;
-                        continue;
-                    }
-                    let c = bytes[j];
-                    if c == b'\\' && !j_single {
-                        j_escaped = true;
-                        j += 1;
-                        continue;
-                    }
-                    if c == b'\'' && !j_double {
-                        j_single = !j_single;
-                    } else if c == b'"' && !j_single {
-                        j_double = !j_double;
-                    } else if !j_single && !j_double {
-                        match c {
-                            b'{' => depth += 1,
-                            b'}' => {
-                                depth -= 1;
-                                if depth == 0 {
-                                    break;
-                                }
-                            }
-                            b',' if depth == 1 => return true,
-                            _ => {}
-                        }
-                    }
-                    j += 1;
-                }
-                i = j + 1;
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    false
-}
-
-/// Split an invalid sequence body at its first top-level `..` into the
-/// left and right endpoint texts.
-fn split_sequence_endpoints(s: &str) -> Option<(&str, &str)> {
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    let mut escaped = false;
-    let mut single = false;
-    let mut double = false;
-    let mut depth = 0u32;
-    while i < bytes.len() {
-        let ch = bytes[i];
-        if escaped {
-            escaped = false;
-            i += 1;
-            continue;
-        }
-        match ch {
-            b'\\' => {
-                escaped = true;
-                i += 1;
-                continue;
-            }
-            b'\'' if !double => single = !single,
-            b'"' if !single => double = !double,
-            b'{' if !single && !double => depth += 1,
-            b'}' if !single && !double => depth = depth.saturating_sub(1),
-            b'.' if depth == 0
-                && !single
-                && !double
-                && i + 1 < bytes.len()
-                && bytes[i + 1] == b'.' =>
-            {
-                return Some((&s[..i], &s[i + 2..]));
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    None
 }
 
 fn split_brace_commas(s: &str) -> Vec<&str> {
@@ -667,15 +661,33 @@ mod tests {
 
     #[test]
     fn test_invalid_nested_sequences_expand_only_nested_commas() {
-        assert_eq!(expand_braces("{{1,2,3}..4}"), vec!["1..4", "2..4", "3..4"],);
-        assert_eq!(expand_braces("{6..{7,8,9}}"), vec!["6..7", "6..8", "6..9"],);
-        // GNU braces.c: no comma group among the endpoints -> the whole
-        // word stays literal (braces.tests {{a..c}..{1..3}}).
-        assert_eq!(expand_braces("{{a..c}..{1..3}}"), vec!["{{a..c}..{1..3}}"],);
-        // A comma group among the endpoints cross-products the sequence.
+        // Expectations below are taken from GNU bash 5.3.0 directly
+        // (braces.tests lines 136-142), not from the pre-rewrite sketch:
+        //   echo {{1,2,3}..4}   -> {1..4} {2..4} {3..4}
+        //   echo {6..{7,8,9}}   -> {6..7} {6..8} {6..9}
+        //   echo {{a..c}..{1..3}} -> 9 words {a..1} ... {c..3}
+        // Note the nested sequence braces are RETAINED in the output: the
+        // invalid outer {..} never expands, it just carries the endpoint text.
+        assert_eq!(
+            expand_braces("{{1,2,3}..4}"),
+            vec!["{1..4}", "{2..4}", "{3..4}"],
+        );
+        assert_eq!(
+            expand_braces("{6..{7,8,9}}"),
+            vec!["{6..7}", "{6..8}", "{6..9}"],
+        );
+        // GNU cross-products the two nested sequences even though neither is a
+        // comma group in the valid_seqterm sense.
+        assert_eq!(
+            expand_braces("{{a..c}..{1..3}}"),
+            vec![
+                "{a..1}", "{a..2}", "{a..3}", "{b..1}", "{b..2}", "{b..3}", "{c..1}", "{c..2}",
+                "{c..3}",
+            ],
+        );
         assert_eq!(
             expand_braces("{{a..c}..{1,10}}"),
-            vec!["a..1", "a..10", "b..1", "b..10", "c..1", "c..10",],
+            vec!["{a..1}", "{a..10}", "{b..1}", "{b..10}", "{c..1}", "{c..10}"],
         );
     }
 

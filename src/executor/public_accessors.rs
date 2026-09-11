@@ -577,7 +577,7 @@ impl Executor {
         "bash: ".to_string()
     }
 
-    pub(in crate::executor) fn diagnostic_prefix_for_line(&self, line: usize) -> String {
+    pub fn diagnostic_prefix_for_line(&self, line: usize) -> String {
         if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
             return format!("{script}: line {line}: ");
         }

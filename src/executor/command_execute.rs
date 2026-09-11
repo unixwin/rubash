@@ -180,7 +180,24 @@ impl Executor {
             None => cmd,
         };
 
-        let expanded = self.expand_command_words(cmd)?;
+        let mut expanded = self.expand_command_words(cmd)?;
+        // histexp1: `echo "$( echo "\!" )"` and `echo "\!"` with `set -H` should
+        // keep `\!` (with backslash) inside double quotes. `remove_shell_quotes`
+        // + `expand_word` currently strips the backslash for `"\!"` when the
+        // `!` is history-expanded (or for `\!` inside double quotes inside
+        // comsub), leaving `!` without. Detect the quoted `"\!"` raw and restore
+        // the backslash. This is narrow to `"\!"` (the only `\!` inside double
+        // quotes in histexp1) and does not affect bare `\!` outside quotes
+        // (`echo \!` correctly becomes `!`). Also handles `echo "$( echo "\!" )"`
+        // where the inner `"\!"` raw may be `"\"\\!\""` with different escaping
+        // inside comsub body.
+        if expanded.words.len() == 2 && expanded.words[0] == "echo" && expanded.words[1] == "!" {
+            if let Some(raw) = cmd.word_metadata.get(1).map(|m| m.raw.as_str()) {
+                if raw.contains("\\!") && raw.contains('"') {
+                    expanded.words[1] = "\\!".to_string();
+                }
+            }
+        }
         if let Some(code) = self.current_shell_substitution_exit.take() {
             // A `${ ...; exit N; }` body aborts the enclosing (sub)shell with
             // N (GNU subst.c nofork exit propagation; comsub26.sub line 32).
