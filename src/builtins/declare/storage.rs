@@ -91,7 +91,7 @@ impl Parenthesized for String {
 }
 
 pub(super) fn quote_declare_value(value: &str) -> String {
-    if value.contains(['\n', '\r', '\'']) {
+    if value.chars().any(|ch| ch.is_control()) {
         return format!("$'{}'", quote_ansi_c(value));
     }
     format!("\"{}\"", quote_double(value))

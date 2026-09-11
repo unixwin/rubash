@@ -114,6 +114,20 @@ impl Executor {
         let value = value
             .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
             .unwrap_or(value);
+        // A quoted value with no expansion syntax is already fully decoded
+        // (e.g. from $'...' ANSI-C quoting). It must not go through the
+        // general expansion walker, which restores C0 marker bytes
+        // (U+0014 to backslash, U+0011 to empty, U+0017 to quote) that
+        // collide with real data bytes produced by ANSI-C decoding. Only
+        // the private-use area quote markers placed by
+        // escape_decoded_ansi_c_quotes are restored here.
+        if quoted && !compound_assignment
+            && !value.contains('$') && !value.contains('`') && !value.contains("$(")
+        {
+            return value
+                .replace("\u{E002}", "'")
+                .replace("\u{E003}", "\"");
+        }
         // GNU subst.c:4357 expand_string_assignment (W_ASSIGNMENT,
         // subst.c:11432): unquoted element values of a compound assignment
         // undergo the assignment tilde pass on the RAW element text, before

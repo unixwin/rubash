@@ -508,6 +508,8 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
             .replace('\x1a', "`")
             .replace('\x17', "'")
             .replace('\x14', "\\")
+            .replace("\u{E002}", "'")
+            .replace("\u{E003}", "\"")
     }
 
     if value == "\\\"\\" {
