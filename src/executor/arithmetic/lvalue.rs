@@ -140,6 +140,12 @@ impl ConditionalArithParser<'_> {
                         .ok()?
                         .to_string();
                     self.pos += 1;
+                    // A pre-expanded key (the Executor-side
+                    // expand_subscript_string pass) is already the final
+                    // string: use it verbatim and never expand it again.
+                    if let Some(literal) = super::super::decode_arithmetic_assoc_key(&key) {
+                        return Some(literal);
+                    }
                     return Some(self.expand_assoc_subscript_key(&key));
                 }
                 b']' => {
@@ -157,7 +163,7 @@ impl ConditionalArithParser<'_> {
         // expand_subscript_string removes the quotes but runs no expansion
         // inside a single-quoted span, so `A['$var']` keys on the text `$var`
         // and `A['a b']` keys on `a b`.
-        if let Some(literal) = wholly_single_quoted_literal(key) {
+        if let Some(literal) = super::super::wholly_single_quoted_literal(key) {
             return literal;
         }
 
@@ -204,22 +210,4 @@ impl ConditionalArithParser<'_> {
         self.pos += op.len();
         Some(op)
     }
-}
-
-/// The concatenated contents of `text` when it is covered entirely by
-/// single-quoted spans (`'a b'`, `'a''b'`); `None` when any character sits
-/// outside a single-quoted span, in which case the subscript still has to be
-/// expanded.
-fn wholly_single_quoted_literal(text: &str) -> Option<String> {
-    let mut out = String::new();
-    let mut rest = text;
-    let mut saw_span = false;
-    while !rest.is_empty() {
-        let inner = rest.strip_prefix('\'')?;
-        let end = inner.find('\'')?;
-        out.push_str(&inner[..end]);
-        rest = &inner[end + 1..];
-        saw_span = true;
-    }
-    saw_span.then_some(out)
 }

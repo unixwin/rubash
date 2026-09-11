@@ -10,7 +10,7 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use super::Executor;
-use crate::executor::{is_marked_var, ASSOC_VARS};
+use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
 
 /// Categories surfaced by GNU Bash's arithmetic evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,11 +106,14 @@ impl Executor {
 
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
-        let expression = if self.has_associative_parameter_subscript(expression) {
-            normalize_arithmetic_quotes(expression)
-        } else {
-            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(expression))
-        };
+        // Associative subscripts are expanded first, in their own pass, and
+        // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
+        // so the ordinary expansion below cannot expand them a second time and
+        // the parser stores the key verbatim.
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
+        let expression = normalize_arithmetic_quotes(
+            &self.expand_arithmetic_expression_mut(&with_assoc_keys),
+        );
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -167,8 +170,10 @@ impl Executor {
     /// context (`for (( ... ))` headers) keeps them and rejects them.
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
         self.arithmetic_last_error_category.set(None);
-        let expression =
-            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(expression));
+        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression);
+        let expression = normalize_arithmetic_quotes(
+            &self.expand_arithmetic_expression_mut(&with_assoc_keys),
+        );
         if crate::builtins::set::shell_option_enabled(&self.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.env_vars) {
                 self.arithmetic_nounset_error.set(true);
@@ -247,43 +252,87 @@ impl Executor {
         Err(crate::executor::ExecuteError::ExpansionFailure(1))
     }
 
-    fn has_associative_parameter_subscript(&self, expression: &str) -> bool {
+    /// GNU subst.c expand_subscript_string: an associative-array subscript is
+    /// word-expanded exactly once — parameter, command, arithmetic and tilde
+    /// expansion plus quote removal, with no field splitting, no pathname
+    /// expansion and no process substitution — and the result is used
+    /// verbatim as the key, never re-expanded.
+    ///
+    /// expr.c reaches it through `array_variable_part` -> `array_value_internal`
+    /// (`arrayfunc.c:1596`, `akey = expand_subscript_string (t, 0)`) for every
+    /// form that names the element: `(( A[sub] ))`, `(( A[sub] = v ))`,
+    /// `(( A[sub]++ ))`, `$(( A[sub] ))` and `(( x = A[sub] ))`.
+    ///
+    /// Rubash's arithmetic parser never sees an `Executor` (it works on
+    /// `env_vars` alone), so the expansion happens here, before evaluation:
+    /// each subscript is replaced by [`ARITH_ASSOC_KEY_MARKER`] followed by a
+    /// hex encoding of the expanded key. The parser reads it back untouched
+    /// (`lvalue::parse_assoc_subscript`), which is what keeps
+    /// `A['$v']` → `$v` and `k='$w'; A[$k]` → `$w` from expanding twice.
+    fn expand_arithmetic_assoc_subscripts(&mut self, expression: &str) -> String {
         let bytes = expression.as_bytes();
-        let mut index = 0;
+        let mut output = String::with_capacity(expression.len());
+        let mut index = 0usize;
         while index < bytes.len() {
-            if !(bytes[index].is_ascii_alphabetic() || bytes[index] == 95) {
-                index += 1;
+            let ch = bytes[index];
+            if !(ch.is_ascii_alphabetic() || ch == b'_') {
+                // A substitution yields a value, not an arithmetic lvalue, so
+                // anything inside it (`${A[sub]}` — where the braced-parameter
+                // expander already runs expand_subscript_string once — or
+                // `$(...)`) is left to the ordinary expansion below. Without
+                // this the key of `${A[sub]}` was replaced by its own marker
+                // and the lookup missed (assoc16.sub `$(( ${A[$(echo
+                // Darwin)]} ))`).
+                let is_substitution = ch == b'`'
+                    || (ch == b'$' && matches!(bytes.get(index + 1), Some(&b'(') | Some(&b'{')));
+                if is_substitution {
+                    let end = assoc_skip_substitution(bytes, index);
+                    output.push_str(&expression[index..end]);
+                    index = end;
+                    continue;
+                }
+                let next = expression[index..].chars().next().unwrap_or_default();
+                output.push(next);
+                index += next.len_utf8();
                 continue;
             }
             let start = index;
             index += 1;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == 95)
+            while index < bytes.len() && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
             {
                 index += 1;
             }
+            let name = &expression[start..index];
             if index < bytes.len()
-                && bytes[index] == 91
-                && is_marked_var(&self.env_vars, ASSOC_VARS, &expression[start..index])
+                && bytes[index] == b'['
+                && is_marked_var(&self.env_vars, ASSOC_VARS, name)
             {
-                if expression[index..].contains("[$") {
-                    return true;
-                }
-                // A single-quoted subscript is literal data: the ordinary
-                // expansion path would treat the quotes as ordinary
-                // characters and expand `$` inside them, but GNU keeps a
-                // single-quoted subscript verbatim (`assoc['$var']` keys on
-                // `$var`). Route those through the assoc-subscript parser too.
                 let end = assoc_subscript_end(bytes, index);
-                let subscript = expression
-                    .get(index + 1..end.saturating_sub(1))
-                    .unwrap_or("");
-                if subscript.trim_start().starts_with('\'') {
-                    return true;
+                if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
+                    let raw = &expression[index + 1..end - 1];
+                    let key = self.expand_assoc_subscript_once(raw);
+                    output.push_str(name);
+                    output.push('[');
+                    output.push_str(&encode_arithmetic_assoc_key(&key));
+                    output.push(']');
+                    index = end;
+                    continue;
                 }
             }
+            output.push_str(name);
         }
-        false
+        output
+    }
+
+    /// One `expand_subscript_string` pass over a raw subscript. A wholly
+    /// single-quoted subscript is literal data — nothing expands inside a
+    /// single-quoted span, which is why `A['$v']` keys on `$v` — and anything
+    /// else goes through the ordinary word expansion, which stops at one round.
+    fn expand_assoc_subscript_once(&mut self, raw: &str) -> String {
+        if let Some(literal) = wholly_single_quoted_literal(raw) {
+            return literal;
+        }
+        self.expand_word_mut_with_context(raw, SubstitutionQuoteContext::Unquoted)
     }
 
     pub(super) fn expand_arithmetic_special_parameters(&self, expression: &str) -> String {
@@ -418,6 +467,19 @@ pub(super) fn arithmetic_unbound_variable(
         {
             name.push(chars.next().expect("peeked arithmetic identifier"));
         }
+        // An associative-array subscript is a string key, not an arithmetic
+        // operand: GNU expr.c never routes it through expr_streval, so any
+        // name inside it is data and must not be reported as unbound
+        // (`set -u; declare -A A; (( A[k] ))` is fine, and a key like `x1`
+        // is not a variable). An *indexed* subscript is evaluated
+        // arithmetically, so its identifier is a real read and keeps the
+        // check (`set -u; echo $(( I[j] ))` reports `j`).
+        if chars.peek() == Some(&'[') && is_marked_var(env_vars, ASSOC_VARS, &name) {
+            chars.next();
+            skip_subscript_chars(&mut chars);
+            previous = Some(']');
+            continue;
+        }
         // An identifier that is the left-hand side of an assignment
         // (`i=0`, `i+=1`, `x = 2`) is a write target, not a value read.
         // GNU expr.c only routes *reads* through expr_streval, so `set -u;
@@ -447,6 +509,38 @@ pub(super) fn arithmetic_unbound_variable(
     // Returning a synthesized error here used to make `set -u; a=0;
     // echo $((a))` fail with rc=127 (issue #67).
     None
+}
+
+/// Consume the rest of an array subscript whose opening `[` was just read,
+/// tracking nested brackets, quotes and escapes so a `]` inside a quoted or
+/// nested key does not end it early.
+fn skip_subscript_chars(chars: &mut std::iter::Peekable<std::str::Chars>) {
+    let mut depth = 1usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for next in chars.by_ref() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if next == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        match next {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '[' if !single && !double => depth += 1,
+            ']' if !single && !double => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Returns true when the identifier just scanned is immediately followed by
@@ -541,15 +635,31 @@ fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
     let mut index = open;
     while index < bytes.len() {
         let ch = bytes[index];
-        index += 1;
         if escaped {
             escaped = false;
+            index += 1;
             continue;
         }
         if ch == b'\\' && !single {
             escaped = true;
+            index += 1;
             continue;
         }
+        if !single && !double {
+            // A `]` inside a substitution is data, not the subscript close:
+            // GNU's parser skips `$(...)`, `$((...))`, `${...}` and backticks
+            // as units when it looks for the matching bracket, so
+            // `A[$(echo a]b)]` keys on `a]b`.
+            if ch == b'$' && matches!(bytes.get(index + 1), Some(&b'(') | Some(&b'{')) {
+                index = assoc_skip_substitution(bytes, index);
+                continue;
+            }
+            if ch == b'`' {
+                index = assoc_skip_substitution(bytes, index);
+                continue;
+            }
+        }
+        index += 1;
         match ch {
             b'\'' if !double => single = !single,
             b'"' if !single => double = !double,
@@ -564,6 +674,110 @@ fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
         }
     }
     index
+}
+
+/// Skip the shell substitution starting at `start` (`bytes[start] == b'$'` for
+/// `$(`, `$((`, `${`, or a backtick) and return the index just past it. An
+/// unterminated substitution runs to the end of the input so a missing close
+/// can never make a stray `]` look like the subscript delimiter.
+fn assoc_skip_substitution(bytes: &[u8], start: usize) -> usize {
+    let opener = bytes[start];
+    let (open, close) = if opener == b'`' {
+        (b'`', b'`')
+    } else {
+        match bytes.get(start + 1) {
+            Some(b'(') => (b'(', b')'),
+            Some(b'{') => (b'{', b'}'),
+            _ => return start + 1,
+        }
+    };
+    let mut index = if opener == b'`' { start } else { start + 1 };
+    let mut depth = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        index += 1;
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == b'\\' && !single {
+            escaped = true;
+            continue;
+        }
+        match ch {
+            b'\'' if !double => single = !single,
+            b'"' if !single => double = !double,
+            _ if single || double => {}
+            _ if ch == open => depth += 1,
+            _ if ch == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => {}
+        }
+    }
+    index
+}
+
+/// Marker that introduces a pre-expanded associative-array subscript key in an
+/// arithmetic expression (see `Executor::expand_arithmetic_assoc_subscripts`).
+/// Control byte 0x1e: the parameter-expansion walker and the arithmetic parser
+/// both pass it through unchanged, and it cannot appear in ordinary shell
+/// source, so a subscript that starts with it is unambiguously a pre-expanded
+/// key rather than user text.
+pub(super) const ARITH_ASSOC_KEY_MARKER: char = '\u{1e}';
+
+/// Encode an expanded associative-subscript key so the arithmetic parser can
+/// read it back verbatim. Hex digits keep the payload free of `$`, quotes,
+/// backslashes and `]`, which would otherwise be re-interpreted.
+pub(super) fn encode_arithmetic_assoc_key(key: &str) -> String {
+    let mut encoded = String::with_capacity(1 + key.len() * 2);
+    encoded.push(ARITH_ASSOC_KEY_MARKER);
+    for byte in key.as_bytes() {
+        encoded.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        encoded.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+    }
+    encoded
+}
+
+/// Decode a subscript produced by [`encode_arithmetic_assoc_key`]; `None` when
+/// `text` is ordinary user-written subscript text.
+pub(super) fn decode_arithmetic_assoc_key(text: &str) -> Option<String> {
+    let hex = text.strip_prefix(ARITH_ASSOC_KEY_MARKER)?;
+    let digits = hex.as_bytes();
+    if digits.len() % 2 != 0 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 2);
+    for pair in digits.chunks(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        bytes.push((hi * 16 + lo) as u8);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The concatenated contents of `text` when it is covered entirely by
+/// single-quoted spans (`'a b'`, `'a''b'`); `None` when any character sits
+/// outside a single-quoted span, in which case the subscript still has to be
+/// expanded.
+pub(super) fn wholly_single_quoted_literal(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = text;
+    let mut saw_span = false;
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('\'')?;
+        let end = inner.find('\'')?;
+        out.push_str(&inner[..end]);
+        rest = &inner[end + 1..];
+        saw_span = true;
+    }
+    saw_span.then_some(out)
 }
 
 /// A single quote in `expression` that is not part of an associative-array
