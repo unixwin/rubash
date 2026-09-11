@@ -378,8 +378,8 @@ impl Executor {
         names: &[String],
         line: &str,
         raw: bool,
-    ) {
-        self.assign_read_scalar_names_with_field_count(names, line, raw, names.len());
+    ) -> bool {
+        self.assign_read_scalar_names_with_field_count(names, line, raw, names.len())
     }
 
     pub(in crate::executor) fn assign_read_scalar_names_with_field_count(
@@ -388,15 +388,14 @@ impl Executor {
         line: &str,
         raw: bool,
         field_count: usize,
-    ) {
+    ) -> bool {
         if names.len() == 1 && field_count == 0 {
             let value = if raw {
                 line.to_string()
             } else {
                 unescape_read_backslashes(line)
             };
-            self.apply_shell_assignment(&names[0], value);
-            return;
+            return self.apply_shell_assignment(&names[0], value);
         }
 
         let ifs = self
@@ -413,9 +412,17 @@ impl Executor {
         // names to the empty string even when the line has fewer fields;
         // apply_shell_assignment keeps nameref/readonly/array semantics and
         // the same variable store as regular assignments.
+        // GNU variables.c: bind_read_variable stops on readonly failure and
+        // does not bind subsequent names (read.tests: `readonly b; read a b c`
+        // leaves `c` unset, stat >1).  Propagate failure and stop the loop.
+        let mut ok = true;
         for (index, name) in names.iter().enumerate() {
             let value = fields.get(index).cloned().unwrap_or_default();
-            self.apply_shell_assignment(name, value);
+            if !self.apply_shell_assignment(name, value) {
+                ok = false;
+                break;
+            }
         }
+        ok
     }
 }
