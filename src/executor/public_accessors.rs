@@ -43,6 +43,49 @@ impl Executor {
         self.history_provider = Some(provider);
     }
 
+    /// Host completion hook. Given the in-progress command `line` and the
+    /// `cursor` position, return completion candidates for the word under the
+    /// cursor, honoring the compspec registered for the command (if any) and
+    /// falling back to command completion (first word) or file completion.
+    ///
+    /// Candidate generation reuses the same GNU programmable-completion engine
+    /// as the `compgen` builtin (see
+    /// `crate::builtins::complete::complete_line_candidates`). The host (niubash)
+    /// wires this into its reedline completer so the completion *engine* lives in
+    /// rubash while the *UI* stays in the host — the same split as
+    /// `HistoryProvider` keeps storage on the host.
+    ///
+    /// Dynamic compspec actions `-C` (external command) and `-F` (shell function
+    /// filling `COMPREPLY`) are resolved by the executor and merged here in a
+    /// follow-up; the static-action engine already covers file/path/command/
+    /// wordlist completion.
+    pub fn complete_line(&self, line: &str, cursor: usize) -> Vec<String> {
+        let function_names: Vec<String> = self.functions.keys().cloned().collect();
+        let job_names: Vec<String> = self
+            .job_table
+            .jobs
+            .values()
+            .filter(|job| job.background)
+            .map(|job| job.command.clone())
+            .collect();
+        crate::builtins::complete::complete_line_candidates(
+            line,
+            cursor,
+            &self.completion_specs,
+            &self.env_vars,
+            &self.aliases,
+            &function_names,
+            &job_names,
+        )
+    }
+
+    /// The canonical list of shell builtin command names (mirrors
+    /// `BUILTIN_NAMES`). Host completion uses this instead of hardcoding the
+    /// list, so the two never drift apart when builtins are added or removed.
+    pub fn builtin_command_names() -> &'static [&'static str] {
+        crate::executor::builtin_names::builtin_names()
+    }
+
     pub fn set_external_file_builtins_enabled(&mut self, enabled: bool) {
         self.external_file_builtins_enabled = enabled;
     }
