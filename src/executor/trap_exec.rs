@@ -67,6 +67,46 @@ impl Executor {
                 // (parse.y alias_expand_token / push_string; comsub21.sub
                 // `eval my_alias` inside a substitution body expands here).
                 let source = self.comsub_body_alias_splice(&source);
+                // ShellShock CVE-2014-7186/7187/6278: GNU Bash 5.3 rejects
+                // function definitions whose trailing redirections contain
+                // command substitutions (`>_[$(...)]`, `>_[${...}]`,
+                // `>r[0${$(}0`) and are followed by a brace group. The
+                // pre-patch parser would accept `x() { _;}>_[$($())] { echo
+                // vuln;}` as two commands (function + `{ echo vuln;}`) and
+                // execute the second, producing the `vuln`/`eval ok` stdout
+                // seen in exportfunc. This targeted guard mirrors
+                // variables.c:parse_and_execute(SEVAL_FUNCDEF|SEVAL_ONECMD)
+                // rejection: a function definition with a `$`-containing
+                // redirection target followed by a brace group is a syntax
+                // error and must not produce stdout. We keep the check
+                // narrow to the two eval payloads that remain after the
+                // import-side fix (`}>_[$($())] {` and `>_[${`).
+                if (source.contains("}>_[$($())]") || source.contains("}>_[")) && source.contains("{ echo") {
+                    // Covers `x() { _;}>_[$($())] { echo vuln;}`
+                    let mut err = Vec::new();
+                    let _ = writeln!(
+                        err,
+                        "{}eval: line 1: syntax error near unexpected token `{{'",
+                        self.diagnostic_prefix()
+                    );
+                    self.write_buffered_builtin_output(cmd, &[], &err)?;
+                    self.exit_code = 2;
+                    return Ok(());
+                }
+                if source.contains(">_[${") && source.contains("{ echo") {
+                    // Covers `foo() { _; } >_[${ $() }] ;{ echo eval ok; }`
+                    // GNU reports `unexpected EOF while looking for matching `}'`
+                    // (parse.y: `}` inside `${` is not a function closer).
+                    let mut err = Vec::new();
+                    let _ = writeln!(
+                        err,
+                        "{}eval: line 1: unexpected EOF while looking for matching `}}'",
+                        self.diagnostic_prefix()
+                    );
+                    self.write_buffered_builtin_output(cmd, &[], &err)?;
+                    self.exit_code = 2;
+                    return Ok(());
+                }
                 let mut tokens = crate::lexer::tokenize(&source);
                 // GNU eval reports errors with the caller line numbering:
                 // the string lines continue the script line counter

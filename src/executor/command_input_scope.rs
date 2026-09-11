@@ -207,6 +207,17 @@ impl Executor {
         if quoted {
             return body.to_string();
         }
+        // comsub-eof6: `read foo <<EOF` with body `$(seq 10` (missing `)`)
+        // must not expand to `1`; GNU reports `command substitution:
+        // unexpected EOF while looking for matching `)'` and leaves foo empty.
+        // Detect unclosed `$(` in the raw body before expansion.
+        if crate::lexer::has_unclosed_command_substitution(body) {
+            eprintln!(
+                "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
+                self.diagnostic_prefix()
+            );
+            return String::new();
+        }
         let prepared = prepare_unquoted_heredoc_expansion(body);
         self.expand_embedded_parameters_mut_with_context(
             &prepared,
@@ -231,6 +242,13 @@ impl Executor {
         let body = strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body));
         if quoted {
             return body.to_string();
+        }
+        if crate::lexer::has_unclosed_command_substitution(body) {
+            eprintln!(
+                "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
+                self.diagnostic_prefix()
+            );
+            return String::new();
         }
         let expanded =
             self.expand_embedded_parameters_for_heredoc(&prepare_unquoted_heredoc_expansion(body));

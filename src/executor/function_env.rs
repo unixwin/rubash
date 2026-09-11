@@ -56,34 +56,83 @@ pub(in crate::executor) fn parse_exported_function_body(
     value: &str,
 ) -> Option<(Vec<CommandNode>, Vec<crate::parser::Redirect>)> {
     let value = value.trim();
+    // GNU variables.c:initialize_shell_variables checks STREQN("() {", string, 4)
+    // – the definition must start with "() {" exactly (no "(){" without space
+    // is already covered by the trim_start check below, but the 4-char prefix
+    // enforces the required space). The rest of the validation mirrors
+    // parse_and_execute(SEVAL_FUNCDEF|SEVAL_ONECMD): only a single function
+    // definition with optional redirections is accepted; trailing `; cmd` or
+    // extra brace groups (ShellShock) must be rejected.
     let rest = value.strip_prefix("()")?.trim_start();
     if !rest.starts_with('{') {
         return None;
     }
-    // Split the closing brace of the definition from any trailing
-    // function-definition redirections (`} 1>&2`). GNU exportstr values are
-    // the printed definition, so the redirections come after the brace.
-    let (body_and_brace, def_redirects) = match rest.rfind('}') {
-        Some(close) if close + 1 == rest.len() => (rest, Vec::new()),
-        Some(close) => {
-            let trailing = rest[close + 1..].trim();
-            let tokens = crate::lexer::tokenize(&format!(": {trailing}"));
-            let parsed = crate::parser::parse(&tokens);
-            let redirects = parsed
-                .commands
-                .first()
-                .map(crate::parser::ast_print::collected_redirects)
-                .unwrap_or_default();
-            (&rest[..close + 1], redirects)
-        }
-        None => return None,
-    };
-    if !body_and_brace.ends_with('}') {
+    // Validate via the real parser: build a synthetic definition
+    // `__rubash_import_test () { ... }` and require exactly one command which
+    // is a function definition. This rejects trailing commands (`; echo BAD`),
+    // extra brace groups (`} { echo vuln;}`), and malformed redirections that
+    // the manual rfind('}') would otherwise swallow.
+    let dummy = "__rubash_import_test";
+    let synthetic = format!("{} {}", dummy, value);
+    let tokens = crate::lexer::tokenize(&synthetic);
+    let ast = crate::parser::parse(&tokens);
+    if ast.commands.len() != 1 {
         return None;
     }
-    let body = body_and_brace[1..body_and_brace.len() - 1].trim();
-    let tokens = crate::lexer::tokenize(body);
-    Some((crate::parser::parse(&tokens).commands, def_redirects))
+    let cmd = &ast.commands[0];
+    let func = cmd.function_command.as_ref()?;
+    if func.name != dummy {
+        return None;
+    }
+    // Ensure the synthetic string was consumed entirely: the parser must not
+    // have left extra tokens (e.g., `; echo BAD` would be a second command,
+    // already rejected by len !=1; a stray `}` would also produce a second
+    // command). Additionally, reject if the original value's trailing part
+    // after the function's `}` contains non-redirect words – the synthetic
+    // check already covers it, but we keep the explicit redirect extraction
+    // for the exportstr rendering path.
+    let def_redirects = crate::parser::ast_print::collected_redirects(cmd);
+    // Verify trailing part is only redirects/whitespace: re-slice original rest
+    // to ensure no `;` or extra command leaked through brace matching quirks
+    // (e.g., `>_[${...}] { echo vuln;}` where the `{` could be mis-identified
+    // as function body). The synthetic single-command guarantee already ensures
+    // this, but we add a lightweight lexical check for `;` after the final `}`
+    // to guard against future parser divergences.
+    if let Some(close) = rest.rfind('}') {
+        let trailing = rest[close + 1..].trim();
+        if !trailing.is_empty() {
+            // Valid trailing is only whitespace and redirections; a `;` or `&`
+            // indicates an extra command and must be rejected (CVE-2014-6271).
+            if trailing.contains(';') || trailing.contains('&') || trailing.contains('|') {
+                // However redirections themselves may contain `&` as in `2>&1`;
+                // parse trailing as `:` + trailing and check for extra commands.
+                let t_tokens = crate::lexer::tokenize(&format!(": {}", trailing));
+                let t_ast = crate::parser::parse(&t_tokens);
+                // A valid redirection list is a single `:` command with only
+                // redirects and no extra words/commands.
+                if t_ast.commands.len() != 1 {
+                    return None;
+                }
+                let first = &t_ast.commands[0];
+                // If the first command has words beyond `:`, it's not just
+                // redirects (e.g., `: ; echo BAD` has second command).
+                if first.words.len() > 1 {
+                    return None;
+                }
+                if t_ast.commands.len() != 1 || first.words.first().map(String::as_str) != Some(":") {
+                    return None;
+                }
+                // Check that all remaining tokens after `:` are redirects, not words.
+                // collected_redirects will be empty for `; echo` case, but the
+                // parse would have produced a second command which we already
+                // rejected via len check. So trailing with `;` is already
+                // rejected by the synthetic len check; this path is for
+                // `>file` vs `;` differentiation.
+            }
+        }
+    }
+    let body = func.body.clone();
+    Some((body, def_redirects))
 }
 
 pub(in crate::executor) fn exported_function_env_name(name: &str) -> String {
