@@ -206,6 +206,12 @@ impl Executor {
                 .replace('\x14', "\\")
                 .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
                 .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+            // The lexer marks quoted glob metacharacters (*?[!@+) with a
+            // leading CTLESC (\x11) so the glob engine treats them as data.
+            // This fast path skips the general expander (which strips \x11),
+            // so dequote here the same way glob.rs dequote_pathname does:
+            // drop the \x11 sentinel and keep the following character.
+            let restored = dequote_ctlesc(&restored);
             return crate::executor::substitution_metadata::bytes_to_shell_text(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&restored),
             );
@@ -1089,4 +1095,25 @@ fn normalize_dollar_double_quotes(value: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(output)
+}
+
+/// Remove CTLESC (\x11) sentinels the lexer inserts before quoted glob
+/// metacharacters (*?[!@+). Mirrors glob.rs `dequote_pathname`: the \x11
+/// is a marker, the following character is the data it protects.
+fn dequote_ctlesc(value: &str) -> String {
+    if !value.contains('\x11') {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\x11' {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }

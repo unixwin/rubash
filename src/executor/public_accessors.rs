@@ -611,8 +611,12 @@ impl Executor {
             .unwrap_or(0);
         let warning_line = start_line + body_lines;
         let delimiter = cmd.heredoc_delimiter.as_deref().unwrap_or("");
+        // GNU make_cmd.c:627 reports the heredoc start as the line where the
+        // body ends (the EOF/delimiter line), not the line where `<<EOF` was
+        // written. Match that by using warning_line for both the prefix and
+        // the "at line N" field.
         eprintln!(
-            "{}warning: here-document at line {start_line} delimited by end-of-file (wanted `{delimiter}')",
+            "{}warning: here-document at line {warning_line} delimited by end-of-file (wanted `{delimiter}')",
             self.diagnostic_prefix_for_line(warning_line)
         );
     }
