@@ -6,6 +6,7 @@ impl Executor {
         cmd: &CommandNode,
         process_substitution_files: ProcessSubstitutionFiles,
     ) -> Result<(), ExecuteError> {
+        let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_MATCMD);
         let standalone_assignments = cmd.words.is_empty() && !cmd.assignments.is_empty();
         let keep_temporary_assignments = self.keeps_temporary_assignments(cmd);
         if self.posix_function_declare_prefix_assignments_are_local(cmd) {

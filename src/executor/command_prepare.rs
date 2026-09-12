@@ -160,6 +160,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_EMPTY);
         if command_has_no_effect(cmd) {
             return Ok(());
         }
@@ -333,6 +334,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<CommandNode, ExecuteError> {
+        let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_EXPAND);
         let preserve_word_metadata = cmd.conditional_command.is_some()
             || cmd.words.first().is_some_and(|word| word == "[[")
             || !cmd.process_substitutions.is_empty()
