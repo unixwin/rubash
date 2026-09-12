@@ -16,16 +16,17 @@
 
 ## 一、总体结论
 
-- **83 套件 GNU 5.3.0 true-baseline 重跑（2026-09-11）：32 零差 / 51 有 DIFF / 总 diff 2072 行。**
-  `e5291002`（unicode1 `$'...'` 复合赋值元素值）后 intl 77 → 87，见
-  [§intl 87 行](#intl-87-行--locale-平台归属--unicode1-控制字节标记冲突2026-09-11)；
-  全 83 套件总数待重跑。
+- **83 套件 GNU 5.3.0 true-baseline 重跑（2026-09-12）：38 零差 / 45 有 DIFF / 总 diff 1985 行。**
+  ANSI-C `$'...'` 载体扩展修复（0x11/0x16 加入载体集 + `bytes_to_shell_text` 载体感知编码）后
+  多族大幅收敛：new-exp 241→65、more-exp 232→33、quote 172→10、posixexp 93→14、
+  procsub 33→11、history 127→119、assoc 242→217、array 246→239、braces 13→1、
+  posixexp2 14→2、errors 35→34、glob 50→48；净减 87 行。
 - 已完全修平的大族：builtins、complete、func、rsh、invocation、dbg-support、cprint、
   globstar（检查侧归因）、trap、appendop、attr、casemod、dynvar、extglob2/3、
   getopts、glob-bracket、herestr、ifs、invert、mapfile、nquote2/3/4/5、posixexp2、
   posixpat、precedence、printf、strip、tilde/tilde2。
-- 剩余主要缺口集中在 array(246)、assoc(242)、history(127)、nameref(105)、
-  globstar(101) 五大族，占总 diff 的 33%。
+- 剩余主要缺口集中在 array(239)、assoc(217)、history(127)、nameref(105)、
+  globstar(101) 五大族，占总 diff 的 34%。
 - 隔离场景下的 GNU Bash 语义——数组、关联数组、算术、条件、nameref、mapfile、
   POSIX 命令替换、花括号展开、信号表、trap、history -d、invocation 长选项——均已
   与 GNU Bash 5.3.0 一致。

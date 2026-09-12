@@ -101,6 +101,24 @@ fn push_escaped_text(output: &mut String, text: &str) {
     }
 }
 
+fn push_escaped_text_with_carriers(output: &mut String, text: &str) {
+    for ch in text.chars() {
+        let byte = ch as u32;
+        if byte < 0x80 && is_carrier_byte(byte) {
+            push_raw_byte_marker(output, byte as u8);
+        } else {
+            if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+                output.push(ch);
+            }
+            output.push(ch);
+        }
+    }
+}
+
+fn is_carrier_byte(byte: u32) -> bool {
+    matches!(byte, 0x0c | 0x11 | 0x13 | 0x14 | 0x16 | 0x17 | 0x1a | 0x1f)
+}
+
 pub(in crate::executor) struct SubstitutionOutput {
     pub(in crate::executor) bytes: Vec<u8>,
     pub(in crate::executor) status: i32,
@@ -352,12 +370,12 @@ pub(crate) fn bytes_to_shell_text(bytes: &[u8]) -> String {
     while !remaining.is_empty() {
         match std::str::from_utf8(remaining) {
             Ok(text) => {
-                push_escaped_text(&mut output, text);
+                push_escaped_text_with_carriers(&mut output, text);
                 break;
             }
             Err(error) => {
                 let valid = error.valid_up_to();
-                push_escaped_text(
+                push_escaped_text_with_carriers(
                     &mut output,
                     std::str::from_utf8(&remaining[..valid]).unwrap_or_default(),
                 );

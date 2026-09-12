@@ -9,7 +9,7 @@ fn is_assignment_carrier_byte(byte: u32) -> bool {
     // so they take the same owner-tagged carrier as the C0 quote bytes.
     // unicode1.sub [0x000c]=$'\f' and [0x0013]=$'\023' both collapsed to
     // empty elements without this.
-    matches!(byte, 0x0c | 0x13 | 0x14 | 0x17 | 0x1a | 0x1f)
+    matches!(byte, 0x0c | 0x11 | 0x13 | 0x14 | 0x16 | 0x17 | 0x1a | 0x1f)
 }
 
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {
