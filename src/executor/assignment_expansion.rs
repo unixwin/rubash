@@ -93,7 +93,7 @@ impl Executor {
         {
             return self.expand_assignment_value_inner(value);
         }
-        const DQ_DATA: &str = "\u{E001}";
+        const DQ_DATA: &str = "\u{E102}";
         let expanded =
             self.expand_assignment_value_inner(&hoist_data_double_quotes(value, DQ_DATA));
         expanded.replace(DQ_DATA, "\"")
@@ -122,7 +122,7 @@ impl Executor {
     }
 
     fn expand_compound_element_tilde(&self, token: &str) -> String {
-        const DQ_DATA: &str = "\u{E001}";
+        const DQ_DATA: &str = "\u{E102}";
         let (prefix, element) = if token.starts_with('[') {
             match token.find("]=") {
                 Some(offset) => (&token[..offset + 2], &token[offset + 2..]),
@@ -343,8 +343,8 @@ impl Executor {
             // removal into the stored value (`x=a\'b` stores `a'b`). Hoist the
             // markers out of the quote-removal pass so the data quotes they
             // become are not re-stripped as syntax, then restore them.
-            const DATA_SINGLE_QUOTE: &str = "\u{E000}";
-            const DATA_DOUBLE_QUOTE: &str = "\u{E001}";
+            const DATA_SINGLE_QUOTE: &str = "\u{E101}";
+            const DATA_DOUBLE_QUOTE: &str = "\u{E102}";
             let hoisted_value = value
                 .replace('\x17', DATA_SINGLE_QUOTE)
                 .replace('\x18', DATA_DOUBLE_QUOTE);
@@ -628,12 +628,12 @@ impl Executor {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
                     // pass delivers `"${a[@]}"` as
-                    // \u{E001}${a[@]}\u{E001} with no \x1d quoted-RHS
+                    // \u{E102}${a[@]}\u{E102} with no \x1d quoted-RHS
                     // marker; the [@] list must still fan out per element
                     // (array.tests: local v=("${foo[@]}") keeps 'b c' one
                     // element).
                     token
-                        .trim_matches('\u{E001}')
+                        .trim_matches('\u{E102}')
                         .strip_prefix("${")
                         .and_then(|token| token.strip_suffix("[@]}"))
                 })
@@ -681,8 +681,8 @@ impl Executor {
             } else if let Some((var_name, pattern, replacement, global)) = {
                 // The hoist pass carries the element's wrapping quotes as
                 // DQ_DATA markers; strip them before matching the patsub
-                // shape (`\u{E001}${a[@]/#/"q"}\u{E001}`).
-                let core = token.trim_matches('\u{E001}');
+                // shape (`\u{E102}${a[@]/#/"q"}\u{E102}`).
+                let core = token.trim_matches('\u{E102}');
                 core.strip_prefix("${")
                     .and_then(|token| token.strip_suffix('}'))
                     .and_then(parse_parameter_replacement)
@@ -959,11 +959,11 @@ impl Executor {
 
 /// Split a compound assignment body into element tokens, treating single
 /// quotes, double quotes and the hoisted DQ_DATA marker as quoting, so a
-/// quoted space (`("a b"` hoisted to `(\u{E001}a b\u{E001}`) stays inside its
+/// quoted space (`("a b"` hoisted to `(\u{E102}a b\u{E102}`) stays inside its
 /// token. Tokens keep every character verbatim; only unquoted whitespace
 /// separates elements.
 fn split_compound_element_words(value: &str) -> Vec<String> {
-    const DQ_DATA: char = '\u{E001}';
+    const DQ_DATA: char = '\u{E102}';
     let mut tokens = Vec::new();
     let mut token = String::new();
     let mut single = false;

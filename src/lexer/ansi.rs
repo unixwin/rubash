@@ -3,7 +3,13 @@
 /// with one of these values that came out of ANSI-C decoding is DATA, not a
 /// carrier, and must be tagged so the carrier restore cannot claim it.
 fn is_assignment_carrier_byte(byte: u32) -> bool {
-    matches!(byte, 0x14 | 0x17 | 0x1a | 0x1f)
+    // U+000C form feed and U+0013 are not quote carriers, but they are
+    // control bytes that StorageWordIter's is_ascii_whitespace splitter
+    // (0x0c) and PARAM_NAME_END_MARKER (0x13) would otherwise claim,
+    // so they take the same owner-tagged carrier as the C0 quote bytes.
+    // unicode1.sub [0x000c]=$'\f' and [0x0013]=$'\023' both collapsed to
+    // empty elements without this.
+    matches!(byte, 0x0c | 0x13 | 0x14 | 0x17 | 0x1a | 0x1f)
 }
 
 pub(crate) fn decode_ansi_c_quoted(value: &str) -> String {

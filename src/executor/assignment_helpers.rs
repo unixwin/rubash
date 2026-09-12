@@ -594,14 +594,35 @@ pub(in crate::executor) fn unquote_storage_value(value: &str) -> String {
         // A bare storage value still carries the ANSI-C quote markers: a
         // value that the lexer decoded from $'...' reaches this fallthrough
         // without quote delimiters of its own, so the PUA markers must come
-        // back as ' and ". The C0 carriers (U+0014/17/1A/1F) are
+        // back as ' and ". The C0 markers (U+0014/17/1A/1F) are
         // deliberately NOT restored here -- on this path they are
         // indistinguishable from genuine data bytes that ANSI-C decoding
         // produced ($'\027' is a real U+0017), and restoring them corrupted
         // those values. The quoted paths above keep the full
         // restore_quote_markers because there the C0 bytes are
         // unambiguously walker markers.
-        return value
+        let mut decoded = String::new();
+        let mut chars = value.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch as u32 == crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE {
+                if let Some(&next) = chars.peek() {
+                    if (crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST
+                        ..=crate::executor::substitution_metadata::RAW_BYTE_MARKER_LAST)
+                        .contains(&(next as u32))
+                    {
+                        chars.next();
+                        if let Some(byte) = char::from_u32(
+                            next as u32 - crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST,
+                        ) {
+                            decoded.push(byte);
+                            continue;
+                        }
+                    }
+                }
+            }
+            decoded.push(ch);
+        }
+        return decoded
             .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
             .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
     };
