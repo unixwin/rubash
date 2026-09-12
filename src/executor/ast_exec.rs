@@ -48,12 +48,16 @@ impl Executor {
         if let Some(original_dir) = original_dir {
             let _ = env::set_current_dir(original_dir);
         }
+        super::exec_profile::print_summary();
         result
     }
 
     pub(in crate::executor) fn execute_ast_inner(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
-        if self.try_upstream_scripts() {
-            return Ok(());
+        {
+            let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_UPSTREAM);
+            if self.try_upstream_scripts() {
+                return Ok(());
+            }
         }
 
         let mut index = 0;
@@ -62,11 +66,14 @@ impl Executor {
         let mut subshell_depth: Option<usize> = None;
         let mut subshell_stdin: Option<(String, String)> = None;
         while index < ast.commands.len() {
-            let protected_coprocs = self.coprocs_referenced_by_command(&ast.commands[index]);
-            self.refresh_background_jobs_with_protected_coprocs(&protected_coprocs)?;
-            self.run_pending_signal_traps()?;
-
             let command = &ast.commands[index];
+            {
+                let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_JOBS);
+                let protected_coprocs = self.coprocs_referenced_by_command(command);
+                self.refresh_background_jobs_with_protected_coprocs(&protected_coprocs)?;
+                self.run_pending_signal_traps()?;
+            }
+            let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
             self.set_current_line(command);
             if self.noexec_enabled() {
                 self.exit_code = 0;
@@ -691,6 +698,7 @@ impl Executor {
                 }
             }
 
+            drop(_t_chain);
             let execution_result = if command.inverted || command.and_or().is_some() {
                 self.with_errexit_suppressed(|executor| executor.execute_command(command))
             } else {

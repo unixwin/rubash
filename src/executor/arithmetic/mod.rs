@@ -12,6 +12,49 @@ use std::collections::HashMap;
 use super::Executor;
 use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
 
+thread_local! {
+    /// Variable writes performed by the arithmetic evaluator between the
+    /// start and end of one top-level evaluation: (name, value before the
+    /// first write). Replaces the former whole-env snapshot + O(n) diff,
+    /// which cloned the entire variable table on every `$(( ))` evaluation.
+    static ARITH_WRITES: std::cell::RefCell<Vec<(String, Option<String>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(super) fn record_arith_write(name: &str, old_value: Option<String>) {
+    ARITH_WRITES.with(|log| {
+        log.borrow_mut().push((name.to_string(), old_value));
+    });
+}
+
+fn take_arith_writes() -> Vec<(String, Option<String>)> {
+    ARITH_WRITES.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
+/// Sync shell_state with the variables the arithmetic evaluator wrote.
+/// Mirrors the former whole-map diff semantics: a name whose env_vars value
+/// equals its pre-evaluation value is left alone; a removed name is ignored
+/// (the diff loop only visited surviving keys).
+fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
+    for (name, old_value) in take_arith_writes() {
+        let new_value = executor.env_vars.get(&name);
+        let changed = match (&old_value, new_value) {
+            (Some(old), Some(new)) => old != new,
+            (None, Some(_)) => true,
+            (Some(_), None) | (None, None) => false,
+        };
+        if !changed {
+            continue;
+        }
+        let new_value = new_value.expect("changed implies present").clone();
+        if let Some(variable) = executor.shell_state.variables.get_mut(&name) {
+            variable.value = crate::shell::ShellValue::Scalar(new_value);
+        } else if !name.starts_with("__RUBASH_") {
+            let _ = executor.shell_state.variables.set_scalar(&name, &new_value);
+        }
+    }
+}
+
 /// Categories surfaced by GNU Bash's arithmetic evaluator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArithmeticErrorCategory {
@@ -136,7 +179,7 @@ impl Executor {
             return None;
         }
         // Save a snapshot of variable values before evaluation to detect changes.
-        let pre_eval_vars: HashMap<String, String> = self.env_vars.clone();
+        ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let (value, category) = eval_mutable_arith_value_with_random(
             &expression,
             &mut self.env_vars,
@@ -147,17 +190,7 @@ impl Executor {
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent variable expansions see the updated values.
-        for (name, new_value) in &self.env_vars {
-            if pre_eval_vars.get(name) != Some(new_value) {
-                // Variable was modified during arithmetic evaluation
-                if let Some(variable) = self.shell_state.variables.get_mut(name) {
-                    variable.value = crate::shell::ShellValue::Scalar(new_value.clone());
-                } else if !name.starts_with("__RUBASH_") {
-                    // Create a new entry in shell_state for non-internal variables
-                    let _ = self.shell_state.variables.set_scalar(name, new_value);
-                }
-            }
-        }
+        sync_arith_writes_to_shell_state(self);
 
         value
     }
@@ -186,7 +219,7 @@ impl Executor {
             return None;
         }
         // Save a snapshot to detect variable changes from arithmetic side effects
-        let pre_eval_vars: HashMap<String, String> = self.env_vars.clone();
+        ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let (value, category) = eval_mutable_arith_value_with_random(
             &expression,
             &mut self.env_vars,
@@ -198,15 +231,7 @@ impl Executor {
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent parameter expansions see arithmetic side effects
         // (e.g., ++i in array subscripts like a[++i]=value).
-        for (name, new_value) in &self.env_vars {
-            if pre_eval_vars.get(name) != Some(new_value) {
-                if let Some(variable) = self.shell_state.variables.get_mut(name) {
-                    variable.value = crate::shell::ShellValue::Scalar(new_value.clone());
-                } else if !name.starts_with("__RUBASH_") {
-                    let _ = self.shell_state.variables.set_scalar(name, new_value);
-                }
-            }
-        }
+        sync_arith_writes_to_shell_state(self);
 
         value
     }

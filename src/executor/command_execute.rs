@@ -3,27 +3,39 @@ use super::*;
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        use super::exec_profile::{ensure_init, PhaseTimer, P_COUNT, P_TOTAL};
+        ensure_init();
+        let _t_total = PhaseTimer::new(&P_TOTAL);
+        if super::exec_profile::P_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
+            P_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // Set the source line for every command, including commands inside a
         // DEBUG trap function. The trap action expands its call-site `$LINENO`
         // before entering that function, while the function body must see its
         // own source line (dbg-support2.tests).
-        if self.debug_trap_running && self.function_depth > 0 {
-            if let Some(line) = self.debug_trap_function_line {
-                self.env_vars
-                    .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+        {
+            let _t = PhaseTimer::new(&super::exec_profile::P_LINECMD);
+            if self.debug_trap_running && self.function_depth > 0 {
+                if let Some(line) = self.debug_trap_function_line {
+                    self.env_vars
+                        .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
+                } else {
+                    self.set_current_line(cmd);
+                }
             } else {
                 self.set_current_line(cmd);
             }
-        } else {
-            self.set_current_line(cmd);
+            self.set_current_command(cmd);
         }
-        self.set_current_command(cmd);
+        let _t_heredoc = PhaseTimer::new(&super::exec_profile::P_HEREDOC);
         self.report_command_heredoc_errors(cmd)?;
         if let Some((name, message, status)) = self.parameter_heredoc_expansion_error(cmd) {
             eprintln!("{}{}: {}", self.diagnostic_prefix(), name, message);
             self.exit_code = status;
             return Ok(());
         }
+        drop(_t_heredoc);
+        let _t_scans = PhaseTimer::new(&super::exec_profile::P_SCANS);
 
         if let Some(message) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_PAREN__") {
             // parse.y: an unclosed `name=(` compound assignment reports the
@@ -125,6 +137,8 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
+        drop(_t_scans);
+        let _t_dispatch = PhaseTimer::new(&super::exec_profile::P_DISPATCH);
         if let Some(result) = self.execute_initial_command_node(cmd) {
             // Compound commands run through execute_initial_command_node and
             // bypass the errexit check in execute_materialized_command. A

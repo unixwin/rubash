@@ -307,6 +307,7 @@ impl Executor {
                 self.run_debug_trap(&arithmetic.test)?;
             }
             if !arithmetic.test.trim().is_empty() {
+                let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_TEST);
                 match self.eval_arithmetic_command_value(&arithmetic.test) {
                     Some(0) => break,
                     Some(_) => {}
@@ -323,7 +324,9 @@ impl Executor {
 
             ran_body = true;
             self.loop_depth += 1;
+            let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_BODY);
             let result = self.execute_ast(&body_ast);
+            drop(_t);
             self.loop_depth -= 1;
             match result {
                 Ok(()) => {}
@@ -345,15 +348,17 @@ impl Executor {
                 restore_for_line(self);
                 self.run_debug_trap(&arithmetic.update)?;
             }
-            if !arithmetic.update.trim().is_empty()
-                && self
+            if !arithmetic.update.trim().is_empty() {
+                let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_FOR_UPDATE);
+                if self
                     .eval_arithmetic_command_value(&arithmetic.update)
                     .is_none()
-            {
-                self.report_arithmetic_error_raw_display(&arithmetic.update_metadata.expression);
-                self.exit_code = 1;
-                arithmetic_failed = true;
-                break;
+                {
+                    self.report_arithmetic_error_raw_display(&arithmetic.update_metadata.expression);
+                    self.exit_code = 1;
+                    arithmetic_failed = true;
+                    break;
+                }
             }
         }
 

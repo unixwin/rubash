@@ -227,7 +227,9 @@ impl ConditionalArithParser<'_> {
         if name == "SRANDOM" {
             return;
         }
+        let old_value = self.env_vars.get(name).cloned();
         self.env_vars.insert(name.to_string(), value.clone());
+        super::super::record_arith_write(name, old_value);
         set_process_env(name, value);
     }
 
@@ -254,7 +256,9 @@ impl ConditionalArithParser<'_> {
         };
         entries.insert(index, value.to_string());
         let value = format_indexed_array_storage(entries);
+        let old_value = self.env_vars.get(name).cloned();
         self.env_vars.insert(name.to_string(), value);
+        super::super::record_arith_write(name, old_value);
         mark_env_name(self.env_vars, ARRAY_VARS, name);
     }
 
@@ -270,8 +274,10 @@ impl ConditionalArithParser<'_> {
         } else {
             entries.push((key.to_string(), value));
         }
+        let old_value = self.env_vars.get(name).cloned();
         self.env_vars
             .insert(name.to_string(), format_assoc_storage(entries));
+        super::super::record_arith_write(name, old_value);
         mark_env_name(self.env_vars, ASSOC_VARS, name);
     }
 }
