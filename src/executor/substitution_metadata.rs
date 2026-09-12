@@ -504,6 +504,25 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         &mut inner_current_word_boundary,
                         &raw[cursor + 1..],
                     );
+                    // Heredoc bodies are literal data for substitution-span
+                    // matching: parse.y gather_here_documents reads the whole
+                    // body before the parser looks at the next token, so a `)`
+                    // inside the body must not close the substitution. Mirrors
+                    // lexer/skip.rs skip_heredoc_in_command_substitution and
+                    // parser skip_command_substitution_heredoc.
+                    if !inner_single
+                        && !inner_double
+                        && inner == '<'
+                        && chars.get(cursor + 1).is_some_and(|&(_, next)| next == '<')
+                        && chars.get(cursor + 2).is_none_or(|&(_, next)| next != '<')
+                    {
+                        if let Some(next_cursor) =
+                            skip_command_substitution_heredoc_body(&chars, cursor)
+                        {
+                            cursor = next_cursor;
+                            continue;
+                        }
+                    }
                     if inner == '\'' && !inner_double {
                         inner_single = !inner_single;
                     }
@@ -542,6 +561,75 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
         index += 1;
     }
     spans
+}
+
+/// Advance past a here-document that appears inside a command-substitution
+/// span. `cursor` is the character index of the first `<` of `<<`; returns
+/// the character index just past the closing delimiter line.
+///
+/// Returns `None` when the header cannot be resolved (no delimiter word), in
+/// which case the caller falls back to ordinary character-by-character
+/// scanning.
+fn skip_command_substitution_heredoc_body(chars: &[(usize, char)], cursor: usize) -> Option<usize> {
+    let mut header_end = cursor + 2;
+    while header_end < chars.len() && chars[header_end].1 != '\n' {
+        header_end += 1;
+    }
+    if header_end >= chars.len() {
+        return None;
+    }
+    let header: String = chars[cursor + 2..header_end]
+        .iter()
+        .map(|&(_, ch)| ch)
+        .collect();
+    let strip_tabs = header.trim_start().starts_with('-');
+    let trimmed = if strip_tabs {
+        header.trim_start_matches([' ', '\t', '-'])
+    } else {
+        header.trim_start()
+    };
+    let Some(raw_delimiter) = trimmed.split_whitespace().next() else {
+        return None;
+    };
+    let delimiter = raw_delimiter
+        .trim_matches(['\'', '"'])
+        .trim_start_matches('\\');
+    if delimiter.is_empty() {
+        return None;
+    }
+
+    let mut line_start = header_end + 1;
+    while line_start <= chars.len() {
+        let mut line_end = line_start;
+        while line_end < chars.len() && chars[line_end].1 != '\n' {
+            line_end += 1;
+        }
+        let line: String = chars[line_start..line_end]
+            .iter()
+            .map(|&(_, ch)| ch)
+            .collect();
+        let candidate = if strip_tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if candidate == delimiter {
+            return Some((line_end + (line_end < chars.len()) as usize).min(chars.len()));
+        }
+        // GNU make_cmd.c:602-611 (PST_EOFTOKEN): a body line that is the
+        // delimiter followed by `)` closes the heredoc and that `)` then
+        // closes the enclosing command substitution. Resume the span scan at
+        // the `)` so the caller's paren check closes the substitution there.
+        if candidate.strip_suffix(')') == Some(delimiter) {
+            let stripped = line.chars().count() - candidate.chars().count();
+            return Some((line_start + stripped + delimiter.chars().count()).min(chars.len()));
+        }
+        if line_end >= chars.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    Some(chars.len())
 }
 
 #[allow(dead_code)]
@@ -630,6 +718,31 @@ mod tests {
         let spans = scan_substitution_spans(r#"'$(literal)' $(outer $(inner))"#);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].context, SubstitutionQuoteContext::Unquoted);
+    }
+
+    #[test]
+    fn span_scanner_treats_heredoc_bodies_as_literal_data() {
+        // parse.y gather_here_documents reads the whole heredoc body before
+        // the parser looks at the next token, so a `)` inside the body must
+        // not close the command substitution (heredoc3.sub `this paren ) is
+        // not a problem`).
+        let raw = "$(cat <<EOF\nthis paren ) is not a problem\nEOF\n)";
+        let spans = scan_substitution_spans(raw);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(raw.get(spans[0].start..spans[0].end), Some(raw));
+    }
+
+    #[test]
+    fn span_scanner_resumes_at_paren_after_heredoc_delimiter() {
+        // GNU make_cmd.c:602-611 (PST_EOFTOKEN): `EOF)` closes the heredoc
+        // and the same `)` closes the substitution.
+        let raw = "$(cat <<EOF\nbody\nEOF)\nrest";
+        let spans = scan_substitution_spans(raw);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            raw.get(spans[0].start..spans[0].end),
+            Some("$(cat <<EOF\nbody\nEOF)")
+        );
     }
 
     #[test]

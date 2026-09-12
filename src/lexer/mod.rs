@@ -346,56 +346,6 @@ fn tokenize_with_heredocs(
                     }
                 }
 
-                // heredoc3.sub `this paren ) is not a problem` inside $(cat <<EOF) - handled via allow_closing_paren and in_comsub
-                // The truncated `this paren` case is a symptom of has_unclosed splitting at `)`; keep body verbatim when in_comsub
-                // For now, keep the body as is and let the next iteration handle ` ) is not a problem` as separate body line
-                // which will be skipped as it starts with ` )` and is not delimiter, but will be pushed as ` ) is not a problem\n`
-                // which is not ideal. The proper fix is in has_unclosed handling, tracked as TODO.
-                // Heredoc inside $(cat <<EOF) with `this paren ) is not a problem` was being split at `)`
-                // due to has_unclosed treating `)` as closing `$(\n` even though it's inside heredoc body.
-                // When in_comsub and allow_closing_paren, keep body verbatim even if line contains `)`.
-                // The truncated `this paren` case is handled by reconstructing.
-                if raw_line == "this paren" && in_comsub && delimiter.value == "EOF" {
-                    // Reconstruct full line that was split at `)` by has_unclosed logic
-                    // The full line is `this paren ) is not a problem` - next lines iterator will have ` ) is not a problem` as remainder
-                    // Instead, treat `this paren` as start and peek next line
-                    raw_line = "this paren ) is not a problem".to_string();
-                    comparable = raw_line.clone();
-                } else if raw_line == "quoted balanced parens \\"
-                    && in_comsub
-                    && delimiter.value == "EOF"
-                {
-                    raw_line = "quoted balanced parens \\( ) are not a problem either".to_string();
-                    comparable = raw_line.clone();
-                }
-                if raw_line.trim() == ") is not a problem" && in_comsub && delimiter.value == "EOF"
-                {
-                    continue;
-                }
-                if raw_line.trim() == ") are not a problem either"
-                    && in_comsub
-                    && delimiter.value == "EOF"
-                {
-                    continue;
-                }
-                if raw_line == " ) is not a problem" && in_comsub && delimiter.value == "EOF" {
-                    continue;
-                }
-                if raw_line == " ) are not a problem either"
-                    && in_comsub
-                    && delimiter.value == "EOF"
-                {
-                    continue;
-                }
-                // heredoc7: `cat <<EOF && grep $(` with ` foobar`/`EOF`/`echo notthereanywhere) *.c` inside grep's $( should not be cat's body/delimiter
-                if !in_comsub && delimiter.value == "EOF" && logical_line.contains("grep $(") {
-                    if raw_line == " foobar"
-                        || raw_line == "EOF"
-                        || raw_line.contains("notthereanywhere")
-                    {
-                        continue;
-                    }
-                }
                 if comparable == delimiter.value
                     || (delimiter.allow_closing_paren
                         && comparable
