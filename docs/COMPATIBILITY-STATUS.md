@@ -17,6 +17,9 @@
 ## 一、总体结论
 
 - **83 套件 GNU 5.3.0 true-baseline 重跑（2026-09-11）：32 零差 / 51 有 DIFF / 总 diff 2072 行。**
+  `e5291002`（unicode1 `$'...'` 复合赋值元素值）后 intl 77 → 87，见
+  [§intl 87 行](#intl-87-行--locale-平台归属--unicode1-控制字节标记冲突2026-09-11)；
+  全 83 套件总数待重跑。
 - 已完全修平的大族：builtins、complete、func、rsh、invocation、dbg-support、cprint、
   globstar（检查侧归因）、trap、appendop、attr、casemod、dynvar、extglob2/3、
   getopts、glob-bracket、herestr、ifs、invert、mapfile、nquote2/3/4/5、posixexp2、
@@ -801,3 +804,33 @@ GNU bash 的字符语义由 `setlocale()` + `MB_CUR_MAX` 决定：UTF-8 locale �
 产物：`target/issue-suites/results/locale-c-probe/`（GNU/rubash 双侧 + diff）、
 `target/issue-suites/results/intl-now-baseline/intl/`；探针脚本
 `target/locale-c-probe.sh`。
+
+### intl 87 行 = locale 平台归属 + unicode1 控制字节标记冲突（2026-09-11）
+
+`e5291002 fix(expand): decode $'...' spans inside embedded assignments` 修好了
+`unicode1.sub` 的根因：`A=([k]=$'\001')` 这类复合赋值元素值此前被字面存成
+`$'\001`（丢尾引号、不解码），因为 `expand_embedded_parameters_ordered_mut`
+的 `$` 分支没有 `'` 臂——`$` 落到 `Some(other)` 只推 `$`+`'`，随后那个尾引号
+被当成单引号跨度的开头，把整行剩余吞进"引用体"。
+
+修好后 7 例探针（`target/ansifull-probe.sh`，含 `[k]=$'...'`、多元素、`\x`/`\u`
+转义、空白值）与 GNU 5.3.0 逐字节一致。`C_UTF_8` 表从"塌成 1 个元素"
+变成能解析 20+ 项。
+
+intl 计数 77 → 87 是**输出形状变粗**，不是语义回退：三个缺 locale 的子测试
+（fr_FR.ISO8859-1 / zh_TW.BIG5 / jp_JP.SHIFT_JIS，WSL glibc 归档里都没有）
+现在把各自的失败项逐条打印，行数变多。`LC_ALL=C` 下仍 0 差。
+
+**unicode1 剩余差 = 控制字节与 rubash 内部标记冲突**，不是本次改动的缺口：
+
+- `A=([1]=$'\f' [2]=x)` → `[1]=""`（GNU `=\$'\f'`）：`\x0c` 被
+  `expand_braced_replacement.rs` 的 `PATSUB_QUOTED_VALUE_END` 占用。
+- `$'\023'`（0x13）被 `PARAM_NAME_END_MARKER`（`quotes.rs:10`）占用。
+- 0x14 / 0x17 / 0x1a / 0x1f 已有 `encode_raw_byte_marker` 承载方案
+  （`ansi.rs` `is_assignment_carrier_byte`），但 0x0c / 0x13 没有。
+- `C=([1]=\  [2]=x)`（转义空格）→ `[1]="\\"`（GNU `=" "`）：另一条路径。
+
+载体标签方案需要覆盖全部 C0 控制字节，属架构级改动，超出本次范围。
+
+探针：`target/ansifull-probe.sh`、`target/ws-probe.sh`、`target/ws2-probe.sh`、
+`target/ff-probe.sh`、`target/bigarr-probe.sh`。
