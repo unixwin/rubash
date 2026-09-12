@@ -111,6 +111,20 @@ impl Executor {
             }
             [operand, end] if end == "]]" => i32::from(self.expand_word(operand).is_empty()),
             [operand] => i32::from(self.expand_word(operand).is_empty()),
+            [op, operand, end] if op == "-t" && end == "]]" => {
+                let w = self.expand_word(operand);
+                if w.parse::<i64>().is_err() {
+                    return 1;
+                }
+                i32::from(!self.conditional_file_unary(op, operand))
+            }
+            [op, operand] if op == "-t" => {
+                let w = self.expand_word(operand);
+                if w.parse::<i64>().is_err() {
+                    return 1;
+                }
+                i32::from(!self.conditional_file_unary(op, operand))
+            }
             [op, operand, end] if is_conditional_file_unary(op) && end == "]]" => {
                 i32::from(!self.conditional_file_unary(op, operand))
             }
@@ -135,12 +149,12 @@ impl Executor {
                 if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge")
                     && end == "]]" =>
             {
-                i32::from(!self.conditional_numeric_binary(left, op, right))
+                self.conditional_numeric_binary_status(left, op, right)
             }
             [left, op, right]
                 if matches!(op.as_str(), "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge") =>
             {
-                i32::from(!self.conditional_numeric_binary(left, op, right))
+                self.conditional_numeric_binary_status(left, op, right)
             }
             [left, op, right, end] if is_conditional_file_binary(op) && end == "]]" => {
                 i32::from(!self.conditional_file_binary(left, op, right))
@@ -219,9 +233,7 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata
-                        .get(2)
-                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
                 let left = self.expand_word(left);
                 let right = self.expand_word(right);
@@ -235,9 +247,7 @@ impl Executor {
             }
             [left, op, right]
                 if matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata
-                        .get(2)
-                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
                 let left = self.expand_word(left);
                 let right = self.expand_word(right);
@@ -252,17 +262,13 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && op == "=~"
-                    && metadata
-                        .get(2)
-                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
             [left, op, right]
                 if op == "=~"
-                    && metadata
-                        .get(2)
-                        .is_some_and(|metadata| !metadata.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
@@ -388,8 +394,7 @@ impl Executor {
     }
 
     pub(super) fn conditional_regex_match(&mut self, left: &str, right: &str) -> bool {
-        let right = unescape_remaining_shell_escapes(right);
-        let right = restore_numeric_decimal_regex_escapes(&right);
+        let right = restore_numeric_decimal_regex_escapes(right);
         let Ok(regex) = self.compile_conditional_regex(&right) else {
             return false;
         };
@@ -426,9 +431,14 @@ impl Executor {
     }
 
     pub(super) fn conditional_regex_match_status(&mut self, left: &str, right: &str) -> i32 {
-        let left = self.expand_word(left);
-        let right = unescape_remaining_shell_escapes(&self.expand_word(right));
-        let right = restore_numeric_decimal_regex_escapes(&right);
+        let left_exp = self.expand_word(left);
+        let right_exp = self.expand_word(right);
+        let right_f = restore_numeric_decimal_regex_escapes(&right_exp);
+        if right_exp.contains("jbig2dec") || right_exp.contains("[^-]") || right.contains("jbig2dec") {
+            eprintln!("DBG regex normal left={:?} right_exp={:?} final={:?}", left_exp, right_exp, right_f);
+        }
+        let left = left_exp;
+        let right = right_f;
         let Ok(regex) = self.compile_conditional_regex(&right) else {
             return 2;
         };
@@ -528,33 +538,43 @@ impl Executor {
     }
 
     pub(super) fn conditional_numeric_binary(&mut self, left: &str, op: &str, right: &str) -> bool {
-        let left = self.expand_word(left);
-        let right = self.expand_word(right);
-        let (Some(left), _) = eval_mutable_arith_value_with_random(
-            &left,
+        self.conditional_numeric_binary_status(left, op, right) == 0
+    }
+
+    pub(super) fn conditional_numeric_binary_status(
+        &mut self,
+        left: &str,
+        op: &str,
+        right: &str,
+    ) -> i32 {
+        let left_expanded = self.expand_word(left);
+        let right_expanded = self.expand_word(right);
+        let (Some(left_val), _) = eval_mutable_arith_value_with_random(
+            &left_expanded,
             &mut self.env_vars,
             Some(&self.random_state),
         ) else {
-            self.report_conditional_arithmetic_error(&left);
-            return false;
+            self.report_conditional_arithmetic_error(&left_expanded);
+            return 1;
         };
-        let (Some(right), _) = eval_mutable_arith_value_with_random(
-            &right,
+        let (Some(right_val), _) = eval_mutable_arith_value_with_random(
+            &right_expanded,
             &mut self.env_vars,
             Some(&self.random_state),
         ) else {
-            self.report_conditional_arithmetic_error(&right);
-            return false;
+            self.report_conditional_arithmetic_error(&right_expanded);
+            return 1;
         };
-        match op {
-            "-eq" => left == right,
-            "-ne" => left != right,
-            "-lt" => left < right,
-            "-le" => left <= right,
-            "-gt" => left > right,
-            "-ge" => left >= right,
+        let matched = match op {
+            "-eq" => left_val == right_val,
+            "-ne" => left_val != right_val,
+            "-lt" => left_val < right_val,
+            "-le" => left_val <= right_val,
+            "-gt" => left_val > right_val,
+            "-ge" => left_val >= right_val,
             _ => false,
-        }
+        };
+        i32::from(!matched)
     }
 }
 

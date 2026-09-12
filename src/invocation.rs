@@ -248,6 +248,12 @@ impl ShellInvocation {
         }
         if let Some(name) = &self.command_name {
             executor.set_env("__RUBASH_SCRIPT_NAME", name);
+        } else if self.command.is_some() {
+            // GNU `bash -c` without explicit $0 reports as "bash: -c: ..."
+            executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+        }
+        if self.command.is_some() {
+            executor.set_env("__RUBASH_IS_C", "1");
         }
         executor.set_positional_params(self.positional_params.clone());
         Ok(())

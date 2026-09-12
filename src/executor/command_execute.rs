@@ -53,7 +53,7 @@ impl Executor {
                 eprintln!("{}{}", self.diagnostic_prefix(), message);
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                     eprintln!(
-                        "{}`{}'",
+                        "{}syntax error: `{}'",
                         self.diagnostic_prefix(),
                         parse_error_source_display(source)
                     );

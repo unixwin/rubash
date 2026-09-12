@@ -242,7 +242,15 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
                         executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
                         executor.set_env("BASH_ARGV0", command_name);
                         executor.set_positional_params(args[index + 3..].to_vec());
+                    } else {
+                        // GNU error.c get_name_for_error: `bash -c` without
+                        // explicit $0 reports as "bash: -c: line N:" (the
+                        // baseline sed normalizes /usr/local/bin/bash to bash).
+                        // Use the canonical shell name so `sed 's|^.*/||'`
+                        // matches the GNU baseline.
+                        executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
                     }
+                    executor.set_env("__RUBASH_IS_C", "1");
                     return run_command_string_with_init(executor, command, init_file.as_deref());
                 }
                 // GNU shell.c:519-528: a pending -c with no following argv
