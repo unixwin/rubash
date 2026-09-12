@@ -502,12 +502,41 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
     // Numeric range
     if let (Ok(start), Ok(end)) = (left.parse::<i64>(), right.parse::<i64>()) {
         let width = numeric_range_width(left, right);
-        let step = if start <= end { step } else { -step };
-        let mut result = Vec::new();
-        let mut current = start;
-        while (step > 0 && current <= end) || (step < 0 && current >= end) {
-            result.push(format_numeric_range_value(current, width));
-            current += step;
+        // Port of GNU braces.c mkseq (bash 5.3 braces.c:373-472): precompute
+        // the element count with checked arithmetic (any overflow -> literal
+        // fallback, same as GNU returning NULL from mkseq), then emit
+        // exactly `count` values. The increment only happens BETWEEN
+        // elements, never after the last one — incrementing past `end`
+        // would overflow i64 for end == i64::MAX ({MAX-2..MAX}).
+        let abs_incr = step;
+        let incr: i64 = if start <= end { abs_incr } else { -abs_incr };
+        let prevn: i64 = if start < end {
+            match end.checked_sub(start) {
+                Some(v) => v,
+                None => return None,
+            }
+        } else {
+            match start.checked_sub(end) {
+                Some(v) => v,
+                None => return None,
+            }
+        };
+        let count: usize = match usize::try_from(prevn / abs_incr) {
+            Ok(q) => match q.checked_add(1) {
+                Some(c) => c,
+                None => return None,
+            },
+            Err(_) => return None,
+        };
+        let mut result = Vec::with_capacity(count);
+        let mut n = start;
+        for i in 0..count {
+            result.push(format_numeric_range_value(n, width));
+            if i + 1 < count {
+                // Invariant: n stays within [min(start,end), max(start,end)],
+                // so this cannot overflow (same invariant GNU relies on).
+                n += incr;
+            }
         }
         return Some(result);
     }
@@ -519,21 +548,28 @@ fn expand_range(s: &str) -> Option<Vec<String>> {
         && start.is_ascii_alphabetic()
         && end.is_ascii_alphabetic()
     {
-        let step = i16::try_from(step).ok()?;
-        let step: i16 = if start <= end { step } else { -step };
-        let mut result = Vec::new();
-        let mut current = start as i16;
+        // GNU braces.c mkseq ST_CHAR path: same count-based loop as the
+        // numeric range (count = |end-start|/incr + 1). count > 1 implies
+        // step <= 57, so the `step as i32` cast below cannot truncate.
+        let diff = (start as i32 - end as i32).unsigned_abs() as usize;
+        let step_u = usize::try_from(step).unwrap_or(usize::MAX);
+        let count = diff / step_u + 1;
+        let dir: i32 = if start <= end { 1 } else { -1 };
+        let mut result = Vec::with_capacity(count);
+        let mut cur = start as i32;
         // GNU braces.c renders the backslash position of a character
         // sequence as an EMPTY element (it is the quoting character):
         // {a..Z} yields ... ] "" [ ... so the baseline shows "]  [".
-        while (step > 0 && current <= end as i16) || (step < 0 && current >= end as i16) {
-            let byte = current as u8;
+        for i in 0..count {
+            let byte = cur as u8;
             if byte == b'\\' {
                 result.push(String::new());
             } else {
                 result.push((byte as char).to_string());
             }
-            current += step;
+            if i + 1 < count {
+                cur += dir * (step as i32);
+            }
         }
         return Some(result);
     }
@@ -592,6 +628,39 @@ mod tests {
     #[test]
     fn test_range_numeric() {
         assert_eq!(expand_braces("{1..3}"), vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_seq_near_i64_max_terminates() {
+        // GNU: {9223372036854775805..9223372036854775807} -> exactly 3 values.
+        // rubash hung >5s here via the binary; pin down which layer.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = expand_range("9223372036854775805..9223372036854775807");
+            let _ = tx.send(r);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Some(r)) => assert_eq!(
+                r,
+                vec![
+                    "9223372036854775805".to_string(),
+                    "9223372036854775806".to_string(),
+                    "9223372036854775807".to_string()
+                ]
+            ),
+            Ok(None) => panic!("expand_range returned None on i64 boundary"),
+            Err(_) => panic!("expand_range HUNG on i64 boundary"),
+        }
+
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let r = brace_expand("{9223372036854775805..9223372036854775807}");
+            let _ = tx2.send(r);
+        });
+        match rx2.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(r) => assert_eq!(r.len(), 3),
+            Err(_) => panic!("brace_expand HUNG on i64 boundary"),
+        }
     }
 
     #[test]
