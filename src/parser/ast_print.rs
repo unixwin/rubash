@@ -500,12 +500,20 @@ impl Printer {
             // echoes the section text as written between the (( )) markers),
             // "; " separators, cprintf ("))") and no semicolon before the
             // do-line (newline ("do\n") follows directly).
+            // GNU make_arith_for_command substitutes empty sections with "1"
+            // (make_cmd.c:300-302), so the printer must emit "1" for empty.
+            let init = arithmetic.init_metadata.expression.trim_start();
+            let init = if init.trim().is_empty() { "1" } else { init };
+            let test = arithmetic.test_metadata.expression.trim_start();
+            let test = if test.trim().is_empty() { "1" } else { test };
+            let update = arithmetic.update_metadata.expression.trim_start();
+            let update = if update.trim().is_empty() { "1" } else { update };
             self.cprintf("for ((");
-            self.cprintf(arithmetic.init_metadata.expression.trim_start());
+            self.cprintf(init);
             self.cprintf("; ");
-            self.cprintf(arithmetic.test_metadata.expression.trim_start());
+            self.cprintf(test);
             self.cprintf("; ");
-            self.cprintf(arithmetic.update_metadata.expression.trim_start());
+            self.cprintf(update);
             self.cprintf("))");
             self.print_do_done_body(&for_command.body);
             return;

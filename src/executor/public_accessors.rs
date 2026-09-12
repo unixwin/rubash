@@ -558,6 +558,7 @@ impl Executor {
     }
 
     pub(crate) fn diagnostic_prefix(&self) -> String {
+        let is_c = self.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
             self.env_vars.get("__RUBASH_SCRIPT_NAME"),
             self.env_vars.get("__RUBASH_CURRENT_LINE"),
@@ -567,7 +568,16 @@ impl Executor {
             if self.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
                 return format!("{script}: eval: line {line}: ");
             }
+            if is_c {
+                return format!("{script}: -c: line {line}: ");
+            }
             return format!("{script}: line {line}: ");
+        }
+        if is_c {
+            if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+                return format!("{script}: -c: line 1: ");
+            }
+            return "bash: -c: line 1: ".to_string();
         }
 
         // GNU error.c:88-120 (get_name_for_error): without a script/$0
@@ -578,8 +588,15 @@ impl Executor {
     }
 
     pub fn diagnostic_prefix_for_line(&self, line: usize) -> String {
+        let is_c = self.env_vars.contains_key("__RUBASH_IS_C");
         if let Some(script) = self.env_vars.get("__RUBASH_SCRIPT_NAME") {
+            if is_c {
+                return format!("{script}: -c: line {line}: ");
+            }
             return format!("{script}: line {line}: ");
+        }
+        if is_c {
+            return format!("bash: -c: line {line}: ");
         }
 
         "bash: ".to_string()

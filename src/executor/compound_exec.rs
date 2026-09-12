@@ -269,6 +269,15 @@ impl Executor {
         body: &[CommandNode],
     ) -> Result<(), ExecuteError> {
         let mut arithmetic_failed = false;
+        let mut init_failed = false;
+        // GNU 5.3 execute_arith_for_command increments loop_level before
+        // evaluating init and always decrements after, even on init failure.
+        // Git Bash 5.2 (and the temporary baseline in this task) omits the
+        // decrement on failed init, leaving loop_level==1 so the following
+        // `break` is considered in-loop, suppresses its diagnostic and aborts
+        // the remainder of the script (arith-for.tests: `for ((j=;;))` with
+        // `j=` empty RHS). Match the Git Bash baseline for now.
+        self.loop_depth += 1;
         // GNU execute_arith_for_command:3236 sets line_number = arith_lineno
         // = arith_for_command->line, and eval_arith_for_expr:3187 runs the
         // DEBUG trap before each expression evaluation (init once; test and
@@ -295,6 +304,7 @@ impl Executor {
             self.report_arithmetic_error_raw_display(&arithmetic.init_metadata.expression);
             self.exit_code = 1;
             arithmetic_failed = true;
+            init_failed = true;
         }
 
         let mut ran_body = false;
@@ -366,6 +376,11 @@ impl Executor {
             self.exit_code = 1;
         } else if !ran_body {
             self.exit_code = 0;
+        }
+        // Git Bash 5.2 bug: failed init does not decrement loop_level.
+        // Keep the increment so the following `break` is treated as in-loop.
+        if !init_failed {
+            self.loop_depth -= 1;
         }
         Ok(())
     }

@@ -224,14 +224,11 @@ impl Executor {
                 std::borrow::Cow::Borrowed(value)
             };
         let value: &str = &tilde_value;
-        if value.contains("\\$(") {
-            let literal = if quoted {
-                strip_matching_quotes(value)
-            } else {
-                value
-            };
-            return unescape_remaining_shell_escapes(literal);
-        }
+        // The previous early return for "\\$(" treated "\\$(" (literal backslash + comsub)
+        // as a literal, breaking cases like c=\$\'\\$(printf ...)\' where the
+        // "\\$(" is actually "\\" (escaped backslash) + "$(comsub)" that must expand.
+        // Let the general expander handle escaping correctly (it distinguishes
+        // "\$(" (escaped) from "\\$(" (backslash + comsub)).
         if quoted && value.contains(":$((") {
             return self.expand_quoted_prompt_arithmetic_assignment(value);
         }
