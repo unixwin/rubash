@@ -621,7 +621,17 @@ impl Executor {
                             }
                         } else if decoded
                             .chars()
-                            .any(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+                            // GNU subst.c keeps a quoted span one word even when
+                            // it decodes to whitespace, so re-quote the decoded
+                            // value when it would otherwise be field-split
+                            // (A=( $'n\nl' ) is one element, not `n` and `l`).
+                            // ASCII whitespace here, not char::is_whitespace:
+                            // StorageWordIter splits on is_ascii_whitespace,
+                            // which includes form feed (unicode1.sub
+                            // [0x000c]=$'\f' stored an empty element), while
+                            // char::is_whitespace would additionally hide
+                            // non-ASCII space separators we must not quote.
+                            .any(|ch| ch.is_ascii_whitespace() || ch == '\x0b')
                         {
                             output.push('"');
                             for ch in decoded.chars() {
