@@ -1284,7 +1284,7 @@ impl Executor {
         // gets the same boundary from a ShellState clone — assignments,
         // aliases, functions, set --, IFS, env-carried traps, positional
         // params, and job bookkeeping all restore wholesale at the end.
-        let saved_state = self.shell_state.clone();
+        let saved_state = self.shell_state.clone_for_child_save();
         // The fd table is executor state, not ShellState: a forked child's
         // descriptor table is a copy (execute_in_subshell after make_child),
         // so `( exec 3<&- )` cannot close the parent's fd 3. Rc-shared

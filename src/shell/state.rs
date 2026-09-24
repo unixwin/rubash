@@ -213,6 +213,21 @@ impl ShellState {
         }
     }
 
+    /// Saved-state snapshot for an in-place forked-child boundary
+    /// (execute_cmd.c:1576 execute_in_subshell): `Clone` deep-copies
+    /// `session_history` so the child's list mutations are private, but
+    /// the private copy belongs to the CHILD — the saved snapshot must
+    /// keep the parent's live `Rc`. The script driver records into the
+    /// same session object, so restoring the stale clone would split the
+    /// history list: later records land on one object while `history`/`fc`
+    /// read the other. Swap so `self` (the child view) holds the clone
+    /// and the returned snapshot holds the original.
+    pub(crate) fn clone_for_child_save(&mut self) -> Self {
+        let mut saved = self.clone();
+        std::mem::swap(&mut saved.session_history, &mut self.session_history);
+        saved
+    }
+
     /// Restore a snapshot taken by `snapshot_interior`.
     pub(crate) fn restore_interior(&self, snapshot: &InteriorSnapshot) {
         self.subshell_depth.set(snapshot.subshell_depth);

@@ -187,7 +187,8 @@ impl Executor {
                 })
         });
         // Save parent state BEFORE the this_shell_invocation block clears it.
-        let saved_shell_state = this_shell_invocation.then(|| self.shell_state.clone());
+        let saved_shell_state =
+            this_shell_invocation.then(|| self.shell_state.clone_for_child_save());
         // GNU execute_cmd.c:6139-6233 / jobs.c: a script child is a separate
         // process, so its job table is process-local — a fresh exec child
         // starts with an empty table, and a fork-model child only inherits a

@@ -302,7 +302,7 @@ impl Executor {
             // executes the whole list in the forked subshell
             // (execute_cmd.c:1576 execute_in_subshell).
             if command.subshell && subshell_state.is_none() {
-                subshell_state = Some(self.shell_state.clone());
+                subshell_state = Some(self.shell_state.clone_for_child_save());
                 subshell_fd_table = Some(self.fd_table.clone());
                 subshell_cwd = env::current_dir().ok();
                 self.shell_state.loop_depth = 0;

@@ -1581,7 +1581,7 @@ impl Executor {
         // back. The typed ShellState clone is the whole boundary; process
         // resources (cwd, OS env, exit code, captures) are handled
         // separately below.
-        let saved_state = self.shell_state.clone();
+        let saved_state = self.shell_state.clone_for_child_save();
         let saved_exit_code = self.exit_code;
         let saved_dir = env::current_dir().ok();
         // The body is fresh parser input whose alias expansion GNU applies
@@ -1677,7 +1677,7 @@ impl Executor {
         // `$(f)` runs the function inside the substitution's subshell — a
         // forked child in GNU — so variable/scope/job mutations of the call
         // die with the substitution. Whole-state clone, not a field list.
-        let saved_state = self.shell_state.clone();
+        let saved_state = self.shell_state.clone_for_child_save();
         let saved_dir = env::current_dir().ok();
         let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
