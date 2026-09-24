@@ -728,10 +728,12 @@ impl Executor {
         let command = bash_command_source_text(cmd);
         self.shell_state.env_vars
             .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
-        if !command_references_bash_command(cmd) {
-            self.shell_state.env_vars.remove("__RUBASH_CURRENT_COMMAND");
-            return;
-        }
+        // GNU the_printed_command_except_trap is refreshed unconditionally
+        // for every executed command (execute_cmd.c compound heads), and
+        // variables.c:1558 get_bash_command reads it directly — there is no
+        // "only when the command text names BASH_COMMAND" gate. Indirect
+        // references like ${!name} resolve through the same dynamic var, so
+        // the command text is always recorded.
         self.shell_state.env_vars
             .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
     }
