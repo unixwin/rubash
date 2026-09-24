@@ -15,23 +15,24 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-24 晚，master `7b562024`，env 归零口径）：81 零差 / 2 残余 / 83 套件**
-> （台账 `target/issue-suites/results/true-baseline-ledger.log`。
-> 本轮变化：intl 真修复——`decimal_point()` 改用 LC_NUMERIC 类目正确优先级
-> `LC_ALL > LC_NUMERIC > LANG`（此前误复用含 LC_CTYPE 的 `locale_name()`，
-> 宿主 `LC_CTYPE=C.UTF-8` 遮蔽脚本 `export LANG=de_DE.UTF-8`）；
-> posixexp2/braces 的前次差异为过期工件，重跑即 0。
-> env 归零套件（逐行审计确认）：glob 29 / extglob 16（NTFS 非法 `*?:` 文件名）、
-> test 8（NTFS 无 setgid/setuid/sticky 位与 atime `-N`）、type 6（二进制名）、
-> errors 2（`/mnt/d` vs `D:` 路径形式）、ifs-posix 1（40s 超时，手动跑完输出全对）、
-> read 2（`/dev/tty` 控制终端）、coproc 4（真实 `/etc/passwd` ENOENT 等）、
-> nquote 12（od 列宽为主）、quotearray 2、intl 4（修复前）。
-> **残余真差 2 套件**：nameref 1（内部变量 `RO_PID` 泄漏进 `declare -r` 列表）、
-> trap 1（ERR trap 多触发一次，execute_cmd.c 抑制边界）。
-> 已知被 env 口径覆盖的引擎小差（记录备查，暂未修）：nquote 的
-> `${v:-$'\t'}` ANSI-C 解码与 heredoc `'` carrier 泄漏、coproc 的
-> 脚本名诊断前缀与失败 coproc 的 COPROC 残留、quotearray 的
-> assoc key `\021` carrier。）
+> **最新台账（2026-09-25，master `71c933eb`，env 归零口径）：82 零差 / 1 残余 / 83 套件**
+> （受影响切片重跑：nquote/nquote1-5/quotearray/posixexp2/braces/coproc/trap/nameref。
+> 本轮修复全部已登记的引擎小差：
+> ① `"${v op word}"` operator word 内 `$'...'` 按 GNU parse.y:4053-4070
+> （parse_matched_pair）提取期 ansiexpand + 数据 carrier 重引号——
+> `"${mytab:-$'\t'}"` 现在输出 tab（nquote）；heredoc 语境保持字面
+> （GNU 不解码 heredoc 内 ANSI-C）；POSIX 模式跟踪 sq 区间防误判。
+> ② `declare -p` 显示引用先 `display_text()` 解 carrier 再判定
+> ansic_shouldquote——assoc key `\021` carrier 泄漏消除（quotearray）。
+> ③ 内部 respawn 的 `-c` 子壳（coproc/后台 `&`）继承
+> `__RUBASH_SCRIPT_NAME`/行号，诊断前缀对齐 GNU 的 fork 语义
+> （execute_cmd.c:1761）——coproc stderr 逐字节一致。
+> 结果：quotearray/posixexp2/braces/trap 归零；nquote 剩 10 行全是宿主
+> `od` 列宽格式（env）；coproc 剩 5 行为 `/etc/passwd` ENOENT（env）+
+> 失败 coproc 的 `COPROC` 清除时序（隔离探针 GNU 同样偶发 `63 60`）。
+> **残余真差 1 套件**：nameref 1——`RO_PID` 偶发可见于 `declare -r`，
+> 系 coproc 收割时序竞争（CreateProcess 启动延迟 vs GNU fork 的瞬时
+> 退出），GNU 自身在隔离探针中也会出现同名残留，归类时序残余。）
 >
 > **上一台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`。
