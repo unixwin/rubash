@@ -63,6 +63,15 @@ impl Executor {
     ) -> Result<crate::builtins::exit::ExitAction, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // builtins/exit.def:59-62: an interactive shell echoes "exit" (or
+        // "logout" in a login shell) to stderr before parsing arguments;
+        // CHECK_HELPOPT runs first, so `exit --help` stays silent.
+        if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+            && cmd.words.get(1).map(String::as_str) != Some("--help")
+        {
+            let login = self.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+            writeln!(stderr, "{}", if login { "logout" } else { "exit" })?;
+        }
         let action = crate::builtins::exit::execute_with_io(
             cmd.words[1..].iter().map(String::as_str),
             self.exit_code,

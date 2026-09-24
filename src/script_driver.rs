@@ -1188,7 +1188,24 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             None => read_unbuffered_line(&mut raw),
         };
         match line_result {
-            Ok(0) => eof = true,
+            // bashline.c bash_readline: interactive EOF synthesizes the
+            // `exit` command, whose builtin echoes "exit" (or "logout")
+            // to stderr before exiting (builtins/exit.def:59-62). The
+            // prompt is already on stderr, so the line reads `$ exit`.
+            Ok(0) => {
+                if executor
+                    .get_env("__RUBASH_INTERACTIVE")
+                    .as_deref()
+                    == Some("1")
+                {
+                    let login = executor
+                        .get_env("__RUBASH_LOGIN_SHELL")
+                        .as_deref()
+                        == Some("1");
+                    eprintln!("{}", if login { "logout" } else { "exit" });
+                }
+                eof = true;
+            }
             Ok(_) => {}
             Err(_) => eof = true,
         }
