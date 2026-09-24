@@ -4,7 +4,7 @@
 > 状态：DONE ✅ / IN-PROGRESS 🔵 / QUEUED ⏳ / BLOCKED ⛔
 > 纪律：每任务完成必须带回归测试；禁止新增哨兵字节；PASS 只认 WSL GNU 5.3.0
 > script-file 口径；完成后 master 复跑受影响基线切片。
-> 最后更新：2026-09-23（新增 Q11 /proc 最小仿真）
+> 最后更新：2026-09-25（82/83 台账 + Q5/Q6/Q7 核销 + nameref 时序归档）
 
 ## ✅ 已完成（2026-09-20 ~ 09-22 主冲刺）
 
@@ -20,6 +20,11 @@
 | 审计 | 全仓准入守卫审计（1123 处分类，B 九族/C 八桩清单） | docs/admission-guard-audit-20260922.md |
 | 归因 | harness 归因清扫（真账 ~480 / 噪声 ~195 分账） | docs/harness-attribution-20260922.md |
 | #66/#64 | 映射缺口补录（7baee60f 等）+ niubash#118 复核（新立 #120） | GitHub |
+| Q5 | histexp 修复（!!/!str 透传） | ✅ 09-25 台账切片归零（histexp 0 env=0） |
+| Q6 | alias 修复（eval/alias 展开失效） | ✅ 09-25 台账切片归零（alias 0 env=0） |
+| Q7 | redir/vredir fd→readonly 语义 | ✅ 09-25 台账切片归零（redir/vredir 0 env=0） |
+| 严差 | nquote ANSI-C/quotearray carrier/coproc 脚本名前缀 | fa321959 / 06fc6124 / 71c933eb |
+| 归档 | nameref `RO_PID`：coproc 收割时序竞争，GNU 隔离探针同样偶发——归时序残余，不修代码 | 82/83 台账（5780be63） |
 
 ## 🔵 进行中
 
@@ -41,9 +46,9 @@
 | Q2 | **C 类八桩清除**（审计文档 C1-C8，~23 行）| 可立即 | 原守护场景在真实现下继续通过 |
 | Q3 | **niu 产品基线复跑**（niu.exe 47/2357 → 目标 ≥54/928 对齐）| 等 niu 分歧消除 agent 完成 | 双层台账对比表 |
 | Q4 | **winux 痕迹改名迁移**（ADR 3.8：54 处/7 文件）| ✅ 完成（09-22，ccb3615a/f0bdaf45/473def11）：中性名优先（__RUBASH_PATH_STYLE/COREUTILS_PATH/SHELL_COREUTILS_DIR），旧名转兼容回退；WINUXSH_ROOT 导出标记 deprecated niu bridge；bash.rs 标注 AI invoker 入口；探针残留已清 |
-| Q5 | histexp 修复（!!/!str 透传，真账 74 行）| 排队 | histexp 切片归零 |
-| Q6 | alias 修复（eval/alias 展开失效，69 行）| 排队 | alias 切片归零 |
-| Q7 | redir/vredir fd→readonly 语义（41+27 行）| 排队 | 切片归零 |
+| Q5 | ~~histexp 修复~~ | ✅ 已核销（见上）| 切片归零 |
+| Q6 | ~~alias 修复~~ | ✅ 已核销（见上）| 切片归零 |
+| Q7 | ~~redir/vredir fd→readonly 语义~~ | ✅ 已核销（见上）| 切片归零 |
 | Q8 | 差分模糊测试放量（60 → 1000+ case）| 等原型验收后 | 分歧清单产出 |
 | Q9 | pty 端到端测试（niu 侧 reedline/PS1）| 排队 | 交互探针集 |
 | Q10 | 性能专项（#71 冷启动/-c 固定开销）| 兼容性达标后 | 基准对比 |
