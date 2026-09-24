@@ -1623,6 +1623,7 @@ impl Executor {
                         &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
                             alternate,
                             self.posix_mode_enabled(),
+                            false,
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                     ),
