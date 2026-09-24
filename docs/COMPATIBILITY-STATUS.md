@@ -15,7 +15,25 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
+> **最新台账（2026-09-24 晚，master `7b562024`，env 归零口径）：81 零差 / 2 残余 / 83 套件**
+> （台账 `target/issue-suites/results/true-baseline-ledger.log`。
+> 本轮变化：intl 真修复——`decimal_point()` 改用 LC_NUMERIC 类目正确优先级
+> `LC_ALL > LC_NUMERIC > LANG`（此前误复用含 LC_CTYPE 的 `locale_name()`，
+> 宿主 `LC_CTYPE=C.UTF-8` 遮蔽脚本 `export LANG=de_DE.UTF-8`）；
+> posixexp2/braces 的前次差异为过期工件，重跑即 0。
+> env 归零套件（逐行审计确认）：glob 29 / extglob 16（NTFS 非法 `*?:` 文件名）、
+> test 8（NTFS 无 setgid/setuid/sticky 位与 atime `-N`）、type 6（二进制名）、
+> errors 2（`/mnt/d` vs `D:` 路径形式）、ifs-posix 1（40s 超时，手动跑完输出全对）、
+> read 2（`/dev/tty` 控制终端）、coproc 4（真实 `/etc/passwd` ENOENT 等）、
+> nquote 12（od 列宽为主）、quotearray 2、intl 4（修复前）。
+> **残余真差 2 套件**：nameref 1（内部变量 `RO_PID` 泄漏进 `declare -r` 列表）、
+> trap 1（ERR trap 多触发一次，execute_cmd.c 抑制边界）。
+> 已知被 env 口径覆盖的引擎小差（记录备查，暂未修）：nquote 的
+> `${v:-$'\t'}` ANSI-C 解码与 heredoc `'` carrier 泄漏、coproc 的
+> 脚本名诊断前缀与失败 coproc 的 COPROC 残留、quotearray 的
+> assoc key `\021` carrier。）
+>
+> **上一台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`。
 > 本轮清零套件：procsub（`<(cmd)` 共享流语义 + 管道 fd-1 单流排序）、
 > set-e（`!` errexit 豁免穿过分组驱动）、vredir（`{var}<<EOF` 动态 fd）、

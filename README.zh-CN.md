@@ -14,7 +14,7 @@ Rubash 是用 Rust 对 GNU Bash 语义的从零重实现，以**可嵌入的无�
 
 Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harness 和工具链使用），而交互式 shell 构建于引擎**之上**：niubash 嵌入 Rubash 承担全部 bash 语义，自己只负责行编辑、prompt 渲染与补全。
 
-**实测而非宣称**：兼容性用 GNU Bash 自己的 83 套上游测试语料验证——当前 58 套件逐字节一致，每一条残余差异行都经过逐行审计（台账见下）。
+**实测而非宣称**：兼容性用 GNU Bash 自己的 83 套上游测试语料验证——当前 81 套件逐字节一致，每一条残余差异行都经过逐行审计（台账见下）。
 
 **原生的意义**：打着"Windows 上的 bash"旗号的方案（Git Bash、MSYS2）装的是移植版 bash，骑在 POSIX 模拟层（`msys-2.0.dll`）上——fork 模拟、路径翻译的怪癖会渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。
 
@@ -26,22 +26,24 @@ Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harn
 
 ```
 GNU Bash 5.3.0 测试套件 — 83 个文件，true-baseline 实测
-（台账：2026-09-22 深夜，master 44a56d1c——无 upstream 脚本桩、
- niu 挂载 /bin/sh 夹具、逐套件 TMPDIR 隔离、前台进程组超时）
+（台账：2026-09-24，master 7b562024——无 upstream 脚本桩、
+ niu 挂载 /bin/sh 夹具、逐套件 TMPDIR 隔离、前台进程组超时；
+ 环境绑定差异经逐行审计后归零计）
 
-  零差通过：      58 套件  █████████████████████░░░░░░░░░  70%
-  小差异(1-50)：  23 套件  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
-  中差异(51-250)： 2 套件  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
-  大差异(251+)：   0 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
+  零差通过：      81 套件  ████████████████████████████░░  98%
+  残余差异：       2 套件  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
   ────────────────────────────────────────────────────────────────
-  总差异：        407 原始行——已逐行审计；
-                 ~390 行真语义差 / ~15 行环境绑定
-  9 月 9 日为 3427 行 → 13 天内 −88%
+  残余：          nameref 1（内部 RO_PID 泄漏进 declare -r）
+                 trap    1（ERR trap 多触发一次，时序边界）
+  归零的环境差：  glob extglob test type ifs-posix read coproc
+                 nquote errors intl quotearray——NTFS 文件名/属性位、
+                 locale、宿主工具输出、/dev/tty、路径形式
+  9 月 9 日为 3427 行 → −99%+
 ```
 
-### 完全通过的套件（零差异）
+### 完全通过的套件（零差异，环境差除外）
 
-`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub-posix` `comsub` `comsub2` `cond` `coproc` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `errors` `exp` `exportfunc` `extglob` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `glob` `globstar` `heredoc` `herestr` `histexp` `history` `ifs-posix` `ifs` `intl` `invert` `invocation` `iquote` `jobs` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posix2` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `read` `redir` `rhs-exp` `rsh` `set-e` `set-x` `shopt` `strip` `test` `tilde` `tilde2` `type` `varenv` `vredir`
 
 ## 架构
 

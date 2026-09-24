@@ -962,22 +962,21 @@ mod tests {
         assert_eq!(output.bytes, vec![0x1d, 0x1f, 0x1a, 0x15, 0xff]);
         assert_eq!(output.status, 23);
         assert_eq!(output.context, SubstitutionQuoteContext::DoubleQuoted);
+        // d45619ee: every carrier-range byte (0x0c/0x11/0x13 + 0x14..=0x1f)
+        // and every invalid-UTF-8 byte is owner-tagged as an E000/E001+b
+        // marker pair — raw passthrough would let a carrier consumer claim
+        // user data. The readback bytes stay untouched; only text_lossy
+        // encodes.
         assert_eq!(
             output
                 .text_lossy()
                 .chars()
                 .map(|ch| ch as u32)
                 .collect::<Vec<_>>(),
-            vec![
-                0x1d,
-                RAW_BYTE_MARKER_ESCAPE,
-                RAW_BYTE_MARKER_FIRST + 0x1f,
-                RAW_BYTE_MARKER_ESCAPE,
-                RAW_BYTE_MARKER_FIRST + 0x1a,
-                0x15,
-                RAW_BYTE_MARKER_ESCAPE,
-                RAW_BYTE_MARKER_FIRST + 0xff,
-            ],
+            [0x1d, 0x1f, 0x1a, 0x15, 0xff]
+                .iter()
+                .flat_map(|b| [RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST + *b as u32])
+                .collect::<Vec<_>>(),
         );
     }
 
@@ -1014,13 +1013,30 @@ mod tests {
             SubstitutionQuoteContext::Unquoted,
         ));
         assert_eq!(word.status, Some(41));
-        assert_eq!(
-            word.materialize_lossy_at_boundary().as_bytes(),
-            &[b'p', b'r', b'e', 0x1d, b'a', b' ', b'b']
+        // d45619ee carrier contract: the substitution byte 0x1d is
+        // owner-tagged in materialized text (UTF-8 of U+E000 U+E01E), not
+        // emitted raw — decoders restore it at the byte boundary.
+        let mut expected = b"pre".to_vec();
+        expected.extend_from_slice(
+            format!(
+                "{}{}",
+                char::from_u32(RAW_BYTE_MARKER_ESCAPE).unwrap(),
+                char::from_u32(RAW_BYTE_MARKER_FIRST + 0x1d).unwrap()
+            )
+            .as_bytes(),
         );
+        expected.extend_from_slice(b"a b");
+        assert_eq!(word.materialize_lossy_at_boundary().as_bytes(), &expected);
         assert_eq!(
             word.split(Some(" "), SubstitutionSplitPolicy::Split),
-            vec![format!("pre{}a", char::from(0x1d)), "b".to_string()]
+            vec![
+                format!(
+                    "pre{}{}a",
+                    char::from_u32(RAW_BYTE_MARKER_ESCAPE).unwrap(),
+                    char::from_u32(RAW_BYTE_MARKER_FIRST + 0x1d).unwrap()
+                ),
+                "b".to_string()
+            ]
         );
     }
 

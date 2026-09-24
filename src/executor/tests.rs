@@ -456,75 +456,6 @@ mod unit_tests {
         clear_command_lookup_cache();
     }
 
-    // niubash shell-quirks Q16: an enclosing compound redirect (for loop /
-    // brace group, bound once into the fd table) must not reach external
-    // children inside a command substitution — GNU subst.c:7143 runs the
-    // body with its stdout on the capture pipe. Before the fix the child
-    // inherited the loop's fd-1 file binding, so its output leaked into the
-    // outer redirect target and `$( )` came back empty.
-
-    fn cmdsub_external_probe_command(marker_redirect: &str) -> String {
-        if cfg!(windows) {
-            format!(
-                "for i in 1; do out=$(cmd /c \"echo q16-marker\" 2>&1); \
-[ -n \"$out\" ] || exit 9; done > \"{marker_redirect}\""
-            )
-        } else {
-            format!(
-                "for i in 1; do out=$(sh -c 'echo q16-marker' 2>&1); \
-[ -n \"$out\" ] || exit 9; done > \"{marker_redirect}\""
-            )
-        }
-    }
-
-    #[test]
-    fn cmdsub_external_capture_survives_loop_redirect_binding() {
-        let redirect = std::env::temp_dir().join("rubash-q16-loop-redirect.log");
-        let redirect = redirect.to_string_lossy().replace('\\', "/");
-        let tokens = tokenize(&cmdsub_external_probe_command(&redirect));
-        let ast = parse(&tokens);
-        let mut executor = Executor::new();
-        let result = executor.execute_ast(&ast);
-        assert!(
-            result.is_ok(),
-            "captured output must be non-empty (exit 9 means the substitution lost it), got {:?}",
-            result
-        );
-        let leaked = std::fs::read_to_string(&redirect).unwrap_or_default();
-        assert!(
-            !leaked.contains("q16-marker"),
-            "cmdsub output leaked into the outer redirect target: {leaked:?}"
-        );
-        let _ = std::fs::remove_file(&redirect);
-    }
-
-    #[test]
-    fn cmdsub_external_capture_survives_group_redirect_binding() {
-        let redirect = std::env::temp_dir().join("rubash-q16-group-redirect.log");
-        let redirect = redirect.to_string_lossy().replace('\\', "/");
-        let probe = cmdsub_external_probe_command(&redirect);
-        let probe = probe.replacen("for i in 1; do ", "{ ", 1).replacen(
-            " done > \"",
-            " } > \"",
-            1,
-        );
-        let tokens = tokenize(&probe);
-        let ast = parse(&tokens);
-        let mut executor = Executor::new();
-        let result = executor.execute_ast(&ast);
-        assert!(
-            result.is_ok(),
-            "captured output must be non-empty (exit 9 means the substitution lost it), got {:?}",
-            result
-        );
-        let leaked = std::fs::read_to_string(&redirect).unwrap_or_default();
-        assert!(
-            !leaked.contains("q16-marker"),
-            "cmdsub output leaked into the outer redirect target: {leaked:?}"
-        );
-        let _ = std::fs::remove_file(&redirect);
-    }
-
     // GNU builtins/exit.def:157 exit_builtin -> jump_to_top_level (EXITPROG),
     // handled at execute_cmd.c:1622: `exit` unwinds every enclosing AND-OR
     // list, function and brace group to the shell's top level. Only true
@@ -681,5 +612,73 @@ mod unit_tests {
             result
         );
         assert_eq!(executor.last_exit_code(), 0);
+    }
+    // niubash shell-quirks Q16: an enclosing compound redirect (for loop /
+    // brace group, bound once into the fd table) must not reach external
+    // children inside a command substitution — GNU subst.c:7143 runs the
+    // body with its stdout on the capture pipe. Before the fix the child
+    // inherited the loop's fd-1 file binding, so its output leaked into the
+    // outer redirect target and `$( )` came back empty.
+
+    fn cmdsub_external_probe_command(marker_redirect: &str) -> String {
+        if cfg!(windows) {
+            format!(
+                "for i in 1; do out=$(cmd /c \"echo q16-marker\" 2>&1); \
+[ -n \"$out\" ] || exit 9; done > \"{marker_redirect}\""
+            )
+        } else {
+            format!(
+                "for i in 1; do out=$(sh -c 'echo q16-marker' 2>&1); \
+[ -n \"$out\" ] || exit 9; done > \"{marker_redirect}\""
+            )
+        }
+    }
+
+    #[test]
+    fn cmdsub_external_capture_survives_loop_redirect_binding() {
+        let redirect = std::env::temp_dir().join("rubash-q16-loop-redirect.log");
+        let redirect = redirect.to_string_lossy().replace('\\', "/");
+        let tokens = tokenize(&cmdsub_external_probe_command(&redirect));
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "captured output must be non-empty (exit 9 means the substitution lost it), got {:?}",
+            result
+        );
+        let leaked = std::fs::read_to_string(&redirect).unwrap_or_default();
+        assert!(
+            !leaked.contains("q16-marker"),
+            "cmdsub output leaked into the outer redirect target: {leaked:?}"
+        );
+        let _ = std::fs::remove_file(&redirect);
+    }
+
+    #[test]
+    fn cmdsub_external_capture_survives_group_redirect_binding() {
+        let redirect = std::env::temp_dir().join("rubash-q16-group-redirect.log");
+        let redirect = redirect.to_string_lossy().replace('\\', "/");
+        let probe = cmdsub_external_probe_command(&redirect);
+        let probe = probe.replacen("for i in 1; do ", "{ ", 1).replacen(
+            " done > \"",
+            " } > \"",
+            1,
+        );
+        let tokens = tokenize(&probe);
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "captured output must be non-empty (exit 9 means the substitution lost it), got {:?}",
+            result
+        );
+        let leaked = std::fs::read_to_string(&redirect).unwrap_or_default();
+        assert!(
+            !leaked.contains("q16-marker"),
+            "cmdsub output leaked into the outer redirect target: {leaked:?}"
+        );
+        let _ = std::fs::remove_file(&redirect);
     }
 }

@@ -3543,3 +3543,29 @@ fn kill_missing_pid_reports_no_such_process() {
     assert!(stdout.contains("No such process"), "stdout: {stdout}");
     assert!(stdout.contains("status:1"), "stdout: {stdout}");
 }
+
+#[test]
+fn comsub_quoted_glob_star_stays_quoted_rubash_121() {
+    // rubash#121: a fully-quoted word is correct standalone, but inside $()
+    // the inner quoted '*' lost its pathname-expansion suppression and
+    // expanded (a.py b.py). GNU parse.y xparse_dolparen: a '"' inside a
+    // double-quoted $(...) body does NOT close the outer quote; the comsub
+    // body is skipped wholesale by pathname_patterns_in_word (ffc5afe3).
+    let script = "mkdir -p target/issue121d && cd target/issue121d && touch a.py b.py\n\
+                  printf 'A:%s\n' \"$(printf '%s\n' \"*\")\"\n\
+                  printf 'B:%s\n' \"$(printf '%s\n' '*')\"\n\
+                  printf 'C:%s\n' \"$(printf '%s' '*')\"\n";
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "A:*\nB:*\nC:*\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success());
+}

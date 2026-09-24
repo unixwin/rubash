@@ -233,6 +233,11 @@ impl ShellInvocation {
         if self.posix {
             executor.set_env("__RUBASH_POSIX_MODE", "1");
         }
+        // shell.c:497-503: --login/-l flips LOGIN_SHELL so the `logout`
+        // builtin and exit path see a login shell.
+        if self.login {
+            executor.set_env("__RUBASH_LOGIN_SHELL", "1");
+        }
         for (name, enabled) in &self.shell_flags {
             if !executor.is_shell_option(name) {
                 return Err(format!("{name}: invalid shell option name"));
