@@ -560,6 +560,22 @@ impl Executor {
         // substitution body runs, including DEBUG trap actions.
         *subshell.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
         subshell.stdout_capture = Some(Vec::new());
+        // GNU subst.c:7143 command_substitute: the substitution child's
+        // stdout is the capture pipe, never the caller's fd 1. The forked
+        // executor clones the parent's fd table, and since the compound
+        // redirect binds landed there (4fe2a48f) an enclosing for/group
+        // redirect surfaces as an fd-1 file binding that
+        // apply_external_stdout_redirect delivered to external children —
+        // their output bypassed the capture and landed in the outer
+        // redirect target while the substitution read an empty pipe
+        // (niubash shell-quirks Q16: inside
+        // `for …; do out=$(cargo test 2>&1); …; done > summary.txt` the
+        // failing round's output reached summary.txt and $out stayed
+        // empty). Drop the inherited fd-1 binding so external children hit
+        // the stdout_capture pipe branch; body-level redirects rebind fd 1
+        // on the child's own table. fd 2 stays inherited — $( ) does not
+        // capture stderr (GNU subst.c:7149).
+        subshell.fd_table.entries.remove(&1);
 
         // GNU subst.c:7356-7359 command_substitute: without inherit_errexit
         // the substitution child runs `builtin_ignoring_errexit = 0` and
