@@ -25,6 +25,11 @@
 | Q7 | redir/vredir fd→readonly 语义 | ✅ 09-25 台账切片归零（redir/vredir 0 env=0） |
 | 严差 | nquote ANSI-C/quotearray carrier/coproc 脚本名前缀 | fa321959 / 06fc6124 / 71c933eb |
 | 归档 | nameref `RO_PID`：coproc 收割时序竞争，GNU 隔离探针同样偶发——归时序残余，不修代码 | 82/83 台账（5780be63） |
+| Q2 | **C 类八桩清除** | ✅ 09-25 核销：八桩指纹已全部消失（C1 kill -l 表/C3 cd/C2+C8 type coprocs/C4 coproc reprint/C5 aliasconv sed/C6 eval parse 错误路径/C7 histexp `\!`），守护套件 type/builtins/errors/dstack/comsub 全绿 |
+| T5-B4/5/6 | ASSIGN_DATA/CTLESC/命名字符串三族金标断言 | ✅ 按治理文档 09-22 已落地（locale.rs decode_to_visible_text 生产断言 + marker_leak_golden.rs），核销 |
+| Q1-B8 | THIS_SH 子串判定 → 路径等价 | 71ffce5c |
+| Q1-B4 | BASH_COMMAND 文本探针 → GNU 无条件刷新模型（探针删除） | 9388e774 |
+| Q1-B6 | `[[ ]]` RHS `raw.contains('\\')` → word_quotes 结构化（新增 QuoteKind::Backslash + 嵌套体跳过） | 7d65b573 |
 
 ## 🔵 进行中
 
@@ -42,8 +47,8 @@
 
 | ID | 任务 | 依赖 | 验收 |
 |---|---|---|---|
-| Q1 | **B 类九族语义准入守卫替换**（审计文档 B1-B9，~90 行）| 等 Devin T5 批次落地（同域防冲突）| 每族 GNU 对拍 + 对应套件无回归 |
-| Q2 | **C 类八桩清除**（审计文档 C1-C8，~23 行）| 可立即 | 原守护场景在真实现下继续通过 |
+| Q1 | **B 类九族语义准入守卫替换**（审计文档 B1-B9）：B4/B6/B8 ✅ 已落地；剩余 B1（~40行白名单收敛，最高风险需全量台账）、B2（~30行 $@ 标志化）、B3（别名展开前移 lexer）、B5（procsub 解析阶段识别，23 站点）、B7（alias value 结构化引号态，低风险可控探针可缓）| T5 依赖已解除 | 每族 GNU 对拍 + 对应套件无回归 |
+| Q2 | ~~C 类八桩清除~~ | ✅ 已核销（见上）| 守护场景持续通过 |
 | Q3 | **niu 产品基线复跑**（niu.exe 47/2357 → 目标 ≥54/928 对齐）| 等 niu 分歧消除 agent 完成 | 双层台账对比表 |
 | Q4 | **winux 痕迹改名迁移**（ADR 3.8：54 处/7 文件）| ✅ 完成（09-22，ccb3615a/f0bdaf45/473def11）：中性名优先（__RUBASH_PATH_STYLE/COREUTILS_PATH/SHELL_COREUTILS_DIR），旧名转兼容回退；WINUXSH_ROOT 导出标记 deprecated niu bridge；bash.rs 标注 AI invoker 入口；探针残留已清 |
 | Q5 | ~~histexp 修复~~ | ✅ 已核销（见上）| 切片归零 |
