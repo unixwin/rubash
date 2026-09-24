@@ -524,4 +524,162 @@ mod unit_tests {
         );
         let _ = std::fs::remove_file(&redirect);
     }
+
+    // GNU builtins/exit.def:157 exit_builtin -> jump_to_top_level (EXITPROG),
+    // handled at execute_cmd.c:1622: `exit` unwinds every enclosing AND-OR
+    // list, function and brace group to the shell's top level. Only true
+    // subshell boundaries (parentheses, pipeline stages, command
+    // substitutions) contain it. These tests pin the unwind semantics that
+    // regressed when ExitCode was downgraded to a plain status inside AND-OR
+    // list execution (niubash shell-quirks doc Q3: `cmd || exit 1` guards
+    // silently no-op'd).
+
+    #[test]
+    fn exit_in_and_or_list_terminates_shell() {
+        let tokens = tokenize("true && exit 5; echo UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(5))),
+            "exit inside && must unwind the list, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 5);
+    }
+
+    #[test]
+    fn exit_in_or_guard_terminates_shell() {
+        let tokens = tokenize("[ -f /definitely-missing-file-x ] || exit 1; echo UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(1))),
+            "the classic cmd || exit 1 guard must terminate, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 1);
+    }
+
+    #[test]
+    fn exit_as_first_list_element_terminates_shell() {
+        let tokens = tokenize("exit 0 && echo never; echo UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(0))),
+            "exit leading an && list must terminate, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn exit_in_function_and_or_list_terminates_shell() {
+        let tokens = tokenize("f(){ true && exit 5; echo unf; }; f; echo UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(5))),
+            "exit inside a function's && list terminates the whole shell (GNU: no scope exit), got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 5);
+    }
+
+    #[test]
+    fn exit_in_brace_group_and_or_list_terminates_shell() {
+        let tokens = tokenize("{ true && exit 5; echo unf; }; echo UNREACHED");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(5))),
+            "brace groups are not subshells: exit must unwind them, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 5);
+    }
+
+    #[test]
+    fn exit_in_loop_guard_terminates_shell() {
+        // The original Q3 repro shape: a probe loop whose body guards the
+        // exit behind an && chain.
+        let tokens = tokenize(
+            "while true; do [ ! -f /definitely-missing-file-x ] && exit 0; break; done; echo UNREACHED",
+        );
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            matches!(result, Err(crate::executor::ExecuteError::ExitCode(0))),
+            "exit 0 inside a loop's && guard must terminate the shell, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn subshell_exit_does_not_terminate_parent_shell() {
+        let tokens = tokenize("(exit 5); echo after");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "parenthesized exit must stay in the subshell, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn pipeline_stage_exit_stays_in_stage() {
+        let tokens = tokenize("exit 5 | cat; echo after");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "pipeline-stage exit must not end the shell, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 0);
+    }
+
+    #[test]
+    fn command_substitution_exit_stays_in_subshell() {
+        let tokens = tokenize("v=$(true && exit 5; echo hi)");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "command-substitution exit must stay in the substitution, got {:?}",
+            result
+        );
+        // The substitution was killed by the exit, so `hi` never ran and the
+        // assignment carries the substitution's status (GNU behavior).
+        assert_eq!(executor.last_exit_code(), 5);
+    }
+
+    #[test]
+    fn errexit_guard_context_still_suppresses_and_or_exit_status() {
+        // `false && exit 1` is a guarded context: the exit never runs and
+        // set -e does not fire on &&/|| left-hand failures (GNU set-e
+        // semantics), so the following command still runs.
+        let tokens = tokenize("set -e; false && exit 1; echo ok");
+        let ast = parse(&tokens);
+        let mut executor = Executor::new();
+        let result = executor.execute_ast(&ast);
+        assert!(
+            result.is_ok(),
+            "guarded false && exit must not trigger errexit, got {:?}",
+            result
+        );
+        assert_eq!(executor.last_exit_code(), 0);
+    }
 }

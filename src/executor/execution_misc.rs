@@ -404,10 +404,37 @@ pub(in crate::executor) fn copy_command_substitution_heredoc(
     }
 
     let mut raw_delimiter = String::new();
-    while chars
-        .peek()
-        .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
-    {
+    // GNU read_token_word: quoting inside the delimiter word makes
+    // metacharacters literal — `<< ')'` names `)` as the delimiter, so a
+    // quoted `)` (or `;`, `|`, `&`) is delimiter text, not the
+    // substitution closer (comsub-posix.tests).
+    let mut delimiter_single = false;
+    let mut delimiter_double = false;
+    while let Some(next) = chars.peek().copied() {
+        match next {
+            '\'' if !delimiter_double => delimiter_single = !delimiter_single,
+            '"' if !delimiter_single => delimiter_double = !delimiter_double,
+            _ if !delimiter_single
+                && !delimiter_double
+                && (next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')')) =>
+            {
+                break;
+            }
+            // A backslash quotes the next delimiter byte (`<<\)` uses a
+            // literal `)` delimiter); consume the escape pair as one unit.
+            '\\' if !delimiter_single && !delimiter_double => {
+                let ch = chars.next().unwrap();
+                raw_delimiter.push(ch);
+                source.push(ch);
+                if let Some(escaped) = chars.peek().copied() {
+                    chars.next();
+                    raw_delimiter.push(escaped);
+                    source.push(escaped);
+                }
+                continue;
+            }
+            _ => {}
+        }
         let ch = chars.next().unwrap();
         raw_delimiter.push(ch);
         source.push(ch);

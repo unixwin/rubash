@@ -81,10 +81,17 @@ fn dollar_command_substitution(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
+    // and other non-alphanumeric word characters never reach `word`, so
+    // `$(echo $#)` and `$(echo a # )` both misjudge `#`.
+    let mut token_boundary = true;
     while index < chars.len() {
         let ch = chars[index];
         if escaped {
             escaped = false;
+            token_boundary = false;
             index += 1;
             continue;
         }
@@ -99,27 +106,31 @@ fn dollar_command_substitution(
         }
         if ch == '\\' && !single {
             escaped = true;
+            token_boundary = false;
             index += 1;
             continue;
         }
         if ch == '$' && !single && !double && chars.get(index + 1) == Some(&'\'') {
             ansi_single = true;
+            token_boundary = false;
             index += 2;
             continue;
         }
-        if ch == '#' && !single && !double && word_boundary {
+        if ch == '#' && !single && !double && token_boundary {
             while index + 1 < chars.len() && chars[index + 1] != '\n' {
                 index += 1;
             }
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            token_boundary = true;
             index += 1;
             continue;
         }
         if ch == '`' && !single {
             if let Some((_, next_index)) = backtick_command_substitution(chars, index) {
                 index = next_index;
+                token_boundary = false;
                 continue;
             }
         }
@@ -137,6 +148,7 @@ fn dollar_command_substitution(
         {
             if let Some((_, next_index)) = dollar_command_substitution(chars, index) {
                 index = next_index;
+                token_boundary = false;
                 continue;
             }
         }
@@ -165,6 +177,9 @@ fn dollar_command_substitution(
                     ));
                 }
                 index = next_index;
+                // A heredoc terminator ends on its own line, so the next
+                // character begins a fresh token.
+                token_boundary = true;
                 continue;
             }
         }
@@ -195,6 +210,13 @@ fn dollar_command_substitution(
                 }
             }
             _ => {}
+        }
+        // Quoted characters are word text handled by the quote state
+        // arms; the boundary only tracks characters the live tokenizer
+        // sees.
+        if !single && !double {
+            token_boundary = ch.is_whitespace()
+                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
     }
@@ -394,20 +416,21 @@ fn skip_command_substitution_heredoc(
             ));
         }
         // GNU parse.y gather_here_documents reads the whole heredoc body
-        // before the parser looks at the next token, so a body line that is
-        // the delimiter followed by `)` ends the heredoc AND supplies the
-        // command substitution's closing paren (make_cmd.c:585-640
-        // PST_EOFTOKEN). Consume only up to the `)` and report that the
-        // header did not close the substitution: the caller's paren scan
-        // then closes it at the unconsumed `)`. Mirror of the lexer-side
-        // scanner (lexer/skip.rs strip_suffix form).
-        if let Some(body) = candidate.strip_suffix(')') {
-            if body == delimiter {
-                let paren_index = line_start
-                    + (line.chars().count() - candidate.chars().count())
-                    + delimiter.chars().count();
-                return Some((paren_index, None));
-            }
+        // before the parser looks at the next token, so a body line that
+        // starts with the delimiter and contains `)` later on ends the
+        // heredoc AND pushes the remainder back into the parser input
+        // (make_cmd.c:602-611 PST_EOFTOKEN, shell_ungets(line+redir_len)).
+        // Resume the caller's scan right after the delimiter prefix — the
+        // pushed-back `)` (and anything before it, e.g. `x` in `EOFx)`)
+        // re-enters the token stream, where the `)` closes the substitution.
+        // Covers `EOF)`, `EOF )`, and `))` when the delimiter is `)` itself.
+        if candidate.starts_with(delimiter.as_str())
+            && candidate[delimiter.len()..].contains(')')
+        {
+            let resume = line_start
+                + (line.chars().count() - candidate.chars().count())
+                + delimiter.chars().count();
+            return Some((resume, None));
         }
         if line_end >= chars.len() {
             break;

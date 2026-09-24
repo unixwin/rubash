@@ -15,10 +15,10 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, has_unclosed_input_syntax, tokenize, tokenize_with_initial_posix,
+    expand_aliases_in_source, tokenize, tokenize_with_initial_posix,
     AliasLookup, TokenKind,
 };
-use crate::parser::{parse, CommandNode};
+use crate::parser::CommandNode;
 
 /// bashhist.c: does this script turn history on? Detects the long-form
 /// option (set -o history / -o histexpand) and the short flag cluster
@@ -56,8 +56,12 @@ pub fn script_uses_history(contents: &str) -> bool {
 /// following lines (GNU reads and executes one complete command at a
 /// time), so scripts mentioning the option take the grouped driver where
 /// each group is lexed against the alias table live at that point.
+/// `set -o posix` likewise flips expand_aliases at runtime (general.c
+/// posix_initialize), so it must take the same driver — otherwise
+/// `$(...)` bodies are extracted before the alias table applies
+/// (comsub5.sub).
 pub fn script_uses_aliases(contents: &str) -> bool {
-    contents.contains("expand_aliases")
+    contents.contains("expand_aliases") || contents.contains("set -o posix")
 }
 
 /// GNU parse.y alias_expand_token + push_string, run over the text of one
@@ -169,16 +173,27 @@ pub fn run_script_with_history_in(
             // is ONE complete command, while `foo x` keeps the quote open
             // through the following lines.
             let expanded_pending = expand_group_aliases(executor, &pending);
+            let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
             if pending_heredocs.is_empty()
                 && (!saw_heredoc || paren_depth <= 0)
-                && !stdin_source_needs_more(&expanded_pending)
+                && !stdin_source_needs_more_posix(&expanded_pending, posix)
             {
                 break;
             }
         }
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd);
         let parse_error = executor.take_parse_error();
-        if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+        // A group that ended by unwinding (exit builtin, errexit, POSIX
+        // special-builtin failure) stops the reader unconditionally — GNU's
+        // jump_to_top_level cannot be resumed at the next command.
+        if parse_error
+            || executor.take_exit_jump_pending()
+            || (status != 0
+                && stdin_script_errexit_enabled(executor)
+                // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN
+                // under errexit — the inverted command's status is exempt.
+                && !executor.last_command_inverted())
+        {
             break;
         }
     }
@@ -337,6 +352,7 @@ fn run_history_group(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let pre_alias_text = exec_text.clone();
     let exec_text = expand_group_aliases(executor, &exec_text);
     if exec_text.trim().is_empty() {
         return executor.last_exit_code();
@@ -355,6 +371,11 @@ fn run_history_group(
         false,
         start_line.saturating_sub(1),
         redirect_cmd,
+        if exec_text == pre_alias_text {
+            None
+        } else {
+            Some(pre_alias_text.as_str())
+        },
     );
     executor
         .shell_state
@@ -486,7 +507,13 @@ pub fn stdin_script_errexit_enabled(executor: &Executor) -> bool {
 }
 
 pub fn stdin_source_needs_more(source: &str) -> bool {
-    if has_unclosed_input_syntax(source) {
+    stdin_source_needs_more_posix(source, false)
+}
+
+/// POSIX-aware variant: `set -o posix` changes `'` scanning inside
+/// `"${...}"` (Interp 221), which decides whether the input is complete.
+pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
+    if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
         return true;
     }
     // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
@@ -512,7 +539,11 @@ pub fn stdin_source_needs_more(source: &str) -> bool {
             "case" => stack.push("esac"),
             "if" => stack.push("fi"),
             "for" | "select" | "while" | "until" => stack.push("done"),
-            "esac" | "fi" | "done" if stack.last() == Some(&token.value.as_str()) => {
+            // `{` at command position opens a brace group that must see
+            // its `}` — GNU reads until the closing brace (parse.y
+            // brace_group), so a multi-line `{ ... }` keeps the group open.
+            "{" => stack.push("}"),
+            "esac" | "fi" | "done" | "}" if stack.last() == Some(&token.value.as_str()) => {
                 stack.pop();
             }
             _ => {}
@@ -653,14 +684,19 @@ fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
 
 fn stdin_source_is_function_signature(source: &str) -> bool {
     let trimmed = source.trim();
-    if let Some(name) = trimmed.strip_suffix("()") {
-        return is_stdin_function_name(name.trim());
+    // `name ()` / `name()` signature: peel the trailing parens with
+    // optional whitespace (`'a b c' ( )' is still a signature — GNU's
+    // grammar accepts any WORD; validity is judged at exec time).
+    if let Some(before_close) = trimmed.strip_suffix(')') {
+        if let Some(name) = before_close.trim_end().strip_suffix('(') {
+            return is_stdin_function_name(name.trim_end());
+        }
     }
 
     trimmed
         .strip_prefix("function ")
         .map(str::trim)
-        .is_some_and(is_stdin_function_name)
+        .is_some_and(is_stdin_function_keyword_name)
 }
 
 fn stdin_source_has_unclosed_function_body(source: &str) -> bool {
@@ -677,24 +713,51 @@ fn stdin_source_has_unclosed_function_delimited_body(source: &str, delimiter: ch
     }
 
     let signature = source[..open_delimiter].trim_end();
-    if let Some(name) = signature.strip_suffix("()") {
-        return is_stdin_function_name(name.trim_end());
+    if let Some(before_close) = signature.strip_suffix(')') {
+        if let Some(name) = before_close.trim_end().strip_suffix('(') {
+            return is_stdin_function_name(name.trim_end());
+        }
     }
 
     signature
         .strip_prefix("function ")
         .and_then(|rest| rest.split_whitespace().next())
-        .is_some_and(is_stdin_function_name)
+        .is_some_and(is_stdin_function_keyword_name)
 }
 
+/// `name ()` signature form: GNU accepts non-identifier words
+/// (`11111 () { ...; }' is legal non-posix), but an `=`-bearing word is an
+/// assignment-shaped token, not a name (`a=2 ()` is a syntax error).
+/// `<( ... )` is lexed as one WORD in GNU (parse.y scans the
+/// process-substitution shape inside a word), so `<( : ) () { }' is a
+/// function named `<(:)' — allow the spaced form as a signature too;
+/// validity is judged later by the executor.
 fn is_stdin_function_name(name: &str) -> bool {
-    let Some(first) = name.chars().next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && name
+    if name == "!!" || (name.starts_with("<(") && name.ends_with(')')) {
+        return true;
+    }
+    // A fully quoted name is one WORD in GNU's grammar (`'a b c' () { }'
+    // parses as a definition and is rejected by the executor).
+    if name.len() > 1
+        && (name.starts_with('\'') && name.ends_with('\'')
+            || name.starts_with('"') && name.ends_with('"'))
+    {
+        return true;
+    }
+    !name.is_empty()
+        && !name.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|' | '=')
+        })
+}
+
+/// `function WORD` signature form: GNU function_def takes a single WORD
+/// verbatim, so `=` and digit-leading names are legal (`function a=2`,
+/// `function 11111`); only shell metacharacters end the word.
+fn is_stdin_function_keyword_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
             .chars()
-            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
 }
 
 fn first_unquoted_char(source: &str, target: char) -> Option<usize> {
@@ -782,7 +845,7 @@ fn unquoted_delimiter_depth(source: &str, open: char) -> usize {
 }
 
 pub fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
-    run_source_with_line_offset(executor, input, interactive, 0, None)
+    run_source_with_line_offset(executor, input, interactive, 0, None, None)
 }
 
 pub fn run_source_with_line_offset(
@@ -791,6 +854,7 @@ pub fn run_source_with_line_offset(
     interactive: bool,
     line_offset: usize,
     redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
 ) -> i32 {
     // TODO(shell.c/eval.c/parse.y): GNU Bash parses complete command streams,
     // including pending here-documents, rather than executing script files one
@@ -806,11 +870,15 @@ pub fn run_source_with_line_offset(
         return executor.last_exit_code();
     }
 
-    if !interactive && has_unclosed_input_syntax(input) && !input.contains("<<") {
+    let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    if !interactive
+        && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
+        && !input.contains("<<")
+    {
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
         // of the failed parse and runs nothing.
-        let unclosed = crate::lexer::unclosed_input_close_char(input);
+        let unclosed = crate::lexer::unclosed_input_close_char_posix(input, parse_posix);
         let cut_line = unclosed.map(|(_, open, _, _)| open);
         let source = input.trim_end_matches('\n');
         let prefix = match cut_line {
@@ -828,6 +896,7 @@ pub fn run_source_with_line_offset(
                 interactive,
                 line_offset,
                 redirect_cmd,
+                diagnostic_text,
             );
         }
         executor.mark_parse_error();
@@ -848,7 +917,6 @@ pub fn run_source_with_line_offset(
         return 2;
     }
 
-    let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let mut tokens = tokenize_with_initial_posix(input, parse_posix);
     // A command with more than HEREDOC_MAX (16) here-documents is fatal in
     // GNU (parse.y push_heredoc -> report_syntax_error + exit_shell with
@@ -869,7 +937,19 @@ pub fn run_source_with_line_offset(
             token.column += line_offset;
         }
     }
-    let mut ast = parse(&tokens);
+    // GNU parse.y: a `)` or case-clause terminator at command position is
+    // `syntax error near unexpected token` (yyerror aborts the input). The
+    // lexer folds multi-line `$(...)` bodies, so a top-level `)` token is
+    // genuinely stray (comsub6.sub `math1)` after alias expansion).
+    let mut ast = crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(input.to_string()),
+            diagnostic_text: diagnostic_text.map(str::to_string),
+            source_line_offset: line_offset,
+        },
+    );
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
             eprintln!("{error}");
@@ -879,9 +959,21 @@ pub fn run_source_with_line_offset(
 
     match executor.execute_ast(&ast) {
         Ok(()) => executor.last_exit_code(),
-        Err(ExecuteError::ExitCode(code)) => code,
+        // ExitCode/FatalFunctionError reached the list top: GNU unwound via
+        // jump_to_top_level (exit, errexit, POSIX special-builtin failure).
+        // The grouped drivers must stop reading — record it before the
+        // status conversion loses the distinction.
+        Err(ExecuteError::ExitCode(code)) => {
+            executor.exit_jump_pending.set(true);
+            code
+        }
+        Err(ExecuteError::FatalFunctionError(code)) => {
+            executor.exit_jump_pending.set(true);
+            code
+        }
+        // ExpansionFailure is GNU's DISCARD: the command list aborted but
+        // the reader continues with the next complete command.
         Err(ExecuteError::ExpansionFailure(code)) => code,
-        Err(ExecuteError::FatalFunctionError(code)) => code,
         Err(e) => {
             if interactive {
                 eprintln!("Error: {}", e);

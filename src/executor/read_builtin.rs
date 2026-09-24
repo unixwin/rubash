@@ -53,7 +53,7 @@ impl Executor {
                     && redirect_target_fd(&target).is_none()
                     && !target.starts_with("<(")
                 {
-                    if let Err(error) = self.open_input_redirect(&target) {
+                    if let Err(error) = self.probe_input_redirect(&target) {
                         let mut line = Vec::new();
                         let _ = writeln!(
                             &mut line,
@@ -81,6 +81,10 @@ impl Executor {
         let mut initial_text: Option<String> = None;
         let mut read_fd: Option<u32> = None;
         let mut timeout_zero = false;
+        // GNU read.def:302-351/443-458: the -t operand is a floating-point
+        // second count (have_timeout); TMOUT supplies the default when -t
+        // is absent.
+        let mut timeout_secs: Option<f64> = None;
         let mut index = 1;
         while index < cmd.words.len() {
             match cmd.words[index].as_str() {
@@ -478,7 +482,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -785,7 +792,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -800,7 +810,10 @@ impl Executor {
                 word if word.starts_with("-et") && word.len() > 3 => {
                     let value = &word[3..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -825,7 +838,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -843,7 +859,10 @@ impl Executor {
                     raw = true;
                     let value = &word[4..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1085,7 +1104,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1100,7 +1122,10 @@ impl Executor {
                 word if word.starts_with("-st") && word.len() > 3 => {
                     let value = &word[3..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1622,7 +1647,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1640,7 +1668,10 @@ impl Executor {
                     raw = true;
                     let value = &word[4..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1665,7 +1696,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1688,7 +1722,10 @@ impl Executor {
                     raw = true;
                     let value = &word[5..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1712,7 +1749,10 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     match parse_read_timeout(word) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1728,7 +1768,10 @@ impl Executor {
                     raw = true;
                     let value = &word[3..];
                     match parse_read_timeout(value) {
-                        Ok(is_zero) => timeout_zero = is_zero,
+                        Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                         Err(()) => {
                             let _ = writeln!(
                                 &mut stderr,
@@ -1816,7 +1859,10 @@ impl Executor {
                         };
                     } else if let Some(value) = word.strip_prefix("-t") {
                         match parse_read_timeout(value) {
-                            Ok(is_zero) => timeout_zero = is_zero,
+                            Ok(secs) => {
+                            timeout_zero = secs == 0.0;
+                            timeout_secs = Some(secs);
+                        }
                             Err(()) => {
                                 let _ = writeln!(
                                     &mut stderr,
@@ -2015,6 +2061,7 @@ impl Executor {
                 return 0;
             }
 
+            self.arm_read_deadline(cmd, read_fd, timeout_secs);
             let line = match self.read_input_for_command(
                 cmd,
                 read_fd,
@@ -2026,6 +2073,7 @@ impl Executor {
                 Some(l) => Some(l),
                 None => None,
             };
+            let read_timed_out = self.take_read_timed_out();
             let final_line = match (&line, &initial_text) {
                 (Some(line), _) => line.clone(),
                 (None, Some(text)) => text.clone(),
@@ -2036,7 +2084,7 @@ impl Executor {
                         .replace_indexed_array(&name, std::iter::empty::<String>());
                     self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
                     mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
-                    return 1;
+                    return if read_timed_out { 142 } else { 1 };
                 }
             };
             let values = if raw {
@@ -2056,6 +2104,8 @@ impl Executor {
             mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
             return if invalid_name {
                 self.finish_read_error(cmd, &stderr, 1)
+            } else if read_timed_out {
+                142
             } else {
                 0
             };
@@ -2084,6 +2134,7 @@ impl Executor {
                 };
             }
 
+            self.arm_read_deadline(cmd, read_fd, timeout_secs);
             let status = if let Some(line) =
                 self.read_input_for_command(cmd, read_fd, delimiter, char_limit, exact_char_limit)
             {
@@ -2155,6 +2206,19 @@ impl Executor {
                 } else {
                     0
                 }
+            } else if self.read_timed_out || self.fd_table.read_timed_out {
+                // GNU read.def:539-562: a timeout still assigns the partial
+                // input (empty here) and returns 128+SIGALRM — do not fall
+                // through to another blocking read.
+                let assign_status = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
+                if assign_status != 0 {
+                    return self.finish_read_error(cmd, &stderr, assign_status);
+                }
+                142
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
                     Ok((0, _)) => {
@@ -2196,6 +2260,9 @@ impl Executor {
                     Err(_) => 1,
                 }
             };
+            // GNU read.def:539-562: on timeout the vars keep the partial
+            // assignment above and the builtin returns 128+SIGALRM=142.
+            let status = if self.take_read_timed_out() { 142 } else { status };
             return if invalid_name {
                 self.finish_read_error(cmd, &stderr, 1)
             } else {
@@ -2322,6 +2389,74 @@ impl Executor {
             0
         }
     }
+
+    /// GNU read.def:443-458 + 499-519: arm the absolute read deadline for
+    /// `-t secs` (or TMOUT when -t is absent). A regular-file input fd
+    /// disables the timeout outright (fstat S_ISREG → tmsec = tmusec = 0).
+    /// Buffered sources (heredoc, herestring, text endpoints) keep the
+    /// deadline armed: GNU 5.3 sources them from a pipe, so
+    /// check_read_timeout still fires if the deadline already elapsed.
+    fn arm_read_deadline(
+        &mut self,
+        cmd: &CommandNode,
+        read_fd: Option<u32>,
+        timeout_secs: Option<f64>,
+    ) {
+        let secs = timeout_secs.or_else(|| {
+            self.shell_state
+                .env_vars
+                .get("TMOUT")
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|t| t.is_finite() && *t >= 0.0)
+        });
+        let deadline = secs
+            .filter(|s| *s > 0.0)
+            .filter(|_| !self.read_input_is_regular_file(cmd, read_fd))
+            .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s));
+        self.read_deadline = deadline;
+        self.read_timed_out = false;
+        self.fd_table.read_deadline = deadline;
+        self.fd_table.read_timed_out = false;
+    }
+
+    /// Merge the fd-table timeout flag, clear the armed deadline, and report
+    /// whether this read hit its timeout (caller maps that to 128+SIGALRM).
+    fn take_read_timed_out(&mut self) -> bool {
+        let timed_out = self.read_timed_out || self.fd_table.read_timed_out;
+        self.read_deadline = None;
+        self.read_timed_out = false;
+        self.fd_table.read_deadline = None;
+        self.fd_table.read_timed_out = false;
+        timed_out
+    }
+
+    /// GNU read.def:499-505: `fstat(fd)` S_ISREG turns the timeout off —
+    /// regular files are always readable, so `-t` can never expire on one.
+    fn read_input_is_regular_file(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
+        let fd = read_fd.unwrap_or(0);
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::File(file)) => return crate::fd::is_disk_file(file.handle),
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                return crate::fd::is_disk_file(crate::fd::process_std_handle(0));
+            }
+            Some(_) => return false,
+            None => {}
+        }
+        if fd == 0 {
+            if let Some(redirect) = &cmd.redirect_in {
+                let target = self.expand_redirect_target(redirect);
+                if !target.starts_with('&')
+                    && !target.starts_with("<(")
+                    && !is_closed_redirect_target(&target)
+                {
+                    let path =
+                        shell_path_to_windows(&target, &self.shell_state.env_vars);
+                    return std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false);
+                }
+            }
+        }
+        false
+    }
 }
 
 fn parse_read_fd(value: &str) -> Result<u32, ()> {
@@ -2329,12 +2464,12 @@ fn parse_read_fd(value: &str) -> Result<u32, ()> {
     u32::try_from(fd).map_err(|_| ())
 }
 
-fn parse_read_timeout(value: &str) -> Result<bool, ()> {
+fn parse_read_timeout(value: &str) -> Result<f64, ()> {
     let timeout = value.parse::<f64>().map_err(|_| ())?;
     if !timeout.is_finite() || timeout < 0.0 {
         return Err(());
     }
-    Ok(timeout == 0.0)
+    Ok(timeout)
 }
 
 fn report_read_invalid_identifier(stderr: &mut Vec<u8>, diagnostic_prefix: &str, name: &str) {

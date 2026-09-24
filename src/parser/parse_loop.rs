@@ -12,6 +12,13 @@ pub struct ParseLoopOptions {
     /// GNU echoes the offending input line verbatim; token reconstruction
     /// cannot recover the original spacing, so the guard slices this text.
     pub source_text: Option<String>,
+    /// Pre-alias-expansion text for the same parse, when the caller spliced
+    /// aliases into `source_text` first (grouped driver). GNU's y.error echoes
+    /// the input line as read — `math1)`, not its expansion
+    /// `echo $( date ))` — so diagnostics slice this text when present.
+    /// Lines align with `source_text` because group splices preserve line
+    /// structure.
+    pub diagnostic_text: Option<String>,
     /// How much the caller shifted token positions by before parsing, so the
     /// guard can map a token position back to the source-text byte offset.
     pub source_line_offset: usize,
@@ -21,6 +28,12 @@ pub(super) struct ParseState {
     pub(super) ast: Ast,
     pub(super) current_cmd: CommandNode,
     pub(super) in_subshell: bool,
+    /// Unclosed `$(` depth contributed by word tokens seen so far. The
+    /// lexer does not fold every multi-line substitution (comsub-posix
+    /// tests), so the matching `)` legitimately arrives later as a
+    /// top-level token; while this is > 0 a `)` is consumed as that
+    /// closer instead of being reported as a stray.
+    pub(super) pending_comsub: usize,
 }
 
 /// Parse tokens into an AST
@@ -28,11 +41,11 @@ pub fn parse(tokens: &[Token]) -> Ast {
     parse_with_options(tokens, ParseLoopOptions::default())
 }
 
-/// Options for the parse loop. The stray-close guard is enabled only for
-/// eval reparse: a top-level ")" can also be the legitimate closer of a
-/// multi-line $(...) substitution whose folding the lexer does not yet
-/// perform (comsub-posix.tests), so the top-level loop must keep dropping
-/// it silently until the lexer folds multi-line substitutions.
+/// Options for the parse loop. The stray-close guard reports a top-level
+/// ")" that does not close a pending `$(` — a multi-line substitution the
+/// lexer did not fold leaves its closer as a top-level token
+/// (comsub-posix.tests), and `pending_comsub` lets the guard distinguish
+/// that case from a real syntax error such as `echo x)`.
 pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
     let mut state = ParseState {
         ast: Ast {
@@ -40,18 +53,48 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         },
         current_cmd: CommandNode::new(),
         in_subshell: false,
+        pending_comsub: 0,
     };
 
     let mut i = 0;
     while i < tokens.len() {
+        // A word token whose text ends inside an unclosed `$(` leaves its
+        // `)` closer to arrive as a later top-level token.
+        if matches!(
+            tokens[i].kind,
+            TokenKind::Word | TokenKind::CommandSubst | TokenKind::Assignment
+        ) {
+            state.pending_comsub +=
+                crate::lexer::unclosed_command_substitution_depth(&tokens[i].raw);
+        }
+        if state.pending_comsub > 0
+            && matches!(tokens[i].value.as_str(), ")" | ";;" | ";&" | ";;;&")
+        {
+            // Still inside an unfolded `$(` body: `)` is its closer and
+            // case terminators belong to the body's own case syntax —
+            // neither is a top-level stray.
+            if tokens[i].value == ")" {
+                state.pending_comsub -= 1;
+            }
+            i += 1;
+            continue;
+        }
         // GNU parse.y: a ')' or a case clause terminator at command position
         // is a syntax error that aborts the remaining input ("case x in
         // esac)" -- the empty case list closes at esac and the ')' is
         // unexpected). The parser used to drop the token silently and run
         // the rest of the line as a simple command.
+        // A `)` at top level is always stray: subshell and case-pattern
+        // closers are consumed inside their own constructs (in_subshell is
+        // set while a `( ... )` body is open), so any `)` reaching the main
+        // loop — at command start or mid-command (`echo x)`) — is GNU's
+        // `syntax error near unexpected token `)''. `;;` et al are only
+        // stray at command position, where a `;;` terminator has no open
+        // clause.
         if options.stray_close_is_error
-            && command_is_empty(&state.current_cmd)
-            && (tokens[i].value == ")" || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
+            && ((tokens[i].value == ")" && !state.in_subshell)
+                || (command_is_empty(&state.current_cmd)
+                    && matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&")))
         {
             push_unexpected_token_error(&mut state, tokens, i, &options);
             break;
@@ -930,10 +973,14 @@ fn push_unexpected_token_error(
     // current input line). With the original text available (eval
     // reparse) echo that line verbatim; token reconstruction cannot
     // recover the original spacing.
-    let verbatim = options.source_text.as_ref().and_then(|text| {
-        let source_offset = tokens[i].position.checked_sub(options.source_line_offset)?;
-        source_line_at_byte_offset(text, source_offset)
-    });
+    let verbatim = options
+        .diagnostic_text
+        .as_ref()
+        .or(options.source_text.as_ref())
+        .and_then(|text| {
+            let source_offset = tokens[i].position.checked_sub(options.source_line_offset)?;
+            source_line_at_byte_offset(text, source_offset)
+        });
     let source = verbatim.unwrap_or_else(|| {
         let line_number = tokens[i].position;
         let mut line_start = i;
@@ -1575,6 +1622,7 @@ mod stray_close_tests {
                 stray_close_is_error: true,
                 source_text: Some(source_text.clone()),
                 source_line_offset: 198,
+                ..ParseLoopOptions::default()
             },
         );
         assert_eq!(marker_source(&ast), source_text);

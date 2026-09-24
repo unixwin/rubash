@@ -284,12 +284,12 @@ impl Executor {
             }
             "test" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], false)?;
+                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], false, &builtin_cmd)?;
                 Ok(())
             }
             "[" => {
                 self.apply_no_output_builtin_redirects(&builtin_cmd)?;
-                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], true)?;
+                self.exit_code = self.execute_test_words(&builtin_cmd.words[1..], true, &builtin_cmd)?;
                 Ok(())
             }
             "shift" => self.execute_shift_command(&builtin_cmd),

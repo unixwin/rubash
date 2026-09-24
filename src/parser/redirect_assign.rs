@@ -27,7 +27,9 @@ pub(super) fn assign_redirect_out_target(
         let redirect =
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, false, false);
         command.redirects.push(redirect.clone());
-        if redirect.fd.unwrap_or(1) == 1 {
+        // A `{var}` redirect allocates a fresh descriptor (GNU redir.c
+        // redir_varassign) — never fd 1, so no redirect_out mirror.
+        if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.redirect_out = Some(redirect);
         }
         return Some(next_i);
@@ -59,7 +61,7 @@ pub(super) fn assign_redirect_out_target(
             false,
         );
         command.redirects.push(redirect.clone());
-        if redirect.fd.unwrap_or(0) == 0 {
+        if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
             command.redirect_in = Some(redirect);
         }
         return Some(index + 1);
@@ -102,7 +104,7 @@ pub(super) fn assign_append_target(
         let redirect =
             redirect_node_with_fd_var(&tokens[index].value, fd, fd_var, &target, true, false);
         command.redirects.push(redirect.clone());
-        if redirect.fd.unwrap_or(1) == 1 {
+        if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.append = Some(redirect);
         }
         return Some(next_i);
@@ -218,8 +220,9 @@ pub(super) fn assign_output_redirect_raw(
     // The `redirect_out` field mirrors only fd-1 redirects (GNU's
     // redirector==1); numbered output redirects (`3>f`, `3>&1`) live in the
     // ordered `redirects` list so fd-1 propagation never mistakes them for
-    // the command's own stdout redirect.
-    if redirect.fd.unwrap_or(1) == 1 {
+    // the command's own stdout redirect. A `{var}` redirect allocates a
+    // fresh descriptor (redir.c redir_varassign) and never binds fd 1.
+    if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
         command.redirect_out = Some(redirect);
     }
     if operator == "&>" {
@@ -255,7 +258,7 @@ pub(super) fn assign_append_redirect_raw(
     let redirect =
         redirect_node_with_fd_var_raw(operator, fd, fd_var, target, raw_target, true, false);
     command.redirects.push(redirect.clone());
-    if redirect.fd.unwrap_or(1) == 1 {
+    if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
         command.append = Some(redirect);
     }
     if operator == "&>>" {

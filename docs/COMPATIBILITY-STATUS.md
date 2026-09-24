@@ -15,7 +15,23 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-22 深夜，master `44a56d1c`，无桩 + niu-sh 夹具）：58 零差 / 25 有 DIFF / 总 407 原始行**
+> **最新台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
+> （台账 `target/issue-suites/results/true-baseline-ledger.log`。
+> 本轮清零套件：procsub（`<(cmd)` 共享流语义 + 管道 fd-1 单流排序）、
+> set-e（`!` errexit 豁免穿过分组驱动）、vredir（`{var}<<EOF` 动态 fd）、
+> builtins（POSIX 特殊内建 unwind 传播 + `command -p` POSIX 工具目录探测）、
+> posix2/invocation/exp（TMPDIR/HOME 反斜杠规范化、`/bin/X` 扩展名探测）、
+> errors（`$[...]` 算术错误丢弃整条命令）、read（真 `-t N` 超时 + `/dev/tty`
+> CON 映射，16→2）、test（`/dev/tty` 挂死 + `-t`/`-c` 设备语义，254→8）。
+> 残余 12 套件按性质：env 绑定 —— extglob 16（全 env）、quotearray 2（全 env）、
+> nquote 12（recho 助手格式）、type 6（二进制名）、test 8（NTFS 属性位）、
+> intl 4（locale）、coproc 4（/etc/passwd 等）、ifs-posix 1（超时）；
+> 真差 —— glob 29（主体 NTFS 非法文件名，env 分类器无法全识别）、
+> errors 2（comsub 诊断措辞族）、nameref 1 / trap 1（时序抖动）。
+> 沿用无桩 harness：`__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 跨边界，
+> `/bin/sh|/usr/bin/sh` 经 PATH 解析为 niubash 夹具，TMPDIR 逐套件隔离。）
+>
+> **上一台账（2026-09-22 深夜，master `44a56d1c`，无桩 + niu-sh 夹具）：58 零差 / 25 有 DIFF / 总 407 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`；逐行审计
 > `docs/diff-audit-20260922.md`。本轮为**首份无桩引擎级台账**：
 > `__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 首次真实跨 WSL→Win32 边界
@@ -497,7 +513,12 @@ core.autocrlf=true 把 vendored bash 测试树（third_party/bash，submodule）
 
 ### 新定位根因（待修）
 
-- procsub：GNU procsub 子进程退出后 /dev/fd 路径 -e 为假；rubash 用持久临时文件 -e 为真。需进程存活期语义（Windows 命名管道方案，高 blast-radius）。
+- procsub：已修共享流语义——`<(cmd)` 临时路径经 `ShellState::procsub_streams`
+  注册为 `Rc<RefCell<ProcSubStream>>` 共享读游标，进程内各打开点
+  （read/函数 stdin/仿真 cat/`<&N`/管道段）经 `procsub_stream_take` 服务剩余字节
+  并推进偏移，spawn 子进程只拿剩余字节物化（subst.c:7143 / redir.c dup2 共享
+  open file description）。procsub.tests count_lines `1,0,0,0,0` 对齐，套件归零。
+  残余语义差：`>(cmd)` 方向与真管道存活期（GNU 子进程退出后路径 -e 为假）未覆盖。
 - posix2 -x：chmod -x 后 test -x 仍真——Windows 可执行位模拟缺失。
 - posix2 variable quoting 1/3：set 内建输出引号格式（SQUOTE 应为反斜杠引号，VHASH 应为裸 ab#cd）。
 

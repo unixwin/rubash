@@ -27,28 +27,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        let mut redirect_failed = false;
-        let auto_close = cmd.words.first().map(String::as_str) != Some("exec");
-        for redirect in &cmd.redirects {
-            if redirect.fd_var.is_some() {
-                match self.execute_dynamic_fd_var_redirect(redirect, auto_close) {
-                    Ok(_) => {}
-                    Err(ExecuteError::IoError(error)) => {
-                        let mut stderr = Vec::new();
-                        writeln!(
-                            &mut stderr,
-                            "{}{}",
-                            self.diagnostic_prefix(),
-                            crate::posix_errors::message(&error)
-                        )?;
-                        self.write_default_stderr(&stderr)?;
-                        self.exit_code = 1;
-                        redirect_failed = true;
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
+        // `{var}` redirects (fd_var) are applied once per command by
+        // Executor::apply_dynamic_fd_var_redirects — for simple commands at
+        // the execute_command dispatch point (GNU redir.c do_redirections →
+        // redir_varassign); the conditional and empty-words paths invoke it
+        // before calling here. This helper only sees commands whose fd_var
+        // redirects are already applied, so it must not re-apply them.
+        let redirect_failed = false;
 
         if let Some(redirect) = &cmd.redirect_in {
             let target = self.expand_redirect_target(redirect);
@@ -66,7 +51,7 @@ impl Executor {
                     .write(true)
                     .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             } else {
-                self.open_input_redirect(&target)?;
+                self.probe_input_redirect(&target)?;
             }
         }
 

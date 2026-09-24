@@ -77,6 +77,20 @@ impl Executor {
             };
 
             if request.check_only {
+                // GNU kill -0 is a real liveness probe (kill(2) with sig 0
+                // returns ESRCH for a dead pid), not an unconditional yes.
+                // A pid the job table already marked Completed is dead even
+                // before the process object is reaped.
+                let job_dead =
+                    self.shell_state.job_table.completed_statuses.contains_key(&pid);
+                if job_dead || !process_exists(pid) {
+                    writeln!(
+                        stderr,
+                        "{}kill: ({pid}) - No such process",
+                        self.diagnostic_prefix()
+                    )?;
+                    status = 1;
+                }
                 continue;
             }
 

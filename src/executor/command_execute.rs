@@ -195,54 +195,35 @@ impl Executor {
                     }
                 }
             }
-            let message = cmd
-                .get_assignment("__RUBASH_PARSE_ERROR__")
-                .map(String::as_str)
-                .unwrap_or("unexpected token");
-            if message.starts_with("syntax error:")
-                || message.starts_with("arithmetic syntax error:")
-            {
-                eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}syntax error: `{}'",
-                        self.parser_diagnostic_prefix(),
-                        parse_error_source_display(source)
-                    );
-                }
-            } else {
-                let message = bash_style_unexpected_token_message(message);
-                eprintln!(
-                    "{}syntax error near {message}",
-                    self.parser_diagnostic_prefix(),
-                );
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}`{}'",
-                        self.parser_diagnostic_prefix(),
-                        parse_error_source_display(source)
-                    );
-                }
-            }
+            self.report_command_parse_error(cmd);
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
 
-        if cmd
-            .word_metadata
-            .iter()
-            .any(|metadata| crate::lexer::has_unclosed_command_substitution(&metadata.raw))
-            || cmd
-                .assignment_values()
-                .any(|value| crate::lexer::has_unclosed_command_substitution(value))
         {
-            self.mark_parse_error();
-            eprintln!(
-                "{}syntax error: unexpected EOF while looking for matching `)'",
-                self.parser_diagnostic_prefix()
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
+            // GNU make_cmd.c gather_here_documents + parse.y:6883: warn on
+            // any heredoc header the unclosed comsub swallowed, then report
+            // `unexpected EOF` at the line after the last input line — not
+            // the command's start line.
+            let mut base_line = cmd.line.unwrap_or(1);
+            let mut reported = false;
+            for raw in cmd
+                .assignment_values()
+                .map(|v| v.as_str())
+                .chain(cmd.word_metadata.iter().map(|m| m.raw.as_str()))
+            {
+                if crate::lexer::has_unclosed_command_substitution(raw) {
+                    self.mark_parse_error();
+                    self.report_unclosed_comsub_eof(raw, base_line);
+                    reported = true;
+                    break;
+                }
+                base_line += raw.matches('\n').count();
+            }
+            if reported {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
         }
 
         if cmd.function_command.is_none()
@@ -432,6 +413,21 @@ impl Executor {
             return self.execute_empty_words_command(&cmd);
         }
 
+        // GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
+        // a `{var}` redirection allocates a fresh descriptor and assigns
+        // its number to var for every simple command — builtins, functions
+        // and external commands alike — before the command runs. Apply
+        // them once here, ahead of dispatch; a failed redirect aborts the
+        // command (do_redirections returns on the first error). `exec`
+        // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
+        // applies them in list order with persistent semantics), so it is
+        // excluded here.
+        if cmd.words.first().map(String::as_str) != Some("exec")
+            && self.apply_dynamic_fd_var_redirects(&cmd, true)?
+        {
+            return Ok(());
+        }
+
         // GNU execute_cmd.c execute_simple_command: array-style assignment
         // prefixes like `var[0]=X` are recognized as assignment words by
         // assignment() (general.c:480) and separated from command words at
@@ -454,13 +450,7 @@ impl Executor {
             return Ok(());
         }
 
-        // `exec {fd}...` mutates the shell's persistent descriptor table.
-        // Do not materialize its input redirect through the external-command
-        // path: that would consume the source virtual fd before exec can
-        // duplicate or move it.
-        if is_dynamic_fd_exec_command(&cmd)
-            || !command_needs_process_substitution_materialization(&cmd)
-        {
+        if !command_needs_process_substitution_materialization(&cmd) {
             return self.execute_materialized_command(&cmd, ProcessSubstitutionFiles::default());
         }
 
@@ -752,7 +742,7 @@ impl Executor {
     }
 }
 
-fn bash_style_unexpected_token_message(message: &str) -> String {
+pub(in crate::executor) fn bash_style_unexpected_token_message(message: &str) -> String {
     if let Some(token) = message
         .strip_prefix("unexpected token `")
         .and_then(|rest| rest.strip_suffix('`'))
@@ -762,27 +752,11 @@ fn bash_style_unexpected_token_message(message: &str) -> String {
     message.to_string()
 }
 
-fn parse_error_source_display(source: &str) -> String {
+pub(in crate::executor) fn parse_error_source_display(source: &str) -> String {
     source
         .trim()
         .replace(";then", "; then")
         .replace("then<W", "then <W")
-}
-
-fn is_dynamic_fd_exec_command(cmd: &CommandNode) -> bool {
-    cmd.words.first().map(String::as_str) == Some("exec")
-        && cmd.words.get(1).is_some_and(|word| {
-            let Some(name) = word
-                .strip_prefix('{')
-                .and_then(|word| word.strip_suffix('}'))
-            else {
-                return false;
-            };
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        })
 }
 
 fn unterminated_extglob(raw: &str) -> bool {

@@ -14,7 +14,7 @@
 
 pub mod builtins;
 pub mod executor;
-#[cfg(windows)]
+#[cfg(any(windows, unix))]
 pub(crate) mod fd;
 pub mod expand;
 pub mod history;
@@ -25,6 +25,7 @@ pub mod lexer;
 pub mod locale;
 pub mod parser;
 pub mod posix_errors;
+pub mod proc_vfs;
 pub mod script_driver;
 pub mod shell;
 

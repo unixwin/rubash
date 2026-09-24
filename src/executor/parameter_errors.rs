@@ -612,7 +612,6 @@ impl Executor {
         // (redir.c heredoc expansion has no quote removal), so the scan must
         // keep treating every `${` as an expansion start.
         self.parameter_expansion_error_in_word_context(body, false)
-            .map(|(name, message, status)| (name, message, if status == 127 { 1 } else { status }))
     }
 
     pub(in crate::executor) fn parameter_expansion_error_in_word(
@@ -620,6 +619,22 @@ impl Executor {
         word: &str,
     ) -> Option<(String, String, i32)> {
         self.parameter_expansion_error_in_word_context(word, true)
+    }
+
+    /// GNU subst.c:8221 parameter_brace_expand_error →
+    /// set_exit_status(EXECUTION_FAILURE): a fatal `${var?msg}` / nounset
+    /// expansion error reports status 1 in script mode. In `-c` mode
+    /// shell.c:1471 run_one_command maps FORCE_EOF to 127.
+    pub(in crate::executor) fn expansion_fatal_status(&self) -> i32 {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_IS_C")
+        {
+            127
+        } else {
+            1
+        }
     }
 
     /// `quote_aware` mirrors GNU word expansion (subst.c): quotes in a word
@@ -643,7 +658,13 @@ impl Executor {
         }
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = self.nounset_unbound_parameter(word) {
-                return Some((name, "unbound variable".to_string(), 127));
+                // expr.c expr_streval raises FORCE_EOF for unbound vars
+                // under set -u — fatal like `${x?}` (see command_execute).
+                return Some((
+                    name,
+                    "unbound variable".to_string(),
+                    Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                ));
             }
         }
         let mut rest = word;
@@ -881,10 +902,15 @@ impl Executor {
                     } else {
                         self.expand_parameter_word(message)
                     };
-                    // Bash reports parameter expansion failures as a
-                    // command-not-found-style expansion error (status 127),
-                    // including both `?` and `:?` operators.
-                    return Some((name.to_string(), message, 127));
+                    // GNU subst.c:8221 parameter_brace_expand_error →
+                    // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
+                    // the whole noninteractive script; subshell, pipeline,
+                    // and command-substitution boundaries contain it.
+                    return Some((
+                        name.to_string(),
+                        message,
+                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                    ));
                 }
             }
             if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {

@@ -457,6 +457,13 @@ impl Executor {
     }
 
     pub(in crate::executor) fn execute_let(&mut self, expressions: &[String]) -> i32 {
+        // GNU let.def:85: a leading `--` argument is skipped (ISOPTION),
+        // so `let -- 'expr'` evaluates expr, not `--` as an operand.
+        let expressions = if expressions.first().map(String::as_str) == Some("--") {
+            &expressions[1..]
+        } else {
+            expressions
+        };
         if expressions.is_empty() {
             eprintln!("{}let: expression expected", self.diagnostic_prefix());
             return 1;
@@ -620,6 +627,24 @@ impl Executor {
                 .map(|alias| (alias.value.replace(DATA_DOLLAR, "$"), alias.expand_next))
         };
         crate::lexer::expand_aliases_in_source(source, &lookup as &crate::lexer::AliasLookup<'_>)
+    }
+
+    /// `comsub_body_alias_splice` for a body extracted from input the
+    /// grouped driver already ran through expand_aliases_in_source
+    /// (__RUBASH_ALIAS_STREAMED): its `$(` bodies were spliced there, so a
+    /// second pass would fire self-referential aliases again (`let` →
+    /// `let --` → `let -- --`; AL_BEINGEXPANDED, parse.y:3259). Eval
+    /// strings and trap actions are fresh input streams — their callers
+    /// use `comsub_body_alias_splice` directly.
+    pub(in crate::executor) fn comsub_body_alias_splice_extracted(
+        &self,
+        source: &str,
+    ) -> String {
+        if self.alias_streamed() {
+            source.to_string()
+        } else {
+            self.comsub_body_alias_splice(source)
+        }
     }
 
     pub(in crate::executor) fn execute_parser_level_alias(

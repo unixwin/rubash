@@ -728,7 +728,44 @@ impl Executor {
                         let (expression, matched) =
                             collect_dollar_paren_arithmetic_expansion(&mut chars);
                         if matched {
-                            if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
+                            // GNU subst.c:10842-10862: `$((` content is
+                            // arithmetic only when the text inside the outer
+                            // parens ends in `)` and survives chk_arithsub's
+                            // balance check; otherwise the whole construct is
+                            // a nested command substitution (`$(( echo ab
+                            // cde ) )` runs `( echo ab cde )`).
+                            let temp2 = expression
+                                .strip_suffix(')')
+                                .unwrap_or(expression.as_str());
+                            let (expression, force_comsub) = if let Some(inner) =
+                                temp2.strip_suffix(')')
+                            {
+                                if arith_sub_parens_balanced(inner) {
+                                    (inner.to_string(), false)
+                                } else {
+                                    (format!("({temp2}"), true)
+                                }
+                            } else {
+                                (format!("({temp2}"), true)
+                            };
+                            if force_comsub {
+                                let value = protect_command_substitution_output(
+                                    &self.expand_command_substitution_mut_with_context(
+                                        &expression,
+                                        context,
+                                    ),
+                                );
+                                if expansion_ws_marked(alternate, preserve_quotes, in_double) {
+                                    output.push_str(&mark_expansion_whitespace(
+                                        &value,
+                                        preserve_quotes,
+                                    ));
+                                } else {
+                                    output.push_str(&value);
+                                }
+                            } else if let Some(value) =
+                                self.eval_arithmetic_expansion_value(&expression)
+                            {
                                 let value = value.to_string();
                                 if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                     output.push_str(&mark_expansion_whitespace(
@@ -806,10 +843,21 @@ impl Executor {
                         // GNU parse.y parse_comsub: an unclosed `$(` reports
                         // `unexpected EOF` and the expansion fails, aborting
                         // the command while the script continues (braces.tests
-                        // "${a+'$('\'}").
+                        // "${a+'$('\'}"). parser_error (error.c:300) uses
+                        // yy_input_name()=="command substitution" and the
+                        // inherited line_number (evalstring.c push_stream(0))
+                        // — the current command line plus the newlines the
+                        // comsub text consumed.
+                        let eof_line = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_LINE")
+                            .and_then(|line| line.parse::<usize>().ok())
+                            .unwrap_or(1)
+                            + source.lines().count().saturating_sub(1);
                         eprintln!(
-                            "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
-                            self.diagnostic_prefix()
+                            "{}unexpected EOF while looking for matching `)'",
+                            self.comsub_eof_diagnostic(eof_line)
                         );
                         self.shell_state.arithmetic_fatal_error.set(true);
                         self.shell_state.arithmetic_expansion_error.set(true);
@@ -837,6 +885,45 @@ impl Executor {
                                     .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                             } else {
                                 output.push_str(&value);
+                            }
+                        } else {
+                            // GNU subst.c: `$[` is unambiguous arithmetic
+                            // (no `$(` comsub fallback like `$((`). An eval
+                            // error is a word-expansion failure — expr.c
+                            // evalerror DISCARDs the command, so the echo
+                            // never runs (errors.tests line 286).
+                            if self
+                                .shell_state
+                                .arithmetic_last_error_category
+                                .take()
+                                .is_some()
+                            {
+                                self.shell_state.arithmetic_fatal_error.set(true);
+                            }
+                            if !self
+                                .shell_state
+                                .arithmetic_expansion_error
+                                .replace(true)
+                            {
+                                // GNU evalexp reports against the
+                                // post-expansion string (expand_arith_string
+                                // ran first).
+                                let eval_input =
+                                    self.arithmetic_last_eval_input.borrow().clone();
+                                let display = if eval_input.is_empty() {
+                                    expression.as_str()
+                                } else {
+                                    eval_input.as_str()
+                                };
+                                if let Some(message) =
+                                    crate::executor::arithmetic::arithmetic_error_message(
+                                        display,
+                                        true,
+                                        &self.shell_state.env_vars,
+                                    )
+                                {
+                                    eprintln!("{}{}", self.diagnostic_prefix(), message);
+                                }
                             }
                         }
                     } else {
@@ -1176,7 +1263,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1351,7 +1438,7 @@ impl Executor {
         // level for this body's own word scan; downstream real-parser paths
         // receive the raw source and splice for themselves at their own
         // parse boundary.
-        let words = split_shell_words(&self.comsub_body_alias_splice(source));
+        let words = split_shell_words(&self.comsub_body_alias_splice_extracted(source));
         // Store leading newlines for the heredoc path to adjust warning
         // line numbers: when `$(` is at end of line, the comsub body starts
         // on the next line, and the `cat` command line is
@@ -1474,7 +1561,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1546,6 +1633,16 @@ impl Executor {
             }
             Err(_) => 1,
         };
+
+        // GNU parse.y: a syntax error inside the substitution body is a
+        // read-time failure of the ENCLOSING command — after this command
+        // finishes, the reader stops (`$( esac ; ...)` in a case pattern:
+        // the `*)` arm still prints `ok 2`, `echo we should not see this`
+        // never runs). The body ran in place, so its parse_error latch is
+        // already ours — propagate it to the abort flag the ast loop checks.
+        if self.parse_error_occurred {
+            self.last_command_substitution_parse_error.set(true);
+        }
 
         self.restore_flat_subshell(saved_state, saved_dir);
         self.exit_code = saved_exit_code;
@@ -1633,28 +1730,62 @@ fn embedded_command_substitution_expression(expression: &str) -> bool {
 fn collect_dollar_paren_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {
+    // GNU parse.y parse_comsub -> parse_matched_pair(P_ARITH): after `$((`
+    // the scan is plain paren nesting, not an adjacent-`))` search — the
+    // second `(` of `$((` is one open, so depth starts at 2 (the `$(` plus
+    // that paren) and the word ends when it returns to 0. Quotes and
+    // backslash escapes keep their `)`s out of the count.
     let mut expression = String::new();
-    let mut paren_depth: usize = 0;
+    let mut paren_depth: usize = 2;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
 
     while let Some(ch) = chars.next() {
+        if escaped {
+            escaped = false;
+            expression.push(ch);
+            continue;
+        }
+        if single {
+            expression.push(ch);
+            if ch == '\'' {
+                single = false;
+            }
+            continue;
+        }
+        if double {
+            expression.push(ch);
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            continue;
+        }
         match ch {
+            '\\' => {
+                escaped = true;
+                expression.push(ch);
+            }
+            '\'' => {
+                single = true;
+                expression.push(ch);
+            }
+            '"' => {
+                double = true;
+                expression.push(ch);
+            }
             '(' => {
                 paren_depth += 1;
                 expression.push(ch);
             }
-            // A command-like body may end with its own `)` immediately before
-            // the arithmetic expansion's closing `)`: `(echo hi))`.
-            ')' if paren_depth == 1 && chars.peek().copied() == Some(')') => {
-                expression.push(ch);
-                chars.next();
-                return (expression, true);
-            }
-            ')' if paren_depth == 0 && chars.peek().copied() == Some(')') => {
-                chars.next();
-                return (expression, true);
-            }
             ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    expression.push(ch);
+                    return (expression, true);
+                }
                 expression.push(ch);
             }
             _ => expression.push(ch),
@@ -1662,6 +1793,50 @@ fn collect_dollar_paren_arithmetic_expansion(
     }
 
     (expression, false)
+}
+
+/// GNU subst.c:9727 chk_arithsub — paren-balance check on the inside of
+/// `$(( ... ))`: a stray `)` means the construct is really a nested command
+/// substitution (`$(( echo ab cde ) )`), not arithmetic. Quotes and
+/// backslash escapes are skipped exactly like the C version.
+fn arith_sub_parens_balanced(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    let mut count = 0i32;
+    let mut index = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                index += 2;
+                continue;
+            }
+            '\'' | '"' => {
+                let quote = chars[index];
+                index += 1;
+                while index < chars.len() {
+                    if quote == '"' && chars[index] == '\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if chars[index] == quote {
+                        break;
+                    }
+                    index += 1;
+                }
+                index += 1;
+                continue;
+            }
+            '(' => count += 1,
+            ')' => {
+                count -= 1;
+                if count < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    count == 0
 }
 
 fn collect_dollar_bracket_arithmetic_expansion(
@@ -1713,19 +1888,47 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
     let mut word = String::new();
     let mut word_boundary = true;
     let mut current_word_boundary = true;
+    let mut parameter_depth = 0usize;
+    // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
+    // a token boundary — after whitespace, a separator (`;&|()<>`), or at
+    // the start of the body. `word.is_empty()` alone is wrong: `$`, quotes,
+    // escapes and other non-alphanumeric word characters never reach `word`,
+    // so `$(echo $#)` and `$(echo 'a'#b)` would misread `#` as a comment.
+    let mut token_boundary = true;
 
     while let Some(source_ch) = chars.next() {
         if escaped {
             source.push(source_ch);
             escaped = false;
+            token_boundary = false;
+            // A backslash-quoted character is word text (placeholder:
+            // `c\ase` is not `case`), so a following `#` stays mid-word
+            // (`\;#` in comsub1.sub).
+            word.push('\u{1}');
             continue;
         }
         if source_ch == '\\' && !single {
             source.push(source_ch);
             escaped = true;
+            token_boundary = false;
             continue;
         }
-        if source_ch == '#' && !single && !double && word_boundary {
+        // `${` opens parameter text: inside it `#` is a parameter operator
+        // (e.g. `${#x}`), never a comment introducer.
+        if source_ch == '$' && !single && chars.peek().copied() == Some('{') {
+            source.push(source_ch);
+            source.push(chars.next().expect("parameter brace"));
+            parameter_depth += 1;
+            token_boundary = false;
+            continue;
+        }
+        if source_ch == '}' && parameter_depth > 0 {
+            source.push(source_ch);
+            parameter_depth -= 1;
+            token_boundary = false;
+            continue;
+        }
+        if source_ch == '#' && !single && !double && token_boundary && parameter_depth == 0 {
             source.push(source_ch);
             while let Some(comment_ch) = chars.peek().copied() {
                 if comment_ch == '\n' {
@@ -1737,10 +1940,12 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
             word.clear();
             word_boundary = true;
             current_word_boundary = true;
+            token_boundary = true;
             continue;
         }
         if source_ch == '`' && !single {
             source.push(source_ch);
+            token_boundary = false;
             let mut backtick_escaped = false;
             for backtick_ch in chars.by_ref() {
                 source.push(backtick_ch);
@@ -1833,7 +2038,14 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                         }
                         source.push(body_ch);
                         if body_ch == '\n' {
-                            if body_line.trim_end() == delimiter {
+                            // `<<-` strips leading tabs on the terminator
+                            // line the same way the `)` check above does.
+                            let terminator = if strip_tabs {
+                                body_line.trim_start_matches('\t')
+                            } else {
+                                body_line.as_str()
+                            };
+                            if terminator.trim_end() == delimiter {
                                 break;
                             }
                             body_line.clear();
@@ -1845,6 +2057,9 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                         break;
                     }
                 }
+                // A heredoc terminator ends on its own line, so the next
+                // character begins a fresh token.
+                token_boundary = true;
                 continue;
             }
         }
@@ -1894,10 +2109,12 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
         match source_ch {
             '\'' if !double => {
                 single = !single;
+                token_boundary = false;
                 source.push(source_ch);
             }
             '"' if !single => {
                 double = !double;
+                token_boundary = false;
                 source.push(source_ch);
             }
             '(' if !single && !double && case_depth == 0 => {
@@ -1913,6 +2130,12 @@ pub(in crate::executor) fn collect_command_substitution_source_ex(
                 source.push(source_ch);
             }
             _ => source.push(source_ch),
+        }
+        // Quoted characters are word text handled by the quote arms; the
+        // boundary only tracks characters the live tokenizer sees.
+        if !single && !double {
+            token_boundary = source_ch.is_whitespace()
+                || matches!(source_ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
     }
 

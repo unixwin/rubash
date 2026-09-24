@@ -158,6 +158,14 @@ impl Executor {
         cmd: &CommandNode,
         conditional_command: &ConditionalCommand,
     ) -> Result<(), ExecuteError> {
+        // GNU redir.c do_redirections → redir_varassign: `[[ ]] {fd}<f`
+        // allocates and assigns the dynamic fd like any other command.
+        // This path bypasses the simple-command dispatch, so apply the
+        // fd_var redirects here.
+        if self.apply_dynamic_fd_var_redirects(cmd, true)? {
+            self.exit_code = 1;
+            return Ok(());
+        }
         self.apply_no_output_builtin_redirects(cmd)?;
         // GNU execute_cmd.c execute_cond_command -> redir.c
         // do_redirections/undo_redirections: the command's output
@@ -211,8 +219,14 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
-                self.exit_code = 1;
-                return Err(ExecuteError::ExitCode(1));
+                // subst.c expand_wdesc_fatal → exp_jump_to_top_level
+                // (FORCE_EOF): fatal expansion errors end the whole
+                // noninteractive script (subshell/pipeline boundaries
+                // contain it). shell.c:1471 run_one_command maps FORCE_EOF
+                // to 127 under `-c`; script mode exits EXECUTION_FAILURE=1.
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
             }
             self.exit_code = status;
             if status == 1 {
@@ -339,6 +353,15 @@ impl Executor {
                 status = 1;
             }
         }
+        // GNU execute_cmd.c execute_null_command (4203-4278): a wordless
+        // command carrying a REDIR_VARASSIGN redirect force-forks — the fd
+        // allocation and variable bind happen in the child, so the parent
+        // keeps the file side effects but never sees the variable value.
+        // Apply the redirects for their side effects, then undo the binds.
+        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            status = 1;
+        }
+        self.undo_child_fd_var_redirects();
         match self.apply_no_output_builtin_redirects_with_status(cmd) {
             Ok(redirect_failed) => {
                 if redirect_failed {
@@ -528,8 +551,17 @@ impl Executor {
                     // can consult the raw form and avoid mis-materializing
                     // the expanded word as a process substitution (func5.sub
                     // line 45 `\<\(:\)` must report "command not found").
-                    || metadata.value.contains("<(")
-                    || metadata.value.contains(">(")
+                    // The expanded value carries CTLESC markers between the
+                    // metacharacters (`<` CTLESC `(`), so compare against the
+                    // dequoted form.
+                    || metadata
+                        .value
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .contains("<(")
+                    || metadata
+                        .value
+                        .replace(crate::executor::markers::CTLESC, "")
+                        .contains(">(")
             });
         let mut variable_expanded = CommandNode {
             words: Vec::new(),

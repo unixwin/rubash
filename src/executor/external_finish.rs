@@ -313,6 +313,11 @@ impl Executor {
         // the parent's next parse check (heredoc3.sub -> heredoc10.sub).
         let saved_parse_error = self.parse_error_occurred;
         self.parse_error_occurred = false;
+        // jump_to_top_level unwinding is also per-process: a pending flag
+        // inherited by the child would abort its first grouped command, and
+        // a jump inside the child (comsub6.sub's parse error exits 2) must
+        // not break the parent's next group (comsub7.sub printed nothing).
+        let saved_exit_jump_pending = self.exit_jump_pending.replace(false);
         let saved_comsub_parse_error = self.last_command_substitution_parse_error.get();
         self.last_command_substitution_parse_error.set(false);
         // GNU's this_command_name belongs to the executing command only;
@@ -358,7 +363,7 @@ impl Executor {
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
-        } else if let (Some(input), _) = self.function_call_stdin(cmd)? {
+        } else if let (Some(input), _, _) = self.function_call_stdin(cmd)? {
             self.shell_state
                 .env_vars
                 .insert(FUNCTION_STDIN.to_string(), input);
@@ -499,6 +504,7 @@ impl Executor {
             crate::builtins::kill::requeue_pending_signals(saved_pending_signals);
         }
         self.parse_error_occurred = saved_parse_error;
+        self.exit_jump_pending.set(saved_exit_jump_pending);
         self.last_command_substitution_parse_error
             .set(saved_comsub_parse_error);
         self.shell_state.pipestatus = saved_pipestatus;

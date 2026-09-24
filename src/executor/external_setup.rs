@@ -158,7 +158,7 @@ impl Executor {
                     if redirect_target_fd(&target).is_none()
                         && !is_closed_redirect_target(&target)
                     {
-                        self.open_input_redirect(&target)?;
+                        self.probe_input_redirect(&target)?;
                     }
                 }
             }
@@ -276,6 +276,10 @@ impl Executor {
             self.command_with_process_substitution_files(cmd)?;
         self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
+        // GNU execute_cmd.c: external commands fork before do_redirections
+        // — a `{var}` bind happened only in the child, so the parent's
+        // variable is untouched and the allocated descriptor dies there.
+        self.undo_child_fd_var_redirects();
         self.finish_process_substitutions(process_substitutions)?;
         result
     }
@@ -874,7 +878,45 @@ impl Executor {
     ) -> Result<PathBuf, ExecuteError> {
         let path = self.process_substitution_temp_path()?;
         fs::write(&path, output)?;
+        // subst.c:7143 command_substitute — the `<(cmd)` word names a
+        // pipe-like stream: every open shares one offset that drains on
+        // read. The temp file is only the argv carrier for external
+        // children; in-shell opens must consult the registered stream
+        // instead (procsub.tests count_lines: `wc -l < $1` x5 ->
+        // 1,0,0,0,0).
+        self.shell_state.procsub_streams.borrow_mut().insert(
+            path.clone(),
+            Rc::new(RefCell::new(crate::shell::state::ProcSubStream {
+                data: output.to_vec(),
+                offset: 0,
+            })),
+        );
         Ok(path)
+    }
+
+    /// Serve the remaining bytes of a process-substitution stream opened
+    /// through its temp-path carrier, advancing the shared offset to EOF
+    /// (GNU: the word is a `/dev/fd/N` pipe dup — redir.c:1183
+    /// open_redir_file hands every consumer the same draining stream).
+    /// Returns `None` when `path` is not a registered substitution.
+    pub(in crate::executor) fn procsub_stream_take(&self, path: &std::path::Path) -> Option<Vec<u8>> {
+        let key = {
+            let streams = self.shell_state.procsub_streams.borrow();
+            if streams.contains_key(path) {
+                path.to_path_buf()
+            } else {
+                let canon = path.canonicalize().ok()?;
+                streams
+                    .keys()
+                    .find(|key| key.canonicalize().ok().as_deref() == Some(canon.as_path()))?
+                    .clone()
+            }
+        };
+        let stream = self.shell_state.procsub_streams.borrow().get(&key)?.clone();
+        let mut stream = stream.borrow_mut();
+        let rest = stream.data[stream.offset..].to_vec();
+        stream.offset = stream.data.len();
+        Some(rest)
     }
 
     pub(in crate::executor) fn virtual_fd_stdin_remaining_bytes(&self, fd: u32) -> Option<Vec<u8>> {

@@ -15,7 +15,7 @@ use std::rc::Rc;
 #[test]
 fn host_session_history_feeds_and_collects_script_expansions() {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
-    assert!(session.borrow_mut().record("echo seedmark", "", "", 0));
+    assert!(session.borrow_mut().record("echo seedmark", "", "", Some(0)));
 
     let out = std::env::temp_dir().join(format!("rubash-s1-{}-out.txt", std::process::id()));
     let _ = std::fs::remove_file(&out);

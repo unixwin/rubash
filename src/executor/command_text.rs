@@ -174,6 +174,10 @@ pub(in crate::executor) fn fd_closed_key(fd: u32) -> String {
     format!("{FD_CLOSED_PREFIX}{fd}")
 }
 
+pub(in crate::executor) fn fd_terminal_key(fd: u32) -> String {
+    format!("{FD_TERMINAL_PREFIX}{fd}")
+}
+
 pub(in crate::executor) fn command_has_output_redirects(cmd: &CommandNode) -> bool {
     cmd.redirect_out.is_some()
         || cmd.append.is_some()

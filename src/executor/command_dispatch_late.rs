@@ -14,6 +14,7 @@ impl Executor {
         &mut self,
         args: &[String],
         bracket: bool,
+        cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         // W_ARRAYREF (in-band ARRAYREF_FLAG) is a no-op for test/[ — GNU
         // marks arrayref-shaped operands (execute_cmd.c:4366) but test.def
@@ -33,6 +34,7 @@ impl Executor {
             }
             index += 1;
         }
+        self.sync_fd_terminal_marks(Some(cmd));
         Ok(crate::builtins::test::execute(
             &args,
             bracket,
@@ -175,7 +177,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "test") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_test_words(&cmd.words[1..], false)?;
+                    self.exit_code = self.execute_test_words(&cmd.words[1..], false, cmd)?;
                     Ok(())
                 }
             }
@@ -183,7 +185,7 @@ impl Executor {
                 if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "[") {
                     self.execute_external(cmd)
                 } else {
-                    self.exit_code = self.execute_test_words(&cmd.words[1..], true)?;
+                    self.exit_code = self.execute_test_words(&cmd.words[1..], true, cmd)?;
                     Ok(())
                 }
             }

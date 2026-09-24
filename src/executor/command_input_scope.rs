@@ -529,9 +529,22 @@ impl Executor {
         // unexpected EOF while looking for matching `)'` and leaves foo empty.
         // Detect unclosed `$(` in the raw body before expansion.
         if crate::lexer::has_unclosed_command_substitution(body) {
+            // GNU error.c:300 parser_error with yy_input_name()=="command
+            // substitution": `script: command substitution: line N:` — N is
+            // the inherited script line when the comsub string runs out
+            // (evalstring.c push_stream(0) keeps line_number), i.e. the
+            // delimiter line: command line + body lines + 1.
+            let eof_line = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1)
+                + body.lines().count()
+                + 1;
             eprintln!(
-                "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
-                self.diagnostic_prefix()
+                "{}unexpected EOF while looking for matching `)'",
+                self.comsub_eof_diagnostic(eof_line)
             );
             return String::new();
         }
@@ -618,9 +631,21 @@ impl Executor {
             return decode_stdin_body_enq(body);
         }
         if crate::lexer::has_unclosed_command_substitution(body) {
+            // Same GNU parser_error shape as the mut variant above: the
+            // reported line is the heredoc delimiter line (command line +
+            // body lines + 1), since the comsub inherits the outer
+            // line_number (evalstring.c push_stream(0)).
+            let eof_line = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .and_then(|line| line.parse::<usize>().ok())
+                .unwrap_or(1)
+                + body.lines().count()
+                + 1;
             eprintln!(
-                "{}command substitution: line 1: unexpected EOF while looking for matching `)'",
-                self.diagnostic_prefix()
+                "{}unexpected EOF while looking for matching `)'",
+                self.comsub_eof_diagnostic(eof_line)
             );
             return String::new();
         }

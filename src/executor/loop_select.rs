@@ -252,7 +252,14 @@ impl Executor {
                     .read_all_bytes(fd)
                     .map(|bytes| bytes_to_shell_text(&bytes)),
                 Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
-                    self.virtual_fd_stdin_remaining(fd)
+                    // Same drain-on-serve as the `<&N` path in
+                    // stdin_string_for_command: the loop's stdin owns the
+                    // shared offset now (redir.c dup2 semantics).
+                    let input = self.virtual_fd_stdin_remaining(fd);
+                    if input.is_some() {
+                        self.fd_table.drain_input_to_eof(fd);
+                    }
+                    input
                 }
                 _ => None,
             };
@@ -264,6 +271,11 @@ impl Executor {
                 .read(true)
                 .write(true)
                 .open(&path);
+        }
+        // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): loop stdin redirect
+        // reads synthetic /proc files before the filesystem.
+        if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+            return Some(bytes_to_shell_text(&bytes));
         }
         fs::read_to_string(path).ok()
     }

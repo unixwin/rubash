@@ -91,7 +91,7 @@ impl Executor {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = self.execute_test_words(&cmd.words[1..], false)?;
+                self.exit_code = self.execute_test_words(&cmd.words[1..], false, cmd)?;
                 Ok(())
             }
             "[" => {
@@ -99,7 +99,7 @@ impl Executor {
                     return self.execute_external(cmd);
                 }
                 self.apply_no_output_builtin_redirects(cmd)?;
-                self.exit_code = self.execute_test_words(&cmd.words[1..], true)?;
+                self.exit_code = self.execute_test_words(&cmd.words[1..], true, cmd)?;
                 Ok(())
             }
             "dirname" => {

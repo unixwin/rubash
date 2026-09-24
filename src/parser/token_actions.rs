@@ -18,6 +18,25 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         | TokenKind::BraceExpand => {
             state.current_cmd.subshell |= state.in_subshell;
             note_command_line(&mut state.current_cmd, token);
+            // GNU read_token_word (parse.y:5821-5843): a `{varname}` word
+            // immediately followed by a redirection operator is a
+            // REDIR_WORD claimed by the redirect (fd_var), never a command
+            // word — `{fd}</dev/null exec` runs `exec`, not `{fd}`.
+            if !command_is_open_conditional(&state.current_cmd)
+                && tokens.get(*i + 1).is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        TokenKind::RedirectIn
+                            | TokenKind::RedirectOut
+                            | TokenKind::Append
+                            | TokenKind::HereDoc
+                            | TokenKind::HereString
+                    )
+                })
+                && redirect_fd_var_prefix(tokens, *i + 1).is_some()
+            {
+                return TokenAction::Advance;
+            }
             if token.value.starts_with('{')
                 && token.value.contains(';')
                 && !token.value.contains('}')
@@ -484,7 +503,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     let redirect =
                         redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                     state.current_cmd.redirects.push(redirect.clone());
-                    if redirect.fd.unwrap_or(0) == 0 {
+                    // `{var}` redirects allocate a fresh descriptor (GNU
+                    // redir.c redir_varassign) — never the fd-0 mirror.
+                    if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(redirect);
                     }
                     *i = next_i;
@@ -557,7 +578,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         false,
                     );
                     state.current_cmd.redirects.push(redirect.clone());
-                    if redirect.fd.unwrap_or(0) == 0 {
+                    if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(redirect);
                     }
                     *i += 1;
@@ -650,7 +671,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_fd_var_prefix(tokens, *i),
                 ));
                 if fd.is_none() {
-                    state.current_cmd.heredoc_delimiter = Some(delimiter);
+                    // GNU stores `here_doc_eof` dequoted (make_cmd.c
+                    // string_quote_removal); CTLESC pairs must not leak
+                    // into the `wanted `%s'` warning text.
+                    state.current_cmd.heredoc_delimiter =
+                        Some(delimiter.replace(crate::executor::markers::CTLESC, ""));
                 }
                 *i += 1;
             }

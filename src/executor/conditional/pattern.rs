@@ -144,8 +144,13 @@ pub(in crate::executor) fn case_pattern_matches_at_with_case(
                 continue;
             }
 
-            let (matched, next_pattern_index) =
-                case_pattern_atom_matches(pattern, pattern_index, word[word_index], nocase);
+            let (matched, next_pattern_index) = case_pattern_atom_matches(
+                pattern,
+                pattern_index,
+                word[word_index],
+                word_index + 1 == word.len(),
+                nocase,
+            );
             if matched {
                 pattern_index = next_pattern_index;
                 word_index += 1;
@@ -172,6 +177,7 @@ fn case_pattern_atom_matches(
     pattern: &[char],
     pattern_index: usize,
     candidate: char,
+    is_last_word_char: bool,
     nocase: bool,
 ) -> (bool, usize) {
     match pattern[pattern_index] {
@@ -198,6 +204,14 @@ fn case_pattern_atom_matches(
         '\\' if pattern_index + 1 < pattern.len() => (
             chars_match(pattern[pattern_index + 1], candidate, nocase),
             pattern_index + 2,
+        ),
+        // GNU sm_loop.c:121-135: a trailing unquoted `\` at the end of the
+        // pattern "cannot match" — except the special case where the string
+        // char is `\` AND it is the last character of the string (p == pe &&
+        // sc == '\\' && n+1 == se breaks out as a match).
+        '\\' => (
+            candidate == '\\' && is_last_word_char,
+            pattern_index + 1,
         ),
         literal => (chars_match(literal, candidate, nocase), pattern_index + 1),
     }

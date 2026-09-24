@@ -13,6 +13,8 @@ mod variable;
 pub(crate) use variable::variable_is_set;
 
 use std::collections::HashMap;
+#[cfg(windows)]
+use std::fs::File;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use crate::executor::markers::{DATA_DOLLAR};
@@ -533,7 +535,7 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
         "-u" => Ok(file_mode_has_bit(operand, env_vars, 0o4000)),
         "-g" => Ok(file_mode_has_bit(operand, env_vars, 0o2000)),
         "-k" => Ok(file_mode_has_bit(operand, env_vars, 0o1000)),
-        "-t" => Ok(fd_is_terminal(operand)),
+        "-t" => Ok(fd_is_terminal(operand, env_vars)),
         _ => Err(format!("{}: unary operator expected", op)),
     }
 }
@@ -699,10 +701,17 @@ fn modified_since_last_read(path: &str, env_vars: &HashMap<String, String>) -> b
     modified > accessed
 }
 
-fn fd_is_terminal(operand: &str) -> bool {
+fn fd_is_terminal(operand: &str, env_vars: &HashMap<String, String>) -> bool {
     let Ok(fd) = operand.parse::<i32>() else {
         return false;
     };
+    // GNU test.c → isatty(fd): the answer tracks the descriptor's CURRENT
+    // target, not the process std handle — `t -t 0 < /dev/tty` is true
+    // even when the host stdin is a pipe. The executor mirrors its fd
+    // table into __RUBASH_FD_TERMINAL_<fd> before dispatching the builtin.
+    if let Some(mark) = env_vars.get(&format!("__RUBASH_FD_TERMINAL_{fd}")) {
+        return mark == "1";
+    }
     match fd {
         0 => io::stdin().is_terminal(),
         1 => io::stdout().is_terminal(),
@@ -735,7 +744,22 @@ fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixF
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn file_type_matches(path: &str, env_vars: &HashMap<String, String>, kind: UnixFileKind) -> bool {
+    // S_ISCHR port: the only character devices the path map can resolve
+    // are the console (CON via /dev/tty, CONIN$/CONOUT$ via /dev/std*)
+    // and NUL. Open and ask GetFileType rather than probing metadata —
+    // device names have no filesystem metadata.
+    use std::os::windows::io::AsRawHandle;
+    if !matches!(kind, UnixFileKind::CharDevice) {
+        return false;
+    }
+    File::open(test_path(path, env_vars))
+        .map(|file| crate::fd::is_char_device_handle(file.as_raw_handle() as _))
+        .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn file_type_matches(
     _path: &str,
     _env_vars: &HashMap<String, String>,

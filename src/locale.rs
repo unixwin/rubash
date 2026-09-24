@@ -568,7 +568,6 @@ fn platform_collate(a: &str, b: &str, locale: &str) -> Option<std::cmp::Ordering
 
 #[cfg(unix)]
 fn platform_collate(a: &str, b: &str, locale: &str) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
     use std::ffi::CString;
     use std::sync::Mutex;
     // Activate LC_COLLATE once per distinct locale name; glibc compares with

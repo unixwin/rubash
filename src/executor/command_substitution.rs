@@ -220,7 +220,7 @@ impl Executor {
         // words the real parser would see — an alias body can inject
         // operators or quotes the raw source did not carry.
         let word_source = strip_command_substitution_comments(source);
-        let word_source = self.comsub_body_alias_splice(&word_source);
+        let word_source = self.comsub_body_alias_splice_extracted(&word_source);
 
         // rubash#117 whitelist admission: GNU subst.c:7143
         // command_substitute routes every body through parse_and_execute —
@@ -523,7 +523,7 @@ impl Executor {
             .and_then(|line| line.parse::<usize>().ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
-        let source = &self.comsub_body_alias_splice(source);
+        let source = &self.comsub_body_alias_splice_extracted(source);
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -533,6 +533,13 @@ impl Executor {
         let ast = crate::parser::parse(&tokens);
 
         if ast.commands.iter().any(command_has_parse_error) {
+            // GNU reports the body's syntax error (parse.y yyerror) even
+            // though the enclosing command is what dies — emit the stored
+            // diagnostic instead of silently swallowing it (case-pattern
+            // `$(esac;x)` in comsub-posix6.sub).
+            if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
+                self.report_command_parse_error(command);
+            }
             self.last_command_substitution_parse_error.set(true);
             self.last_command_substitution_status.set(Some(2));
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
@@ -571,11 +578,24 @@ impl Executor {
         // (niubash shell-quirks Q16: inside
         // `for …; do out=$(cargo test 2>&1); …; done > summary.txt` the
         // failing round's output reached summary.txt and $out stayed
-        // empty). Drop the inherited fd-1 binding so external children hit
-        // the stdout_capture pipe branch; body-level redirects rebind fd 1
-        // on the child's own table. fd 2 stays inherited — $( ) does not
-        // capture stderr (GNU subst.c:7149).
-        subshell.fd_table.entries.remove(&1);
+        // empty). Rebind fd 1 to the default Stdout endpoint so external
+        // children hit the stdout_capture pipe branch and drained bytes
+        // route through write_fd_endpoint's Stdout arm into the capture.
+        // Dropping the entry outright is wrong under the unified fd-1
+        // ordering: output_endpoint(1) == None short-circuits
+        // write_fd_endpoint and silently discards the substitution's
+        // output. Body-level redirects still rebind fd 1 on the child's
+        // own table. fd 2 stays inherited — $( ) does not capture stderr
+        // (GNU subst.c:7149).
+        subshell.fd_table.entries.insert(
+            1,
+            crate::executor::fd_table::FdEntry {
+                read: None,
+                write: Some(FdWriteEndpoint::Stdout),
+                closed: false,
+                dynamic: false,
+            },
+        );
 
         // GNU subst.c:7356-7359 command_substitute: without inherit_errexit
         // the substitution child runs `builtin_ignoring_errexit = 0` and
@@ -612,6 +632,16 @@ impl Executor {
                 );
                 subshell.execute_ast(&ast)
             };
+            // GNU parse.y: a syntax error inside the substitution body is a
+            // read-time failure of the ENCLOSING command — after this command
+            // finishes the reader stops (`$( esac ; ...)` in a case pattern:
+            // the `*)` arm prints, `echo we should not see this` is skipped).
+            // The body ast carried a __RUBASH_PARSE_ERROR__ node past the
+            // early command_has_parse_error screen, so propagate the child's
+            // parse_error latch onto the parent's abort flag here.
+            if subshell.parse_error_occurred {
+                self.last_command_substitution_parse_error.set(true);
+            }
             let mut status = command_substitution_result_status(result, subshell.exit_code);
             // Bash runs EXIT in the command-substitution child, so an
             // EXIT trap installed by the body contributes its output to
@@ -749,9 +779,14 @@ impl Executor {
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
             last_command_substitution_parse_error: Cell::new(false),
+            last_command_inverted: Cell::new(false),
+            exit_jump_pending: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),
+            fd_var_external_undo: Vec::new(),
+            read_deadline: None,
+            read_timed_out: false,
             stdout_capture: None,
             stderr_capture: None,
             host_external_command_handler: None,
@@ -788,15 +823,23 @@ impl Executor {
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {
-    command.has_assignment("__RUBASH_PARSE_ERROR__")
-        || command
-            .and_or_list
-            .as_ref()
-            .is_some_and(|list| list.commands.iter().any(command_has_parse_error))
-        || command
-            .pipeline_command
-            .as_ref()
-            .is_some_and(|pipeline| pipeline.stages.iter().any(command_has_parse_error))
+    command_parse_error_node(command).is_some()
+}
+
+fn command_parse_error_node(command: &CommandNode) -> Option<&CommandNode> {
+    if command.has_assignment("__RUBASH_PARSE_ERROR__") {
+        return Some(command);
+    }
+    command
+        .and_or_list
+        .as_ref()
+        .and_then(|list| list.commands.iter().find_map(command_parse_error_node))
+        .or_else(|| {
+            command
+                .pipeline_command
+                .as_ref()
+                .and_then(|pipeline| pipeline.stages.iter().find_map(command_parse_error_node))
+        })
 }
 
 /// rubash#117 whitelist admission for the word-level command-substitution
@@ -864,7 +907,10 @@ fn strip_command_substitution_comments(source: &str) -> String {
             comment = true;
             continue;
         }
-        boundary = ch.is_whitespace();
+        // GNU read_token: `#` starts a comment only at a token boundary —
+        // after whitespace or a separator, not mid-word (`$#`, `a#b`).
+        boundary = ch.is_whitespace()
+            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         output.push(ch);
     }
 

@@ -6,7 +6,7 @@ mod arithmetic_command;
 mod arithmetic_expansion;
 mod arithmetic_for;
 mod array_element_assignment;
-pub(crate) mod assignment;
+pub mod assignment;
 pub mod ast_print;
 mod brace_command;
 mod brace_expansion;

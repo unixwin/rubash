@@ -191,15 +191,42 @@ impl Executor {
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
+        let mut fd0_bindings: Vec<FunctionCallStdinBinding> = Vec::new();
         let (call_stdin, stdin_carved_from_parent) =
             if let Some(definition_redirects) = &definition_redirects {
                 match self.function_call_stdin(definition_redirects)? {
-                    (Some(input), carved) => (Some(input), carved),
-                    (None, _) => self.function_call_stdin(call_cmd)?,
+                    (Some(input), carved, binding) => {
+                        if let Some(binding) = binding {
+                            fd0_bindings.push(binding);
+                        }
+                        (Some(input), carved)
+                    }
+                    (None, _, binding) => {
+                        if let Some(binding) = binding {
+                            fd0_bindings.push(binding);
+                        }
+                        let (input, carved, binding) = self.function_call_stdin(call_cmd)?;
+                        if let Some(binding) = binding {
+                            fd0_bindings.push(binding);
+                        }
+                        (input, carved)
+                    }
                 }
             } else {
-                self.function_call_stdin(call_cmd)?
+                let (input, carved, binding) = self.function_call_stdin(call_cmd)?;
+                if let Some(binding) = binding {
+                    fd0_bindings.push(binding);
+                }
+                (input, carved)
             };
+        // GNU redir.c do_redirections applies the call's redirects last;
+        // when materialized FUNCTION_STDIN text serves the body, a device
+        // bind installed by an earlier redirect would shadow it — undo.
+        if call_stdin.is_some() {
+            while let Some(binding) = fd0_bindings.pop() {
+                self.restore_function_call_fd0(binding);
+            }
+        }
         let (old_function, old_function_stdin, old_function_stdin_offset, old_positional_params) = {
             let old_function = self.shell_state.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
             let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
@@ -320,6 +347,11 @@ impl Executor {
                 executor.execute_ast_inner(body_ast)
             })
         });
+        // GNU execute_cmd.c:5269+ — the call's input redirections are
+        // undone when the function returns.
+        while let Some(binding) = fd0_bindings.pop() {
+            self.restore_function_call_fd0(binding);
+        }
         // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
         // saved DEBUG action is restored only when the body did not set a
         // new one, so a trap set inside the function persists after return
@@ -522,7 +554,7 @@ impl Executor {
     pub(in crate::executor) fn function_call_stdin(
         &mut self,
         call_cmd: &CommandNode,
-    ) -> Result<(Option<String>, bool), ExecuteError> {
+    ) -> Result<(Option<String>, bool, Option<FunctionCallStdinBinding>), ExecuteError> {
         self.apply_comsub_stdin_writeback();
         let carves_parent_stdin = call_cmd.redirect_in.is_none()
             && call_cmd.heredoc.is_none()
@@ -530,7 +562,7 @@ impl Executor {
             && self.virtual_fd_stdin_remaining(0).is_none()
             && self.function_stdin_remaining().is_some();
         if let Some(input) = self.stdin_string_for_command_mut(call_cmd) {
-            return Ok((Some(input), carves_parent_stdin));
+            return Ok((Some(input), carves_parent_stdin, None));
         }
 
         let Some(redirect) = &call_cmd.redirect_in else {
@@ -547,25 +579,75 @@ impl Executor {
                 return Ok((
                     Some(input.get(offset..).unwrap_or_default().to_string()),
                     true,
+                    None,
                 ));
             }
-            return Ok((self.virtual_fd_stdin_remaining(0), false));
+            return Ok((self.virtual_fd_stdin_remaining(0), false, None));
         };
         if redirect.fd.unwrap_or(0) != 0 {
-            return Ok((None, false));
+            return Ok((None, false, None));
         }
         let target = self.expand_redirect_target(redirect);
         if is_closed_redirect_target(&target) {
-            return Ok((None, false));
+            return Ok((None, false, None));
         }
-        Ok((
-            Some(fs::read_to_string(shell_path_to_windows(
-                &target,
-                &self.shell_state.env_vars,
-            ))?),
-            false,
-        ))
+        // GNU execute_cmd.c:5269-5278 (execute_function) applies the call's
+        // redirections to real descriptors for the body's duration
+        // (redir.c do_redirections, unwound on return). Endpoints with no
+        // EOF — CON via /dev/tty, a fifo, an fd alias — cannot be slurped
+        // into FUNCTION_STDIN: read_to_string blocks forever waiting for a
+        // console EOF that never comes (test.tests `t -t 0 < /dev/tty`
+        // hung). Bind fd 0 to the live endpoint instead so the body's
+        // readers reach it through fd_table.
+        if let Some(source_fd) = redirect_target_fd(&target) {
+            if self.fd_table.is_open_for_read(source_fd)
+                || self.fd_table.read_endpoint(source_fd).is_some()
+            {
+                let saved = self.fd_table.entries.get(&0).cloned();
+                if self.fd_table.dup_input(0, source_fd).is_ok() {
+                    return Ok((
+                        None,
+                        false,
+                        Some(FunctionCallStdinBinding { entry: saved }),
+                    ));
+                }
+            }
+            return Ok((None, false, None));
+        }
+        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        if !std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+            let file = FileFd::open_read(path.clone())?;
+            let saved = self.fd_table.entries.get(&0).cloned();
+            self.fd_table.open_input(0, FdReadEndpoint::File(file), false);
+            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
+        }
+        // A `<(cmd)` temp path is a draining stream, not a replayable
+        // file — serve the shared remainder (subst.c:7143).
+        let input = match self.procsub_stream_take(&path) {
+            Some(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+            None => fs::read_to_string(&path)?,
+        };
+        Ok((Some(input), false, None))
     }
+
+    fn restore_function_call_fd0(&mut self, binding: FunctionCallStdinBinding) {
+        match binding.entry {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
+    }
+}
+
+/// A live fd-0 binding installed for a function call whose `<` target is
+/// not a slurpable file (device, fifo, fd alias). `entry` is the
+/// displaced table entry — `None` when fd 0 was unbound — restored after
+/// the body finishes (GNU execute_cmd.c undo_redirections).
+pub(in crate::executor) struct FunctionCallStdinBinding {
+    pub(in crate::executor) entry: Option<crate::executor::fd_table::FdEntry>,
 }
 
 fn function_redirects_affect_body(command: &CommandNode) -> bool {

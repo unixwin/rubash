@@ -311,14 +311,24 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
         if configured_shell_root(_env_vars).is_some() {
             return "/usr/local/bin:/usr/bin:/bin".to_string();
         }
-        return [
+        let mut dirs = vec![
             PathBuf::from(r"C:\Windows\System32"),
             PathBuf::from(r"C:\Windows"),
-        ]
-        .into_iter()
-        .map(|path| path.to_string_lossy().to_string())
-        .collect::<Vec<_>>()
-        .join(";");
+        ];
+        // command.def: `command -p` must guarantee a PATH that finds the
+        // standard utilities (confstr _CS_PATH). Windows has no system
+        // POSIX bin directory — the standard utilities live wherever the
+        // host keeps its toolset (Git usr/bin, WinuxCmd links), discovered
+        // from the real PATH as the first directory holding a full set.
+        #[cfg(windows)]
+        if let Some(dir) = windows_posix_tools_dir(_env_vars) {
+            dirs.push(dir);
+        }
+        return dirs
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(";");
     }
 
     "/usr/local/bin:/usr/bin:/bin".to_string()
@@ -1047,6 +1057,11 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         match normalized.as_str() {
             "/dev/stdin" => return PathBuf::from("CONIN$"),
             "/dev/stdout" | "/dev/stderr" => return PathBuf::from("CONOUT$"),
+            // GNU open("/dev/tty") binds the controlling terminal; the
+            // Windows console device CON resolves to the input buffer under
+            // GENERIC_READ and the screen buffer under GENERIC_WRITE, so a
+            // single name covers `< /dev/tty` and `> /dev/tty` alike.
+            "/dev/tty" => return PathBuf::from("CON"),
             _ => {}
         }
     }
@@ -1135,6 +1150,39 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     if cfg!(windows) {
         if let Some(mapped) = map_windows_home_path(&normalized, env_vars) {
             return mapped;
+        }
+    }
+
+    // Logical POSIX bin dirs name the system toolset namespace. With no
+    // configured shell root, `PATH=/bin:/usr/bin` (invocation.tests) or
+    // `/bin/ls` must still reach the host's POSIX utilities — map them to
+    // the toolset directory discovered from the real PATH, the same
+    // provider standard_path uses for `command -p`.
+    if cfg!(windows) && shell_root.is_none() {
+        #[cfg(windows)]
+        if let Some(dir) = windows_posix_tools_dir(env_vars) {
+            const POSIX_BIN_DIRS: &[&str] =
+                &["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/usr/local/sbin"];
+            for base in POSIX_BIN_DIRS {
+                if normalized == *base {
+                    return dir;
+                }
+                if let Some(rest) = normalized
+                    .strip_prefix(base)
+                    .filter(|rest| rest.starts_with('/'))
+                {
+                    let candidate =
+                        dir.join(rest.trim_start_matches('/').replace('/', "\\"));
+                    // The toolset holds `X.exe`; the logical name is bare.
+                    // Probe extensions so `/bin/sh` resolves to the real
+                    // file — GNU open(2) then reports ENOTDIR for `cd`,
+                    // not ENOENT (errors.tests:225).
+                    if let Some(found) = executable_candidate(&candidate, env_vars) {
+                        return found;
+                    }
+                    return candidate;
+                }
+            }
         }
     }
 
@@ -1280,6 +1328,35 @@ fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> 
 
 pub(crate) fn shell_root_configured(env_vars: &HashMap<String, String>) -> bool {
     configured_shell_root(env_vars).is_some()
+}
+
+/// The host directory holding the POSIX standard utilities — the first
+/// real-PATH entry containing a full toolset (sh/cat/rm). Used for
+/// `command -p`'s guaranteed-utility PATH (command.def) and for mapping
+/// the logical `/bin`/`/usr/bin` namespace when no shell root is
+/// configured.
+#[cfg(windows)]
+pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    let tools_dir = |path_value: &str| {
+        std::env::split_paths(path_value).find(|dir| {
+            ["sh.exe", "cat.exe", "rm.exe"]
+                .iter()
+                .all(|name| dir.join(name).is_file())
+        })
+    };
+    // The toolset location is a host property: a script that overwrites
+    // PATH (`PATH=/bin:/usr/bin`, invocation.tests) must not lose it, so
+    // Executor::new pins the directory found on the startup PATH into
+    // __RUBASH_POSIX_TOOLS_DIR. Probing the live process PATH is useless —
+    // env_var writes sync into it before the lookup runs.
+    if let Some(pinned) = env_vars
+        .get("__RUBASH_POSIX_TOOLS_DIR")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_dir())
+    {
+        return Some(pinned);
+    }
+    env_vars.get("PATH").and_then(|path| tools_dir(path))
 }
 
 fn map_windows_home_path(normalized: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {

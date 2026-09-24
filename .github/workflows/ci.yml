@@ -47,6 +47,32 @@ jobs:
         continue-on-error: true
         run: cargo test --test cli_tests
 
+  cross-target-check:
+    name: Cross-target check (linux/darwin)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu, aarch64-apple-darwin
+
+      - name: Check Linux target
+        run: cargo check --target x86_64-unknown-linux-gnu
+
+      - name: Check macOS target
+        run: cargo check --target aarch64-apple-darwin
+
+      - name: Check tests on Linux target
+        run: cargo check --tests --target x86_64-unknown-linux-gnu
+
+      - name: Check tests on macOS target
+        run: cargo check --tests --target aarch64-apple-darwin
+
   shell-functionality:
     name: Shell functionality tests
     runs-on: ubuntu-latest

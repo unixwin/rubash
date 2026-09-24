@@ -20,15 +20,29 @@ pub(super) fn skip_heredoc_in_chars_with_closure(
         index += 1;
     }
     let delimiter_start = index;
-    while chars
-        .get(index)
-        .is_some_and(|ch| !ch.is_whitespace() && !matches!(ch, ';' | '|' | '&' | ')'))
-    {
-        // A backslash quotes the next delimiter byte (`<<\)` uses a literal
-        // `)` delimiter); consume the escape pair as one unit so the quoted
-        // `)` is not mistaken for the substitution closer.
-        if chars.get(index) == Some(&'\\') && chars.get(index + 1).is_some() {
-            index += 1;
+    // GNU read_token_word: quoting inside the delimiter word makes
+    // metacharacters literal — `<< ')'` names `)` as the delimiter, so a
+    // quoted `)` (or `;`, `|`, `&`) is delimiter text, not the
+    // substitution closer (comsub-posix.tests).
+    let mut delimiter_single = false;
+    let mut delimiter_double = false;
+    while let Some(next) = chars.get(index).copied() {
+        match next {
+            '\'' if !delimiter_double => delimiter_single = !delimiter_single,
+            '"' if !delimiter_single => delimiter_double = !delimiter_double,
+            _ if !delimiter_single
+                && !delimiter_double
+                && (next.is_whitespace() || matches!(next, ';' | '|' | '&' | ')')) =>
+            {
+                break;
+            }
+            // A backslash quotes the next delimiter byte (`<<\)` uses a
+            // literal `)` delimiter); consume the escape pair as one unit so
+            // the quoted `)` is not mistaken for the substitution closer.
+            '\\' if !delimiter_single && !delimiter_double && chars.get(index + 1).is_some() => {
+                index += 1;
+            }
+            _ => {}
         }
         index += 1;
     }

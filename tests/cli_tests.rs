@@ -3451,3 +3451,95 @@ fn this_sh_child_script_runs_history_expansion() {
         "a\necho a\necho echo a echo echo a\n"
     );
 }
+
+#[test]
+fn kill_zero_reports_dead_background_child_after_kill() {
+    // GNU kill -0 is a real liveness probe: after `kill -9 $pid` the probe
+    // must fail with "No such process" (kill.def -> kill(2) ESRCH), even
+    // though the Windows process object lingers until the shell reaps it.
+    // Regression: the tracked-background-kill fast path answered kill -0
+    // unconditionally with status 0 for any pid in the job table.
+    let script = "sleep 30 & pid=$!\n\
+                  kill -0 $pid; test $? -eq 0 || exit 10\n\
+                  kill -9 $pid\n\
+                  sleep 0.4\n\
+                  if kill -0 $pid 2>/dev/null; then exit 20; fi\n\
+                  kill -0 $pid 2>&1 | grep -q 'No such process' || exit 30\n\
+                  wait $pid 2>/dev/null\n\
+                  test $? -eq 137 || exit 40\n\
+                  echo done\n";
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "done\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn kill_zero_and_terminate_foreign_windows_process() {
+    // kill must reach processes that are NOT rubash children (a GUI app such
+    // as Task Manager): OpenProcess over the Win32 pid space, not the job
+    // table. The foreign process is a hidden `cmd /C ping` spawned through
+    // PowerShell Start-Process: no console window pops, it is detached from
+    // this test (a sibling of rubash under test, not its child), and it
+    // survives long enough for the probe. notepad is NOT usable here — it
+    // exits instantly on machines where Notepad is a store-app alias.
+    if cfg!(not(windows)) {
+        return;
+    }
+    let pid_out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "$p = Start-Process 'C:\\Windows\\System32\\cmd.exe' \
+             -ArgumentList '/C ping -n 30 127.0.0.1 >nul' \
+             -WindowStyle Hidden -PassThru; \
+             Start-Sleep -Milliseconds 1000; \
+             if (Get-Process -Id $p.Id -ErrorAction SilentlyContinue) { [int]$p.Id } else { 'EXITED' }",
+        ])
+        .output()
+        .expect("spawn foreign process via powershell");
+    let stdout_raw = String::from_utf8_lossy(&pid_out.stdout).trim().to_string();
+    if stdout_raw == "EXITED" || stdout_raw.is_empty() {
+        // Locked-down CI host: nothing to assert.
+        return;
+    }
+    let pid: u32 = stdout_raw.parse().expect("foreign pid");
+    assert_ne!(pid, 0);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(format!(
+            "kill -0 {pid} && kill {pid} && sleep 0.5 && if kill -0 {pid} 2>/dev/null; then echo STILL-ALIVE; else echo DEAD; fi"
+        ))
+        .output()
+        .expect("run rubash");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout, "DEAD\n", "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    // Idempotent cleanup in case the kill above failed the assert early.
+    let _ = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .output();
+}
+
+#[test]
+fn kill_missing_pid_reports_no_such_process() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("kill -0 2147483000 2>&1; printf 'status:%s\n' \"$?\"")
+        .output()
+        .expect("run rubash");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("No such process"), "stdout: {stdout}");
+    assert!(stdout.contains("status:1"), "stdout: {stdout}");
+}

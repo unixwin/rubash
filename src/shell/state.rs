@@ -15,6 +15,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use crate::builtins::alias::Alias;
@@ -131,6 +132,23 @@ pub struct ShellState {
     /// xtrace writes can realign when the variable changed through a path
     /// that skipped the resolve hook (read/local/unset/direct store).
     pub(crate) xtrace_fd_source: RefCell<String>,
+    /// subst.c:7143 command_substitute — a `<(cmd)` word names a
+    /// pipe-like stream: every open shares one offset that drains on
+    /// read (procsub.tests count_lines: repeated `wc -l < $1` ->
+    /// 1,0,0,0,0). rubash writes the capture to a temp file so real
+    /// external argv consumers get a path; in-shell opens of a
+    /// registered path serve the remaining bytes and advance the shared
+    /// offset. The `Rc` keeps the stream shared across `ShellState`
+    /// clones, matching fork's shared open file description.
+    pub(crate) procsub_streams: RefCell<HashMap<PathBuf, Rc<RefCell<ProcSubStream>>>>,
+}
+
+/// Buffered contents of one materialized `<(cmd)` output — see
+/// `ShellState::procsub_streams`.
+#[derive(Debug)]
+pub(crate) struct ProcSubStream {
+    pub(crate) data: Vec<u8>,
+    pub(crate) offset: usize,
 }
 
 /// Typed snapshot of the interior-mutable slice of ShellState.
@@ -142,6 +160,13 @@ pub struct ShellState {
 /// mutable field added to ShellState MUST join this snapshot (the fork
 /// path via `command_substitution_executor` covers it automatically
 /// through `Clone`, but this path does not).
+///
+/// Deliberate exemption: `procsub_streams` is NOT snapshotted. GNU fork
+/// shares the parent's open file descriptions, so a `<(cmd)` stream's
+/// read offset stays shared across the `$( )` boundary — draining in the
+/// child must drain the parent's stream too. A stream registered inside
+/// the child leaves a dead map entry in the parent after restore, which
+/// is harmless: its temp path is unique and already deleted.
 #[derive(Debug)]
 pub(crate) struct InteriorSnapshot {
     subshell_depth: usize,
@@ -256,6 +281,10 @@ impl Clone for ShellState {
             xtrace_fd: Cell::new(self.xtrace_fd.get()),
             xtrace_fd_source: RefCell::new(self.xtrace_fd_source.borrow().clone()),
             debug_trap_command: RefCell::new(self.debug_trap_command.borrow().clone()),
+            // GNU fork shares the parent's open file descriptions, so a
+            // process-substitution stream's read offset stays shared
+            // across the clone boundary.
+            procsub_streams: RefCell::new(self.procsub_streams.borrow().clone()),
         }
     }
 }

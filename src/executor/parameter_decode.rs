@@ -423,6 +423,205 @@ fn push_quoted_pattern_str(output: &mut String, value: &str) {
     }
 }
 
+/// Mask `"..."` spans of a pattern word into `slots` before the shared
+/// quote decoder runs. GNU subst.c expands substitutions inside a quoted
+/// pattern span with quoting live, so the OUTPUT chars are quoted (CTLESC)
+/// — `"$p"` with p='*' is a literal `*` pattern while unquoted `$p` stays a
+/// wildcard. The shared embedded expander strips that context, so the span
+/// content is expanded here and every output char is literal-marked; the
+/// caller's slot-restore then splices the marked text back after decoding.
+pub(in crate::executor) fn mask_quoted_pattern_spans(
+    pattern: &str,
+    exec: &Executor,
+    slots: &mut Vec<String>,
+) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    let mut single = false;
+    let mut masked = String::with_capacity(pattern.len());
+    while i < chars.len() {
+        let ch = chars[i];
+        if single {
+            masked.push(ch);
+            if ch == '\'' {
+                single = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\'' {
+            single = true;
+            masked.push(ch);
+            i += 1;
+            continue;
+        }
+        if ch == '\\' && i + 1 < chars.len() {
+            masked.push(ch);
+            masked.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        // A `$(...)` / `` `...` `` / `${...}` unit is expanded later by the
+        // shared expander; a `"` inside it belongs to the substitution body,
+        // not to the pattern quoting layer (parse.y parse_comsub nests the
+        // context). Skip the unit so `$(printf "%s" \\)` keeps its inner
+        // quotes out of this mask.
+        if ch == '$' && chars.get(i + 1) == Some(&'(') {
+            if let Some(end) = crate::lexer::skip_parenthesized_unit_corrected(&chars, i + 1) {
+                masked.extend(chars[i..end].iter());
+                i = end;
+                continue;
+            }
+        }
+        if ch == '$' && chars.get(i + 1) == Some(&'{') {
+            let rest: String = chars[i + 2..].iter().collect();
+            if let Some(end) =
+                crate::executor::parameter_ops::matching_parameter_brace(&rest)
+            {
+                masked.extend(chars[i..i + 2 + end + 1].iter());
+                i += 2 + end + 1;
+                continue;
+            }
+        }
+        if ch == '`' {
+            masked.push(ch);
+            i += 1;
+            while i < chars.len() {
+                let bt = chars[i];
+                masked.push(bt);
+                i += 1;
+                if bt == '\\' && i < chars.len() {
+                    masked.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                if bt == '`' {
+                    break;
+                }
+            }
+            continue;
+        }
+        // `$"..."` locale strings expand exactly like `"..."` in the C
+        // locale (subst.c: the dollar is part of the quote syntax); keep the
+        // `$` inside the masked span instead of leaking it into the pattern.
+        let dollar_locale = ch == '$' && chars.get(i + 1) == Some(&'"');
+        if ch == '"' || dollar_locale {
+            let mut j = i + if dollar_locale { 2 } else { 1 };
+            let mut content = String::new();
+            let mut closed = false;
+            while j < chars.len() {
+                let inner = chars[j];
+                if inner == '\\' && j + 1 < chars.len() {
+                    let next = chars[j + 1];
+                    // Inside `"..."`, `\` quotes only `$`, `` ` ``, `"`,
+                    // `\`, and newline (GNU subst.c
+                    // string_extract_double_quoted); every other `\X` is
+                    // literal backslash + X. Feed the expander an escaped
+                    // form for each literal char so `\'` stays `\'` and
+                    // `\a` stays `\a` instead of collapsing to `a`.
+                    match next {
+                        '$' | '`' | '"' | '\\' => {
+                            content.push(inner);
+                            content.push(next);
+                        }
+                        '\'' => {
+                            content.push('\\');
+                            content.push('\\');
+                            content.push('\\');
+                            content.push(next);
+                        }
+                        other => {
+                            content.push('\\');
+                            content.push('\\');
+                            content.push(other);
+                        }
+                    }
+                    j += 2;
+                    continue;
+                }
+                // Inside `"..."`, a `$(...)` / `` `...` `` / `${...}` is a
+                // nested substitution with its own quoting rules — a `"`
+                // inside it does NOT close the outer quote (parse.y
+                // parse_matched_pair + parse_comsub nest the contexts).
+                // Skip each as a unit so `"$(printf "%s" \\)"` keeps the
+                // inner `"%s"` quotes inside the comsub.
+                if inner == '$' && chars.get(j + 1) == Some(&'(') {
+                    if let Some(end) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, j + 1)
+                    {
+                        content.extend(chars[j..end].iter());
+                        j = end;
+                        continue;
+                    }
+                }
+                if inner == '$' && chars.get(j + 1) == Some(&'{') {
+                    let rest: String = chars[j + 2..].iter().collect();
+                    if let Some(end) = crate::executor::parameter_ops::matching_parameter_brace(
+                        &rest,
+                    ) {
+                        content.extend(chars[j..j + 2 + end + 1].iter());
+                        j += 2 + end + 1;
+                        continue;
+                    }
+                }
+                if inner == '`' {
+                    content.push(inner);
+                    j += 1;
+                    while j < chars.len() {
+                        let bt = chars[j];
+                        content.push(bt);
+                        j += 1;
+                        if bt == '\\' && j < chars.len() {
+                            content.push(chars[j]);
+                            j += 1;
+                            continue;
+                        }
+                        if bt == '`' {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if inner == '"' {
+                    closed = true;
+                    j += 1;
+                    break;
+                }
+                if inner == '\'' {
+                    // Inside `"..."` a `'` is literal data (GNU
+                    // string_extract_double_quoted keeps it verbatim); a
+                    // bare `'` handed to the embedded expander would be
+                    // eaten as an unclosed quote opener, so feed it the
+                    // escaped form (`${t//"'"/X}` in quote1.sub).
+                    content.push('\\');
+                    content.push(inner);
+                    j += 1;
+                    continue;
+                }
+                content.push(inner);
+                j += 1;
+            }
+            if !closed {
+                masked.push('"');
+                i += 1;
+                continue;
+            }
+            let expanded =
+                exec.expand_embedded_parameters_preserving_escaped_single_quotes(&content);
+            let mut marked = String::new();
+            push_literal_pattern_str(&mut marked, &expanded);
+            slots.push(marked);
+            masked.push(crate::executor::markers::IFS_GLUE);
+            masked.push_str(&(slots.len() - 1).to_string());
+            i = j;
+            continue;
+        }
+        masked.push(ch);
+        i += 1;
+    }
+    masked
+}
+
 fn push_quoted_pattern_char(output: &mut String, ch: char) {
     if ch == '\'' {
         // A decoded literal quote must survive the embedded-parameter

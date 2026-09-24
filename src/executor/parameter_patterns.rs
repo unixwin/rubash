@@ -254,8 +254,16 @@ impl Executor {
         // first so the decoder does not tag glob chars inside an inner
         // expansion (keeps ? a glob in the inner removal).
         let mut masked = String::with_capacity(pattern.len());
-        let mut rest = pattern;
         let mut slots: Vec<String> = Vec::new();
+        // GNU subst.c: a double-quoted span in a pattern word expands its
+        // substitutions with quoting live, so the OUTPUT chars carry CTLESC
+        // (`"${x//"$p"/!}"` with p='*' matches a literal `*`, and `p='\'`
+        // matches a literal `\` — an unquoted `$p` instead feeds a live
+        // escape to the matcher). The shared embedded expander strips the
+        // marker context, so expand the span here and emit every output
+        // char literal-marked through the slot mechanism below.
+        let pre_masked = mask_quoted_pattern_spans(pattern, self, &mut slots);
+        let mut rest: &str = &pre_masked;
         while let Some(pos) = rest.find("${") {
             masked.push_str(&rest[..pos]);
             let after = &rest[pos + 2..];

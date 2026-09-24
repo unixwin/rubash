@@ -1679,6 +1679,7 @@ impl Executor {
                     &tokens,
                     crate::parser::ParseLoopOptions {
                         stray_close_is_error: true,
+                        diagnostic_text: None,
                         source_text: Some(edited.clone()),
                         source_line_offset: 0,
                     },
@@ -1714,6 +1715,7 @@ impl Executor {
                     &tokens,
                     crate::parser::ParseLoopOptions {
                         stray_close_is_error: true,
+                        diagnostic_text: None,
                         source_text: Some(command.clone()),
                         source_line_offset: 0,
                     },

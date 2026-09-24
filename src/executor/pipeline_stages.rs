@@ -582,11 +582,14 @@ impl Executor {
                 if !stdout.is_empty() {
                     let payload =
                         crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stdout);
-                    if let Some(capture) = &mut self.stdout_capture {
-                        capture.write_all(&payload)?;
-                    } else {
-                        self.write_default_stdout(&payload)?;
-                    }
+                    // One fd-1 stream: the thread-local capture is the
+                    // innermost live fd 1 while a stage body runs, so route
+                    // through write_default_stdout — writing the field
+                    // capture first would reorder against thread-local
+                    // writes from spawned children in the same body
+                    // (procsub.tests: `x <(date) | cat` emitted the inner
+                    // pipeline's wc output before the earlier spawned wc).
+                    self.write_default_stdout(&payload)?;
                 }
                 if !stderr.is_empty() {
                     let payload =
@@ -597,11 +600,9 @@ impl Executor {
             }
         }
         let payload = crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
-        if let Some(capture) = &mut self.stdout_capture {
-            capture.write_all(&payload)?;
-        } else {
-            self.write_default_stdout(&payload)?;
-        }
+        // Same single-fd-1 ordering: the live thread-local capture (if any)
+        // is the stage's fd 1, ahead of self.stdout_capture.
+        self.write_default_stdout(&payload)?;
         Ok(())
     }
 

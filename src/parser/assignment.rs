@@ -150,7 +150,7 @@ fn split_compound_element_operator<'a>(
     None
 }
 
-pub(crate) fn split_compound_assignment_words(inner: &str) -> Vec<String> {
+pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut double = false;

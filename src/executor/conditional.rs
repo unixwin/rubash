@@ -172,6 +172,7 @@ impl Executor {
                     return 2;
                 }
                 let args = vec![op.to_string(), w];
+                self.sync_fd_terminal_marks(None);
                 i32::from(
                     !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
                         .unwrap_or(1)
@@ -186,6 +187,7 @@ impl Executor {
                     return 2;
                 }
                 let args = vec![op.to_string(), w];
+                self.sync_fd_terminal_marks(None);
                 i32::from(
                     !(crate::builtins::test::execute(&args, false, &self.shell_state.env_vars)
                         .unwrap_or(1)

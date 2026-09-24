@@ -32,6 +32,25 @@ pub(super) fn heredoc_delimiters(
             } else {
                 pair[1].value.clone()
             };
+            // GNU make_cmd.c make_here_document compares body lines with
+            // STREQN against `redir_word` — the DEQUOTED delimiter (the `\`
+            // in `<<\)` only quotes it). The token value keeps CTLESC pairs
+            // for the quoted-delimiter flag; collapse them here so `)` can
+            // match a delimiter spelled `\)`.
+            let value = {
+                let mut dequoted = String::with_capacity(value.len());
+                let mut chars = value.chars();
+                while let Some(ch) = chars.next() {
+                    if ch == crate::executor::markers::CTLESC {
+                        if let Some(next) = chars.next() {
+                            dequoted.push(next);
+                        }
+                    } else {
+                        dequoted.push(ch);
+                    }
+                }
+                dequoted
+            };
             HereDocDelimiter {
                 value,
                 quoted: context.quoted,

@@ -48,7 +48,7 @@
 | Q9 | pty 端到端测试（niu 侧 reedline/PS1）| 排队 | 交互探针集 |
 | Q10 | 性能专项（#71 冷启动/-c 固定开销）| 兼容性达标后 | 基准对比 |
 | Q11 | **/proc 最小仿真**（P1 引擎内合成：fd 别名 + open 咽喉；P2 参数经纪人物化，覆盖 bat 等第三方；计划见 docs/proc-vfs-plan.md）| P1 可立即（与 Q1/Q2 同域防冲突）；P2 依赖 P1 | P1: 字段格式单测 + read/mapfile/external_cat cli tests；P2: 外部 exe 以 /proc 参数读到内容（bat 探针）|
-| Q12 | **Linux 交叉编译修复 + CI 跨 target 门禁**（`cargo check --target x86_64-unknown-linux-gnu` 现报 80 错：`crate::fd` 为 windows 门内模块、11 文件 67 处无条件引用；unix fallback 使 fd 层 consumers 编译通过或同步 gated；CI ubuntu lib job 已连红）| 可立即，**优先**（CI 红）| 跨 target check 零错误；CI 恢复绿；CI 增加 linux/darwin check 门禁 |
+| Q12 | **Linux 交叉编译修复 + CI 跨 target 门禁**（fd 层双平台分发器 + unix POSIX 实现）| ✅ 完成（09-23，c144a0c9/d9486c1d）：fd/mod.rs 变 dispatcher（windows_impl 原样保留 + unix.rs POSIX 实现 HANDLE=RawFd），/proc hooks cfg 化（shell_options RawHandle/RawFd 分平台、init.rs HANDLE 别名解析、parser::assignment 公有化）；x86_64-linux-gnu / aarch64-apple-darwin / Windows 三 target `cargo check --tests` 全零错，`cargo test --lib` 424 过（仅 2 个既有 substitution_metadata sentinel）；CI 新增 cross-target-check 门禁（linux/darwin lib+tests check）|
 
 ## ⛔ 阻塞/等待
 

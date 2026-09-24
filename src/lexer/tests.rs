@@ -110,13 +110,16 @@ fn posix_interleaved_quotes_whole_line_balance() {
     // posixexp2 case 28: `"${IFS+"'"x ~ x'}'x"'}"x}" #'` closes the `${...}`
     // span at the first `}` in POSIX mode (single quotes literal inside the
     // double-quoted body), the double quote closes right after `'x`, and the
-    // trailing `'..."` single-quoted segment balances the word. The
-    // unclosed-input pre-flight and the line collector must agree, otherwise
-    // the script is rejected with "unexpected end of file" before execution.
+    // trailing `'..."` single-quoted segment balances the word. But GNU
+    // parse.y still treats a `#` at a token boundary inside `( ... )` as a
+    // comment through end of line, so the `')` closing the subshell is
+    // comment text and the line IS unclosed — GNU 5.3.0 reports
+    // "unexpected end of file from `(' command" for this line in isolation
+    // (in the suite the subshell stays open into the following line).
     let line = "(echo -n '28 '; printf '%s\\n' \"${IFS+\"'\"x ~ x'}'x\"'}\"x}\" #') 2>&-";
     assert!(
-        !has_unclosed_input_syntax(line),
-        "posix-interleaved quotes must not read as unclosed input"
+        has_unclosed_input_syntax(line),
+        "`#' inside an open `( ... )` comments through EOL, so the line is unclosed"
     );
     let tokens = tokenize_with_initial_posix(line, true);
     assert!(

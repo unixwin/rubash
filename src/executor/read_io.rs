@@ -30,6 +30,23 @@ impl Executor {
         line
     }
 
+    /// GNU read.def read_timeout gate: before each blocking byte read, wait
+    /// out the remaining deadline for the handle to become readable
+    /// (shtimer_select → select). Returns true when the read must stop.
+    fn read_wait_timed_out(&mut self, handle: crate::fd::HANDLE) -> bool {
+        let Some(deadline) = self.read_deadline else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if now >= deadline
+            || crate::fd::wait_readable(handle, deadline - now) == crate::fd::ReadWait::Timeout
+        {
+            self.read_timed_out = true;
+            return true;
+        }
+        false
+    }
+
     pub(in crate::executor) fn read_input_for_command(
         &mut self,
         cmd: &CommandNode,
@@ -38,6 +55,17 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
+        // read.def check_read_timeout runs at the top of every read-loop
+        // iteration — including before the first byte — so a deadline that
+        // already expired during setup reports timeout even on buffered
+        // input (e.g. `read -t .001 a <<<abcde`, whose GNU pipe herestring
+        // is not S_ISREG and keeps the timeout armed).
+        if let Some(deadline) = self.read_deadline {
+            if std::time::Instant::now() >= deadline {
+                self.read_timed_out = true;
+                return None;
+            }
+        }
         // An unnumbered heredoc is the last stdin redirect, so it overrides
         // an earlier `<&fd`. An explicit `read -u N` still owns the input fd.
         if read_fd.is_none() {
@@ -136,12 +164,47 @@ impl Executor {
                     .write(true)
                     .open(&path);
             }
+            // GNU redir.c opens the target as the command's fd 0; for
+            // non-regular inputs (/dev/tty → CON, NUL, a fifo) the read must
+            // come byte-wise off the live handle — a slurp-to-EOF would
+            // block forever on a device and `read -t` needs the bounded
+            // wait. Bind it transiently so fd_table's deadline-aware record
+            // reader handles the stream.
+            if !std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+                let Ok(file) = FileFd::open_read(path) else {
+                    return None;
+                };
+                let saved = self.fd_table.entries.get(&0).cloned();
+                self.fd_table.open_input(0, FdReadEndpoint::File(file), false);
+                let line = self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit);
+                match saved {
+                    Some(entry) => {
+                        self.fd_table.entries.insert(0, entry);
+                    }
+                    None => {
+                        self.fd_table.entries.remove(&0);
+                    }
+                }
+                return line;
+            }
             // GNU read receives raw bytes from redir.c-opened inputs. Keep
             // invalid UTF-8 inside the RAW_BYTE_MARKER carrier instead of
             // dropping the whole record at this boundary.
-            let Ok(input) = crate::executor::substitution_metadata::read_shell_input_file(path)
-            else {
-                return None;
+            // Q11 /proc P1: synthetic files are served before the filesystem
+            // (docs/proc-vfs-plan.md hook B).
+            let input = if let Some(bytes) =
+                crate::proc_vfs::proc_file_content(&expanded_target)
+            {
+                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
+            } else if let Some(bytes) = self.procsub_stream_take(&path) {
+                // `<(cmd)` carrier path: the word names a draining
+                // stream — serve the shared remainder (subst.c:7143).
+                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
+            } else {
+                match crate::executor::substitution_metadata::read_shell_input_file(path) {
+                    Ok(text) => text,
+                    Err(_) => return None,
+                }
             };
             if input.is_empty() {
                 return None;
@@ -237,6 +300,10 @@ impl Executor {
         // limit), then retain the pipe for the next call instead of
         // draining it and losing unread records.
         loop {
+            if self.read_wait_timed_out(pipe.handle) {
+                ended = true;
+                break;
+            }
             match crate::fd::read_some(pipe.handle, 1) {
                 Ok(buf) if buf.is_empty() => {
                     ended = true;
@@ -433,7 +500,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn read_inherited_process_stdin(
-        &self,
+        &mut self,
         delimiter: char,
         char_limit: Option<usize>,
         exact_char_limit: bool,
@@ -458,6 +525,9 @@ impl Executor {
         let mut eof = false;
         loop {
             if !decoder.has_queued() {
+                if self.read_wait_timed_out(stdin_handle) {
+                    break;
+                }
                 let buf = crate::fd::read_some(stdin_handle, 1).ok()?;
                 if buf.is_empty() {
                     eof = true;

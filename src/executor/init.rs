@@ -29,6 +29,21 @@ impl Executor {
             env_vars.entry("PATH".to_string()).or_insert(path_val);
         }
 
+        // Pin the host's POSIX toolset directory before scripts can
+        // overwrite PATH: `PATH=/bin:/usr/bin` (invocation.tests) and
+        // `command -p` (command.def _CS_PATH) both need the logical bin
+        // namespace to keep resolving. env_var writes sync into the process
+        // environment, so a runtime probe of std::env PATH is polluted.
+        #[cfg(windows)]
+        if !env_vars.contains_key("__RUBASH_POSIX_TOOLS_DIR") {
+            if let Some(dir) = crate::executor::path::windows_posix_tools_dir(&env_vars) {
+                env_vars.insert(
+                    "__RUBASH_POSIX_TOOLS_DIR".to_string(),
+                    dir.to_string_lossy().to_string(),
+                );
+            }
+        }
+
         // Seed the trap table a shell inherits from its environment: traps
         // ignored at startup become hard-ignores (trap.c), and WSL's init
         // leaves SIGRTMIN ignored for every child, which the GNU 5.3.0
@@ -133,7 +148,7 @@ impl Executor {
             };
             if let Ok(fd) = num.parse::<u32>() {
                 let handle =
-                    isize::from_str_radix(value.trim_start_matches("0x"), 16).ok();
+                    crate::fd::HANDLE::from_str_radix(value.trim_start_matches("0x"), 16).ok();
                 let entry = inherited_fd_handles.entry(fd).or_default();
                 if is_write {
                     entry.1 = handle;
@@ -193,6 +208,7 @@ impl Executor {
                 debug_trap_command: std::cell::RefCell::new(None),
                 xtrace_fd: Cell::new(-1),
                 xtrace_fd_source: std::cell::RefCell::new(String::new()),
+                procsub_streams: std::cell::RefCell::new(HashMap::new()),
             },
             fd_table: FdTable::new(),
             exit_code: 0,
@@ -240,9 +256,14 @@ impl Executor {
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(None),
             last_command_substitution_parse_error: Cell::new(false),
+            last_command_inverted: Cell::new(false),
+            exit_jump_pending: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),
+            fd_var_external_undo: Vec::new(),
+            read_deadline: None,
+            read_timed_out: false,
             stdout_capture: None,
             stderr_capture: None,
             host_external_command_handler: None,
@@ -321,6 +342,21 @@ impl Executor {
                 .unwrap_or_else(|| "/".to_string()),
         };
         env_vars.insert("PWD".to_string(), pwd);
+        // Suites write $TMPDIR into generated scripts unquoted
+        // (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`); an inherited
+        // Windows backslash path is escape syntax to the shell reader and
+        // corrupts to `D:repo...`. $HOME has the same problem in pattern
+        // position (exp.tests: `${x#$HOME}` — `\U`/`\A` become pattern
+        // escapes so the prefix never strips). Windows filesystem APIs
+        // accept forward slashes, so normalize inherited values to the
+        // shell-safe form.
+        for name in ["TMPDIR", "HOME"] {
+            if let Some(value) = env_vars.get_mut(name) {
+                if value.contains('\\') {
+                    *value = value.replace('\\', "/");
+                }
+            }
+        }
         env_vars
             .entry("TMPDIR".to_string())
             .or_insert_with(safe_temp_dir_string);

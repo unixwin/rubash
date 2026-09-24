@@ -165,8 +165,10 @@ impl Executor {
                 // Heredoc bodies are raw text, so inputs carrying `<<` skip
                 // this probe like the script driver does.
                 if !source.contains("<<") {
+                    let eval_posix =
+                        self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
                     if let Some((close, open_line, eof_line, report_open)) =
-                        crate::lexer::unclosed_input_close_char(&source)
+                        crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
                         // GNU eval continues the caller's line numbering:
                         // eval-input line i sits at caller_line+i-1;
@@ -261,6 +263,7 @@ impl Executor {
             &tokens,
             crate::parser::ParseLoopOptions {
                 stray_close_is_error: true,
+                diagnostic_text: None,
                 source_text: Some(source.to_string()),
                 source_line_offset: caller_line.saturating_sub(1),
             },
@@ -1035,10 +1038,6 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        if let Some(status) = self.execute_dynamic_fd_exec_redirect(cmd)? {
-            return Ok(status);
-        }
-
         if exec_has_only_redirects(cmd) {
             if let Some(status) = self.execute_stdio_only_exec_redirect(cmd)? {
                 return Ok(status);
@@ -1075,6 +1074,15 @@ impl Executor {
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(status);
+        }
+
+        // GNU redir.c do_redirections → redir_varassign: `exec cmd {var}>f`
+        // still allocates the descriptor and assigns var persistently
+        // before running the operand. The stdio-only paths above already
+        // covered the no-operand forms; apply the fd_var redirects here so
+        // a real operand sees them (and they persist after it exits).
+        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            return Ok(1);
         }
 
         if let Some(redirect) = &cmd.redirect_out {
@@ -1217,6 +1225,30 @@ impl Executor {
             // exec with only redirections always ends with status 0 unless
             // a redirection itself fails).
             handled = true;
+            // GNU redir.c do_redirection_internal → redir_varassign
+            // (redir.c:1133-1166): `exec {var}>file` allocates a fresh
+            // descriptor in list order and assigns it to var persistently
+            // (exec redirections are never undone). A failed redirect stops
+            // the list — do_redirections returns on the first error.
+            if redirect.fd_var.is_some() {
+                match self.execute_dynamic_fd_var_redirect(redirect, false) {
+                    Ok(_) => {}
+                    Err(ExecuteError::IoError(error)) => {
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        )?;
+                        self.write_default_stderr(&stderr)?;
+                        self.exit_code = 1;
+                        return Ok(Some(1));
+                    }
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
             match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::Append
@@ -1430,6 +1462,33 @@ impl Executor {
                 _ => {}
             }
             handled = true;
+        }
+
+        // `{var}<<EOF` heredocs live in heredoc_redirects, not redirects.
+        // GNU redir.c make_here_document writes the body to a temp file and
+        // redir_varassign binds the fresh fd to var persistently under exec
+        // (vredir1.sub: `exec {v}<<-EOF` leaves v holding a readable fd).
+        for redirect in &cmd.heredoc_redirects {
+            if redirect.fd_var.is_none() {
+                continue;
+            }
+            handled = true;
+            match self.execute_dynamic_fd_var_heredoc(redirect, false) {
+                Ok(_) => {}
+                Err(ExecuteError::IoError(error)) => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.diagnostic_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    return Ok(Some(1));
+                }
+                Err(error) => return Err(error),
+            }
         }
 
         if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
@@ -1854,270 +1913,170 @@ impl Executor {
         result
     }
 
-    fn execute_dynamic_fd_exec_redirect(
+    /// GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
+    /// every `{var}` redirection allocates a fresh descriptor and assigns
+    /// the number to the variable — for builtins, functions and external
+    /// commands alike — before the command runs. Applies all fd_var
+    /// redirects of `cmd` in list order; returns whether any failed (the
+    /// command then does not run, matching GNU's redirection-error
+    /// abort). `auto_close` mirrors the caller's varredir_close handling
+    /// (the option itself is checked inside execute_dynamic_fd_var_redirect).
+    pub(in crate::executor) fn apply_dynamic_fd_var_redirects(
         &mut self,
         cmd: &CommandNode,
-    ) -> Result<Option<i32>, ExecuteError> {
-        let Some(name) = cmd.words.get(1).and_then(|word| dynamic_fd_var_name(word)) else {
-            return Ok(None);
+        auto_close: bool,
+    ) -> Result<bool, ExecuteError> {
+        let mut redirect_failed = false;
+        self.fd_var_external_undo.clear();
+        for redirect in &cmd.redirects {
+            let Some(name) = redirect.fd_var.as_deref() else {
+                continue;
+            };
+            // Record the variable's prior value so commands that fork
+            // before do_redirections (external programs, forced-fork null
+            // commands — execute_cmd.c:4216) can undo the binding. The
+            // scalar store lives in both env_vars and the typed VariableStore
+            // (temporary_assignments.rs apply_shell_assignment_inner), so the
+            // snapshot covers both.
+            let resolved = self
+                .resolved_variable_name(name)
+                .unwrap_or_else(|| name.to_string());
+            let prior = self.shell_state.env_vars.get(&resolved).cloned();
+            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            self.fd_var_external_undo.push((resolved, prior, prior_typed));
+            match self.execute_dynamic_fd_var_redirect(redirect, auto_close) {
+                Ok(_) => {}
+                Err(ExecuteError::IoError(error)) => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.diagnostic_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    redirect_failed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        // `{var}<<EOF` heredocs live in heredoc_redirects, not redirects.
+        // GNU redir.c make_here_document writes the body to a temp file and
+        // redir_varassign binds the fresh fd to var, so `exec {v}<<-EOF`
+        // leaves v holding a readable descriptor (vredir1.sub).
+        for redirect in &cmd.heredoc_redirects {
+            let Some(name) = redirect.fd_var.as_deref() else {
+                continue;
+            };
+            let resolved = self
+                .resolved_variable_name(name)
+                .unwrap_or_else(|| name.to_string());
+            let prior = self.shell_state.env_vars.get(&resolved).cloned();
+            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            self.fd_var_external_undo.push((resolved, prior, prior_typed));
+            match self.execute_dynamic_fd_var_heredoc(redirect, auto_close) {
+                Ok(_) => {}
+                Err(ExecuteError::IoError(error)) => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.diagnostic_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_default_stderr(&stderr)?;
+                    self.exit_code = 1;
+                    redirect_failed = true;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(redirect_failed)
+    }
+
+    /// `{var}<<[-]EOF` / `{var}<<<word` — allocate a dynamic fd holding the
+    /// heredoc/herestring body and bind it to var (redir.c make_here_document
+    /// + redir_varassign).
+    fn execute_dynamic_fd_var_heredoc(
+        &mut self,
+        redirect: &crate::parser::HereDocRedirect,
+        auto_close: bool,
+    ) -> Result<bool, ExecuteError> {
+        let Some(name) = redirect.fd_var.as_deref() else {
+            return Ok(false);
         };
-        if cmd.words.len() != 2 {
-            return Ok(None);
+        if self.dynamic_fd_assignment_readonly(name) {
+            let prefix = self.diagnostic_prefix();
+            let payload =
+                format!("{name}: readonly variable\n{prefix}{name}: cannot assign fd to variable");
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                payload,
+            )));
         }
-
-        let closes_existing_fd = cmd
-            .redirect_in
-            .as_ref()
-            .or(cmd.redirect_out.as_ref())
-            .or(cmd.append.as_ref())
-            .is_some_and(|redirect| is_closed_redirect_target(&self.expand_redirect_target(redirect)));
-        // GNU sets up the redirection itself (creating output targets, opening
-        // input files) before failing the fd assignment to a readonly variable.
-        let readonly_blocked = !closes_existing_fd && self.dynamic_fd_assignment_readonly(name);
-
-        if cmd.here_string.is_some() || cmd.heredoc.is_some() {
-            if readonly_blocked {
-                self.report_readonly_fd_assignment(name);
-                return Ok(Some(1));
-            }
-            let Some(input) = self.stdin_string_for_command_mut(cmd) else {
-                return Ok(None);
-            };
-            let Some(fd) = self.allocate_dynamic_fd() else {
-                self.report_fd_dup_error("here-string");
-                return Ok(Some(1));
-            };
-            if !self.set_dynamic_fd_variable(name, fd) {
-                self.close_persistent_fd(fd)?;
-                self.report_fd_assignment_failure(name);
-                return Ok(Some(1));
-            }
-            self.set_fd_input_text(fd, input, true);
-            return Ok(Some(0));
-        }
-
-        if let Some(redirect) = &cmd.redirect_in {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                self.close_dynamic_fd(name)?;
-                return Ok(Some(0));
-            }
-
-            if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                let Some(fd) = self.allocate_dynamic_fd() else {
-                    self.report_fd_dup_error(&target);
-                    return Ok(Some(1));
-                };
-                self.copy_persistent_input_fd(fd, source_fd);
-                // GNU redir.c:1161-1166: redir_varassign failure closes the
-                // freshly duplicated descriptor — the slot must not leak
-                // into later {var} allocations.
-                if readonly_blocked {
-                    self.close_persistent_fd(fd)?;
-                    self.report_readonly_fd_assignment(name);
-                    return Ok(Some(1));
-                }
-                if !self.set_dynamic_fd_variable(name, fd) {
-                    self.close_persistent_fd(fd)?;
-                    self.report_fd_assignment_failure(name);
-                    return Ok(Some(1));
-                }
-                if move_source {
-                    self.close_persistent_fd(source_fd)?;
-                }
-                return Ok(Some(0));
-            }
-
-            if let Some(source) = target
-                .strip_prefix("<(")
-                .and_then(|target| target.strip_suffix(')'))
-            {
-                if let Some(input) = self.process_substitution_output(source) {
-                    let Some(fd) = self.allocate_dynamic_fd() else {
-                        self.report_fd_dup_error(&target);
-                        return Ok(Some(1));
-                    };
-                    self.fd_table.open_input(
-                        fd,
-                        FdReadEndpoint::process_substitution(&input),
-                        true,
-                    );
-                    self.set_fd_input_text(fd, input, true);
-                    if readonly_blocked {
-                        self.close_persistent_fd(fd)?;
-                        self.report_readonly_fd_assignment(name);
-                        return Ok(Some(1));
-                    }
-                    if !self.set_dynamic_fd_variable(name, fd) {
-                        self.close_persistent_fd(fd)?;
-                        self.report_fd_assignment_failure(name);
-                        return Ok(Some(1));
-                    }
-                    return Ok(Some(0));
-                }
-            }
-
-            if matches!(
-                target.as_str(),
-                "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0"
-            ) {
-                let Some(fd) = self.allocate_dynamic_fd() else {
-                    self.report_fd_dup_error(&target);
-                    return Ok(Some(1));
-                };
-                self.fd_table
-                    .open_input(fd, FdReadEndpoint::InheritedProcessStdin, true);
-                if readonly_blocked {
-                    self.close_persistent_fd(fd)?;
-                    self.report_readonly_fd_assignment(name);
-                    return Ok(Some(1));
-                }
-                if !self.set_dynamic_fd_variable(name, fd) {
-                    self.close_persistent_fd(fd)?;
-                    self.report_fd_assignment_failure(name);
-                    return Ok(Some(1));
-                }
-                return Ok(Some(0));
-            }
-
-            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-            let file = if redirect.operator.ends_with("<>") {
-                FileFd::open_readwrite(path)
+        let close_after_command = auto_close
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
+        let body = if redirect.body_carrier.is_some() {
+            if redirect.here_string {
+                self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
             } else {
-                FileFd::open_read(path)
+                self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
             }
-            .map_err(|io| crate::posix_errors::path_error(&target, io))?;
-            let Some(fd) = self.allocate_dynamic_fd() else {
-                self.report_fd_dup_error(&target);
-                return Ok(Some(1));
-            };
-            if readonly_blocked {
-                self.close_persistent_fd(fd)?;
-                self.report_readonly_fd_assignment(name);
-                return Ok(Some(1));
-            }
-            if !self.set_dynamic_fd_variable(name, fd) {
-                self.close_persistent_fd(fd)?;
-                self.report_fd_assignment_failure(name);
-                return Ok(Some(1));
-            }
-            self.set_fd_input_file(fd, file.clone(), true);
-            // Same `6<>` suffix rule as the exec path above: one O_RDWR
-            // open file description feeds both directions.
-            if redirect.operator.ends_with("<>") {
-                self.fd_table
-                    .open_output(fd, FdWriteEndpoint::File(file), true);
-                self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                self.shell_state
-                    .env_vars
-                    .insert(fd_output_key(fd), target.clone());
-            }
-            return Ok(Some(0));
+        } else if let Some(body) = &redirect.body {
+            self.expand_heredoc_body_mut(body)
+        } else {
+            String::new()
+        };
+        let Some(fd) = self.allocate_dynamic_fd() else {
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{name}: cannot allocate fd"),
+            )));
+        };
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::text(&body), true);
+        if !self.set_dynamic_fd_variable(name, fd) {
+            self.close_persistent_fd(fd)?;
+            return Err(ExecuteError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("{name}: cannot assign fd to variable"),
+            )));
         }
-
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                if self.dynamic_fd_variable_value(name).is_none()
-                    && crate::builtins::set::shell_option_enabled(
-                        &self.shell_state.env_vars,
-                        "nounset",
-                    )
-                {
-                    eprintln!("{}{name}: ambiguous redirect", self.diagnostic_prefix());
-                    return Ok(Some(1));
-                }
-                self.close_dynamic_output_fd(name)?;
-                return Ok(Some(0));
-            }
-
-            let Some(fd) = self.allocate_dynamic_fd() else {
-                self.report_fd_dup_error(&target);
-                return Ok(Some(1));
-            };
-            if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                self.copy_persistent_output_fd(fd, source_fd);
-                if readonly_blocked {
-                    self.close_persistent_fd(fd)?;
-                    self.report_readonly_fd_assignment(name);
-                    return Ok(Some(1));
-                }
-                if !self.set_dynamic_fd_variable(name, fd) {
-                    self.close_persistent_fd(fd)?;
-                    self.report_fd_assignment_failure(name);
-                    return Ok(Some(1));
-                }
-                if move_source {
-                    self.close_persistent_fd(source_fd)?;
-                }
-                return Ok(Some(0));
-            }
-            if self.open_persistent_output_process_substitution(fd, &target)? {
-                if readonly_blocked {
-                    self.close_persistent_fd(fd)?;
-                    self.report_readonly_fd_assignment(name);
-                    return Ok(Some(1));
-                }
-                if !self.set_dynamic_fd_variable(name, fd) {
-                    self.close_persistent_fd(fd)?;
-                    self.report_fd_assignment_failure(name);
-                    return Ok(Some(1));
-                }
-                return Ok(Some(0));
-            }
-            self.create_redirect_output(&target, redirect.clobber)?;
-            if readonly_blocked {
-                self.close_persistent_fd(fd)?;
-                self.report_readonly_fd_assignment(name);
-                return Ok(Some(1));
-            }
-            if !self.set_dynamic_fd_variable(name, fd) {
-                self.close_persistent_fd(fd)?;
-                self.report_fd_assignment_failure(name);
-                return Ok(Some(1));
-            }
-            self.set_fd_output_file(fd, target, true, false)?;
-            return Ok(Some(0));
+        if close_after_command {
+            self.close_persistent_fd(fd)?;
         }
+        Ok(true)
+    }
 
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_redirect_target(redirect);
-            if is_closed_redirect_target(&target) {
-                self.close_dynamic_output_fd(name)?;
-                return Ok(Some(0));
+    /// GNU execute_cmd.c: an external command forks before do_redirections,
+    /// so a `{var}` redirection binds only in the child — the parent's
+    /// variable is untouched and the freshly allocated descriptor dies
+    /// with the child. Undoes what apply_dynamic_fd_var_redirects recorded
+    /// for the just-finished command.
+    pub(in crate::executor) fn undo_child_fd_var_redirects(&mut self) {
+        let undo = std::mem::take(&mut self.fd_var_external_undo);
+        for (name, prior, prior_typed) in undo {
+            if let Some(fd) = self.dynamic_fd_variable_value(&name) {
+                let _ = self.close_persistent_fd(fd);
             }
-            let Some(fd) = self.allocate_dynamic_fd() else {
-                self.report_fd_dup_error(&target);
-                return Ok(Some(1));
-            };
-            if self.open_persistent_output_process_substitution(fd, &target)? {
-                if readonly_blocked {
-                    self.close_persistent_fd(fd)?;
-                    self.report_readonly_fd_assignment(name);
-                    return Ok(Some(1));
+            match prior {
+                Some(value) => {
+                    self.shell_state.env_vars.insert(name.clone(), value);
                 }
-                if !self.set_dynamic_fd_variable(name, fd) {
-                    self.close_persistent_fd(fd)?;
-                    self.report_fd_assignment_failure(name);
-                    return Ok(Some(1));
+                None => {
+                    self.shell_state.env_vars.remove(&name);
                 }
-                return Ok(Some(0));
             }
-            if readonly_blocked {
-                self.close_persistent_fd(fd)?;
-                self.report_readonly_fd_assignment(name);
-                return Ok(Some(1));
+            match prior_typed {
+                Some(variable) => {
+                    let _ = self.shell_state.variables.set(name, variable);
+                }
+                None => {
+                    let _ = self.shell_state.variables.remove(&name);
+                }
             }
-            if !self.set_dynamic_fd_variable(name, fd) {
-                self.close_persistent_fd(fd)?;
-                self.report_fd_assignment_failure(name);
-                return Ok(Some(1));
-            }
-            self.set_fd_output_file(fd, target, true, true)?;
-            return Ok(Some(0));
         }
-
-        Ok(None)
     }
 
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
@@ -2182,10 +2141,25 @@ impl Executor {
 
         match redirect.kind {
             crate::parser::RedirectKind::CloseInput => {
+                // GNU redir.c:1219-1223 (r_close_this + REDIR_VARASSIGN):
+                // the fd to close comes from redir_varvalue — an unset or
+                // non-numeric variable is an ambiguous redirect.
+                if self.dynamic_fd_variable_value(name).is_none() {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{name}: ambiguous redirect"),
+                    )));
+                }
                 self.close_dynamic_input_fd(name);
                 return Ok(true);
             }
             crate::parser::RedirectKind::CloseOutput => {
+                if self.dynamic_fd_variable_value(name).is_none() {
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("{name}: ambiguous redirect"),
+                    )));
+                }
                 self.close_dynamic_output_fd(name)?;
                 return Ok(true);
             }
@@ -2490,15 +2464,6 @@ impl Executor {
         self.fd_table.allocate_dynamic_with_limit(limit)
     }
 
-    fn report_fd_dup_error(&mut self, target: &str) {
-        eprintln!(
-            "{}redirection error: cannot duplicate fd: Invalid argument",
-            self.diagnostic_prefix()
-        );
-        eprintln!("{}{}: Invalid argument", self.diagnostic_prefix(), target);
-        self.exit_code = 1;
-    }
-
     fn fd_dup_error_payload(&self, target: &str) -> String {
         format!(
             "redirection error: cannot duplicate fd: Invalid argument\n{}{}: Invalid argument",
@@ -2578,16 +2543,6 @@ impl Executor {
         is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &resolved)
     }
 
-    fn report_readonly_fd_assignment(&mut self, name: &str) {
-        eprintln!("{}{}: readonly variable", self.diagnostic_prefix(), name);
-        eprintln!(
-            "{}{}: cannot assign fd to variable",
-            self.diagnostic_prefix(),
-            name
-        );
-        self.exit_code = 1;
-    }
-
     /// GNU redir.c bind_dynamic_variable -> bind_variable: a `{var}` fd
     /// assignment is a real variable binding — nameref targets resolve, an
     /// empty-cell nameref stores the fd number as its cell and is validated
@@ -2599,26 +2554,19 @@ impl Executor {
         self.apply_shell_assignment(name, fd.to_string())
     }
 
-    /// GNU redir.c: after the fd-number bind fails the redirection reports
-    /// `name: cannot assign fd to variable` (no command-name segment) and
-    /// the command fails with status 1.
-    fn report_fd_assignment_failure(&mut self, name: &str) {
-        eprintln!(
-            "{}{}: cannot assign fd to variable",
-            self.diagnostic_prefix(),
-            name
-        );
-        self.exit_code = 1;
-    }
-
     pub(in crate::executor) fn execute_exec_command(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         let status = self.execute_exec(cmd)?;
-        let dynamic_fd_redirect = is_dynamic_fd_exec_redirect(cmd);
         self.exit_code = status;
-        if !dynamic_fd_redirect && crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
+        // GNU exec.def: a failed `exec command` exits a noninteractive
+        // shell (EXECUTION_FAILURE). A `{var}` word that reached argv is a
+        // spaced form — an ordinary operand — while the adjacent
+        // `{var}redir` form was already consumed by the parser into
+        // redirect.fd_var (parse.y:5821-5843 REDIR_WORD), so it never
+        // appears here.
+        if crate::builtins::exec::replaces_shell(&cmd.words[1..]) {
             return Err(ExecuteError::ExitCode(status));
         }
         Ok(())
@@ -2650,21 +2598,6 @@ pub(crate) fn signal_trap_name(signal: i32) -> Option<String> {
     crate::builtins::kill::translate_signal(&signal.to_string()).map(|name| format!("SIG{name}"))
 }
 
-fn is_dynamic_fd_exec_redirect(cmd: &CommandNode) -> bool {
-    cmd.words.len() == 2
-        && cmd
-            .words
-            .get(1)
-            .and_then(|word| dynamic_fd_var_name(word))
-            .is_some()
-        && (cmd.redirect_in.is_some()
-            || cmd.redirect_out.is_some()
-            || cmd.append.is_some()
-            || cmd.here_string.is_some()
-            || cmd.heredoc.is_some()
-            || !cmd.redirects.is_empty())
-}
-
 fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
     if cmd.words.len() == 1 {
         return true;
@@ -2682,19 +2615,4 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
     )
 }
 
-fn dynamic_fd_var_name(word: &str) -> Option<&str> {
-    let name = word.strip_prefix('{')?.strip_suffix('}')?;
-    if let Some((array_name, index)) = parse_array_subscript(name) {
-        if is_shell_name(array_name) && index.parse::<usize>().is_ok() {
-            return Some(name);
-        }
-    }
-    let mut chars = name.chars();
-    let first = chars.next()?;
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    chars
-        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-        .then_some(name)
-}
+

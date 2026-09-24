@@ -255,22 +255,22 @@ impl Executor {
         self.last_builtin_write_failed.replace(false)
     }
 
-    /// GNU execute_cmd.c execute_simple_command applies `do_redirections`
-    /// before word expansion, so a word-expansion diagnostic
-    /// (`${x?word}`, bad substitution) writes to the command's *redirected*
-    /// stderr. Rubash validates expansions before the command's redirect
-    /// state is active, so route the diagnostic through the resolved
-    /// `OutputFdState` instead of the ambient fd table.
+    /// GNU execute_cmd.c execute_simple_command runs `expand_words`
+    /// (execute_cmd.c:4617) BEFORE the command's own `do_redirections`
+    /// (execute_builtin_or_function at execute_cmd.c:5606, or the forked-child
+    /// path at execute_cmd.c:5522). A word-expansion diagnostic
+    /// (`${x?word}`, bad substitution) therefore writes to fd 2 as bound by
+    /// the *enclosing* context only — a `{ }`/`( )` compound redirect or the
+    /// pipeline dup — never to the failing command's own `2>file`/`2>&1`.
+    /// The fd state is seeded from the ambient fd table, which already
+    /// carries those enclosing bindings.
     pub(in crate::executor) fn write_redirected_command_stderr(
         &mut self,
         cmd: &CommandNode,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
-        let mut state = self.command_output_fd_state();
-        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            self.write_default_stderr(output)?;
-            return Ok(());
-        }
+        let _ = cmd;
+        let state = self.command_output_fd_state();
         state.write_to_fd(self, 2, output)
     }
 

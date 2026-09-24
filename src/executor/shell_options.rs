@@ -4,6 +4,17 @@ use crate::executor::glob::{pathname_expand_word, PathnameExpansion};
 
 impl Executor {
     pub(in crate::executor) fn open_input_redirect(&self, target: &str) -> io::Result<File> {
+        self.open_input_redirect_impl(target, true)
+    }
+
+    /// Redirect-open validity probe (GNU redir.c open_redir_file: the open
+    /// itself never reads). A registered `<(cmd)` path must not be drained
+    /// by a probe — the consumer (read/cat/child stdin) does that.
+    pub(in crate::executor) fn probe_input_redirect(&self, target: &str) -> io::Result<File> {
+        self.open_input_redirect_impl(target, false)
+    }
+
+    fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
         if is_null_device(target) {
             return File::open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
         }
@@ -15,7 +26,47 @@ impl Executor {
         if let Some(fd) = dev_stdio_redirect_fd(target) {
             return self.open_fd_read_endpoint(fd, target);
         }
-        File::open(shell_path_to_windows(target, &self.shell_state.env_vars))
+        // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
+        // serve as a pre-filled pipe converted to a File; reads hit EOF at
+        // content end, matching procfs static-snapshot semantics.
+        if let Some(content) = crate::proc_vfs::proc_file_content(target) {
+            use std::io::Write as _;
+            let (reader, mut writer) = std::io::pipe()?;
+            writer
+                .write_all(&content)
+                .map_err(|e| crate::posix_errors::path_error(target, e))?;
+            drop(writer); // close write side: reader sees EOF after content
+            #[cfg(windows)]
+            {
+                use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+                let handle = reader.into_raw_handle();
+                return Ok(unsafe { File::from_raw_handle(handle) });
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::{FromRawFd as _, IntoRawFd as _};
+                let fd = reader.into_raw_fd();
+                return Ok(unsafe { File::from_raw_fd(fd) });
+            }
+        }
+        let win_path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        // A spawned child reading a `<(cmd)` carrier must get the stream's
+        // REMAINING bytes — GNU hands it a dup of the shared pipe offset,
+        // so the parent's next open sees what the child left
+        // (subst.c:7143). Serve the remainder through a fresh temp and
+        // advance the shared offset.
+        if consume {
+            if let Some(bytes) = self.procsub_stream_take(&win_path) {
+                let path = self
+                    .write_process_substitution_temp_bytes(&bytes)
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::Other, "failed to materialize input")
+                    })?;
+                return File::open(&path)
+                    .map_err(|e| crate::posix_errors::path_error(target, e));
+            }
+        }
+        File::open(win_path)
             .map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
@@ -36,6 +87,12 @@ impl Executor {
                 let bytes = self
                     .virtual_fd_stdin_remaining_bytes(fd)
                     .unwrap_or_default();
+                // GNU hands the child a dup of the same open file
+                // description: bytes the child reads move the shared
+                // offset — drain the source so the next consumer sees
+                // the remainder, not a replay (procsub.tests
+                // count_lines → 1,0,0,0,0).
+                self.fd_table.drain_input_to_eof(fd);
                 let path = self
                     .write_process_substitution_temp_bytes(&bytes)
                     .map_err(|_| {
@@ -61,6 +118,120 @@ impl Executor {
                 format!("{target}: Bad file descriptor"),
             )),
         }
+    }
+
+    /// GNU test.c: `-t fd` answers isatty(fd) — whether the descriptor's
+    /// current target is a terminal. The builtin only receives env_vars,
+    /// so mirror the fd table plus the command's own (not yet bound)
+    /// redirects into __RUBASH_FD_TERMINAL_<fd> right before it runs.
+    /// Rewritten fresh each call so a stale mark can never outlive the
+    /// binding it described.
+    pub(in crate::executor) fn sync_fd_terminal_marks(&mut self, cmd: Option<&CommandNode>) {
+        self.shell_state
+            .env_vars
+            .retain(|key, _| !key.starts_with(FD_TERMINAL_PREFIX));
+        let mut marks: BTreeMap<u32, bool> = BTreeMap::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if entry.closed {
+                continue;
+            }
+            let read_tty = match &entry.read {
+                Some(FdReadEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(0))
+                }
+                _ => false,
+            };
+            let write_tty = match &entry.write {
+                Some(FdWriteEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdWriteEndpoint::Stdout) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(1))
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(2))
+                }
+                _ => false,
+            };
+            marks.insert(*fd, read_tty || write_tty);
+        }
+        if let Some(cmd) = cmd {
+            // do_redirections would leave the dup'd target live while the
+            // builtin runs; the virtual-stdin model never bound it, so
+            // judge the redirect's effective endpoint directly.
+            if let Some(redirect) = &cmd.redirect_in {
+                let fd = redirect.fd.unwrap_or(0);
+                let target = self.expand_redirect_target(redirect);
+                if is_closed_redirect_target(&target) {
+                    marks.insert(fd, false);
+                } else if let Some(tty) = self.redirect_target_is_terminal(&target) {
+                    marks.insert(fd, tty);
+                }
+            }
+            for redirect in [
+                &cmd.redirect_out,
+                &cmd.append,
+                &cmd.redirect_err,
+                &cmd.redirect_err_append,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let fd = redirect.fd.unwrap_or(1);
+                let target = self.expand_redirect_target(redirect);
+                if let Some(tty) = self.redirect_target_is_terminal(&target) {
+                    marks.insert(fd, tty);
+                }
+            }
+        }
+        for (fd, tty) in marks {
+            self.shell_state
+                .env_vars
+                .insert(fd_terminal_key(fd), if tty { "1" } else { "0" }.to_string());
+        }
+    }
+
+    /// isatty() verdict for an expanded redirect target: `&N` and the
+    /// /dev/fd/N aliases consult fd N's bound endpoint; a path is probed
+    /// read-only (no create/truncate side effect) and judged by
+    /// GetConsoleMode — true for CON, false for NUL and disk files.
+    fn redirect_target_is_terminal(&self, target: &str) -> Option<bool> {
+        if let Some(source_fd) = redirect_target_fd(target) {
+            return Some(match self.fd_table.read_endpoint(source_fd) {
+                Some(FdReadEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
+                Some(FdReadEndpoint::InheritedProcessStdin) => {
+                    crate::fd::is_console_handle(crate::fd::process_std_handle(0))
+                }
+                Some(_) => false,
+                None => match self.fd_table.output_endpoint(source_fd) {
+                    Some(FdWriteEndpoint::File(file)) => {
+                        crate::fd::is_console_handle(file.handle)
+                    }
+                    Some(FdWriteEndpoint::Stdout) => {
+                        crate::fd::is_console_handle(crate::fd::process_std_handle(1))
+                    }
+                    Some(FdWriteEndpoint::Stderr) => {
+                        crate::fd::is_console_handle(crate::fd::process_std_handle(2))
+                    }
+                    _ => false,
+                },
+            });
+        }
+        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        File::open(&path)
+            .ok()
+            .map(|file| {
+                #[cfg(windows)]
+                let raw = {
+                    use std::os::windows::io::AsRawHandle;
+                    file.as_raw_handle() as crate::fd::HANDLE
+                };
+                #[cfg(unix)]
+                let raw = {
+                    use std::os::unix::io::AsRawFd;
+                    file.as_raw_fd() as crate::fd::HANDLE
+                };
+                crate::fd::is_console_handle(raw)
+            })
     }
 
     pub(in crate::executor) fn create_redirect_output(
@@ -168,8 +339,25 @@ impl Executor {
             return Ok(false);
         };
         match endpoint {
-            FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
-            FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
+            // Same dup2 open-file-description semantics as write_fd_endpoint:
+            // a write to an fd bound to Stdout/Stderr follows the live
+            // capture (pipe/command substitution), not the raw process stdio.
+            FdWriteEndpoint::Stdout => {
+                if stdout_capture_active() {
+                    stdout_capture_write(output)?;
+                } else if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stdout_bytes(output)?;
+                }
+            }
+            FdWriteEndpoint::Stderr => {
+                if let Some(capture) = &mut self.stderr_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stderr_bytes(output)?;
+                }
+            }
             FdWriteEndpoint::CoprocStdin { fd, .. } => {
                 crate::fd::write_all(fd.handle, output)?;
             }
@@ -227,17 +415,10 @@ impl Executor {
         &mut self,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
-        // Thread-local capture (pipeline stages for builtins that write to
-        // the process stdout) wins over the Executor field capture.
-        if stdout_capture_active() {
-            stdout_capture_write(output)?;
-            return Ok(());
-        }
-        if let Some(capture) = &mut self.stdout_capture {
-            capture.write_all(output)?;
-            return Ok(());
-        }
-
+        // fd 1's bound endpoint decides the destination (dup2 snapshot
+        // semantics): the Stdout arm inside write_fd_endpoint resolves to
+        // the active capture or raw stdio, and a `1>&2` binding correctly
+        // follows fd 2 instead.
         self.write_fd_endpoint(1, output)?;
         Ok(())
     }
@@ -246,10 +427,8 @@ impl Executor {
         &mut self,
         output: &[u8],
     ) -> Result<(), ExecuteError> {
-        if let Some(capture) = &mut self.stderr_capture {
-            capture.write_all(output)?;
-            return Ok(());
-        }
+        // Same: fd 2 may be bound to Stdout by `2>&1`, so the capture
+        // buffers are consulted inside the endpoint arms, not first.
         self.write_fd_endpoint(2, output)?;
         Ok(())
     }
@@ -268,8 +447,25 @@ impl Executor {
             return Ok(());
         };
         match endpoint {
-            FdWriteEndpoint::Stdout => write_stdout_bytes(output)?,
-            FdWriteEndpoint::Stderr => write_stderr_bytes(output)?,
+            // GNU dup2 (`2>&1`) copies the open file description: a write to
+            // an fd bound to Stdout must land wherever fd 1 currently goes —
+            // the active stdout capture/pipe — not the raw process stdout.
+            FdWriteEndpoint::Stdout => {
+                if stdout_capture_active() {
+                    stdout_capture_write(output)?;
+                } else if let Some(capture) = &mut self.stdout_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stdout_bytes(output)?;
+                }
+            }
+            FdWriteEndpoint::Stderr => {
+                if let Some(capture) = &mut self.stderr_capture {
+                    capture.write_all(output)?;
+                } else {
+                    write_stderr_bytes(output)?;
+                }
+            }
             FdWriteEndpoint::CoprocStdin { fd, .. } => {
                 crate::fd::write_all(fd.handle, output).map_err(|_| {
                     io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed")
@@ -918,6 +1114,10 @@ impl Executor {
             // pipe input, not block opening CONIN$).
             if let Some(source_fd) = redirect_target_fd(&target) {
                 if let Some(input) = self.virtual_fd_stdin_remaining(source_fd) {
+                    // GNU dup2 hands the consumer the live stream: bytes
+                    // it took are gone for the next reader (procsub.tests
+                    // count_lines `wc -l < $1` five times → 1,0,0,0,0).
+                    self.fd_table.drain_input_to_eof(source_fd);
                     return Some(input);
                 }
                 if source_fd == 0 {
@@ -949,6 +1149,41 @@ impl Executor {
                     .read(true)
                     .write(true)
                     .open(&path);
+            }
+            // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic files
+            // are served before the filesystem (read/cat/heredoc stdin path).
+            if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                return Some(
+                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                );
+            }
+            // GNU redir.c dup2's the descriptor — a character device has
+            // no EOF, so slurping blocks forever on the console
+            // (test.tests `t -t 0 < /dev/tty` hung via
+            // function_call_stdin). Decline the text channel; the caller
+            // binds the live fd for the command's duration instead.
+            {
+                #[cfg(windows)]
+                use std::os::windows::io::AsRawHandle;
+                #[cfg(unix)]
+                use std::os::unix::io::AsRawFd;
+                if let Ok(file) = File::open(&path) {
+                    #[cfg(windows)]
+                    let raw = file.as_raw_handle() as crate::fd::HANDLE;
+                    #[cfg(unix)]
+                    let raw = file.as_raw_fd() as crate::fd::HANDLE;
+                    if crate::fd::is_char_device_handle(raw) {
+                        return None;
+                    }
+                }
+            }
+            // A `<(cmd)` temp path is a pipe carrier, not a file: reopening
+            // it must resume at the shared offset, not replay the contents
+            // (subst.c:7143 command_substitute / redir.c dup semantics).
+            if let Some(bytes) = self.procsub_stream_take(&path) {
+                return Some(
+                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                );
             }
             return fs::read_to_string(path).ok();
         }

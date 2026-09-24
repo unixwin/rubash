@@ -657,6 +657,24 @@ pub struct Executor {
     /// after word expansion so the enclosing context unwinds.
     current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
+    /// GNU execute_cmd.c:626-652: `! CMD` sets CMD_INVERT_RETURN on the
+    /// inner command, and with exit_immediately_on_error on it additionally
+    /// gains CMD_IGNORE_RETURN (execute_cmd.c:652-656) — an inverted
+    /// command's status never satisfies errexit. The grouped script drivers
+    /// (run_script_with_history / the stdin loop) re-check
+    /// `status != 0 && errexit` after each complete command and cannot see
+    /// the node's flags, so the flat-command loop records here whether the
+    /// last executed top-level command carried `!`; the drivers consult it
+    /// before breaking (set-e1.sub `! true` under `set -o posix`).
+    pub(crate) last_command_inverted: Cell<bool>,
+    /// The group's execute_ast ended by unwinding (`exit`, errexit, POSIX
+    /// special-builtin failure, fatal expansion — GNU's
+    /// jump_to_top_level(EXITPROG/ERREXIT/FORCE_EOF)). run_source converts
+    /// the ExecuteError into a bare status; this flag lets the grouped
+    /// drivers stop reading instead of treating it as an ordinary nonzero
+    /// command status (builtins source5.sub: `. missing` under `set -o
+    /// posix` exits the shell even without `set -e`).
+    pub(crate) exit_jump_pending: Cell<bool>,
     /// GNU execute_cmd.c:4887-4888 sets `special_builtin_failed = 1` when a
     /// POSIX special builtin returns an error status (> EX_SHERRBASE = 256).
     /// After the command (execute_cmd.c:1004-1017), if `posixly_correct &&
@@ -683,6 +701,26 @@ pub struct Executor {
     /// entry; keyed by node address, valid only within that command's
     /// execution span.
     redirect_target_memo: RefCell<HashMap<String, String>>,
+    /// GNU execute_cmd.c: external commands (and the forced fork of a
+    /// wordless `{var}` command, execute_null_command:4203-4278) run
+    /// do_redirections in the child — the `{var}` bind never reaches the
+    /// parent environment. The generic fd_var application in
+    /// execute_command records (resolved name, prior env_vars entry, prior
+    /// typed-store entry) here so execute_external can undo the binding and
+    /// release the descriptor after the child finishes.
+    fd_var_external_undo: Vec<(
+        String,
+        Option<String>,
+        Option<crate::shell::variables::Variable>,
+    )>,
+    /// builtins/read.def read_timeout: absolute deadline for `read -t N`
+    /// (and the TMOUT default). Set only while a `read` builtin call is
+    /// active; consulted by the genuinely blocking endpoints (inherited
+    /// process stdin, coproc pipes) — buffered endpoints never wait.
+    pub(crate) read_deadline: Option<std::time::Instant>,
+    /// A bounded read expired mid-line: GNU assigns the partial input and
+    /// returns 128+SIGALRM=142 (read.def:539-562 `goto assign_vars`).
+    pub(crate) read_timed_out: bool,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
     host_external_command_handler: Option<HostExternalCommandHandler>,

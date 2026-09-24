@@ -144,6 +144,8 @@ struct Boundary {
 /// `source`, given the alias table in `lookup`. Returns the rewritten
 /// source; everything outside the replaced words is byte-identical.
 pub(crate) fn expand_aliases_in_source(source: &str, lookup: &AliasLookup<'_>) -> String {
+    let source = expand_comsub_alias_bodies(source, lookup);
+    let source = source.as_str();
     let mut buf: Vec<char> = source.chars().collect();
     let mut pos = 0usize;
     // AL_BEINGEXPANDED stack (parse.y:3259) — an alias does not expand
@@ -590,6 +592,151 @@ fn skip_backtick(buf: &[char], mut pos: usize) -> usize {
         }
     }
     pos
+}
+
+/// GNU expands aliases while reading a `$(...)` body — parse_comsub feeds
+/// the same token reader, so alias_expand_token applies inside the
+/// substitution (comsub5.sub: `alias switch=case` + `$( switch foo in foo)
+/// ...)` runs to the `)` after `esac`, not `foo)`). The substitution's
+/// extent is therefore decided on post-alias text; iterate because a splice
+/// can move the close paren (`case` protects a mid-body `)`, and an alias
+/// can contribute the closing `)` itself: `short='echo ok 8 )'`).
+/// `'` bodies and `\` escapes hide `$(`; `"` and `` ` `` interiors do not.
+fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String {
+    if !source.contains("$(") && !source.contains("${ ") && !source.contains("${\t")
+        && !source.contains("${\n") && !source.contains("${|") && !source.contains("${(")
+    {
+        return source.to_string();
+    }
+    let mut chars: Vec<char> = source.chars().collect();
+    let mut pos = 0usize;
+    let mut in_double = false;
+    let mut changed = false;
+    while pos < chars.len() {
+        match chars[pos] {
+            '\\' => pos = (pos + 2).min(chars.len()),
+            '\'' if !in_double => pos = skip_single_quote(&chars, pos),
+            '"' => {
+                in_double = !in_double;
+                pos += 1;
+            }
+            '`' if !in_double => pos = skip_backtick(&chars, pos),
+            '$' if chars.get(pos + 1) == Some(&'(') => {
+                pos = splice_substitution_body(
+                    &mut chars,
+                    pos,
+                    lookup,
+                    &mut changed,
+                    |chars, open| crate::lexer::skip_parenthesized_unit_corrected(chars, open),
+                );
+            }
+            // Bash 5.3 funsub (parser.h:83-85 FUNSUB_CHAR, parse.y:5506):
+            // `${ ' followed by blank, newline, '|' or '(' parses a command
+            // list like `$(` — its body gets the same one-pass expansion.
+            '$' if chars.get(pos + 1) == Some(&'{')
+                && chars.get(pos + 2).is_some_and(|c| {
+                    matches!(c, ' ' | '\t' | '\n' | '|' | '(')
+                }) =>
+            {
+                pos = splice_substitution_body(
+                    &mut chars,
+                    pos,
+                    lookup,
+                    &mut changed,
+                    skip_funsub_body,
+                );
+            }
+            _ => pos += 1,
+        }
+    }
+    if changed {
+        chars.into_iter().collect()
+    } else {
+        source.to_string()
+    }
+}
+
+/// Shared body expansion for `$(` and `${ `: expand the body in ONE pass —
+/// alias chains already resolve inside expand_aliases_in_source via
+/// pushed-text boundaries. Expansion can move the closer's extent (e.g.
+/// `switch`→`case` makes a following `foo)` case syntax, not the closer);
+/// the freshly included tail is then new input and gets its own pass.
+/// Already-spliced text is never rescanned — a self-referential alias must
+/// not fire twice (AL_BEINGEXPANDED, parse.y:3259): `let` → `let --`
+/// stays. The loop is bounded so an unclosed body cannot spin.
+/// `extent(chars, open)` returns the index just past the closer, like
+/// skip_parenthesized_unit_corrected.
+fn splice_substitution_body(
+    chars: &mut Vec<char>,
+    pos: usize,
+    lookup: &AliasLookup<'_>,
+    changed: &mut bool,
+    extent: fn(&[char], usize) -> Option<usize>,
+) -> usize {
+    let open = pos + 1;
+    let body_end = extent(chars, open)
+        .unwrap_or(chars.len() + 1)
+        .saturating_sub(1)
+        .min(chars.len());
+    let body: String = chars[open + 1..body_end].iter().collect();
+    let expanded = expand_aliases_in_source(&body, lookup);
+    if expanded != body {
+        chars.splice(open + 1..body_end, expanded.chars());
+        *changed = true;
+    }
+    let mut consumed = expanded.chars().count();
+    for _ in 0..8 {
+        let new_end = extent(chars, open)
+            .unwrap_or(chars.len() + 1)
+            .saturating_sub(1)
+            .min(chars.len());
+        let tail_start = open + 1 + consumed;
+        if new_end <= tail_start || tail_start >= chars.len() {
+            break;
+        }
+        let tail: String = chars[tail_start..new_end].iter().collect();
+        let tail_expanded = expand_aliases_in_source(&tail, lookup);
+        if tail_expanded == tail {
+            break;
+        }
+        chars.splice(tail_start..new_end, tail_expanded.chars());
+        *changed = true;
+        consumed += tail_expanded.chars().count();
+    }
+    let end = extent(chars, open).unwrap_or(chars.len() + 1);
+    end.max(pos + 2).min(chars.len())
+}
+
+/// Extent of a `${ command; }' funsub body: `open` is the index of `{` —
+/// scan to the `}` that returns depth to 0, skipping quoted spans and
+/// escape pairs (mirrors Lexer::skip_braced's funsub branch, skip.rs).
+/// Returns the index just past the closing `}`.
+fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\\' && !single {
+            index += 2;
+            continue;
+        }
+        match ch {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double => depth += 1,
+            '}' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Skip `$( ... )` honoring nested parens and quoting. Case patterns with

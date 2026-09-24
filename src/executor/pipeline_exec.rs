@@ -196,10 +196,17 @@ impl Executor {
             return Ok(false);
         }
         let word = command.words[0].trim();
-        let Some(inner) = word
-            .strip_prefix('{')
-            .and_then(|value| value.strip_suffix('}'))
-        else {
+        let Some(after_open) = word.strip_prefix('{') else {
+            return Ok(false);
+        };
+        // GNU parse.y: `{` is a reserved word only when followed by a blank.
+        // A glued `{fdq}` is an ordinary word (command not found, braces
+        // kept in the diagnostic); only the lexer-collapsed `{ list; }`
+        // form — whitespace after the opener — re-tokenizes here.
+        if !after_open.starts_with(char::is_whitespace) {
+            return Ok(false);
+        }
+        let Some(inner) = after_open.strip_suffix('}') else {
             return Ok(false);
         };
         let inner = inner.trim().trim_end_matches(';').trim();
@@ -1459,6 +1466,25 @@ impl Executor {
             return self
                 .execute_compound_pipeline_stage(command, input)
                 .map(Some);
+        }
+
+        // GNU execute_cmd.c:4617 expand_words runs BEFORE the element's own
+        // do_redirections (execute_builtin_or_function execute_cmd.c:5606),
+        // so a word-expansion diagnostic (`${x?word}`, bad substitution)
+        // writes to the element's ambient fd 2 — the real stderr for a
+        // top-level pipeline — never through the command's own `2>&1`.
+        // Stage helpers expand words via expand_command_word which would
+        // silently substitute the `${x?word}` error word, so run the same
+        // expansion-error check the top-level command path runs first.
+        if let Some((name, message, status)) = self.parameter_expansion_error(command) {
+            let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
+            self.write_default_stderr(line.as_bytes())?;
+            let code = if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
+                self.expansion_fatal_status()
+            } else {
+                status
+            };
+            return Ok(Some((String::new(), String::new(), code)));
         }
 
         let expanded = self.brace_expanded_pipeline_stage(command);

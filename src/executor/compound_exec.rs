@@ -409,9 +409,10 @@ impl Executor {
         // across), so resolve each stdio disposition to an owned inheritable
         // HANDLE and spawn through STARTUPINFOEXW +
         // PROC_THREAD_ATTRIBUTE_HANDLE_LIST (src/fd::spawn_whitelisted).
+        #[cfg(windows)]
         use std::os::windows::io::AsRawHandle;
         let mut owned_handles: Vec<crate::fd::HANDLE> = Vec::new();
-        let mut std_handles = [0isize; 3];
+        let mut std_handles = [0 as crate::fd::HANDLE; 3];
         for (fd, resolved) in stdio.iter().enumerate() {
             let h = match resolved {
                 BackgroundStdio::Inherit => {
@@ -423,9 +424,20 @@ impl Executor {
                     }
                 }
                 BackgroundStdio::Null => crate::fd::open_null_device_inheritable()?,
-                BackgroundStdio::File(file) => crate::fd::duplicate_handle_inheritable(
-                    file.as_raw_handle() as crate::fd::HANDLE,
-                )?,
+                BackgroundStdio::File(file) => {
+                    #[cfg(windows)]
+                    {
+                        crate::fd::duplicate_handle_inheritable(
+                            file.as_raw_handle() as crate::fd::HANDLE,
+                        )?
+                    }
+                    #[cfg(unix)]
+                    {
+                        crate::fd::duplicate_handle_inheritable(
+                            std::os::unix::io::AsRawFd::as_raw_fd(file),
+                        )?
+                    }
+                }
             };
             owned_handles.push(h);
             std_handles[fd] = h;
@@ -1734,13 +1746,12 @@ impl Executor {
                     // pair, so `${COPROC[@]}` is literally "63 60". The parent
                     // ends live in fd_table as real HANDLE endpoints (Rc'd
                     // FileFd), so dup/close/fork share them like GNU's fork.
-                    use std::os::windows::io::IntoRawHandle;
                     let coproc_write_file = Rc::new(FileFd {
-                        handle: stdin_writer.into_raw_handle() as crate::fd::HANDLE,
+                        handle: crate::fd::into_handle(stdin_writer),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdin")),
                     });
                     let coproc_read_file = Rc::new(FileFd {
-                        handle: stdout_reader.into_raw_handle() as crate::fd::HANDLE,
+                        handle: crate::fd::into_handle(stdout_reader),
                         path: std::path::PathBuf::from(format!("coproc:{pid}:stdout")),
                     });
                     let coproc_read_fd = self.allocate_coproc_fd(0);
@@ -2408,6 +2419,39 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
             && chars[index] != '"'
             && !(chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')))
         {
+            // GNU read_token_word: quoting inside a substitution belongs to
+            // the substitution's own input, not to the pattern — `$( echo
+            // "$bar")` must not split the segment at the inner `"`, or the
+            // `$(` looks unclosed and the expansion reports EOF
+            // (comsub-posix6.sub case-pattern substitution).
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                // Returns the index just past the closing `)`.
+                if let Some(close) =
+                    crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                {
+                    index = close.min(chars.len());
+                    continue;
+                }
+            }
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                if let Some(close) = skip_braced_case_pattern_unit(&chars, index + 1) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+            if chars[index] == '`' {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' && index + 1 < chars.len() {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+                continue;
+            }
             if chars[index] == '\\' && index + 1 < chars.len() {
                 index += 2;
             } else {
@@ -2422,6 +2466,36 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
     }
 
     output
+}
+
+/// Balanced `${...}` skip for the case-pattern segment scanner — braces,
+/// quotes, and escapes inside the expansion are its own (GNU
+/// parse_matched_pair). Returns the index of the closing `}`.
+fn skip_braced_case_pattern_unit(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' if !single => {
+                index += 2;
+                continue;
+            }
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '{' if !single && !double => depth += 1,
+            '}' if !single && !double => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 fn quoted_case_pattern_end(chars: &[char], start: usize, quote: char) -> Option<usize> {

@@ -226,7 +226,7 @@ impl Executor {
         }
         let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
-        let source = self.comsub_body_alias_splice(&source);
+        let source = self.comsub_body_alias_splice_extracted(&source);
         if heredoc_header_closes_command_substitution(&source) {
             // GNU parse.y:4563-4567: when the `)` that closes a command
             // substitution sits on the heredoc header line (`cat << EOF)`),
@@ -332,7 +332,7 @@ impl Executor {
 
         let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
-        let source = self.comsub_body_alias_splice(&source);
+        let source = self.comsub_body_alias_splice_extracted(&source);
         let comsub_start_line = self
             .shell_state
             .env_vars

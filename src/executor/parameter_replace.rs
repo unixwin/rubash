@@ -256,6 +256,12 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     } else {
         pattern_literal_tail_ends(pattern, value)
     };
+    // GNU sm_loop.c:121-135: a pattern whose last char is an unquoted `\`
+    // can only match a `\` that is the LAST character of the whole string
+    // (`p == pe && sc == '\\' && n+1 == se`). The per-substring matcher sees
+    // each candidate end as its own `se`, so a lone trailing `\` must also
+    // restrict candidates to those ending at value's end.
+    let ends_at_value_end = !extglob_pattern && pattern_ends_with_lone_backslash(pattern);
 
     for (start_pos, start) in indices[start_index..].iter().enumerate() {
         let ends = &indices[start_index + start_pos + 1..];
@@ -271,6 +277,9 @@ pub(in crate::executor) fn find_parameter_pattern_match(
                     continue;
                 }
             }
+            if ends_at_value_end && *end != value.len() {
+                continue;
+            }
             if parameter_pattern_match(pattern, &value[*start..*end], nocase, extglob) {
                 best = Some(*end);
             }
@@ -281,6 +290,21 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     }
 
     None
+}
+
+/// True when `pattern` ends with an unescaped `\` — an odd-length trailing
+/// run of raw backslashes. CTLESC-quoted or PATTERN_LITERAL_BACKSLASH chars
+/// are already-marked literals and never count.
+fn pattern_ends_with_lone_backslash(pattern: &str) -> bool {
+    let mut count = 0usize;
+    for ch in pattern.chars().rev() {
+        if ch == '\\' {
+            count += 1;
+        } else {
+            break;
+        }
+    }
+    count % 2 == 1
 }
 
 /// Maximum number of characters a pattern without a star can match, or

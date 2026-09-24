@@ -3,12 +3,12 @@
 //! Run with: cargo run
 
 use rubash::executor::{ExecuteError, Executor};
-use rubash::lexer::{has_unclosed_input_syntax, tokenize_with_initial_posix};
+use rubash::lexer::tokenize_with_initial_posix;
 use rubash::parser::parse;
 use rubash::script_driver::{
     run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
     script_uses_history, stdin_heredoc_declarations, stdin_script_errexit_enabled,
-    stdin_source_needs_more,
+    stdin_source_needs_more_posix,
 };
 use std::env;
 use std::fs;
@@ -659,7 +659,7 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let mut pending = String::new();
     let mut last_was_newline = false;
     for line in contents.lines() {
-        if line.trim().is_empty() && !has_unclosed_input_syntax(&pending) {
+        if line.trim().is_empty() && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix) {
             last_was_newline =
                 flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
             pending.clear();
@@ -757,7 +757,7 @@ fn run_command_string_with_init(
     let status = if script_uses_history(command) || script_uses_aliases(command) {
         run_script_with_history(executor, command, None)
     } else {
-        run_source_with_line_offset(executor, command, interactive, line_offset, None)
+        run_source_with_line_offset(executor, command, interactive, line_offset, None, None)
     };
     finish_shell(executor, status, interactive)
 }
@@ -953,7 +953,8 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             pending_heredocs.extend(stdin_heredoc_declarations(&input));
         }
 
-        if !pending_heredocs.is_empty() || stdin_source_needs_more(&pending) {
+        let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+        if !pending_heredocs.is_empty() || stdin_source_needs_more_posix(&pending, stdin_posix) {
             continue;
         }
 
@@ -978,10 +979,17 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             false,
             pending_start_line.saturating_sub(1),
             None,
+            None,
         );
         let parse_error = executor.take_parse_error();
         pending.clear();
-        if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+        if parse_error
+            || executor.take_exit_jump_pending()
+            || (status != 0
+                && stdin_script_errexit_enabled(executor)
+                // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
+                && !executor.last_command_inverted())
+        {
             break;
         }
     }
@@ -993,9 +1001,15 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
             false,
             pending_start_line.saturating_sub(1),
             None,
+            None,
         );
         let parse_error = executor.take_parse_error();
-        if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+        if parse_error
+            || executor.take_exit_jump_pending()
+            || (status != 0
+                && stdin_script_errexit_enabled(executor)
+                && !executor.last_command_inverted())
+        {
             pending.clear();
         }
     }
@@ -1085,7 +1099,8 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 }
             }
 
-            if pending_heredocs.is_empty() && !stdin_source_needs_more(&pending) {
+            let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+            if pending_heredocs.is_empty() && !stdin_source_needs_more_posix(&pending, stdin_posix) {
                 // bashhist.c bash_add_history: complete commands are recorded
                 // while remember_on_history (set -o history) is on.
                 let history_on = executor
@@ -1114,10 +1129,16 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     true,
                     pending_start_line.saturating_sub(1),
                     None,
+                    None,
                 );
                 let parse_error = executor.take_parse_error();
                 pending.clear();
-                if parse_error || (status != 0 && stdin_script_errexit_enabled(executor)) {
+                if parse_error
+                    || executor.take_exit_jump_pending()
+                    || (status != 0
+                        && stdin_script_errexit_enabled(executor)
+                        && !executor.last_command_inverted())
+                {
                     eof = true;
                 }
             }
@@ -1476,6 +1497,7 @@ fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             &pending,
             true,
             pending_start_line.saturating_sub(1),
+            None,
             None,
         );
         let _ = status;

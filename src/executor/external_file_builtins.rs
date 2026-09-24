@@ -10,6 +10,43 @@ impl Executor {
         if !self.external_file_builtins_enabled {
             return Ok(false);
         }
+        let name = cmd.words[0].as_str();
+        let emulated = matches!(
+            name,
+            "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf" | "mkdir" | "touch"
+                | "chmod" | "cp" | "rm" | "rmdir" | "cat" | "/bin/cat" | "/usr/bin/cat" | "sed"
+                | "mkfifo" | "tty" | "/bin/tty" | "/usr/bin/tty"
+        );
+        // GNU findcmd.c:365/416 (search_for_command): a plain name resolved
+        // through PATH for execution enters the hash table with
+        // times_found=1. The emulated commands below stand in for that PATH
+        // binary, so record the same resolution — `hash -t`/`hash -l`/
+        // `BASH_CMDS` must see it (builtins9.sub: a stale `hash -p` entry
+        // forgotten under checkhash is re-recorded by the next run).
+        if emulated
+            && !name.contains('/')
+            && !name.contains('\\')
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
+            && self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_TEMP_PATH")
+                .map(String::as_str)
+                != Some("1")
+        {
+            if let Some(program) =
+                crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
+            {
+                let display = super::execution_misc::shell_display_path(
+                    &program.to_string_lossy().replace('\\', "/"),
+                );
+                crate::builtins::hash::record_command_resolution(
+                    &mut self.shell_state.env_vars,
+                    name,
+                    &display,
+                );
+            }
+        }
         match cmd.words[0].as_str() {
             "/bin/pwd" | "/usr/bin/pwd" => {
                 let mut pwd_cmd = cmd.clone();
@@ -623,7 +660,20 @@ impl Executor {
             let mut output = Vec::new();
             for word in cat_file_operands(cmd) {
                 let target = self.expand_word(word);
-                match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
+                // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic
+                // files are served before the filesystem.
+                if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                    output.extend(bytes);
+                    continue;
+                }
+                let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // `<(cmd)` carrier path: the word names a draining stream —
+                // serve the shared remainder (subst.c:7143).
+                let read = match self.procsub_stream_take(&win) {
+                    Some(bytes) => Ok(bytes),
+                    None => fs::read(&win),
+                };
+                match read {
                     Ok(bytes) => output.extend(bytes),
                     Err(_) => {
                         let mut stderr = Vec::new();
@@ -689,7 +739,20 @@ impl Executor {
         let mut output = Vec::new();
         for word in cat_file_operands(cmd) {
             let target = self.expand_word(word);
-            match fs::read(shell_path_to_windows(&target, &self.shell_state.env_vars)) {
+            // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic files
+            // are served before the filesystem, matching procfs semantics.
+            if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                output.extend(bytes);
+                continue;
+            }
+            let win = shell_path_to_windows(&target, &self.shell_state.env_vars);
+            // `<(cmd)` carrier path: the word names a draining stream —
+            // serve the shared remainder (subst.c:7143).
+            let read = match self.procsub_stream_take(&win) {
+                Some(bytes) => Ok(bytes),
+                None => fs::read(&win),
+            };
+            match read {
                 Ok(bytes) => output.extend(bytes),
                 Err(_) => {
                     let mut stderr = Vec::new();
@@ -756,11 +819,40 @@ impl Executor {
     }
 
     fn external_mkfifo(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        for path in &cmd.words[1..] {
-            let target = shell_path_to_windows(&self.expand_word(path), &self.shell_state.env_vars);
-            let _ = File::create(target)?;
+        // Windows has no POSIX fifo object; creating a regular file would
+        // silently change semantics (a fifo's blocking open/read behavior
+        // would become an instant regular-file EOF). GNU coreutils mkfifo
+        // reports per-operand failures and exits 1 — match that honestly:
+        // `mkfifo: cannot create fifo 'NAME': Operation not supported`.
+        // -m MODE consumes a value; other options are accepted and ignored.
+        let mut mode_value_pending = false;
+        let mut no_more_flags = false;
+        let mut failed = false;
+        for word in &cmd.words[1..] {
+            let expanded = self.expand_word(word);
+            if mode_value_pending {
+                mode_value_pending = false;
+                continue;
+            }
+            if !no_more_flags && expanded == "--" {
+                no_more_flags = true;
+                continue;
+            }
+            if !no_more_flags && expanded.starts_with('-') && expanded != "-" {
+                if expanded == "-m" {
+                    mode_value_pending = true;
+                }
+                continue;
+            }
+            let mut stderr = Vec::new();
+            let _ = writeln!(
+                &mut stderr,
+                "mkfifo: cannot create fifo '{expanded}': Operation not supported"
+            );
+            self.write_default_stderr(&stderr)?;
+            failed = true;
         }
-        self.exit_code = 0;
+        self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
 }

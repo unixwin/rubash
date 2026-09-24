@@ -47,7 +47,10 @@ pub(super) fn collect_trailing_redirections(
                 let redirect =
                     redirect_node_with_fd_var(&token.value, fd, fd_var, &target, false, false);
                 command.redirects.push(redirect.clone());
-                if redirect.fd.unwrap_or(0) == 0 {
+                // A `{var}` redirect allocates a fresh descriptor >= 10
+                // (GNU redir.c redir_varassign) — it never binds fd 0, so it
+                // must not mirror into redirect_in.
+                if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                     command.redirect_in = Some(redirect);
                 }
                 *index = next_i + 1;
@@ -159,7 +162,7 @@ pub(super) fn collect_trailing_redirections(
                     false,
                 );
                 command.redirects.push(redirect.clone());
-                if redirect.fd.unwrap_or(0) == 0 {
+                if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                     command.redirect_in = Some(redirect);
                 }
             }
@@ -177,7 +180,7 @@ pub(super) fn collect_trailing_redirections(
                         false,
                     );
                     command.redirects.push(redirect.clone());
-                    if redirect.fd.unwrap_or(0) == 0 {
+                    if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         command.redirect_in = Some(redirect);
                     }
                 } else {
@@ -236,7 +239,16 @@ pub(super) fn collect_trailing_redirections(
                     redirect_fd_var_prefix(tokens, *index),
                 ));
                 if fd.is_none() {
-                    command.heredoc_delimiter = Some(target.value.clone());
+                    // GNU make_cmd.c make_here_document stores
+                    // `here_doc_eof = string_quote_removal(word)` — the
+                    // DEQUOTED delimiter; it is used both for body-line
+                    // matching and for the `delimited by end-of-file
+                    // (wanted `%s')` warning, so drop CTLESC pairs here.
+                    command.heredoc_delimiter = Some(
+                        target
+                            .value
+                            .replace(crate::executor::markers::CTLESC, ""),
+                    );
                 }
                 *index += 2;
                 continue;
@@ -278,9 +290,12 @@ pub(super) fn assign_here_string_redirect_raw(
         false,
         false,
     ));
-    if let Some(fd) = fd {
+    // GNU parse.y: `{var}<<<word` is a REDIR_WORD herestring — the word
+    // binds a freshly allocated descriptor (redir.c redir_varassign), not
+    // fd 0, so it must not take the `here_string` stdin mirror.
+    if fd.is_some() || fd_var.is_some() {
         command.heredoc_redirects.push(HereDocRedirect {
-            fd: Some(fd),
+            fd,
             fd_var: fd_var.clone(),
             operator: operator.to_string(),
             operator_metadata: Box::new(build_word_metadata(0, operator, operator)),
@@ -371,10 +386,24 @@ pub(super) fn take_adjacent_redirect_fd_prefix(
 }
 
 pub(super) fn redirect_fd_var_prefix(tokens: &[Token], redirect_index: usize) -> Option<String> {
+    let redirect = tokens.get(redirect_index)?;
     let previous = redirect_index
         .checked_sub(1)
         .and_then(|index| tokens.get(index))?;
-    let name = previous.value.strip_prefix('{')?.strip_suffix('}')?;
+    // GNU read_token_word (parse.y:5821-5843): `{varname}` becomes a
+    // REDIR_WORD only when the `}' is immediately followed by `<' or `>'
+    // (the bare redirection operator — a digit-prefixed `{fd}2>f` is the
+    // word `{fd}2` plus `>f`, and a spaced `{fd} <f` keeps `{fd}` an
+    // ordinary word).  `character` there is the byte right after the word;
+    // the token columns reproduce exactly that adjacency test.
+    if !matches!(redirect.value.chars().next(), Some('<' | '>'))
+        || redirect.column != previous.column + previous.raw.len()
+    {
+        return None;
+    }
+    // GNU checks the raw token text (`valid_identifier(token+1)`), so a
+    // quoted name like `{"fd"}<f` stays an ordinary word.
+    let name = previous.raw.strip_prefix('{')?.strip_suffix('}')?;
     if is_shell_identifier(name) {
         return Some(name.to_string());
     }
@@ -724,7 +753,13 @@ pub(super) fn fill_pending_heredoc_body(
     redirect.gather_line = Some(gather_line);
     if redirect.fd.is_none() {
         cmd.heredoc = Some(body);
-        cmd.heredoc_delimiter = Some(redirect.delimiter.clone());
+        // GNU stores the dequoted delimiter (`here_doc_eof = redir_word`),
+        // so CTLESC pairs must not reach the warning text either.
+        cmd.heredoc_delimiter = Some(
+            redirect
+                .delimiter
+                .replace(crate::executor::markers::CTLESC, ""),
+        );
         cmd.heredoc_gather_line = Some(gather_line);
     }
     true
