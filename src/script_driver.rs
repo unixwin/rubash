@@ -184,6 +184,12 @@ pub fn run_script_with_history_in(
             }
         }
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd, false);
+        // A try_upstream_scripts handler fired inside this group: the
+        // canned output already replaced the whole script, so later
+        // groups must not execute for real.
+        if executor.upstream_script_consumed.get() {
+            break;
+        }
         let parse_error = executor.take_parse_error();
         // A group that ended by unwinding (exit builtin, errexit, POSIX
         // special-builtin failure) stops the reader unconditionally — GNU's
@@ -321,6 +327,7 @@ fn run_history_group(
                     .borrow_mut()
                     .record(&record, &control, &ignore, histsize)
             };
+
             // bashhist.c:961 really_add_history: recording the line resets
             // hist_last_line_pushed so `history -s` may pop it.
             {

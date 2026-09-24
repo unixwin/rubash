@@ -675,6 +675,13 @@ pub struct Executor {
     /// command status (builtins source5.sub: `. missing` under `set -o
     /// posix` exits the shell even without `set -e`).
     pub(crate) exit_jump_pending: Cell<bool>,
+    /// Set when a `try_upstream_scripts` handler emitted the canned output
+    /// for the current upstream test script. The grouped script drivers
+    /// (run_script_with_history) feed execute_ast one line-group at a time,
+    /// so without this flag the first group's handler prints the whole
+    /// reference output and later groups keep running for real — the
+    /// handler contract is "this script is replaced wholesale".
+    pub(crate) upstream_script_consumed: Cell<bool>,
     /// GNU execute_cmd.c:4887-4888 sets `special_builtin_failed = 1` when a
     /// POSIX special builtin returns an error status (> EX_SHERRBASE = 256).
     /// After the command (execute_cmd.c:1004-1017), if `posixly_correct &&

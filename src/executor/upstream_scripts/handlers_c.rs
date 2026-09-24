@@ -12,7 +12,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", QUOTEARRAY_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", QUOTEARRAY_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(QUOTEARRAY_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -29,7 +29,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", PARSER_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", PARSER_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(PARSER_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -46,7 +46,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", POSIX2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", POSIX2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(POSIX2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -63,7 +63,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", POSIXPAT_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", POSIXPAT_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(POSIXPAT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -80,7 +80,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", INVOCATION_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", INVOCATION_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(INVOCATION_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -97,7 +97,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", TEST_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", TEST_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(TEST_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -114,7 +114,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", READ_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", READ_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(READ_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -131,7 +131,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", REDIR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", REDIR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(REDIR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -148,7 +148,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", VREDIR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", VREDIR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(VREDIR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -165,7 +165,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", VARENV_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", VARENV_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(VARENV_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -182,7 +182,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", PRINTF_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", PRINTF_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(PRINTF_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -199,7 +199,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", PROCSUB_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", PROCSUB_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(PROCSUB_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -216,7 +216,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", TRAP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", TRAP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(TRAP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -233,7 +233,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", SET_E_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", SET_E_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(SET_E_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -250,7 +250,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", JOBS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", JOBS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(JOBS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;

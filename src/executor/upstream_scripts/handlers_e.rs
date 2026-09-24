@@ -12,7 +12,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COMSUB2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COMSUB2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COMSUB2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -29,7 +29,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COMPLETE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COMPLETE_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COMPLETE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -46,7 +46,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ALIAS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ALIAS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ALIAS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -63,7 +63,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ATTR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ATTR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ATTR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -80,7 +80,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", CPRINT_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", CPRINT_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(CPRINT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -97,7 +97,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", DSTACK_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", DSTACK_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(DSTACK_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -114,7 +114,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", DSTACK2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", DSTACK2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(DSTACK2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -131,7 +131,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", DYNVAR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", DYNVAR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(DYNVAR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -148,7 +148,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", POSIXPIPE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", POSIXPIPE_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(POSIXPIPE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -165,7 +165,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", SHOPT_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", SHOPT_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(SHOPT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;

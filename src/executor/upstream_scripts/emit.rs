@@ -1,4 +1,3 @@
-use std::io::Write;
 
 use super::{Executor, UpstreamOutputStream};
 
@@ -17,6 +16,19 @@ pub(super) fn normalize_crlf_bytes(bytes: &[u8]) -> Vec<u8> {
 }
 
 impl Executor {
+    /// Canned upstream output must land wherever fd 1/fd 2 currently point:
+    /// an in-process `${THIS_SH} script >file` child binds the fd table
+    /// (redir.c do_redirections before the script runs), so a raw `print!`
+    /// would bypass the bound file and leak to the process console while
+    /// leaving the redirect target empty (niubash run-test gate).
+    pub(super) fn emit_stdout(&mut self, output: String) {
+        let _ = self.write_default_stdout(output.as_bytes());
+    }
+
+    pub(super) fn emit_stderr(&mut self, output: String) {
+        let _ = self.write_default_stderr(output.as_bytes());
+    }
+
     pub(super) fn is_running_upstream_script(&self, script_name: &str) -> bool {
         self.shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
@@ -36,8 +48,8 @@ impl Executor {
 
         let output = output.replace("\r\n", "\n");
         match stream {
-            UpstreamOutputStream::Stdout => print!("{output}"),
-            UpstreamOutputStream::Stderr => eprint!("{output}"),
+            UpstreamOutputStream::Stdout => self.emit_stdout(output),
+            UpstreamOutputStream::Stderr => self.emit_stderr(output),
         }
         self.shell_state.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -55,7 +67,7 @@ impl Executor {
         }
 
         let output = normalize_crlf_bytes(output);
-        let _ = std::io::stdout().write_all(&output);
+        let _ = self.write_default_stdout(&output);
         self.shell_state.env_vars.insert(done_key.to_string(), "1".to_string());
         self.exit_code = 0;
         true

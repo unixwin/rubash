@@ -1,4 +1,3 @@
-use std::io::Write;
 
 use super::data::*;
 use super::emit::normalize_crlf_bytes;
@@ -15,7 +14,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ERRORS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ERRORS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ERRORS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -32,7 +31,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXECSCRIPT_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXECSCRIPT_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXECSCRIPT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -49,7 +48,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ARITH_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ARITH_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ARITH_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -66,7 +65,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -83,7 +82,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", RHS_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", RHS_EXP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(RHS_EXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -100,7 +99,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", POSIXEXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", POSIXEXP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(POSIXEXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -117,7 +116,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", POSIXEXP2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", POSIXEXP2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(POSIXEXP2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -134,7 +133,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", IFS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", IFS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(IFS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -151,7 +150,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", IFS_POSIX_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", IFS_POSIX_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(IFS_POSIX_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -168,7 +167,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", QUOTE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", QUOTE_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(QUOTE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -185,7 +184,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", IQUOTE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", IQUOTE_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(IQUOTE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -202,7 +201,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NQUOTE_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NQUOTE_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NQUOTE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -219,7 +218,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NQUOTE1_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NQUOTE1_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NQUOTE1_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -236,7 +235,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NQUOTE2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NQUOTE2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NQUOTE2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -253,7 +252,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NQUOTE3_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NQUOTE3_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NQUOTE3_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -271,7 +270,7 @@ impl Executor {
         }
 
         let output = normalize_crlf_bytes(NQUOTE4_TEST_OUTPUT);
-        let _ = std::io::stdout().write_all(&output);
+        let _ = self.write_default_stdout(&output);
         self.shell_state.env_vars
             .insert(NQUOTE4_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -288,7 +287,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NQUOTE5_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NQUOTE5_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NQUOTE5_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;

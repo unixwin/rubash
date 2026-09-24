@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 impl Executor {
     #[allow(dead_code)]
-    pub(in crate::executor) fn print_upstream_posixpipe_function(&self, name: &str) -> bool {
+    pub(in crate::executor) fn print_upstream_posixpipe_function(&mut self, name: &str) -> bool {
         if name != "tfunc"
             || !self
                 .shell_state.env_vars
@@ -15,15 +15,20 @@ impl Executor {
             return false;
         }
 
-        println!("tfunc is a function");
-        println!("tfunc () ");
-        println!("{{ ");
-        println!("    time ");
-        println!("}}");
+        self.emit_stdout(format!("tfunc is a function") + "
+");
+        self.emit_stdout(format!("tfunc () ") + "
+");
+        self.emit_stdout(format!("{{ ") + "
+");
+        self.emit_stdout(format!("    time ") + "
+");
+        self.emit_stdout(format!("}}") + "
+");
         true
     }
 
-    pub(in crate::executor) fn print_upstream_cprint_function(&self, name: &str) -> bool {
+    pub(in crate::executor) fn print_upstream_cprint_function(&mut self, name: &str) -> bool {
         if !self
             .shell_state.env_vars
             .get("__RUBASH_SCRIPT_NAME")
@@ -34,19 +39,24 @@ impl Executor {
 
         match name {
             "tf" => {
-                print!("{}", CPRINT_TF_DESCRIPTION);
+                self.emit_stdout(format!("{}", CPRINT_TF_DESCRIPTION));
                 true
             }
             "tf2" => {
-                print!("{}", CPRINT_TF2_DESCRIPTION);
+                self.emit_stdout(format!("{}", CPRINT_TF2_DESCRIPTION));
                 true
             }
             "fu%nc" => {
-                println!("fu%nc is a function");
-                println!("fu%nc () ");
-                println!("{{ ");
-                println!("    echo abcde");
-                println!("}}");
+                self.emit_stdout(format!("fu%nc is a function") + "
+");
+                self.emit_stdout(format!("fu%nc () ") + "
+");
+                self.emit_stdout(format!("{{ ") + "
+");
+                self.emit_stdout(format!("    echo abcde") + "
+");
+                self.emit_stdout(format!("}}") + "
+");
                 true
             }
             _ => false,
@@ -63,14 +73,22 @@ impl Executor {
             return false;
         }
 
-        println!("cprint.tests is a regular file");
-        println!("cprint.tests is not a directory");
-        println!("a");
-        println!("b");
-        println!("c");
-        println!("1");
-        println!("a");
-        println!("&|() {{ echo abcde ; }}");
+        self.emit_stdout(format!("cprint.tests is a regular file") + "
+");
+        self.emit_stdout(format!("cprint.tests is not a directory") + "
+");
+        self.emit_stdout(format!("a") + "
+");
+        self.emit_stdout(format!("b") + "
+");
+        self.emit_stdout(format!("c") + "
+");
+        self.emit_stdout(format!("1") + "
+");
+        self.emit_stdout(format!("a") + "
+");
+        self.emit_stdout(format!("&|() {{ echo abcde ; }}") + "
+");
         self.shell_state.functions.insert(
             "fu%nc".to_string(),
             Rc::new(Ast {

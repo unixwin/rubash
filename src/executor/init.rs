@@ -260,6 +260,7 @@ impl Executor {
             last_command_substitution_parse_error: Cell::new(false),
             last_command_inverted: Cell::new(false),
             exit_jump_pending: Cell::new(false),
+            upstream_script_consumed: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),

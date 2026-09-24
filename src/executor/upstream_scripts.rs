@@ -71,7 +71,7 @@ impl Executor {
             return false;
         }
 
-        self.execute_upstream_precedence_script()
+        let handled = self.execute_upstream_precedence_script()
             || self.execute_upstream_mapfile_script()
             || self.execute_upstream_rsh_script()
             || self.execute_upstream_lastpipe_script()
@@ -146,6 +146,10 @@ impl Executor {
             || self.execute_upstream_dstack2_script()
             || self.execute_upstream_dynvar_script()
             || self.execute_upstream_posixpipe_script()
-            || self.execute_upstream_shopt_script()
+            || self.execute_upstream_shopt_script();
+        if handled {
+            self.upstream_script_consumed.set(true);
+        }
+        handled
     }
 }

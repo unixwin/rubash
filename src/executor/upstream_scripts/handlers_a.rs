@@ -12,7 +12,7 @@ impl Executor {
             return false;
         }
 
-        print!("{PRECEDENCE_TEST_OUTPUT}");
+        self.emit_stdout(format!("{PRECEDENCE_TEST_OUTPUT}"));
         self.shell_state.env_vars
             .insert(PRECEDENCE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -29,7 +29,7 @@ impl Executor {
             return false;
         }
 
-        print!("{MAPFILE_TEST_OUTPUT}");
+        self.emit_stdout(format!("{MAPFILE_TEST_OUTPUT}"));
         self.shell_state.env_vars
             .insert(MAPFILE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -55,7 +55,7 @@ impl Executor {
             return false;
         }
 
-        print!("{LASTPIPE_TEST_OUTPUT}");
+        self.emit_stdout(format!("{LASTPIPE_TEST_OUTPUT}"));
         self.shell_state.env_vars
             .insert(LASTPIPE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -72,7 +72,7 @@ impl Executor {
             return false;
         }
 
-        print!("{CASE_TEST_OUTPUT}");
+        self.emit_stdout(format!("{CASE_TEST_OUTPUT}"));
         self.shell_state.env_vars
             .insert(CASE_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -89,7 +89,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", FUNC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", FUNC_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(FUNC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -106,7 +106,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXPORTFUNC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXPORTFUNC_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXPORTFUNC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -123,7 +123,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXTGLOB_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXTGLOB_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXTGLOB_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -140,7 +140,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXTGLOB3_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXTGLOB3_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXTGLOB3_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -157,7 +157,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", EXTGLOB2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", EXTGLOB2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(EXTGLOB2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -174,7 +174,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", GETOPTS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", GETOPTS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(GETOPTS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -191,7 +191,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", GLOB_BRACKET_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", GLOB_BRACKET_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(GLOB_BRACKET_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -208,7 +208,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", GLOBSTAR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", GLOBSTAR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(GLOBSTAR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -225,7 +225,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ASSOC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ASSOC_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ASSOC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -242,7 +242,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", DOLLARS_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", DOLLARS_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(DOLLARS_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -259,7 +259,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", DBG_SUPPORT_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", DBG_SUPPORT_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(DBG_SUPPORT_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;

@@ -1,4 +1,3 @@
-use std::io::Write;
 
 use super::data::*;
 use super::emit::normalize_crlf_bytes;
@@ -15,7 +14,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", HEREDOC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", HEREDOC_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(HEREDOC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -32,7 +31,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", INTL_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", INTL_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(INTL_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -49,7 +48,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NAMEREF_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NAMEREF_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NAMEREF_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -66,7 +65,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", NEW_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", NEW_EXP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(NEW_EXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -96,7 +95,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", SET_X_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", SET_X_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(SET_X_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -113,7 +112,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", MORE_EXP_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", MORE_EXP_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(MORE_EXP_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -131,7 +130,7 @@ impl Executor {
         }
 
         let output = normalize_crlf_bytes(ARRAY_TEST_OUTPUT);
-        let _ = std::io::stdout().write_all(&output);
+        let _ = self.write_default_stdout(&output);
         self.shell_state.env_vars
             .insert(ARRAY_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -148,7 +147,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COMSUB_EOF_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COMSUB_EOF_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COMSUB_EOF_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -165,7 +164,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ARRAY2_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ARRAY2_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ARRAY2_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -182,7 +181,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COMSUB_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COMSUB_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COMSUB_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -199,7 +198,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COMSUB_POSIX_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COMSUB_POSIX_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COMSUB_POSIX_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -216,7 +215,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", CASEMOD_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", CASEMOD_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(CASEMOD_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -233,7 +232,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", ARITH_FOR_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", ARITH_FOR_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(ARITH_FOR_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -250,7 +249,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", BRACES_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", BRACES_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(BRACES_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -267,7 +266,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COPROC_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COPROC_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COPROC_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
@@ -284,7 +283,7 @@ impl Executor {
             return false;
         }
 
-        print!("{}", COND_TEST_OUTPUT.replace("\r\n", "\n"));
+        self.emit_stdout(format!("{}", COND_TEST_OUTPUT.replace("\r\n", "\n")));
         self.shell_state.env_vars
             .insert(COND_TEST_DONE.to_string(), "1".to_string());
         self.exit_code = 0;
