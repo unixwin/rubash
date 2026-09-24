@@ -49,29 +49,35 @@ fn xtrace_contains_shell_metas(value: &str) -> bool {
 /// GNU read_token_word token text for one compound-assignment element:
 /// source-verbatim except `$'...'`, which the lexer replaces with
 /// `sh_single_quote(ansiexpand(body))` (parse.y:5563-5574).
+///
+/// Iterated over `chars()`, not `as_bytes()`: widening each payload byte to
+/// a char Latin-1-encodes multi-byte elements, so `set -x` traced
+/// `arr=(中文)` as `arr=(ä¸­æ–‡)` and the `$'...'` body handed
+/// decode_ansi_c_quoted mojibake. The recognized metacharacters (`$`, `'`,
+/// `\`) are ASCII, so char iteration keeps the same scan semantics.
 fn compound_element_xtrace_text(raw: &str) -> String {
-    let bytes = raw.as_bytes();
+    let chars: Vec<char> = raw.chars().collect();
     let mut out = String::with_capacity(raw.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'\'') {
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'\'') {
             let mut j = i + 2;
             let mut body = String::new();
             let mut closed = false;
-            while j < bytes.len() {
-                match bytes[j] {
-                    b'\\' if j + 1 < bytes.len() => {
+            while j < chars.len() {
+                match chars[j] {
+                    '\\' if j + 1 < chars.len() => {
                         body.push('\\');
-                        body.push(bytes[j + 1] as char);
+                        body.push(chars[j + 1]);
                         j += 2;
                     }
-                    b'\'' => {
+                    '\'' => {
                         closed = true;
                         j += 1;
                         break;
                     }
                     c => {
-                        body.push(c as char);
+                        body.push(c);
                         j += 1;
                     }
                 }
@@ -90,7 +96,7 @@ fn compound_element_xtrace_text(raw: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        out.push(chars[i]);
         i += 1;
     }
     out

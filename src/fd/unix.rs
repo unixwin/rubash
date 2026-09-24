@@ -363,9 +363,12 @@ mod tests {
 
     #[test]
     fn read_some_on_closed_pipe_returns_eof_shape() {
-        use std::os::fd::AsRawFd;
+        use std::os::fd::IntoRawFd;
         let (r, w) = std::io::pipe().unwrap();
-        let rfd = r.as_raw_fd();
+        // into_raw_fd, not as_raw_fd: the test's trailing close_handle must
+        // be the ONLY close — as_raw_fd leaves `r` owning the fd too, and
+        // its Drop closes it a second time, tripping the io_safety abort.
+        let rfd = r.into_raw_fd();
         drop(w);
         let buf = read_some(rfd, 64).unwrap();
         assert!(buf.is_empty());

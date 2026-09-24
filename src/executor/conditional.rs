@@ -761,7 +761,17 @@ impl Executor {
                 };
                 let quoted =
                     crate::executor::substitution_metadata::shell_text_to_raw_bytes(&quoted);
-                marked.extend(quoted.iter().map(|&b| (b as char, true)));
+                // The bytes are the UTF-8 encoding of the expanded text (the
+                // carrier markers decoded); widening each byte to a char
+                // Latin-1-encodes multi-byte payload, and the reassembled
+                // regex RHS arrived mojibaked (中文 -> ä¸­). Decode back to
+                // characters so the marked stream carries the same chars the
+                // no-raw-token path above does. Byte products that are not
+                // valid UTF-8 degrade to U+FFFD instead of distinct Latin-1
+                // chars — they could never match a char-mode subject either
+                // way.
+                let quoted = String::from_utf8_lossy(&quoted);
+                marked.extend(quoted.chars().map(|c| (c, true)));
                 index = end + 1;
                 continue;
             }
@@ -786,7 +796,8 @@ impl Executor {
             let expanded = self.expand_word_mut(&segment);
             let expanded =
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(&expanded);
-            marked.extend(expanded.iter().map(|&b| (b as char, false)));
+            let expanded = String::from_utf8_lossy(&expanded);
+            marked.extend(expanded.chars().map(|c| (c, false)));
         }
 
         marked

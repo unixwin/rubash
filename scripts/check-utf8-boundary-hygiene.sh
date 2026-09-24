@@ -38,12 +38,18 @@ ALLOWLIST=$(cat <<'EOF'
 src/builtins/cd/paths.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/builtins/printf/float.rs::digits\[value as usize\] as char
 src/builtins/pwd.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
+src/executor/alias_helpers.rs::for ch in &text\[cursor\.\.start\]
+src/executor/alias_helpers.rs::for ch in &text\[cursor\.min\(text\.len\(\)\)\.\.\]
 src/executor/arithmetic/expression.rs::is_shell_name_char\(\*ch as char\)
 src/executor/arithmetic/factor.rs::(is_shell_name_(char|start)\(ch as char\)|arithmetic_digit_value\(ch as char|peek\(\)\? as char)
 src/executor/arithmetic/lvalue.rs::(is_shell_name_char\(ch as char\)|peek\(\)\? as char)
 src/executor/arithmetic/mod.rs::(pair\[[0-9]+\] as char|as_bytes\(\)\[\*index\] as char|\(c as char\))
+src/executor/arithmetic/value.rs::is_shell_name_char\(bytes\[end\] as char\)
 src/executor/arrays/storage.rs::(out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
+src/executor/conditional.rs::is_shell_name_char\(bytes\[name_start - 1\] as char\)
+src/executor/conditional.rs::is_shell_name_start\(bytes\[name_start\] as char\)
+src/executor/declare_local.rs::is_shell_name_(start|char)\(c as char\)
 src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_core.rs::bytes\[index\] as char
