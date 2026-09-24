@@ -1172,10 +1172,55 @@ impl Executor {
         }
 
         self.apply_no_output_builtin_redirects(cmd)?;
-        Ok(crate::builtins::exec::execute(
+        // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
+        // context — a group/ambient redirect already bound on the fd table
+        // (`${THIS_SH} script >file`, `{ exec cmd; } >file`) must reach the
+        // spawned child. Inheriting raw process stdio bypasses the bound
+        // file and leaks the child's output to the console while leaving
+        // the redirect target empty (niubash run-test gate).
+        let child_stdout = self.exec_inherited_stdio(1)?;
+        let child_stderr = self.exec_inherited_stdio(2)?;
+        Ok(crate::builtins::exec::execute_with_child_stdio(
             &cmd.words[1..],
             &self.shell_state.env_vars,
+            &mut crate::executor::GlobalStdout,
+            &mut std::io::stderr().lock(),
+            child_stdout,
+            child_stderr,
         )?)
+    }
+
+    /// Resolve the concrete child stdio for an `exec`'d fd from the fd
+    /// table. GNU's fork-exec model inherits whatever the group's
+    /// redirections already dup2'd onto the descriptor (redir.c
+    /// do_redirections runs before exec_builtin), so a bound file endpoint
+    /// or an `N>&M` dup chain must be realized as the child's real std
+    /// handle. `M` dup targets are resolved transitively (`2>&1` follows
+    /// fd 1's endpoint, sharing its open file description).
+    fn exec_inherited_stdio(&self, fd: u32) -> Result<Stdio, ExecuteError> {
+        self.exec_stdio_for_endpoint(fd, 0)
+    }
+
+    fn exec_stdio_for_endpoint(&self, fd: u32, depth: u32) -> Result<Stdio, ExecuteError> {
+        if depth > 4 {
+            return Ok(Stdio::inherit());
+        }
+        if self.fd_table.has_entry(fd) && !self.fd_table.is_open_for_write(fd) {
+            return Ok(Stdio::null());
+        }
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
+                Ok(Stdio::from(crate::fd::handle_to_file(dup)))
+            }
+            Some(FdWriteEndpoint::Stdout) if fd != 1 => {
+                self.exec_stdio_for_endpoint(1, depth + 1)
+            }
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => {
+                self.exec_stdio_for_endpoint(2, depth + 1)
+            }
+            _ => Ok(Stdio::inherit()),
+        }
     }
 
     fn execute_stdio_only_exec_redirect(
