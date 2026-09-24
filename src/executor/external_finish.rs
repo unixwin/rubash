@@ -56,7 +56,10 @@ impl Executor {
         let Some(command_name) = cmd.words.first() else {
             return Ok(false);
         };
-        let command_uses_this_shell = command_name.contains("THIS_SH");
+        // GNU execute_cmd.c:6139 shell_execve decides same-shell by path
+        // equivalence, not by the command text naming THIS_SH — after
+        // expansion `${THIS_SH}` resolves to the same path, while a literal
+        // `THIS_SHxx` word must not match.
         let expanded_command_name = self.expand_word(command_name);
         let expanded_is_this_shell =
             self.shell_state
@@ -66,7 +69,7 @@ impl Executor {
                     shell_path_to_windows(this_sh, &self.shell_state.env_vars)
                         == shell_path_to_windows(&expanded_command_name, &self.shell_state.env_vars)
                 });
-        if !command_uses_this_shell && !expanded_is_this_shell {
+        if !expanded_is_this_shell {
             if let Some(script_path) =
                 direct_windows_shell_script_path(&expanded_command_name, &self.shell_state.env_vars)
             {
@@ -97,7 +100,6 @@ impl Executor {
             .contains_key("__RUBASH_SCRIPT_NAME")
             && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             && self.fd_table.input_snapshot(0).is_none()
-            && !command_name.contains("THIS_SH")
             && !expanded_is_this_shell
         {
             return Ok(false);
@@ -107,7 +109,7 @@ impl Executor {
         let normalized_current_exe = env::current_exe()
             .ok()
             .map(|path| shell_display_path(&path.to_string_lossy()).replace('\\', "/"));
-        if !command_uses_this_shell
+        if !expanded_is_this_shell
             && normalized_current_exe.as_deref() != Some(normalized_command.as_str())
             && !normalized_command.ends_with("/rubash-wrapper")
             && normalized_command != "rubash-wrapper"
