@@ -15,7 +15,26 @@
 > “92%、仅 1 个 bug”）已被真实复现证伪，相关文件已于 2026-08-29 删除，
 > 不再作为判定依据。
 >
-> **最新台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
+> **最新台账（2026-09-25，master `71c933eb`，env 归零口径）：82 零差 / 1 残余 / 83 套件**
+> （受影响切片重跑：nquote/nquote1-5/quotearray/posixexp2/braces/coproc/trap/nameref。
+> 本轮修复全部已登记的引擎小差：
+> ① `"${v op word}"` operator word 内 `$'...'` 按 GNU parse.y:4053-4070
+> （parse_matched_pair）提取期 ansiexpand + 数据 carrier 重引号——
+> `"${mytab:-$'\t'}"` 现在输出 tab（nquote）；heredoc 语境保持字面
+> （GNU 不解码 heredoc 内 ANSI-C）；POSIX 模式跟踪 sq 区间防误判。
+> ② `declare -p` 显示引用先 `display_text()` 解 carrier 再判定
+> ansic_shouldquote——assoc key `\021` carrier 泄漏消除（quotearray）。
+> ③ 内部 respawn 的 `-c` 子壳（coproc/后台 `&`）继承
+> `__RUBASH_SCRIPT_NAME`/行号，诊断前缀对齐 GNU 的 fork 语义
+> （execute_cmd.c:1761）——coproc stderr 逐字节一致。
+> 结果：quotearray/posixexp2/braces/trap 归零；nquote 剩 10 行全是宿主
+> `od` 列宽格式（env）；coproc 剩 5 行为 `/etc/passwd` ENOENT（env）+
+> 失败 coproc 的 `COPROC` 清除时序（隔离探针 GNU 同样偶发 `63 60`）。
+> **残余真差 1 套件**：nameref 1——`RO_PID` 偶发可见于 `declare -r`，
+> 系 coproc 收割时序竞争（CreateProcess 启动延迟 vs GNU fork 的瞬时
+> 退出），GNU 自身在隔离探针中也会出现同名残留，归类时序残余。）
+>
+> **上一台账（2026-09-24，master `e5ac3277`，无桩 + niu-sh 夹具）：71 零差 / 12 有 DIFF / 总 86 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`。
 > 本轮清零套件：procsub（`<(cmd)` 共享流语义 + 管道 fd-1 单流排序）、
 > set-e（`!` errexit 豁免穿过分组驱动）、vredir（`{var}<<EOF` 动态 fd）、

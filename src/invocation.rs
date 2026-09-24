@@ -233,6 +233,11 @@ impl ShellInvocation {
         if self.posix {
             executor.set_env("__RUBASH_POSIX_MODE", "1");
         }
+        // shell.c:497-503: --login/-l flips LOGIN_SHELL so the `logout`
+        // builtin and exit path see a login shell.
+        if self.login {
+            executor.set_env("__RUBASH_LOGIN_SHELL", "1");
+        }
         for (name, enabled) in &self.shell_flags {
             if !executor.is_shell_option(name) {
                 return Err(format!("{name}: invalid shell option name"));
@@ -264,8 +269,13 @@ impl ShellInvocation {
             // explicit operand must overwrite it or `$0` keeps the host name.
             executor.set_env("__RUBASH_SCRIPT_NAME", name);
             executor.set_env("BASH_ARGV0", name);
-        } else if self.command.is_some() {
-            // GNU `bash -c` without explicit $0 reports as "bash: -c: ..."
+        } else if self.command.is_some()
+            && executor.get_env("__RUBASH_SCRIPT_NAME").is_none()
+        {
+            // GNU `bash -c` without explicit $0 reports as "bash: -c: ...".
+            // Internal respawns (coproc / async `&` children) carry the
+            // parent's script name through init.rs — GNU's forked subshell
+            // keeps $0, so do not clobber it here.
             executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
         }
         if self.command.is_some() {

@@ -173,6 +173,29 @@ fn skip_quoted(chars: &[char], start: usize, delimiter: char) -> Option<usize> {
             index += 1;
             continue;
         }
+        // GNU parse.y xparse_dolparen: inside double quotes a `$(...)` or
+        // `` `...` `` body is parsed with its own quote state — a `"`
+        // inside it does NOT close the outer quote. Skip the nested body
+        // wholesale so `"$(printf "%s" "*")"` keeps the inner `*` quoted.
+        // The same holds for `${...}` operator words (`"${v:-"*"}"`).
+        if delimiter == '"' && ch == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some(next_index) = skip_dollar_paren(chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+        if delimiter == '"' && ch == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(next_index) = skip_braced_parameter(chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
+        if delimiter == '"' && ch == '`' {
+            if let Some(next_index) = skip_backtick(chars, index) {
+                index = next_index;
+                continue;
+            }
+        }
         if ch == delimiter {
             return Some(index + 1);
         }

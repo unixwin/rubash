@@ -382,6 +382,23 @@ impl Executor {
             "__RUBASH_SHELL_PID".to_string(),
             self.shell_pid.to_string(),
         );
+        // GNU execute_cmd.c:1761 (execute_in_subshell): a forked async
+        // subshell keeps the parent's $0 and line number, so diagnostics
+        // inside `xcase &` print `./script: line N:` rather than `bash:`. The
+        // spawned `rubash -c` child inherits the script identity through
+        // these markers (init.rs keeps them for __RUBASH_SHELL_PID carriers).
+        if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
+            env_map.insert("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone());
+            let line = background_command
+                .command
+                .line
+                .map(|line| line.to_string())
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned())
+                .unwrap_or_else(|| "1".to_string());
+            env_map.insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
+            let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
+            env_map.insert("__RUBASH_LINE_OFFSET".to_string(), line_offset.to_string());
+        }
 
         // GNU execute_cmd.c:5884 (execute_disk_command) / :1761-1763
         // (execute_in_subshell): the forked async subshell runs

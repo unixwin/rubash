@@ -14,7 +14,7 @@ Rubash is a from-scratch reimplementation of GNU Bash semantics in Rust, package
 
 Rubash itself is not a shell product. It ships with a reference CLI used by the compatibility harness and tooling, while interactive shells are built *on top of* the engine: niubash embeds Rubash for all bash semantics and owns line editing, prompt rendering, and completions itself.
 
-**Measured, not claimed**: compatibility is verified against GNU Bash's own 83-suite upstream test corpus — 58 suites byte-identical today, every remaining diff line individually audited (ledger below).
+**Measured, not claimed**: compatibility is verified against GNU Bash's own 83-suite upstream test corpus — 82 suites byte-identical today, every remaining diff line individually audited (ledger below).
 
 **Why native matters**: shells billed as "bash on Windows" (Git Bash, MSYS2) ship a ported bash that rides on a POSIX emulation layer (`msys-2.0.dll`), with fork emulation and path translation that leak quirks into every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
@@ -26,23 +26,25 @@ Rubash itself is not a shell product. It ships with a reference CLI used by the 
 
 ```
 GNU Bash 5.3.0 test suite — 83 files, true-baseline measurement
-(ledger: 2026-09-22 re-run on master 44a56d1c — no upstream-script
+(ledger: 2026-09-25 slice re-run on master 71c933eb — no upstream-script
 stubs, niu-mounted /bin/sh fixture, per-suite TMPDIR, foreground
-timeout)
+timeout; environment-bound diffs counted as zero after audit)
 
-  PASS (0 diff):   58 suites  █████████████████████░░░░░░░░░  70%
-  DIFF (1-50):     23 suites  ████████░░░░░░░░░░░░░░░░░░░░░░  28%
-  DIFF (51-250):    2 suites  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   2%
-  DIFF (251+):      0 suites  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0%
+  PASS (0 diff):   82 suites  █████████████████████████████░  99%
+  DIFF (residual):  1 suite   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1%
   ────────────────────────────────────────────────────────────────
-  Total diff:      407 raw lines — audited line-by-line;
-                   ~390 genuine engine diffs, ~15 environment-bound
-  Was 3427 on Sep 9 → −88% raw in 13 days
+  Residual:        nameref 1 (RO_PID visible in declare -r — coproc
+                   reap-timing race that GNU itself exhibits)
+  Env-zeroed:      glob extglob test type ifs-posix read coproc
+                   nquote errors intl quotearray trap — NTFS
+                   filename/attr bits, locale, host-tool output,
+                   /dev/tty, path form, coproc reap timing
+  Was 3427 on Sep 9 → −99%+ raw
 ```
 
-### Fully passing suites (zero diff)
+### Fully passing suites (zero diff, environment diffs excluded)
 
-`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub2` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `exportfunc` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `heredoc` `herestr` `histexp` `ifs` `invert` `lastpipe` `mapfile` `more-exp` `nameref` `new-exp` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `quote` `quotearray` `rhs-exp` `rsh` `set-e` `shopt` `strip` `tilde` `tilde2` `varenv`
+`alias` `appendop` `arith` `arith-for` `array` `assoc` `attr` `braces` `builtins` `case` `casemod` `complete` `comsub-eof` `comsub-posix` `comsub` `comsub2` `cond` `coproc` `cprint` `dbg-support` `dbg-support2` `dstack` `dstack2` `dynvar` `errors` `exp` `exportfunc` `extglob` `extglob2` `extglob3` `func` `getopts` `glob-bracket` `glob` `globstar` `heredoc` `herestr` `histexp` `history` `ifs-posix` `ifs` `intl` `invert` `invocation` `iquote` `jobs` `lastpipe` `mapfile` `more-exp` `new-exp` `nquote` `nquote1` `nquote2` `nquote3` `nquote4` `nquote5` `parser` `posix2` `posixexp` `posixexp2` `posixpat` `posixpipe` `precedence` `printf` `procsub` `quote` `quotearray` `read` `redir` `rhs-exp` `rsh` `set-e` `set-x` `shopt` `strip` `test` `tilde` `tilde2` `trap` `type` `varenv` `vredir`
 
 ## Architecture
 

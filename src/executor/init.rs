@@ -94,14 +94,16 @@ impl Executor {
         }
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
-        if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) != Some("1") {
+        let internal_respawn = env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1")
+            || env_vars.contains_key("__RUBASH_SHELL_PID");
+        if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
         }
         env_vars.remove("__RUBASH_SHELL_NAME");
         env_vars.remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         env::remove_var("__RUBASH_CURRENT_FUNCTION");
         env::remove_var("__RUBASH_IN_SOURCE");
-        if env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) != Some("1") {
+        if !internal_respawn {
             env::remove_var("__RUBASH_SCRIPT_NAME");
         }
         env::remove_var("__RUBASH_SHELL_NAME");

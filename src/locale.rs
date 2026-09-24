@@ -149,14 +149,20 @@ pub fn effective_length(s: &str) -> usize {
 /// In `de_DE.UTF-8` this is `,`, so `printf '%.4f' 1` outputs `1,0000`.
 /// In `C`/`en_US.UTF-8` it stays `.`.
 ///
-/// Priority follows GNU: `LC_NUMERIC` > `LC_ALL` > `LANG`. An unset or
-/// `C`/`POSIX` locale returns `.`.
+/// Priority follows GNU setlocale category resolution for LC_NUMERIC:
+/// `LC_ALL` > `LC_NUMERIC` > `LANG` (intl2.sub: `export LANG=de_DE.UTF-8`
+/// must yield `1,0000` even when the host exports `LC_CTYPE=C.UTF-8` —
+/// LC_CTYPE belongs to the character-type category, not numeric). An unset
+/// or `C`/`POSIX` locale returns `.`.
 pub fn decimal_point() -> char {
+    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
     let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
-    let locale = if !numeric.is_empty() {
+    let locale = if !locale_all.is_empty() {
+        locale_all
+    } else if !numeric.is_empty() {
         numeric
     } else {
-        locale_name()
+        std::env::var("LANG").unwrap_or_default()
     };
     let lower = locale.to_lowercase();
     if lower.starts_with("de_de")

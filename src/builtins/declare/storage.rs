@@ -135,10 +135,14 @@ pub(super) fn quote_declare_value(value: &str) -> String {
     // named-escape arm pushed the real character instead of the escape
     // spelling ('\n' -> push "\n" rather than "\\n"), so `n=$'a\nb'` was
     // printed with a literal newline where GNU prints $'a\nb'.
-    if gnu_ansic_shouldquote(value) {
-        return gnu_ansic_quote(value);
+    // GNU's ansic_shouldquote tests the dequoted value; stored carrier
+    // bytes (CTLESC protection pairs) are transport, not data, so decode
+    // to visible text first or a quoted `']'` renders as $'\'\x11]'.
+    let visible = display_text(value);
+    if gnu_ansic_shouldquote(&visible) {
+        return gnu_ansic_quote(&visible);
     }
-    format!("\"{}\"", quote_double(&display_text(value)))
+    format!("\"{}\"", quote_double(&visible))
 }
 
 /// array.c array_to_assign element rule (964-968, same pair in
@@ -146,10 +150,11 @@ pub(super) fn quote_declare_value(value: &str) -> String {
 /// characters (ansic_shouldquote), sh_double_quote otherwise. Indexed
 /// array element renders follow array.c, not the scalar setattr.def rule.
 pub(super) fn quote_array_element_value(value: &str) -> String {
-    if gnu_ansic_shouldquote(value) {
-        return gnu_ansic_quote(value);
+    let visible = display_text(value);
+    if gnu_ansic_shouldquote(&visible) {
+        return gnu_ansic_quote(&visible);
     }
-    format!("\"{}\"", quote_double(&display_text(value)))
+    format!("\"{}\"", quote_double(&visible))
 }
 
 /// Storage roundtrip for element values: decode the full escape set
@@ -272,10 +277,10 @@ fn gnu_sh_contains_shell_metas(value: &str) -> bool {
 /// double quotes for keys with shell metas, double quotes for a bare `*`
 /// or `@` key (ALL_ELEMENT_SUB), otherwise the bare key.
 fn quote_assoc_display_key(key: &str) -> String {
-    if gnu_ansic_shouldquote(key) {
-        return gnu_ansic_quote(key);
-    }
     let key = display_text(key);
+    if gnu_ansic_shouldquote(&key) {
+        return gnu_ansic_quote(&key);
+    }
     if gnu_sh_contains_shell_metas(&key) {
         return format!("\"{}\"", quote_double(&key));
     }
@@ -289,8 +294,9 @@ fn quote_assoc_display_key(key: &str) -> String {
 /// for scalars): `$'...'` when the value has non-printing characters,
 /// otherwise always double quotes.
 fn quote_declare_display_value(value: &str) -> String {
-    if gnu_ansic_shouldquote(value) {
-        return gnu_ansic_quote(value);
+    let visible = display_text(value);
+    if gnu_ansic_shouldquote(&visible) {
+        return gnu_ansic_quote(&visible);
     }
-    format!("\"{}\"", quote_double(&display_text(value)))
+    format!("\"{}\"", quote_double(&visible))
 }

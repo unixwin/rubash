@@ -118,7 +118,7 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
+                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -131,7 +131,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
+                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -148,7 +148,7 @@ impl Executor {
                     if !joined.is_empty() {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
+                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -162,7 +162,7 @@ impl Executor {
                 {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
+                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -278,7 +278,7 @@ impl Executor {
                     if non_empty {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
+                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -289,7 +289,7 @@ impl Executor {
                 if self.parameter_operator_value(var_name).is_some() {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled()),
+                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -309,7 +309,7 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
+                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -321,7 +321,7 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled()),
+                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -373,7 +373,11 @@ impl Executor {
             SubstitutionQuoteContext::DoubleQuoted
                 | SubstitutionQuoteContext::HereDocument
         ) {
-            decode_double_quotes_in_quoted_parameter_word(word, self.posix_mode_enabled())
+            decode_double_quotes_in_quoted_parameter_word(
+                word,
+                self.posix_mode_enabled(),
+                matches!(context, SubstitutionQuoteContext::HereDocument),
+            )
         } else {
             word.to_string()
         }
@@ -816,7 +820,7 @@ impl Executor {
         }
         // Remove double quotes from the alternate (matching the `+`/`-`
         // operator path which calls decode_double_quotes_in_quoted_parameter_word).
-        let decoded = decode_double_quotes_in_quoted_parameter_word(&protected, self.posix_mode_enabled());
+        let decoded = decode_double_quotes_in_quoted_parameter_word(&protected, self.posix_mode_enabled(), false);
         // Use DoubleQuoted context so single quotes are treated as data
         // (not quote delimiters), matching GNU's expand_string_for_rhs
         // behavior inside double quotes. Use unescape_parameter_operator_result
@@ -1093,11 +1097,75 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
 pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
     word: &str,
     posix: bool,
+    heredoc: bool,
 ) -> String {
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();
     let mut index = 0usize;
+    let mut in_sq = false;
     while index < chars.len() {
+        // POSIX mode keeps ' as a real single-quote delimiter inside
+        // "${v op w}" (parse.y:4036 Austin Group interp 221), so a `'`
+        // there opens/closes a quoted span — a `$'` only starts ANSI-C
+        // quoting when the ' is not a span closer (GNU's LEX_WASDOL check
+        // in parse_matched_pair only sees delimiters).
+        if in_sq {
+            if chars[index] == '\'' {
+                in_sq = false;
+            }
+            output.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        // GNU parse.y:4053-4070 (parse_matched_pair): inside a `${...}`
+        // grouping construct a `$'...'` body is ansiexpanded at extraction
+        // time and wrapped in sh_single_quote so the decoded bytes ride out
+        // quote removal as data. Emit each decoded char in its data-carrier
+        // form so the expansion walker never re-reads it as syntax; without
+        // this the `'` is marked DATA_SQUOTE below and `$'\t'` inside
+        // "${v-word}" leaks literal text (nquote.tests).
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') && !heredoc {
+            let mut body = String::new();
+            let mut cursor = index + 2;
+            let mut closed = false;
+            while cursor < chars.len() {
+                let ch = chars[cursor];
+                if ch == '\\' && cursor + 1 < chars.len() {
+                    body.push(ch);
+                    body.push(chars[cursor + 1]);
+                    cursor += 2;
+                    continue;
+                }
+                if ch == '\'' {
+                    closed = true;
+                    cursor += 1;
+                    break;
+                }
+                body.push(ch);
+                cursor += 1;
+            }
+            if !closed {
+                output.push('$');
+                index += 1;
+                continue;
+            }
+            index = cursor;
+            for ch in crate::lexer::decode_ansi_c_quoted(&body).chars() {
+                match ch {
+                    '\'' => output.push(crate::executor::markers::DATA_SQUOTE),
+                    '"' => output.push(crate::executor::markers::DATA_DQUOTE),
+                    '\\' => output.push(crate::executor::markers::DATA_BACKSLASH),
+                    '$' => output.push(DATA_DOLLAR),
+                    '`' => output.push(crate::executor::markers::DATA_BACKTICK),
+                    ' ' | '\t' | '\n' => {
+                        output.push(crate::executor::markers::IFS_GLUE);
+                        output.push(ch);
+                    }
+                    _ => output.push(ch),
+                }
+            }
+            continue;
+        }
         // A backslash escape outside a double-quote span survives quote
         // removal intact: the expansion pass turns it into protected data
         // (`\"` yields a literal quote, posixexp2 case 8). Dropping the
@@ -1130,11 +1198,17 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             index += 2;
             continue;
         }
-        if chars[index] == '\'' && !posix {
+        if chars[index] == '\'' && !posix && !heredoc {
             // Non-POSIX "${var op word}": ' is literal text, never an sq
             // opener. Emit it escaped so the expansion pass yields a data
             // quote and any following $( still expands (braces.tests).
             output.push(crate::executor::markers::DATA_SQUOTE);
+            index += 1;
+            continue;
+        }
+        if chars[index] == '\'' && posix && !heredoc {
+            in_sq = true;
+            output.push(chars[index]);
             index += 1;
             continue;
         }
