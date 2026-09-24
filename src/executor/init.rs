@@ -381,14 +381,17 @@ impl Executor {
         // basename to select posix mode for child invocations. Keeping the
         // inherited name preserves that signal — the copy is still the
         // rubash binary, and a nonexistent target keeps the auto-detected
-        // path so a stale winuxsh export cannot hijack children.
+        // path so a stale winuxsh export cannot hijack children. The same
+        // applies to a `bash`-named wrapper a harness installs so test
+        // scripts see the GNU-conventional shell name in ${THIS_SH##*/}
+        // (type.tests expects `bash`, not the product binary name).
         let inherited_sh = env_vars.get("THIS_SH").is_some_and(|value| {
             let basename = value
                 .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or(value.as_str());
             let stem = basename.strip_suffix(".exe").unwrap_or(basename);
-            stem.eq_ignore_ascii_case("sh")
+            (stem.eq_ignore_ascii_case("sh") || stem.eq_ignore_ascii_case("bash"))
                 && crate::executor::path::shell_path_to_windows(value, env_vars).is_file()
         });
         if !inherited_sh {
