@@ -27,6 +27,15 @@ pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
     let mut quotes = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
+        // Nested expansion bodies have their own quote state (GNU parse.y
+        // xparse_dolparen / parse_matched_pair): quotes and escapes inside
+        // `$(...)`/`${...}`/`` `...` `` do not quote the enclosing word.
+        if let Some(next_index) = super::pathname_pattern::skip_nested_expansion(&chars, index)
+        {
+            index = next_index;
+            continue;
+        }
+
         if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
             if let Some((quote, next_index)) =
                 quoted_segment(&chars, index, 2, '\'', QuoteKind::AnsiC)
@@ -68,7 +77,25 @@ pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
         }
 
         if chars[index] == '\\' {
-            index += 1;
+            // GNU CTLESC (parse.y:5694-5706 got_escaped_character): a
+            // top-level `\x` escape quotes its character — record it like
+            // a quote segment so consumers can tell `\b` from a bare `b`.
+            if let Some(&escaped) = chars.get(index + 1) {
+                let text: String = chars[index..index + 2].iter().collect();
+                quotes.push(WordQuote {
+                    open_delimiter_metadata: delimiter_metadata("\\"),
+                    open_delimiter: "\\".to_string(),
+                    body: escaped.to_string(),
+                    kind: QuoteKind::Backslash,
+                    close_delimiter_metadata: delimiter_metadata(""),
+                    close_delimiter: String::new(),
+                    text,
+                    word_index: None,
+                    assignment_name: None,
+                });
+                index += 2;
+                continue;
+            }
         }
         index += 1;
     }

@@ -204,7 +204,7 @@ fn skip_quoted(chars: &[char], start: usize, delimiter: char) -> Option<usize> {
     None
 }
 
-fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {
+pub(crate) fn skip_dollar_paren(chars: &[char], start: usize) -> Option<usize> {
     let mut index = start + 2;
     let mut depth = 1usize;
     let mut single = false;
@@ -270,7 +270,7 @@ fn skip_dollar_bracket(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-fn skip_braced_parameter(chars: &[char], start: usize) -> Option<usize> {
+pub(crate) fn skip_braced_parameter(chars: &[char], start: usize) -> Option<usize> {
     let mut index = start + 2;
     let mut depth = 1usize;
     while index < chars.len() {
@@ -290,7 +290,7 @@ fn skip_braced_parameter(chars: &[char], start: usize) -> Option<usize> {
     None
 }
 
-fn skip_backtick(chars: &[char], start: usize) -> Option<usize> {
+pub(crate) fn skip_backtick(chars: &[char], start: usize) -> Option<usize> {
     let mut index = start + 1;
     let mut escaped = false;
     while index < chars.len() {
@@ -311,4 +311,19 @@ fn skip_backtick(chars: &[char], start: usize) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+/// Skip a nested `$(...)` / `${...}` / `` `...` `` expansion body that starts
+/// at `chars[index]`, returning the index just past it. GNU gives each such
+/// body its own quote state (parse.y xparse_dolparen / parse_matched_pair),
+/// so quote characters and backslash escapes inside never apply to the
+/// enclosing word. Returns None when `chars[index]` does not open a nested
+/// body or the body is unterminated.
+pub(crate) fn skip_nested_expansion(chars: &[char], index: usize) -> Option<usize> {
+    match (chars.get(index), chars.get(index + 1)) {
+        (Some('$'), Some('(')) => skip_dollar_paren(chars, index),
+        (Some('$'), Some('{')) => skip_braced_parameter(chars, index),
+        (Some('`'), _) => skip_backtick(chars, index),
+        _ => None,
+    }
 }

@@ -689,6 +689,10 @@ pub enum QuoteKind {
     Double,
     AnsiC,
     Locale,
+    /// A top-level `\x` escape quoting its character (GNU CTLESC). Nested
+    /// `$(...)`/`${...}`/`` `...` `` bodies have their own quote state, so
+    /// escapes inside them are never recorded here.
+    Backslash,
 }
 
 /// Represents a quoted segment in a shell word before quote removal.

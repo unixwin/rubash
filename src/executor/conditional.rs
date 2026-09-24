@@ -334,7 +334,7 @@ impl Executor {
                     && matches!(op.as_str(), "=" | "==" | "!=")
                     && metadata
                         .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
+                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 let left = self.expand_word_mut(left);
                 let right = self.expand_word_mut(right);
@@ -351,7 +351,7 @@ impl Executor {
                 if matches!(op.as_str(), "=" | "==" | "!=")
                     && metadata
                         .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
+                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 let left = self.expand_word_mut(left);
                 let right = self.expand_word_mut(right);
@@ -369,7 +369,7 @@ impl Executor {
                     && op == "=~"
                     && metadata
                         .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
+                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
@@ -377,7 +377,7 @@ impl Executor {
                 if op == "=~"
                     && metadata
                         .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty() || m.raw.contains('\\')) =>
+                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
@@ -430,6 +430,17 @@ impl Executor {
         let mut unquoted_start = 0;
 
         while index < chars.len() {
+            // Nested expansion bodies have their own quote state (GNU
+            // parse.y xparse_dolparen / parse_matched_pair): a `\` inside
+            // `$(...)`/`${...}`/`` `...` `` quotes a character of the nested
+            // body, not the outer word. Keep the span inside the unquoted
+            // run so expand_word_mut handles its inner escapes.
+            if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(
+                &chars, index,
+            ) {
+                index = next;
+                continue;
+            }
             if chars[index] == '\\' {
                 if unquoted_start < index {
                     output.push_str(
@@ -460,7 +471,7 @@ impl Executor {
             }
             let body = chars[index + opener_len..end].iter().collect::<String>();
             let value = match kind {
-                QuoteKind::Single => body,
+                QuoteKind::Single | QuoteKind::Backslash => body,
                 QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
                 QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
             };
@@ -744,7 +755,7 @@ impl Executor {
             if let Some((kind, opener_len, end)) = raw_quote_at(&chars, index) {
                 let body = chars[index + opener_len..end].iter().collect::<String>();
                 let quoted = match kind {
-                    QuoteKind::Single => body,
+                    QuoteKind::Single | QuoteKind::Backslash => body,
                     QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
                     QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
                 };
@@ -756,10 +767,19 @@ impl Executor {
             }
 
             let start = index;
-            while index < chars.len()
-                && chars[index] != '\\'
-                && raw_quote_at(&chars, index).is_none()
-            {
+            while index < chars.len() {
+                // Nested `$(...)`/`${...}`/`` `...` `` bodies keep their own
+                // quote state (GNU xparse_dolparen): `\` and quotes inside
+                // them do not terminate the outer unquoted run.
+                if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(
+                    &chars, index,
+                ) {
+                    index = next;
+                    continue;
+                }
+                if chars[index] == '\\' || raw_quote_at(&chars, index).is_some() {
+                    break;
+                }
                 index += 1;
             }
             let segment = chars[start..index].iter().collect::<String>();

@@ -137,7 +137,13 @@ impl Executor {
             let raw_value = assignment.value.trim();
             raw_value.starts_with('(')
                 && raw_value.ends_with(')')
-                && assignment.word_quotes.is_empty()
+                // Only real quote delimiters disqualify the compound list;
+                // a `\x` escape inside it is still data (GNU parses `(x\*)`
+                // as a list whose element contains a literal *).
+                && !assignment
+                    .word_quotes
+                    .iter()
+                    .any(|quote| quote.kind != crate::parser::QuoteKind::Backslash)
         });
         let name = match self.nameref_resolution(name) {
             NamerefResolution::Target(target) => {

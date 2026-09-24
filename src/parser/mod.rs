@@ -22,7 +22,7 @@ mod loop_command;
 mod nodes;
 mod parameter_expansion;
 mod parse_loop;
-mod pathname_pattern;
+pub(crate) mod pathname_pattern;
 mod process_substitution;
 mod redirect_assign;
 mod redirections;
