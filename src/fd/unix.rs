@@ -40,6 +40,19 @@ pub fn is_disk_file(h: HANDLE) -> bool {
     unsafe { libc::fstat(h, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG }
 }
 
+/// The filesystem path an open regular-file descriptor refers to, or
+/// None for pipes/ttys/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)`
+/// on a regular file performs a FRESH open at offset 0 — callers
+/// emulating /dev/fd reopen semantics need the path (dup would share the
+/// writer's offset). `/proc` itself is the authority; non-proc hosts fall
+/// back to fstat+FCNTL-less unknown → None.
+pub fn disk_file_path(h: HANDLE) -> Option<std::path::PathBuf> {
+    if !is_disk_file(h) {
+        return None;
+    }
+    std::fs::read_link(format!("/proc/self/fd/{h}")).ok()
+}
+
 /// isatty(fd) — `test -t`'s terminal probe (GNU test.c).
 pub fn is_console_handle(h: HANDLE) -> bool {
     unsafe { libc::isatty(h) == 1 }

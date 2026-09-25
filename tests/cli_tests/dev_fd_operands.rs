@@ -71,9 +71,12 @@ fn dev_stdout_operand_reads_fd1_endpoint() {
 fn dev_fd1_aliases_read_fd1_not_stdin() {
     // The reported silent family: `/dev/fd/1` and `/proc/self/fd/1` name
     // the command's fd 1 — in a pipeline that is the downstream pipe, not
-    // the upstream stdin (GNU 5.3 returns 0 bytes, rc 0). Bare `cat` reads
-    // fd 0 and gets the data; `tee /dev/stdout` writes fd 1 and forwards
-    // it — the write-vs-read asymmetry is GNU-correct.
+    // the upstream stdin. GNU 5.3 reopens the fd readably
+    // (open("/proc/self/fd/1", O_RDONLY)) and BLOCKS on the pipe's read
+    // end; the well-defined Windows approximation returns empty without
+    // hanging. Bare `cat` reads fd 0 and gets the data; `tee /dev/stdout`
+    // writes fd 1 and forwards it — the write-vs-read asymmetry is
+    // GNU-correct.
     for operand in ["/dev/fd/1", "/proc/self/fd/1"] {
         let output = run(&format!("printf '1\\n2\\n3\\n' | cat {operand}"));
         assert!(output.status.success(), "{operand} failed");
@@ -158,17 +161,83 @@ fn dev_fd_dup_chain_follows_fd0_redirect() {
 #[test]
 fn dev_stdout_operand_same_file_diagnostic() {
     // GNU cat.c: an input file identical to the output file reports
-    // "input file is output file" (still rc 0 on coreutils 9.4) and
-    // leaves the file untouched.
+    // "input file is output file" and exits 1, leaving the file
+    // untouched (a fresh `>` truncate has nothing to overlap, so the
+    // diagnostic only fires when the input file holds bytes).
     let seed = temp_seed("seed\n");
     let output = run(&format!("cat /dev/stdout >>'{seed}'"));
-    assert!(output.status.success());
+    assert!(!output.status.success(), "expected rc 1: {output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("input file is output file"),
         "expected same-file diagnostic: {:?}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(std::fs::read_to_string(&seed).unwrap(), "seed\n");
+
+    // Empty target: GNU reopens the truncated file, reads nothing, exits 0
+    // silently — `>` truncates before cat runs, so there is no overlap to
+    // report.
+    let empty = temp_seed("");
+    let output = run(&format!("cat /dev/stdout >'{empty}'"));
+    assert!(output.status.success());
+    assert_eq!(output.stderr, b"");
+    assert_eq!(std::fs::read_to_string(&empty).unwrap(), "");
+}
+
+#[test]
+fn dev_stdout_reopens_inherited_file_handle() {
+    // GNU /dev/stdout ≡ open("/proc/self/fd/1", O_RDONLY) — a fresh open
+    // of fd 1's target. When the process's inherited stdout is a seeded
+    // file (parent `>>`), cat's reopened input IS the output file:
+    // "input file is output file", rc 1.
+    let seed = temp_seed("parent-seed\n");
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&seed)
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("cat /dev/stdout")
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::piped())
+        .output()
+        .expect("run rubash");
+    assert!(!output.status.success(), "expected rc 1: {output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("input file is output file"),
+        "expected same-file diagnostic: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The same reopen on fd 2's file IS readable input (fd 1 is the
+    // harness pipe, not that file): GNU `cat /dev/stderr 2>>seeded`
+    // prints the seeded bytes.
+    let err_seed = temp_seed("err-seed\n");
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&err_seed)
+        .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("cat /dev/stderr")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(file))
+        .output()
+        .expect("run rubash");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "err-seed\n");
+    assert_eq!(std::fs::read_to_string(&err_seed).unwrap(), "err-seed\n");
+}
+
+#[test]
+fn cat_continues_past_failed_operands() {
+    // GNU cat.c: a failed operand prints a diagnostic and sets exit 1,
+    // but later operands still produce output.
+    let ok = temp_seed("tail-ok\n");
+    let output = run(&format!("cat /dev/fd/9 '{ok}'"));
+    assert!(!output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "tail-ok\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("/dev/fd/9"));
 }
 
 #[test]

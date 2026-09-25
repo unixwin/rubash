@@ -532,6 +532,11 @@ impl Executor {
         }
         match self.fd_table.write_endpoint(fd)? {
             FdWriteEndpoint::File(file) => Some(file.path.clone()),
+            // An inherited stdout/stderr bound to a disk file is still the
+            // output FILE for cat.c's same-inode check — resolve the OS
+            // handle's path so `niu ... >> seeded` reports like GNU.
+            FdWriteEndpoint::Stdout => crate::fd::disk_file_path(crate::fd::process_std_handle(1)),
+            FdWriteEndpoint::Stderr => crate::fd::disk_file_path(crate::fd::process_std_handle(2)),
             _ => None,
         }
     }
@@ -571,10 +576,24 @@ impl Executor {
         }
         match entry.write.as_ref()? {
             FdWriteEndpoint::File(file) => std::fs::read(&file.path).ok(),
-            // Reading the process's own stdout/stderr handle has no
-            // portable answer; GNU would block on a tty/pipe. Empty keeps
-            // the operand well-defined without hanging.
-            FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr => Some(Vec::new()),
+            // GNU /dev/stdout is open("/proc/self/fd/1", O_RDONLY): a FRESH
+            // open of the descriptor's target. When the inherited
+            // stdout/stderr OS handle is a disk file, reopening reads its
+            // bytes from offset 0. For pipes/consoles GNU's read blocks
+            // (the reopened read end waits on the same pipe, or the tty
+            // waits on the console) — empty keeps the operand
+            // well-defined without hanging.
+            FdWriteEndpoint::Stdout | FdWriteEndpoint::Stderr => {
+                let os_fd = if matches!(entry.write, Some(FdWriteEndpoint::Stdout)) {
+                    1
+                } else {
+                    2
+                };
+                match crate::fd::disk_file_path(crate::fd::process_std_handle(os_fd)) {
+                    Some(path) => std::fs::read(path).ok(),
+                    None => Some(Vec::new()),
+                }
+            }
             FdWriteEndpoint::CoprocStdin { .. } | FdWriteEndpoint::ProcessSubstitution { .. } => {
                 None
             }

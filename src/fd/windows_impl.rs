@@ -92,6 +92,7 @@ extern "system" {
     fn SetHandleInformation(h: HANDLE, mask: DWORD, flags: DWORD) -> BOOL;
     fn GetHandleInformation(h: HANDLE, flags: *mut DWORD) -> BOOL;
     fn GetFileType(h: HANDLE) -> DWORD;
+    fn GetFinalPathNameByHandleW(h: HANDLE, buf: *mut u16, len: DWORD, flags: DWORD) -> DWORD;
     fn GetConsoleMode(h: HANDLE, mode: *mut DWORD) -> BOOL;
     fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
     fn PeekNamedPipe(
@@ -555,6 +556,28 @@ const WAIT_TIMEOUT: DWORD = 0x102;
 /// a regular-file input disables `read -t` entirely.
 pub fn is_disk_file(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_DISK
+}
+
+/// The filesystem path an open disk-file handle refers to, or None for
+/// pipes/consoles/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)` on a
+/// regular-file descriptor performs a FRESH open at offset 0, so callers
+/// emulating /dev/fd reopen semantics need the path — a dup of the handle
+/// would share the writer's file offset instead.
+pub fn disk_file_path(h: HANDLE) -> Option<std::path::PathBuf> {
+    if !is_disk_file(h) {
+        return None;
+    }
+    let mut buf = vec![0u16; 1024];
+    let n = unsafe { GetFinalPathNameByHandleW(h, buf.as_mut_ptr(), buf.len() as DWORD, 0) };
+    if n == 0 || n as usize >= buf.len() {
+        return None;
+    }
+    buf.truncate(n as usize);
+    let path = String::from_utf16_lossy(&buf);
+    // VOLUME_NAME_DOS yields \\?\C:\... — strip the device prefix.
+    Some(std::path::PathBuf::from(
+        path.strip_prefix(r"\\?\").unwrap_or(&path),
+    ))
 }
 
 /// The isatty() port for `test -t` (GNU test.c → isatty(fd) → a

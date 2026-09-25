@@ -1895,8 +1895,20 @@ impl Executor {
                                     ),
                                 )
                             } else {
-                                self.dev_fd_operand_bytes_for_command(command, fd)
-                                    .map(|read| read.bytes)
+                                match self.dev_fd_operand_bytes_for_command(command, fd) {
+                                    // GNU cat.c: the operand resolves to the
+                                    // file fd 1 writes to — report, skip,
+                                    // exit 1.
+                                    Some(read) if read.stdout_file && !read.bytes.is_empty() => {
+                                        stderr.push_str(&format!(
+                                            "{}cat: {path}: input file is output file\n",
+                                            self.diagnostic_prefix()
+                                        ));
+                                        status = 1;
+                                        None
+                                    }
+                                    other => other.map(|read| read.bytes),
+                                }
                             };
                             match bytes_opt {
                                 Some(bytes) => {

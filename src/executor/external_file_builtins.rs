@@ -729,6 +729,10 @@ impl Executor {
         // instead of reading the file operand.
         if cat_has_file_operands(cmd) {
             let mut output = Vec::new();
+            // GNU cat.c: operand failures (missing file, input==output)
+            // print a diagnostic and set exit 1 but do NOT stop the loop —
+            // later operands are still processed.
+            let mut status = 0;
             for word in cat_file_operands(cmd) {
                 let target = self.expand_word(word);
                 // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: GNU opens a
@@ -739,8 +743,7 @@ impl Executor {
                     match self.dev_fd_operand_bytes_for_command(cmd, fd) {
                         Some(read) if read.stdout_file && !read.bytes.is_empty() => {
                             // GNU cat.c: input resolves to the file fd 1
-                            // writes to — report and skip it (the command
-                            // still exits 0 on this diagnostic).
+                            // writes to — report and skip it.
                             let mut stderr = Vec::new();
                             writeln!(
                                 &mut stderr,
@@ -749,6 +752,7 @@ impl Executor {
                                 target
                             )?;
                             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            status = 1;
                             continue;
                         }
                         Some(read) => output.extend(read.bytes),
@@ -761,8 +765,7 @@ impl Executor {
                                 target
                             )?;
                             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                            self.exit_code = 1;
-                            return Ok(true);
+                            status = 1;
                         }
                     }
                     continue;
@@ -791,13 +794,12 @@ impl Executor {
                             target
                         )?;
                         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                        self.exit_code = 1;
-                        return Ok(true);
+                        status = 1;
                     }
                 }
             }
             self.write_cat_output(cmd, &filter(&output))?;
-            self.exit_code = 0;
+            self.exit_code = status;
             return Ok(true);
         }
 
