@@ -737,7 +737,21 @@ impl Executor {
                 // offset).
                 if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&target) {
                     match self.dev_fd_operand_bytes_for_command(cmd, fd) {
-                        Some(bytes) => output.extend(bytes),
+                        Some(read) if read.stdout_file && !read.bytes.is_empty() => {
+                            // GNU cat.c: input resolves to the file fd 1
+                            // writes to — report and skip it (the command
+                            // still exits 0 on this diagnostic).
+                            let mut stderr = Vec::new();
+                            writeln!(
+                                &mut stderr,
+                                "{}cat: {}: input file is output file",
+                                self.diagnostic_prefix(),
+                                target
+                            )?;
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            continue;
+                        }
+                        Some(read) => output.extend(read.bytes),
                         None => {
                             let mut stderr = Vec::new();
                             writeln!(

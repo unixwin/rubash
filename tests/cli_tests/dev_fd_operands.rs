@@ -68,6 +68,110 @@ fn dev_stdout_operand_reads_fd1_endpoint() {
 }
 
 #[test]
+fn dev_fd1_aliases_read_fd1_not_stdin() {
+    // The reported silent family: `/dev/fd/1` and `/proc/self/fd/1` name
+    // the command's fd 1 — in a pipeline that is the downstream pipe, not
+    // the upstream stdin (GNU 5.3 returns 0 bytes, rc 0). Bare `cat` reads
+    // fd 0 and gets the data; `tee /dev/stdout` writes fd 1 and forwards
+    // it — the write-vs-read asymmetry is GNU-correct.
+    for operand in ["/dev/fd/1", "/proc/self/fd/1"] {
+        let output = run(&format!("printf '1\\n2\\n3\\n' | cat {operand}"));
+        assert!(output.status.success(), "{operand} failed");
+        assert_eq!(output.stdout, b"", "{operand} read upstream data");
+    }
+    // GNU: tee writes fd 1 AND the /dev/stdout file operand — the same
+    // downstream pipe twice — so two input lines land as four.
+    let output = run("printf 'a\\nb\\n' | tee /dev/stdout | wc -l");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "4");
+}
+
+fn temp_seed(content: &str) -> String {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rubash-devfd-seed-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, content).expect("write seed file");
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[test]
+fn dev_stdin_operand_obeys_command_input_redirect() {
+    // redir.c do_redirections binds the command's own `<file` before the
+    // operand opens /dev/stdin — GNU reads the file, not the pipeline.
+    let seed = temp_seed("seeddata\n");
+    let output = run_with_stdin(
+        &format!("cat /dev/stdin <'{seed}'"),
+        b"pipe-data-that-must-not-appear\n",
+    );
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "seeddata\n");
+}
+
+#[test]
+fn dev_stdin_operand_reads_unnumbered_here_string() {
+    // Unnumbered `<<<` binds fd 0 through `cmd.here_string` — GNU adds the
+    // trailing newline (parse.y here-string; redir.c makes it fd 0).
+    let output = run("cat /dev/stdin <<<'hstr'");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hstr\n");
+}
+
+#[test]
+fn dev_fd2_operand_obeys_stderr_redirect() {
+    // `2>file` is kept only in `redirect_err` (not the ordered list) —
+    // GNU still binds fd 2 to the file, so /dev/fd/2 reads it (empty for
+    // a fresh truncate, seeded bytes for append).
+    let fresh = temp_seed("");
+    let output = run_with_stdin(&format!("cat /dev/fd/2 2>'{fresh}'"), b"pipe\n");
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"");
+
+    let seeded = temp_seed("seeddata\n");
+    let output = run(&format!("cat /dev/fd/2 2>>'{seeded}'"));
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "seeddata\n");
+}
+
+#[test]
+fn dev_fd1_operand_obeys_stdout_redirect() {
+    // `1>file` binds fd 1 to the file; GNU reads the (just-truncated,
+    // hence empty) file rather than ENOENT-ing.
+    let fresh = temp_seed("");
+    let output = run(&format!("cat /dev/fd/1 1>'{fresh}'"));
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"");
+}
+
+#[test]
+fn dev_fd_dup_chain_follows_fd0_redirect() {
+    // `3>&0` then `<file`: the dup chain lands on fd 0, whose own redirect
+    // binds the file — GNU reads "seeddata", not the pipe.
+    let seed = temp_seed("seeddata\n");
+    let output = run_with_stdin(&format!("cat /dev/fd/3 3>&0 <'{seed}'"), b"pipe\n");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "seeddata\n");
+}
+
+#[test]
+fn dev_stdout_operand_same_file_diagnostic() {
+    // GNU cat.c: an input file identical to the output file reports
+    // "input file is output file" (still rc 0 on coreutils 9.4) and
+    // leaves the file untouched.
+    let seed = temp_seed("seed\n");
+    let output = run(&format!("cat /dev/stdout >>'{seed}'"));
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("input file is output file"),
+        "expected same-file diagnostic: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&seed).unwrap(), "seed\n");
+}
+
+#[test]
 fn dev_fd_numbered_operand_reads_bound_descriptor() {
     // GNU redir.c do_redirections: `3<<<x` binds fd 3 for the command;
     // cat opens /dev/fd/3 and reads the here-string.
@@ -99,6 +203,18 @@ fn dev_stdout_stderr_redirect_targets() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "x\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "y\n");
+}
+
+#[test]
+fn external_stage0_inherits_process_stdin() {
+    // GNU execute_pipeline forks the first member with the shell's fd 0:
+    // `printf | sh -c 'ext | cat'` feeds `ext` the real pipe, not an empty
+    // buffered payload. `rubash -c` stands in for a non-whitelisted
+    // external so the inherit path — not the pre-drain — is exercised.
+    let rubash = env!("CARGO_BIN_EXE_rubash").replace('\\', "/");
+    let output = run_with_stdin(&format!("'{rubash}' -c 'cat' | cat"), b"inherited-stdin\n");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "inherited-stdin\n");
 }
 
 #[test]

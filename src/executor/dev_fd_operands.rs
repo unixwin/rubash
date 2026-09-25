@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use super::fd_table::{FdReadEndpoint, FdWriteEndpoint};
-use super::redirect_target_fd;
 use super::Executor;
-use crate::parser::CommandNode;
+use super::{is_closed_redirect_target, redirect_target_fd};
+use crate::parser::{CommandNode, Redirect, RedirectKind};
 
 /// How the child's fd 0 is wired when it does not come from the fd table
 /// (pipeline stages receive a buffered payload or a live pipe reader).
@@ -130,6 +130,64 @@ pub(in crate::executor) fn dev_operand_fd(value: &str) -> Option<u32> {
         (pid.parse::<u32>().ok()? == std::process::id()).then_some(tail)
     })?;
     rest.strip_prefix("fd/")?.parse().ok()
+}
+
+/// The resolved content of a `/dev/fd/N`-family operand together with the
+/// flag GNU cat.c needs: whether the operand lands on the same file the
+/// command's fd 1 writes to ("input file is output file").
+pub(in crate::executor) struct DevFdOperandRead {
+    pub bytes: Vec<u8>,
+    pub stdout_file: bool,
+}
+
+/// The redirect a command applies to descriptor `fd` — the ordered
+/// `redirects` list carries every redirection (a `None` fd means the
+/// kind's default descriptor), while `2>` is kept only in `redirect_err`.
+/// The list wins on overlap because it preserves the do_redirections
+/// left-to-right order the dedicated fields flatten.
+fn command_redirect_for_fd<'c>(cmd: &'c CommandNode, fd: u32) -> Option<&'c Redirect> {
+    cmd.redirects
+        .iter()
+        .rev()
+        .find(|redirect| redirect.fd_var.is_none() && redirect_binds_fd(redirect, fd))
+        .or(match fd {
+            0 => cmd.redirect_in.as_ref(),
+            1 => cmd.redirect_out.as_ref().or(cmd.append.as_ref()),
+            2 => cmd
+                .redirect_err
+                .as_ref()
+                .or(cmd.redirect_err_append.as_ref()),
+            _ => None,
+        })
+}
+
+/// Whether `redirect` binds descriptor `fd`: an explicit `N` matches
+/// directly; `fd: None` means the kind's default (input-ish kinds bind
+/// fd 0, output kinds fd 1, `&>`/`&>>` both fd 1 and fd 2).
+fn redirect_binds_fd(redirect: &Redirect, fd: u32) -> bool {
+    match redirect.fd {
+        Some(n) => n == fd,
+        None => match redirect.kind {
+            RedirectKind::Input
+            | RedirectKind::ReadWrite
+            | RedirectKind::DuplicateInput
+            | RedirectKind::CloseInput
+            | RedirectKind::HereDoc
+            | RedirectKind::HereString => fd == 0,
+            RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => fd == 1 || fd == 2,
+            _ => fd == 1,
+        },
+    }
+}
+
+/// Input-side redirect kinds fail the operand lookup when their target is
+/// missing (GNU aborts the command on the failed redirection); output
+/// kinds create their target, so a missing file reads as empty.
+fn redirect_input_kind(kind: &RedirectKind) -> bool {
+    matches!(
+        kind,
+        RedirectKind::Input | RedirectKind::ReadWrite | RedirectKind::DuplicateInput
+    )
 }
 
 fn dev_operand_temp(bytes: &[u8], m: &mut DevOperandMaterialization) -> Option<String> {
@@ -325,30 +383,32 @@ impl Executor {
     /// descriptor `fd`: GNU applies the command's own redirections first
     /// (redir.c do_redirections — the descriptor space the child opens
     /// `/dev/fd/N` in already has them), so `cat /dev/fd/3 3<<<x` reads the
-    /// here-string bound to fd 3. Numbered `N<file`/`N<&M` redirects on the
-    /// command resolve likewise before falling back to the shell fd table.
+    /// here-string bound to fd 3. Unnumbered redirects (`<`, `>`,
+    /// `<<<`) land in `cmd.redirects` with `fd: None` (the kind's default
+    /// descriptor) and `2>` lives only in `redirect_err`, so the lookup
+    /// consults both stores. Numbered `N<file`/`N<&M` chains resolve
+    /// likewise before falling back to the shell fd table.
     pub(in crate::executor) fn dev_fd_operand_bytes_for_command(
         &mut self,
         cmd: &CommandNode,
         fd: u32,
-    ) -> Option<Vec<u8>> {
+    ) -> Option<DevFdOperandRead> {
         if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
             // The stored body may still carry the STORAGE_WORD_PREFIX
             // quoting marker; fd bytes are the dequoted content.
             let input = input.strip_prefix('\u{1d}').unwrap_or(&input);
-            return Some(crate::executor::substitution_metadata::shell_text_to_raw_bytes(input));
+            return Some(DevFdOperandRead {
+                bytes: crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
+                stdout_file: false,
+            });
         }
+        let stdout_target = self.command_stdout_file_target(cmd);
         let mut fd = fd;
         let mut seen = vec![fd];
         loop {
             // The last redirect bound to this descriptor wins
             // (do_redirections runs them left to right).
-            let Some(redirect) = cmd
-                .redirects
-                .iter()
-                .rev()
-                .find(|redirect| redirect.fd == Some(fd) && redirect.fd_var.is_none())
-            else {
+            let Some(redirect) = command_redirect_for_fd(cmd, fd) else {
                 break;
             };
             match redirect.kind {
@@ -367,22 +427,113 @@ impl Executor {
                 crate::parser::RedirectKind::CloseInput
                 | crate::parser::RedirectKind::CloseOutput => return None,
                 crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
-                    break
+                    if fd == 0 {
+                        // fd-0 here-strings/heredocs live in here_string/
+                        // heredoc/heredoc_redirects (fd=None), not under
+                        // Some(0) — resolve through the same last-wins
+                        // stdin resolver the fd-0 binding itself uses
+                        // (it appends the `<<<` newline, shell-input-file).
+                        if let Some(input) = self.stdin_string_for_command_mut(cmd) {
+                            return Some(DevFdOperandRead {
+                                bytes: input.into_bytes(),
+                                stdout_file: false,
+                            });
+                        }
+                    }
+                    break;
                 }
                 _ => {
                     // Input/Output/Append/ReadWrite and friends all leave fd
                     // bound to the target file — GNU's /dev/fd/N symlink
                     // reopens that file, so read it.
                     let target = self.expand_redirect_target(redirect);
-                    return std::fs::read(crate::executor::shell_path_to_windows(
-                        &target,
-                        &self.shell_state.env_vars,
-                    ))
-                    .ok();
+                    if let Some(source) = redirect_target_fd(&target) {
+                        // `2>&1`-style dup words stored under a file kind.
+                        if seen.contains(&source) {
+                            return None;
+                        }
+                        seen.push(source);
+                        fd = source;
+                        continue;
+                    }
+                    if is_closed_redirect_target(&target) {
+                        return None;
+                    }
+                    let path =
+                        crate::executor::shell_path_to_windows(&target, &self.shell_state.env_vars);
+                    let stdout_file = stdout_target
+                        .as_deref()
+                        .is_some_and(|out| out == path.as_path());
+                    return Some(DevFdOperandRead {
+                        bytes: match std::fs::read(&path) {
+                            Ok(bytes) => bytes,
+                            // An output redirect has already created (or
+                            // would create) its target — GNU reads an empty
+                            // file rather than failing the lookup.
+                            Err(_) if !redirect_input_kind(&redirect.kind) => Vec::new(),
+                            Err(_) => return None,
+                        },
+                        stdout_file,
+                    });
                 }
             }
         }
-        self.dev_fd_operand_bytes(fd)
+        let bytes = self.dev_fd_operand_bytes(fd)?;
+        // fd-table fallback: the operand lands on fd 1's File endpoint when
+        // the descriptor space binds fd 1 there (e.g. `exec >file`).
+        let stdout_file = stdout_target.is_some() && fd == 1;
+        Some(DevFdOperandRead { bytes, stdout_file })
+    }
+
+    /// The file path the command's own redirections bind fd 1 to, or the
+    /// fd table's fd-1 File endpoint when the command does not redirect
+    /// stdout itself — GNU cat.c's "input file is output file" check needs
+    /// it to compare an fd operand's resolved file against stdout.
+    fn command_stdout_file_target(&mut self, cmd: &CommandNode) -> Option<PathBuf> {
+        let mut fd = 1u32;
+        let mut seen = vec![fd];
+        loop {
+            let Some(redirect) = command_redirect_for_fd(cmd, fd) else {
+                break;
+            };
+            match redirect.kind {
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
+                    let target = self.expand_redirect_target(redirect);
+                    let source = redirect_target_fd(&target)?;
+                    if seen.contains(&source) {
+                        return None;
+                    }
+                    seen.push(source);
+                    fd = source;
+                }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    return None
+                }
+                _ => {
+                    let target = self.expand_redirect_target(redirect);
+                    if let Some(source) = redirect_target_fd(&target) {
+                        if seen.contains(&source) {
+                            return None;
+                        }
+                        seen.push(source);
+                        fd = source;
+                        continue;
+                    }
+                    if is_closed_redirect_target(&target) {
+                        return None;
+                    }
+                    return Some(crate::executor::shell_path_to_windows(
+                        &target,
+                        &self.shell_state.env_vars,
+                    ));
+                }
+            }
+        }
+        match self.fd_table.write_endpoint(fd)? {
+            FdWriteEndpoint::File(file) => Some(file.path.clone()),
+            _ => None,
+        }
     }
 
     /// Read a `/dev/fd/N`-family operand for an in-process file builtin

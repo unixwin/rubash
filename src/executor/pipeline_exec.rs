@@ -385,8 +385,22 @@ impl Executor {
                 .map(|prefix| &prefix.command)
                 .unwrap_or(command);
             let mut stage0_stdin_base = None;
+            let mut stage0_stdin_inherit = false;
             if stage_index == 0 {
                 let (stage_input, base) = self.initial_pipeline_input(stage);
+                // GNU execute_pipeline forks the child with the shell's own
+                // fd 0 — with no fd-0 binding on the stage and fd 0 being the
+                // inherited process stdin, the child reads that handle
+                // directly instead of an empty payload pipe.
+                stage0_stdin_inherit = stage_input.is_empty()
+                    && self.stdin_string_for_command(stage).is_none()
+                    && match self.fd_table.entries.get(&0) {
+                        Some(entry) => {
+                            !entry.closed
+                                && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                        }
+                        None => true,
+                    };
                 input = stage_input;
                 stage0_stdin_base = base;
             }
@@ -435,7 +449,7 @@ impl Executor {
                     if last_stage && executor.lastpipe_enabled() {
                         executor.execute_lastpipe_stage(stage, &input).map(Some)
                     } else {
-                        executor.execute_pipeline_stage(stage, &input)
+                        executor.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)
                     }
                 })?
             } else if last_stage && self.lastpipe_enabled() {
@@ -448,13 +462,13 @@ impl Executor {
                 // element, so `! { false; echo A $?; } | cat` reaches the
                 // echo while top-level `{ false; echo x; } | cat` still
                 // dies on `false` under -e.
-                self.execute_pipeline_stage(stage, &input)?
+                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)?
             } else {
                 // Non-final simple pipeline stages never trigger errexit
                 // (bash manual: "any command in a pipeline but the
                 // last").
                 self.with_errexit_suppressed(|executor| {
-                    executor.execute_pipeline_stage(stage, &input)
+                    executor.execute_pipeline_stage(stage, &input, stage0_stdin_inherit)
                 })?
             }) else {
                 return Ok(None);
@@ -775,7 +789,10 @@ impl Executor {
         let saved_value = self.shell_state.variables.get(name).cloned();
         let _ = self.apply_shell_assignment_command("read", name, value.to_string());
         self.exit_code = status;
-        let result = self.execute_pipeline_stage(command, "").ok().flatten();
+        let result = self
+            .execute_pipeline_stage(command, "", false)
+            .ok()
+            .flatten();
         self.exit_code = saved_status;
         self.shell_state.variables.remove(name);
         if let Some(saved_value) = saved_value {
@@ -933,6 +950,20 @@ impl Executor {
         // post-spawn stdin write below; a `/dev/stdin` operand on the first
         // member materializes the same bytes.
         let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        // GNU forks the child with the shell's own fd 0 — when the stage
+        // carries no fd-0 binding (no `<`, `<<<`, `<<`, heredoc-0) and fd 0
+        // is the inherited process stdin, the child must inherit the real
+        // handle rather than a pre-drained payload (which also streams
+        // instead of buffering the whole upstream first).
+        let stage0_inherits = stage0_input.is_empty()
+            && self.stdin_string_for_command(commands[0]).is_none()
+            && match self.fd_table.entries.get(&0) {
+                Some(entry) => {
+                    !entry.closed
+                        && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                }
+                None => true,
+            };
 
         let mut processes = Vec::with_capacity(commands.len());
         let mut stage_dev_ops = Vec::with_capacity(commands.len());
@@ -948,9 +979,17 @@ impl Executor {
             // the outgoing writer (pipes[index].1) borrowable at once.
             let (before, current) = pipes.split_at_mut(index);
             let dev_stdin = if index == 0 {
-                crate::executor::dev_fd_operands::DevOperandStdin::Payload(
-                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stage0_input),
-                )
+                if stage0_inherits {
+                    // fd 0 is the live inherited process stdin — an fd-0
+                    // operand drains it through the fd-table endpoint.
+                    crate::executor::dev_fd_operands::DevOperandStdin::FdTable
+                } else {
+                    crate::executor::dev_fd_operands::DevOperandStdin::Payload(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &stage0_input,
+                        ),
+                    )
+                }
             } else {
                 match before.last_mut().and_then(|pipe| pipe.0.as_mut()) {
                     Some(reader) => {
@@ -996,7 +1035,11 @@ impl Executor {
             self.apply_child_environment(&mut process);
 
             if index == 0 {
-                process.stdin(Stdio::piped());
+                if stage0_inherits {
+                    process.stdin(Stdio::inherit());
+                } else {
+                    process.stdin(Stdio::piped());
+                }
             } else {
                 let (read, _) = &mut pipes[index - 1];
                 process.stdin(stdio_from_transferred_handle(
@@ -1206,6 +1249,19 @@ impl Executor {
             specs.push((program, args));
         }
 
+        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+        // Same contract as the Windows path: with no fd-0 binding the
+        // first child inherits the shell's real stdin handle.
+        let stage0_inherits = stage0_input.is_empty()
+            && self.stdin_string_for_command(commands[0]).is_none()
+            && match self.fd_table.entries.get(&0) {
+                Some(entry) => {
+                    !entry.closed
+                        && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                }
+                None => true,
+            };
+
         let mut processes: Vec<std::process::Child> = Vec::with_capacity(commands.len());
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
@@ -1225,7 +1281,11 @@ impl Executor {
             if let Some(stdout) = previous_stdout.take() {
                 process.stdin(Stdio::from(stdout));
             } else if index == 0 {
-                process.stdin(Stdio::piped());
+                if stage0_inherits {
+                    process.stdin(Stdio::inherit());
+                } else {
+                    process.stdin(Stdio::piped());
+                }
             }
 
             if index + 1 < commands.len() {
@@ -1257,15 +1317,14 @@ impl Executor {
         }
 
         if let Some(mut stdin) = first_stdin {
-            let (input, stdin_base) = self.initial_pipeline_input(commands[0]);
-            if let Some(base) = stdin_base {
+            if let Some(base) = stage0_stdin_base {
                 self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
-                    (base + input.len()).to_string(),
+                    (base + stage0_input.len()).to_string(),
                 );
             }
             stdin.write_all(
-                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stage0_input),
             )?;
         }
 
@@ -1437,6 +1496,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         // A pipeline element runs in its own subshell: an expansion error
         // raised while expanding the element's words on the shared executor
@@ -1499,7 +1559,8 @@ impl Executor {
             );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
-                    let inner = self.execute_pipeline_stage_inner(&materialized, input);
+                    let inner =
+                        self.execute_pipeline_stage_inner(&materialized, input, stdin_inherit);
                     match self.finish_process_substitutions(process_substitutions) {
                         Err(error) => Err(error),
                         Ok(()) => inner,
@@ -1508,7 +1569,7 @@ impl Executor {
                 Err(error) => Err(error),
             }
         } else {
-            self.execute_pipeline_stage_inner(command, input)
+            self.execute_pipeline_stage_inner(command, input, stdin_inherit)
         };
         // Inline stage arms that ran on `self` consumed FUNCTION_STDIN
         // directly; subshell/child stages report through the cell. Whichever
@@ -1545,11 +1606,12 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         if let Some(time_command) = &command.time_command {
             let started = time_command_started();
             let Some((output, stderr, status)) =
-                self.execute_pipeline_stage(&time_command.command, input)?
+                self.execute_pipeline_stage(&time_command.command, input, false)?
             else {
                 return Ok(None);
             };
@@ -1716,7 +1778,7 @@ impl Executor {
                         // Byte mode has no line-count representation; the
                         // real head must run instead of silently emitting
                         // whole lines.
-                        return self.execute_external_pipeline_stage(command, input);
+                        return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                     }
                     if matches!(arg, "-n" | "-b") {
                         cursor += 2;
@@ -1726,7 +1788,7 @@ impl Executor {
                         cursor += 1;
                         continue;
                     }
-                    return self.execute_external_pipeline_stage(command, input);
+                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 }
                 let count = head_line_count(&args).unwrap_or(10);
                 let output = input.split_inclusive('\n').take(count).collect::<String>();
@@ -1834,6 +1896,7 @@ impl Executor {
                                 )
                             } else {
                                 self.dev_fd_operand_bytes_for_command(command, fd)
+                                    .map(|read| read.bytes)
                             };
                             match bytes_opt {
                                 Some(bytes) => {
@@ -1910,7 +1973,7 @@ impl Executor {
                 if let Some(output) = apply_simple_sed_args(input, &args) {
                     Ok(Some((output, String::new(), 0)))
                 } else {
-                    self.execute_external_pipeline_stage(command, input)
+                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
             "grep" => {
@@ -1927,7 +1990,7 @@ impl Executor {
                     .map(|word| self.expand_word(word))
                     .collect();
                 let Some(spec) = inline_grep_args(&args) else {
-                    return self.execute_external_pipeline_stage(command, input);
+                    return self.execute_external_pipeline_stage(command, input, stdin_inherit);
                 };
                 let mut selected = 0usize;
                 let mut line_number = 0usize;
@@ -1983,7 +2046,11 @@ impl Executor {
                         "-l" => input.bytes().filter(|byte| *byte == b'\n').count(),
                         "-w" => input.split_whitespace().count(),
                         _ => {
-                            return self.execute_external_pipeline_stage(command, input);
+                            return self.execute_external_pipeline_stage(
+                                command,
+                                input,
+                                stdin_inherit,
+                            );
                         }
                     };
                     return Ok(Some((format!("{value}\n"), String::new(), 0)));
@@ -1999,7 +2066,7 @@ impl Executor {
                         0,
                     )));
                 }
-                self.execute_external_pipeline_stage(command, input)
+                self.execute_external_pipeline_stage(command, input, stdin_inherit)
             }
             "tr" => {
                 let args = command.words[1..]
@@ -2022,7 +2089,7 @@ impl Executor {
                     // classes it does not know, `[x*n]` repeats, escapes)
                     // must run the real external `tr`; silently returning the
                     // input unchanged is never acceptable.
-                    self.execute_external_pipeline_stage(command, input)
+                    self.execute_external_pipeline_stage(command, input, stdin_inherit)
                 }
             }
             _ => {
@@ -2032,7 +2099,7 @@ impl Executor {
                     if let Some(output) = self.execute_builtin_pipeline_stage(command, input)? {
                         Ok(Some(output))
                     } else {
-                        self.execute_external_pipeline_stage(command, input)
+                        self.execute_external_pipeline_stage(command, input, stdin_inherit)
                     }
                 }
             }

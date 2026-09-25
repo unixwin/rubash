@@ -346,10 +346,11 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let (command, process_substitution_files) =
             self.command_with_process_substitution_files(command)?;
-        let result = self.execute_external_pipeline_stage_inner(&command, input);
+        let result = self.execute_external_pipeline_stage_inner(&command, input, stdin_inherit);
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let output = result?;
         finish_result?;
@@ -360,6 +361,7 @@ impl Executor {
         &mut self,
         command: &CommandNode,
         input: &str,
+        stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
         let Some(name) = command.words.first() else {
             return Ok(Some((String::new(), String::new(), 0)));
@@ -489,13 +491,19 @@ impl Executor {
         }
 
         // The stage's fd 0 is the buffered `input` payload fed through a
-        // pipe below and fd 1 is captured by the caller — /dev/fd operands
+        // pipe below (or the live inherited stdin for an unbound stage 0)
+        // and fd 1 is captured by the caller — /dev/fd operands
         // materialize against those endpoints, not the fd table.
-        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
-            &args,
+        let dev_stdin = if stdin_inherit {
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable
+        } else {
             crate::executor::dev_fd_operands::DevOperandStdin::Payload(
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
-            ),
+            )
+        };
+        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+            &args,
+            dev_stdin,
             crate::executor::dev_fd_operands::DevOperandStdout::Capture,
         );
         let (mut process, _) = external_command_for_named_program(
@@ -513,7 +521,12 @@ impl Executor {
                 process.env(base_name, expanded_value);
             }
         }
-        process.stdin(Stdio::piped()).stdout(Stdio::piped());
+        if stdin_inherit {
+            process.stdin(Stdio::inherit());
+        } else {
+            process.stdin(Stdio::piped());
+        }
+        process.stdout(Stdio::piped());
 
         // Bash applies a pipeline element's redirections before running the
         // command (redir.c do_redirection_internal). The child's stderr must
