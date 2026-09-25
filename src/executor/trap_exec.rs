@@ -165,8 +165,7 @@ impl Executor {
                 // Heredoc bodies are raw text, so inputs carrying `<<` skip
                 // this probe like the script driver does.
                 if !source.contains("<<") {
-                    let eval_posix =
-                        self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+                    let eval_posix = self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
                     if let Some((close, open_line, eof_line, report_open)) =
                         crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
@@ -290,9 +289,8 @@ impl Executor {
         // redirections still bound (redir.c do_redirection_internal for the
         // builtin's duration), so a body's `1>&3` resolves fd 3 to eval's
         // `3>&1`, not the leaf's own fd 1.
-        let result = self.with_compound_output_redirects(cmd, |executor| {
-            executor.execute_ast(&ast)
-        });
+        let result =
+            self.with_compound_output_redirects(cmd, |executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         match saved_eval_context {
             Some(previous) => {
@@ -901,11 +899,7 @@ impl Executor {
         // `3>&1`/`2>&1` also land in `redirect_out`. Only an fd-1 (or
         // default) entry is a stdout redirect; numbered entries propagate
         // through splice_numbered_output_redirects_in_order below instead.
-        if let Some(redirect) = cmd
-            .redirect_out
-            .as_ref()
-            .filter(|r| r.fd.unwrap_or(1) == 1)
-        {
+        if let Some(redirect) = cmd.redirect_out.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
             // GNU do_redirections opens the expanded word once, relative to
             // the cwd in force when the compound command starts; the
             // diagnostic reports that word (redir.c report_error on
@@ -940,12 +934,9 @@ impl Executor {
                 clobber: false,
             };
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
-        } else if let Some(redirect) = cmd
-            .append
-            .as_ref()
-            .filter(|r| r.fd.unwrap_or(1) == 1)
-        {
-            let target = self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
+        } else if let Some(redirect) = cmd.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -964,11 +955,7 @@ impl Executor {
             apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         }
 
-        if let Some(redirect) = cmd
-            .redirect_err
-            .as_ref()
-            .filter(|r| r.fd.unwrap_or(2) == 2)
-        {
+        if let Some(redirect) = cmd.redirect_err.as_ref().filter(|r| r.fd.unwrap_or(2) == 2) {
             let expanded = self.expand_redirect_target(redirect);
             if prepare_targets
                 && !is_closed_redirect_target(&expanded)
@@ -1003,7 +990,8 @@ impl Executor {
             .as_ref()
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
-            let target = self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
+            let target =
+                self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
             let append_redirect = Redirect {
                 fd: redirect.fd,
                 fd_var: redirect.fd_var.clone(),
@@ -1091,9 +1079,7 @@ impl Executor {
             // WORD translates to r_err_and_out - the child's stdout AND
             // stderr go to WORD. The raw target keeps the `&` dup marker,
             // so strip it before opening (redir4.sub: exec >&$fd).
-            if redirect.fd.unwrap_or(1) == 1
-                && redirect.fd_var.is_none()
-                && target.starts_with('&')
+            if redirect.fd.unwrap_or(1) == 1 && redirect.fd_var.is_none() && target.starts_with('&')
             {
                 let path = target.strip_prefix('&').unwrap_or(&target).to_string();
                 let mut file = self.create_redirect_output(&path, redirect.clobber)?;
@@ -1102,25 +1088,44 @@ impl Executor {
                 let child_stdout = Stdio::from(file.try_clone()?);
                 let child_stderr = Stdio::from(file.try_clone()?);
                 let mut child_diag = file.try_clone()?;
-                return Ok(crate::builtins::exec::execute_with_child_stdio(
+                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
                     &cmd.words[1..],
+                    crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                    crate::executor::dev_fd_operands::DevOperandStdout::Path(
+                        shell_path_to_windows(&path, &self.shell_state.env_vars),
+                    ),
+                );
+                let status = crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
                     &self.shell_state.env_vars,
                     &mut file,
                     &mut child_diag,
                     child_stdout,
                     child_stderr,
-                )?);
+                )?;
+                self.finish_dev_fd_operands(dev_ops);
+                return Ok(status);
             }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             let child_stdout = Stdio::from(file.try_clone()?);
-            return Ok(crate::builtins::exec::execute_with_child_stdio(
+            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
                 &cmd.words[1..],
+                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
+                    &target,
+                    &self.shell_state.env_vars,
+                )),
+            );
+            let status = crate::builtins::exec::execute_with_child_stdio(
+                &exec_args,
                 &self.shell_state.env_vars,
                 &mut file,
                 &mut std::io::stderr().lock(),
                 child_stdout,
                 Stdio::inherit(),
-            )?);
+            )?;
+            self.finish_dev_fd_operands(dev_ops);
+            return Ok(status);
         }
 
         if let Some(redirect) = &cmd.append {
@@ -1130,28 +1135,45 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             let child_stdout = Stdio::from(file.try_clone()?);
-            return Ok(crate::builtins::exec::execute_with_child_stdio(
+            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
                 &cmd.words[1..],
+                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
+                    &target,
+                    &self.shell_state.env_vars,
+                )),
+            );
+            let status = crate::builtins::exec::execute_with_child_stdio(
+                &exec_args,
                 &self.shell_state.env_vars,
                 &mut file,
                 &mut std::io::stderr().lock(),
                 child_stdout,
                 Stdio::inherit(),
-            )?);
+            )?;
+            self.finish_dev_fd_operands(dev_ops);
+            return Ok(status);
         }
 
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_redirect_target(redirect);
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             let child_stderr = Stdio::from(file.try_clone()?);
-            return Ok(crate::builtins::exec::execute_with_child_stdio(
+            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
                 &cmd.words[1..],
+                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+            );
+            let status = crate::builtins::exec::execute_with_child_stdio(
+                &exec_args,
                 &self.shell_state.env_vars,
                 &mut std::io::stdout().lock(),
                 &mut file,
                 Stdio::inherit(),
                 child_stderr,
-            )?);
+            )?;
+            self.finish_dev_fd_operands(dev_ops);
+            return Ok(status);
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
@@ -1161,14 +1183,21 @@ impl Executor {
                 .append(true)
                 .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             let child_stderr = Stdio::from(file.try_clone()?);
-            return Ok(crate::builtins::exec::execute_with_child_stdio(
+            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
                 &cmd.words[1..],
+                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+            );
+            let status = crate::builtins::exec::execute_with_child_stdio(
+                &exec_args,
                 &self.shell_state.env_vars,
                 &mut std::io::stdout().lock(),
                 &mut file,
                 Stdio::inherit(),
                 child_stderr,
-            )?);
+            )?;
+            self.finish_dev_fd_operands(dev_ops);
+            return Ok(status);
         }
 
         self.apply_no_output_builtin_redirects(cmd)?;
@@ -1180,14 +1209,21 @@ impl Executor {
         // the redirect target empty (niubash run-test gate).
         let child_stdout = self.exec_inherited_stdio(1)?;
         let child_stderr = self.exec_inherited_stdio(2)?;
-        Ok(crate::builtins::exec::execute_with_child_stdio(
+        let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
             &cmd.words[1..],
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+            crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+        );
+        let status = crate::builtins::exec::execute_with_child_stdio(
+            &exec_args,
             &self.shell_state.env_vars,
             &mut crate::executor::GlobalStdout,
             &mut std::io::stderr().lock(),
             child_stdout,
             child_stderr,
-        )?)
+        )?;
+        self.finish_dev_fd_operands(dev_ops);
+        Ok(status)
     }
 
     /// Resolve the concrete child stdio for an `exec`'d fd from the fd
@@ -1213,12 +1249,8 @@ impl Executor {
                 let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
                 Ok(Stdio::from(crate::fd::handle_to_file(dup)))
             }
-            Some(FdWriteEndpoint::Stdout) if fd != 1 => {
-                self.exec_stdio_for_endpoint(1, depth + 1)
-            }
-            Some(FdWriteEndpoint::Stderr) if fd != 2 => {
-                self.exec_stdio_for_endpoint(2, depth + 1)
-            }
+            Some(FdWriteEndpoint::Stdout) if fd != 1 => self.exec_stdio_for_endpoint(1, depth + 1),
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => self.exec_stdio_for_endpoint(2, depth + 1),
             _ => Ok(Stdio::inherit()),
         }
     }
@@ -1988,7 +2020,8 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            self.fd_var_external_undo.push((resolved, prior, prior_typed));
+            self.fd_var_external_undo
+                .push((resolved, prior, prior_typed));
             match self.execute_dynamic_fd_var_redirect(redirect, auto_close) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
@@ -2019,7 +2052,8 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            self.fd_var_external_undo.push((resolved, prior, prior_typed));
+            self.fd_var_external_undo
+                .push((resolved, prior, prior_typed));
             match self.execute_dynamic_fd_var_heredoc(redirect, auto_close) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
@@ -2659,5 +2693,3 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
                     .any(|redirect| redirect.fd.is_some_and(|fd| fd.to_string() == *fd_word))
     )
 }
-
-

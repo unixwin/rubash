@@ -1,6 +1,6 @@
 use super::*;
-use std::io::IsTerminal;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
+use std::io::IsTerminal;
 
 impl Executor {
     pub(in crate::executor) fn handle_external_file_builtins(
@@ -13,9 +13,24 @@ impl Executor {
         let name = cmd.words[0].as_str();
         let emulated = matches!(
             name,
-            "/bin/pwd" | "/usr/bin/pwd" | "/bin/printf" | "/usr/bin/printf" | "mkdir" | "touch"
-                | "chmod" | "cp" | "rm" | "rmdir" | "cat" | "/bin/cat" | "/usr/bin/cat" | "sed"
-                | "mkfifo" | "tty" | "/bin/tty" | "/usr/bin/tty"
+            "/bin/pwd"
+                | "/usr/bin/pwd"
+                | "/bin/printf"
+                | "/usr/bin/printf"
+                | "mkdir"
+                | "touch"
+                | "chmod"
+                | "cp"
+                | "rm"
+                | "rmdir"
+                | "cat"
+                | "/bin/cat"
+                | "/usr/bin/cat"
+                | "sed"
+                | "mkfifo"
+                | "tty"
+                | "/bin/tty"
+                | "/usr/bin/tty"
         );
         // GNU findcmd.c:365/416 (search_for_command): a plain name resolved
         // through PATH for execution enters the hash table with
@@ -438,6 +453,61 @@ impl Executor {
             }
 
             for (source, source_word) in copy_units {
+                // `/dev/std*`, `/dev/fd/N` sources name a descriptor, not a
+                // filesystem path: GNU copies the fd's content into a
+                // regular file (cp.c copy_internal reads through the dup'd
+                // descriptor), so serve the endpoint's remaining bytes.
+                if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&source_word) {
+                    match self.dev_fd_operand_bytes(fd) {
+                        Some(bytes) => {
+                            let (target, target_display) = if destination.is_dir() {
+                                let leaf = source_word
+                                    .replace('\\', "/")
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or(&source_word)
+                                    .to_string();
+                                (
+                                    destination.join(&leaf),
+                                    format!("{}/{}", destination_word.trim_end_matches('/'), leaf),
+                                )
+                            } else {
+                                (destination.clone(), destination_word.clone())
+                            };
+                            match fs::write(&target, &bytes) {
+                                Ok(()) => {
+                                    if verbose {
+                                        let _ = writeln!(
+                                            stdout,
+                                            "{} -> {}",
+                                            cp_quoted_name(&source_word),
+                                            cp_quoted_name(&target_display)
+                                        );
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = writeln!(
+                                        stderr,
+                                        "{}cp: cannot create '{}': {}",
+                                        prefix,
+                                        target.display(),
+                                        crate::posix_errors::message(&error)
+                                    );
+                                    status = 1;
+                                }
+                            }
+                        }
+                        None => {
+                            let _ = writeln!(
+                                stderr,
+                                "{}cp: cannot stat '{}': No such file or directory",
+                                prefix, source_word
+                            );
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
                 let (target, target_display) = if destination.is_dir() {
                     let Some(name) = source.file_name() else {
                         let _ = writeln!(
@@ -630,7 +700,8 @@ impl Executor {
 
         if cmd.heredoc.is_some() {
             let input = self.stdin_string_for_command_mut(cmd).unwrap_or_default();
-            let output = filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
+            let output =
+                filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
             if let Some(redirect) = &cmd.append {
                 let target = self.expand_redirect_target(redirect);
                 let mut file = OpenOptions::new()
@@ -660,6 +731,28 @@ impl Executor {
             let mut output = Vec::new();
             for word in cat_file_operands(cmd) {
                 let target = self.expand_word(word);
+                // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: GNU opens a
+                // dup of the descriptor — the in-process equivalent reads
+                // the fd endpoint's remaining bytes (subst.c shared
+                // offset).
+                if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&target) {
+                    match self.dev_fd_operand_bytes_for_command(cmd, fd) {
+                        Some(bytes) => output.extend(bytes),
+                        None => {
+                            let mut stderr = Vec::new();
+                            writeln!(
+                                &mut stderr,
+                                "{}cat: {}: No such file or directory",
+                                self.diagnostic_prefix(),
+                                target
+                            )?;
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
+                    }
+                    continue;
+                }
                 // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic
                 // files are served before the filesystem.
                 if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
@@ -695,21 +788,26 @@ impl Executor {
         }
 
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
-            self.write_cat_output(cmd, &filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)))?;
+            self.write_cat_output(
+                cmd,
+                &filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)),
+            )?;
             self.exit_code = 0;
             return Ok(true);
         }
 
         if !cat_has_file_operands(cmd) {
             if let Some(input) = self.read_function_stdin('\0', None, false) {
-                self.write_cat_output(cmd, &filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input)))?;
+                self.write_cat_output(
+                    cmd,
+                    &filter(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+                    ),
+                )?;
                 self.exit_code = 0;
                 return Ok(true);
             }
-            if cmd.redirect_in.is_none()
-                && cmd.heredoc.is_none()
-                && cmd.here_string.is_none()
-            {
+            if cmd.redirect_in.is_none() && cmd.heredoc.is_none() && cmd.here_string.is_none() {
                 // fd 0 may carry a real/virtual endpoint from a compound
                 // redirect (`{ cat; } <&3`) — GNU reads fd 0 directly.
                 if !matches!(
@@ -726,7 +824,12 @@ impl Executor {
             if cmd.redirect_in.is_none()
                 && cmd.heredoc.is_none()
                 && cmd.here_string.is_none()
-                && self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1")
+                && self
+                    .shell_state
+                    .env_vars
+                    .get(INHERIT_PROCESS_STDIN)
+                    .map(String::as_str)
+                    == Some("1")
             {
                 return self.stream_inherited_cat(cmd);
             }
@@ -1172,9 +1275,10 @@ impl Executor {
         };
         let mut failures = 0usize;
         for file in &files {
-            let windows = crate::executor::path::shell_path_to_windows(file, &self.shell_state.env_vars)
-                .to_string_lossy()
-                .to_string();
+            let windows =
+                crate::executor::path::shell_path_to_windows(file, &self.shell_state.env_vars)
+                    .to_string_lossy()
+                    .to_string();
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             match apply_chmod_mode(base, mode) {
@@ -1187,9 +1291,7 @@ impl Executor {
                     let host = if std::path::Path::new(&windows).is_absolute() {
                         std::path::PathBuf::from(&windows)
                     } else {
-                        std::env::current_dir()
-                            .unwrap_or_default()
-                            .join(&windows)
+                        std::env::current_dir().unwrap_or_default().join(&windows)
                     };
                     match std::fs::metadata(&host) {
                         Ok(metadata) => {
@@ -1204,10 +1306,7 @@ impl Executor {
                         }
                         Err(_) => {
                             failures += 1;
-                            eprintln!(
-                                "chmod: cannot access '{}': No such file or directory",
-                                file
-                            );
+                            eprintln!("chmod: cannot access '{}': No such file or directory", file);
                         }
                     }
                     // DrvFs does not support POSIX mode bits (GNU on WSL
@@ -1221,7 +1320,11 @@ impl Executor {
                         && !windows.starts_with("\\\\wsl$")
                         && !windows.starts_with("//wsl$")
                     {
-                        store_emulated_file_mode(&mut self.shell_state.env_vars, &windows, new_mode);
+                        store_emulated_file_mode(
+                            &mut self.shell_state.env_vars,
+                            &windows,
+                            new_mode,
+                        );
                     }
                 }
                 None => {

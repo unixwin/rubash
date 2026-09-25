@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::pipeline_exec::command_is_compound_pipeline_stage;
 
 impl Executor {
@@ -9,10 +9,16 @@ impl Executor {
         input: &str,
     ) -> Result<(String, String, i32), ExecuteError> {
         let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        self.shell_state.env_vars
+        let old_stdin_offset = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .cloned();
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         let saved_stdout_capture = self.stdout_capture.take();
@@ -38,13 +44,18 @@ impl Executor {
         // In-shell stage: the cursor visible on self is the element's real
         // fd-0 consumption within `input` (execute_cmd.c:2758 lastpipe).
         let consumed = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         self.pipeline_stdin_consumed.set(Some(consumed));
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FUNCTION_STDIN_OFFSET,
+            old_stdin_offset,
+        );
         // GNU execute_cmd.c:2758: the lastpipe stage runs in the current
         // shell.  `exit N` must therefore exit the current shell, not just
         // set the pipeline's exit status.  Convert ExitCode to LastpipeExit
@@ -85,16 +96,19 @@ impl Executor {
         // while under `!`/if/while/&&/||/comsub suppression the same group
         // runs to completion (set-e1.sub:40 prints `A 1`).
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         for (name, value) in &command.assignments {
             let (base_name, _) = assignment_name_and_append(name);
             let expanded_value = subshell.expand_assignment_value(name, value);
             subshell
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .insert(base_name.to_string(), expanded_value);
         }
 
@@ -116,9 +130,7 @@ impl Executor {
         let saved_capture = crate::executor::shell_options::begin_stdout_capture();
 
         let result = if command.brace_group.is_some() {
-            subshell
-                .execute_brace_group_pipeline(command)
-                .map(|_| ())
+            subshell.execute_brace_group_pipeline(command).map(|_| ())
         } else {
             subshell.execute_command(command)
         };
@@ -141,7 +153,8 @@ impl Executor {
         // The subshell's FUNCTION_STDIN cursor is the element's fd-0
         // consumption within `input`; report it for the driver writeback.
         let consumed = subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -193,10 +206,12 @@ impl Executor {
         // CMD_IGNORE_RETURN), so the subshell keeps the parent's
         // suppress_errexit like the compound-stage path above.
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         subshell.stdout_capture = Some(Vec::new());
@@ -221,7 +236,8 @@ impl Executor {
             Err(error) => return Err(error),
         };
         let consumed = subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -292,10 +308,12 @@ impl Executor {
 
         let mut subshell = self.command_substitution_executor();
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
         subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         subshell.stderr_capture = Some(Vec::new());
@@ -311,7 +329,8 @@ impl Executor {
             Err(error) => return Err(error),
         };
         let consumed = subshell
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -366,7 +385,9 @@ impl Executor {
             .into_iter()
             .map(|word| {
                 crate::executor::command_prepare::restore_pathname_escape_markers(
-                    &word.replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\").replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
+                    &word
+                        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
+                        .replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
                 )
             });
         let expanded_name = first_fields.next().unwrap_or_default();
@@ -424,12 +445,16 @@ impl Executor {
                 .map(|metadata| metadata.raw.as_str());
             for expanded in self.expand_command_word(command, index, word, raw) {
                 let value = crate::executor::command_prepare::restore_pathname_escape_markers(
-                    &expanded.replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\").replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
+                    &expanded
+                        .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
+                        .replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
                 )
                 .to_string();
                 // \x1d marks a fully quoted word and \x1b a quoted tilde;
                 // both stay literal, as command_prepare does.
-                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+                if expanded.starts_with(STORAGE_WORD_PREFIX)
+                    || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                {
                     args.push(value);
                     continue;
                 }
@@ -463,10 +488,20 @@ impl Executor {
             }
         }
 
+        // The stage's fd 0 is the buffered `input` payload fed through a
+        // pipe below and fd 1 is captured by the caller — /dev/fd operands
+        // materialize against those endpoints, not the fd table.
+        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+            &args,
+            crate::executor::dev_fd_operands::DevOperandStdin::Payload(
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
+            ),
+            crate::executor::dev_fd_operands::DevOperandStdout::Capture,
+        );
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&expanded_name),
-            &args,
+            &dev_args,
             &self.shell_state.env_vars,
         );
 
@@ -530,6 +565,7 @@ impl Executor {
         let output = child.wait_with_output()?;
 
         let mut stdout_bytes = output.stdout;
+        stdout_bytes.extend(self.finish_dev_fd_operands(dev_ops));
         let mut stderr_bytes = output.stderr;
         if stderr_merges_into_stdout {
             // 2>&1: the stage pipe is fd 1, so the captured stderr belongs
@@ -570,12 +606,7 @@ impl Executor {
             let mut stdout = output.to_string();
             let mut stderr = String::new();
             let mut status = 0;
-            if self.route_pipeline_stage_streams(
-                command,
-                &mut stdout,
-                &mut stderr,
-                &mut status,
-            )? {
+            if self.route_pipeline_stage_streams(command, &mut stdout, &mut stderr, &mut status)? {
                 if status != 0 {
                     self.exit_code = status;
                 }

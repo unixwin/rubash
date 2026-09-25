@@ -11,8 +11,7 @@ mod upstream_scripts;
 use arithmetic::{
     arithmetic_division_by_zero_token, arithmetic_unbound_variable, eval_arith_value,
     eval_conditional_arith_value, eval_conditional_arith_value_categorized,
-    eval_conditional_arith_value_categorized_with_writes,
-    eval_conditional_arith_value_with_writes,
+    eval_conditional_arith_value_categorized_with_writes, eval_conditional_arith_value_with_writes,
 };
 
 mod arrays;
@@ -67,6 +66,7 @@ pub fn read_process_stdin_bytes(count: usize) -> std::io::Result<Vec<u8>> {
 use command_words::raw_word_has_unquoted_parameter_expansion;
 use compound_exec::*;
 mod declare_local;
+mod dev_fd_operands;
 mod dynamic_arrays;
 mod exec_profile;
 pub(in crate::executor) use dynamic_arrays::env_derived_dynamic_parameter_value;
@@ -197,8 +197,8 @@ use command_subst_helpers::*;
 use command_text::*;
 pub(crate) use embedded_mutations::COMPOUND_EXPANSION_WS_TAG;
 use env_helpers::*;
-use execution_misc::*;
 pub(crate) use execution_misc::RandomGen;
+use execution_misc::*;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };

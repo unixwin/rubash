@@ -540,6 +540,22 @@ impl Executor {
                 let mut output = String::new();
                 for word in &words[1..] {
                     let path = self.expand_word(word);
+                    // `/dev/fd/N` (N>0) needs the real descriptor table —
+                    // full execution owns it. fd 0 is the FUNCTION_STDIN
+                    // cursor when that channel exists; without it fd 0 is
+                    // the inherited process stdin, which full execution
+                    // drains (subst.c:7143).
+                    if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&path) {
+                        if fd != 0 || !self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
+                            return None;
+                        }
+                        if let Some(text) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
+                            self.comsub_stdin_writeback
+                                .set(Some((text.len(), Self::function_stdin_fingerprint(text))));
+                        }
+                        output.push_str(&self.function_stdin_remaining().unwrap_or_default());
+                        continue;
+                    }
                     if let Ok(value) =
                         fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars))
                     {
@@ -595,6 +611,17 @@ impl Executor {
                 let mut output = String::new();
                 for word in &words[1..] {
                     let path = self.expand_word(word);
+                    // `/dev/fd/N` (N>0) needs the real descriptor table —
+                    // full execution owns it; fd 0 is FUNCTION_STDIN when
+                    // that channel exists, else real execution drains the
+                    // inherited process stdin (subst.c:7143).
+                    if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&path) {
+                        if fd != 0 || !self.shell_state.env_vars.contains_key(FUNCTION_STDIN) {
+                            return None;
+                        }
+                        output.push_str(&self.function_stdin_remaining().unwrap_or_default());
+                        continue;
+                    }
                     if let Ok(value) =
                         fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars))
                     {

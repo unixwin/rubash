@@ -324,6 +324,19 @@ impl Executor {
         if words.first().map(String::as_str) == Some("cat")
             && words[1..].iter().all(|word| !word.starts_with('-'))
             && words.len() > 1
+            // A `/dev/fd/N` operand needs real execution when it names an
+            // fd this shortcut cannot model: N>0 needs the descriptor
+            // table (external_cat owns it), and fd 0 is only the
+            // FUNCTION_STDIN cursor when that channel exists — otherwise
+            // fd 0 is the inherited process stdin, which full execution
+            // drains (subst.c:7143 shared offset).
+            && !words[1..].iter().any(|word| {
+                match crate::executor::dev_fd_operands::dev_operand_fd(word) {
+                    Some(0) => !self.shell_state.env_vars.contains_key(FUNCTION_STDIN),
+                    Some(_) => true,
+                    None => false,
+                }
+            })
         {
             let mut output = String::new();
             let mut status = 0;
@@ -342,6 +355,19 @@ impl Executor {
                     continue;
                 }
                 let path = self.expand_word(word);
+                // `/dev/stdin`/`/dev/fd/0`/`/proc/self/fd/0` read fd 0 —
+                // the FUNCTION_STDIN cursor (the gate above already sent
+                // N>0 descriptors to full execution). Consuming fd 0 here
+                // writes the cursor back the way the external fast path
+                // does (comsub_stdin_writeback).
+                if crate::executor::dev_fd_operands::dev_operand_fd(&path) == Some(0) {
+                    if let Some(text) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
+                        self.comsub_stdin_writeback
+                            .set(Some((text.len(), Self::function_stdin_fingerprint(text))));
+                    }
+                    output.push_str(&self.function_stdin_remaining().unwrap_or_default());
+                    continue;
+                }
                 match fs::read_to_string(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
                     Ok(value) => output.push_str(&value),
                     Err(_) => {
@@ -908,8 +934,7 @@ fn strip_command_substitution_comments(source: &str) -> String {
         }
         // GNU read_token: `#` starts a comment only at a token boundary —
         // after whitespace or a separator, not mid-word (`$#`, `a#b`).
-        boundary = ch.is_whitespace()
-            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        boundary = ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         output.push(ch);
     }
 

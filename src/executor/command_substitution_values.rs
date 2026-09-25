@@ -160,10 +160,17 @@ impl Executor {
                 use std::io::Write;
                 use std::process::Stdio;
                 let program = find_user_command(&cmd_name, &self.shell_state.env_vars)?;
+                let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+                    &expanded_args,
+                    crate::executor::dev_fd_operands::DevOperandStdin::Payload(
+                        crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
+                    ),
+                    crate::executor::dev_fd_operands::DevOperandStdout::Capture,
+                );
                 let (mut process, _) = external_command_for_named_program(
                     &program,
                     Some(&cmd_name),
-                    &expanded_args,
+                    &dev_args,
                     &self.shell_state.env_vars,
                 );
                 self.apply_child_environment(&mut process);
@@ -180,7 +187,8 @@ impl Executor {
                         &crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
                     )
                     .ok()?;
-                let output = child.wait_with_output().ok()?;
+                let mut output = child.wait_with_output().ok()?;
+                output.stdout.extend(self.collect_dev_fd_capture(&dev_ops));
                 Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout)
                         .trim_capture_terminator()
@@ -218,7 +226,9 @@ impl Executor {
         if let Some(values) = self.array_at_word_values(word) {
             return values;
         }
-        let suppress_glob = quoted || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) || word.starts_with(STORAGE_WORD_PREFIX);
+        let suppress_glob = quoted
+            || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+            || word.starts_with(STORAGE_WORD_PREFIX);
         let expanded = strip_matching_quotes(&restore_command_substitution_output(
             &self.expand_word(word),
         ))
@@ -337,12 +347,19 @@ impl Executor {
                             let resolved_list: Option<(Vec<String>, bool)> = (|| {
                                 if let Some((base, starred)) = subscripted {
                                     let resolved = self.resolved_variable_name(base)?;
-                                    let is_assoc =
-                                        is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved);
+                                    let is_assoc = is_marked_var(
+                                        &self.shell_state.env_vars,
+                                        ASSOC_VARS,
+                                        &resolved,
+                                    );
                                     let is_array = is_assoc
-                                        || is_marked_array_var(&self.shell_state.env_vars, &resolved)
+                                        || is_marked_array_var(
+                                            &self.shell_state.env_vars,
+                                            &resolved,
+                                        )
                                         || self
-                                            .shell_state.env_vars
+                                            .shell_state
+                                            .env_vars
                                             .get(&resolved)
                                             .is_some_and(|value| is_array_storage(value));
                                     if is_array {
@@ -350,7 +367,10 @@ impl Executor {
                                         let keys = if is_assoc {
                                             assoc_keys(
                                                 storage,
-                                                assoc_nbuckets(&self.shell_state.env_vars, &resolved),
+                                                assoc_nbuckets(
+                                                    &self.shell_state.env_vars,
+                                                    &resolved,
+                                                ),
                                             )
                                         } else {
                                             array_indices(storage)
@@ -362,16 +382,11 @@ impl Executor {
                                     // non-array yields element 0), so the
                                     // indirection target is X's value.
                                     let target = self.shell_state.env_vars.get(&resolved)?;
-                                    let arr = target
-                                        .strip_suffix("[@]")
-                                        .map(|a| (a, false))
-                                        .or_else(|| {
-                                            target
-                                                .strip_suffix("[*]")
-                                                .map(|a| (a, true))
-                                        })?;
-                                    let resolved_arr =
-                                        self.resolved_variable_name(arr.0)?;
+                                    let arr =
+                                        target.strip_suffix("[@]").map(|a| (a, false)).or_else(
+                                            || target.strip_suffix("[*]").map(|a| (a, true)),
+                                        )?;
+                                    let resolved_arr = self.resolved_variable_name(arr.0)?;
                                     let storage = self.shell_state.env_vars.get(&resolved_arr)?;
                                     let values = if is_marked_var(
                                         &self.shell_state.env_vars,
@@ -380,7 +395,10 @@ impl Executor {
                                     ) {
                                         assoc_hash_ordered_values(
                                             storage,
-                                            assoc_nbuckets(&self.shell_state.env_vars, &resolved_arr),
+                                            assoc_nbuckets(
+                                                &self.shell_state.env_vars,
+                                                &resolved_arr,
+                                            ),
                                         )
                                     } else {
                                         array_values(storage)
@@ -392,16 +410,11 @@ impl Executor {
                                     // expands to the element list.
                                     let resolved = self.resolved_variable_name(ind)?;
                                     let target = self.shell_state.env_vars.get(&resolved)?;
-                                    let arr = target
-                                        .strip_suffix("[@]")
-                                        .map(|a| (a, false))
-                                        .or_else(|| {
-                                            target
-                                                .strip_suffix("[*]")
-                                                .map(|a| (a, true))
-                                        })?;
-                                    let resolved_arr =
-                                        self.resolved_variable_name(arr.0)?;
+                                    let arr =
+                                        target.strip_suffix("[@]").map(|a| (a, false)).or_else(
+                                            || target.strip_suffix("[*]").map(|a| (a, true)),
+                                        )?;
+                                    let resolved_arr = self.resolved_variable_name(arr.0)?;
                                     let storage = self.shell_state.env_vars.get(&resolved_arr)?;
                                     let values = if is_marked_var(
                                         &self.shell_state.env_vars,
@@ -410,14 +423,18 @@ impl Executor {
                                     ) {
                                         assoc_hash_ordered_values(
                                             storage,
-                                            assoc_nbuckets(&self.shell_state.env_vars, &resolved_arr),
+                                            assoc_nbuckets(
+                                                &self.shell_state.env_vars,
+                                                &resolved_arr,
+                                            ),
                                         )
                                     } else {
                                         array_values(storage)
                                     };
                                     Some((values, arr.1))
                                 }
-                            })();
+                            })(
+                            );
                             if let Some((elements, starred)) = resolved_list {
                                 let transformed = elements
                                     .iter()
@@ -428,8 +445,9 @@ impl Executor {
                                 if starred {
                                     // Quoted `*` joins with IFS[0]
                                     // (string_list_pos_params dollar_star).
-                                    return Some(vec![transformed
-                                        .join(&self.ifs_first_char_separator())]);
+                                    return Some(vec![
+                                        transformed.join(&self.ifs_first_char_separator())
+                                    ]);
                                 }
                                 return Some(transformed);
                             }
@@ -440,17 +458,21 @@ impl Executor {
                     }
                     if indirect == "*" {
                         return Some(vec![self
-                            .shell_state.positional_params
+                            .shell_state
+                            .positional_params
                             .join(&self.ifs_first_char_separator())]);
                     }
                     if is_shell_name(indirect) {
-                        if let Some(target) = self.shell_state.env_vars.get(indirect).map(String::as_str) {
+                        if let Some(target) =
+                            self.shell_state.env_vars.get(indirect).map(String::as_str)
+                        {
                             if target == "@" {
                                 return Some(self.shell_state.positional_params.clone());
                             }
                             if target == "*" {
                                 return Some(vec![self
-                                    .shell_state.positional_params
+                                    .shell_state
+                                    .positional_params
                                     .join(&self.ifs_first_char_separator())]);
                             }
                         }
@@ -493,7 +515,8 @@ impl Executor {
                             return Some(self.shell_state.positional_params.clone());
                         }
                         return Some(vec![self
-                            .shell_state.positional_params
+                            .shell_state
+                            .positional_params
                             .join(&self.ifs_first_char_separator())]);
                     }
                 }
@@ -537,7 +560,8 @@ impl Executor {
         &self,
         word: &str,
     ) -> bool {
-        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
+        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX)
+        {
             return false;
         }
         let Some(inner) = whole_word_braced_parameter_body(word) else {
@@ -556,7 +580,8 @@ impl Executor {
         &self,
         word: &str,
     ) -> bool {
-        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX) {
+        if word.starts_with('"') || word.starts_with('\'') || word.starts_with(STORAGE_WORD_PREFIX)
+        {
             return false;
         }
         let Some(inner) = whole_word_braced_parameter_body(word) else {
@@ -574,13 +599,15 @@ impl Executor {
         let values = if transform == ParameterTransform::Assignment {
             let mut values = vec!["set".to_string(), "--".to_string()];
             values.extend(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .iter()
                     .map(|value| shell_single_quote_assignment_value(value)),
             );
             values
         } else {
-            self.shell_state.positional_params
+            self.shell_state
+                .positional_params
                 .iter()
                 .map(|value| self.apply_parameter_transform_value(value, transform))
                 .collect::<Vec<_>>()
@@ -595,7 +622,8 @@ impl Executor {
             // elements (subst.c:3014), so each element survives verbatim: one
             // word per positional (exp10.sub `${*@Q}` with `set -- ' A ' ' B '`).
             let ifs_set_empty = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("IFS")
                 .is_some_and(|value| value.is_empty());
             if ifs_set_empty && !quoted {
@@ -688,7 +716,8 @@ impl Executor {
             return None;
         }
         let values = self
-            .shell_state.positional_params
+            .shell_state
+            .positional_params
             .iter()
             .map(|value| modify(value))
             .collect::<Vec<_>>();
@@ -724,7 +753,6 @@ impl Executor {
                             self.shell_state.positional_params.clone()
                         }
                         QuotedPositionalAtSegment::ArrayAt(name, _) => self
-
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default(),
                         // GNU string_list_dollar_star: `[*]` joins the
@@ -766,7 +794,10 @@ impl Executor {
             .or_else(|| expression.strip_suffix("[*]"))
             .unwrap_or_default();
         let ordered = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
-            assoc_hash_ordered_values(value, assoc_nbuckets(&self.shell_state.env_vars, array_name))
+            assoc_hash_ordered_values(
+                value,
+                assoc_nbuckets(&self.shell_state.env_vars, array_name),
+            )
         } else {
             array_values(value)
         };
@@ -796,7 +827,8 @@ impl Executor {
         command: &CommandNode,
     ) {
         let current_line = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_CURRENT_LINE")
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or_else(|| command.line.unwrap_or(1));
@@ -851,7 +883,8 @@ impl Executor {
         {
             return None;
         }
-        let Some(program) = find_user_command(&stdio.expanded_words[0], &self.shell_state.env_vars) else {
+        let Some(program) = find_user_command(&stdio.expanded_words[0], &self.shell_state.env_vars)
+        else {
             if stdio.expanded_words.first().map(String::as_str) == Some("mktemp") {
                 return None;
             }
@@ -859,10 +892,27 @@ impl Executor {
             // the source (functions, builtins, compound commands).
             return None;
         };
+        let dev_stdin = if let Some(stdin_path) = &stdio.stdin_path {
+            crate::executor::dev_fd_operands::DevOperandStdin::Path(stdin_path.clone())
+        } else if let Some(input) = self.function_stdin_remaining() {
+            crate::executor::dev_fd_operands::DevOperandStdin::Payload(
+                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+            )
+        } else {
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable
+        };
+        let dev_stdout = match &stdio.stdout_redirect {
+            Some(redirect) => {
+                crate::executor::dev_fd_operands::DevOperandStdout::Path(redirect.path.clone())
+            }
+            None => crate::executor::dev_fd_operands::DevOperandStdout::Capture,
+        };
+        let (dev_args, dev_ops) =
+            self.materialize_dev_fd_operands(&stdio.expanded_words[1..], dev_stdin, dev_stdout);
         let (mut process, _) = external_command_for_named_program(
             &program,
             Some(&stdio.expanded_words[0]),
-            &stdio.expanded_words[1..],
+            &dev_args,
             &self.shell_state.env_vars,
         );
 
@@ -876,9 +926,8 @@ impl Executor {
             process.stdin(Stdio::from(file));
         } else if let Some(input) = self.function_stdin_remaining() {
             process.stdin(Stdio::piped());
-            piped_stdin = Some(
-                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
-            );
+            piped_stdin =
+                Some(crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
         }
         if let Some(redirect) = &stdio.stdout_redirect {
             let file = open_command_substitution_redirect(redirect).ok()?;
@@ -899,13 +948,12 @@ impl Executor {
                 let _ = child_stdin.write_all(input);
             }
         }
-        let output = spawned.wait_with_output().ok()?;
+        let mut output = spawned.wait_with_output().ok()?;
+        output.stdout.extend(self.collect_dev_fd_capture(&dev_ops));
         if piped_stdin.is_some() {
             if let Some(text) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
-                self.comsub_stdin_writeback.set(Some((
-                    text.len(),
-                    Self::function_stdin_fingerprint(text),
-                )));
+                self.comsub_stdin_writeback
+                    .set(Some((text.len(), Self::function_stdin_fingerprint(text))));
             }
         }
         let status = output.status.code().unwrap_or(1);
@@ -1066,7 +1114,8 @@ impl Executor {
 
         if index == "NDIRS" {
             return self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("NDIRS")
                 .and_then(|value| value.parse::<usize>().ok())
                 .or_else(|| {
@@ -1084,7 +1133,8 @@ impl Executor {
         }
         let rhs = rhs.parse::<usize>().ok()?;
         let ndirs = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("NDIRS")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or_else(|| {
@@ -1136,10 +1186,7 @@ enum QuotedPositionalAtSegment {
     /// protected data, so they attach to the adjacent word and never field-
     /// split. Text collected between quoted spans is `quoted == false` and
     /// keeps the historic unquoted-literal split behavior.
-    Literal {
-        text: String,
-        quoted: bool,
-    },
+    Literal { text: String, quoted: bool },
     /// `quoted` distinguishes a `"$@"`/`"${@}"` span from a bare unquoted
     /// `$@`/`${@}`: quoted elements' IFS characters are quote-protected data
     /// (GNU CTLESC, subst.c:12273+ word splitting skips them); unquoted
@@ -1156,7 +1203,6 @@ enum QuotedPositionalAtSegment {
     /// joins the elements with IFS[0] into one word (subst.c
     /// string_list_dollar_star), keeping the same affix rules.
     ArrayStar(String, bool),
-
 }
 
 /// `${!name}` where `name` holds `arr[@]`/`arr[*]`: the indirect expansion
@@ -1230,9 +1276,7 @@ fn quoted_positional_at_segments(
                 '$' if chars.get(index + 1) == Some(&'{') => {
                     let body_start = index + 2;
                     if let Some(&body_start_byte) = char_to_byte.get(body_start) {
-                        if let Some(end_byte) =
-                            matching_parameter_brace(&raw[body_start_byte..])
-                        {
+                        if let Some(end_byte) = matching_parameter_brace(&raw[body_start_byte..]) {
                             let close_byte = body_start_byte + end_byte;
                             index = raw[..=close_byte].chars().count();
                             continue;
@@ -1338,8 +1382,7 @@ fn quoted_positional_at_segments(
                 if let Some(&body_start_byte) = char_to_byte.get(body_start) {
                     if let Some(end_byte) = matching_parameter_brace(&raw[body_start_byte..]) {
                         let close_byte = body_start_byte + end_byte;
-                        let body_end =
-                            index + 2 + raw[body_start_byte..close_byte].chars().count();
+                        let body_end = index + 2 + raw[body_start_byte..close_byte].chars().count();
                         let inner = &chars[index + 2..body_end];
                         if inner == ['@'] {
                             push_quoted_positional_literal_segment(
@@ -1360,9 +1403,7 @@ fn quoted_positional_at_segments(
                             // param_expand indirect expansion), e.g.
                             // indir='arr[@]' in nameref18.sub.
                             let ind_name: String = inner[1..].iter().collect();
-                            if let Some((base, star)) =
-                                indirect_array_target(env_vars, &ind_name)
-                            {
+                            if let Some((base, star)) = indirect_array_target(env_vars, &ind_name) {
                                 push_quoted_positional_literal_segment(
                                     &mut segments,
                                     &chars[literal_start..index],
@@ -1380,19 +1421,15 @@ fn quoted_positional_at_segments(
                             }
                         }
                         if inner.len() > 3 && inner[inner.len() - 3..] == ['[', '@', ']'] {
-                            let array_name: String =
-                                inner[..inner.len() - 3].iter().collect();
+                            let array_name: String = inner[..inner.len() - 3].iter().collect();
                             if is_shell_name(&array_name) {
                                 push_quoted_positional_literal_segment(
                                     &mut segments,
                                     &chars[literal_start..index],
                                     false,
                                 )?;
-                                segments.push(QuotedPositionalAtSegment::ArrayAt(
-                                    array_name,
-                                    false,
-
-                                ));
+                                segments
+                                    .push(QuotedPositionalAtSegment::ArrayAt(array_name, false));
                                 saw_positional_at = true;
                                 index = raw[..=close_byte].chars().count();
                                 literal_start = index;
@@ -1506,18 +1543,14 @@ fn quoted_body_positional_at_segments(
                     saw_positional_at = true;
                     index += 4;
                     piece_start = index;
-                } else if let Some(close) =
-                    body[index + 2..].iter().position(|ch| *ch == '}')
-                {
+                } else if let Some(close) = body[index + 2..].iter().position(|ch| *ch == '}') {
                     // `${name[@]}` word-list source inside a larger quoted
                     // body (GNU subst.c: the `[@]` subscript produces one
                     // word per element inside double quotes).
                     let token = &body[index + 2..index + 2 + close];
                     if token.first() == Some(&'!') {
                         let ind_name: String = token[1..].iter().collect();
-                        if let Some((base, star)) =
-                            indirect_array_target(env_vars, &ind_name)
-                        {
+                        if let Some((base, star)) = indirect_array_target(env_vars, &ind_name) {
                             push_body_piece(&mut segments, &body[piece_start..index])?;
                             segments.push(if star {
                                 QuotedPositionalAtSegment::ArrayStar(base, true)
@@ -1552,11 +1585,13 @@ fn quoted_body_positional_at_segments(
                 // belongs to the inner substitution's own expansion, not a
                 // top-level positional word-list source — `"A=$(( $@ ))"`
                 // expands the arith in place (array17.sub).
-                index =
-                    crate::lexer::skip_parenthesized_unit_corrected(body, index + 1)
-                        .unwrap_or(body.len());
+                index = crate::lexer::skip_parenthesized_unit_corrected(body, index + 1)
+                    .unwrap_or(body.len());
             }
-            '$' if body.get(index + 1).is_some_and(|ch| is_shell_name_start(*ch)) => {
+            '$' if body
+                .get(index + 1)
+                .is_some_and(|ch| is_shell_name_start(*ch)) =>
+            {
                 // `"$ref"` inside a larger quoted body: a nameref cell of
                 // `arr[@]`/`arr[*]` is still a word-list source.
                 let mut end = index + 1;
@@ -1727,7 +1762,6 @@ where
                         segments.get(segment_index - 1),
                         Some(QuotedPositionalAtSegment::PositionalAt(_))
                             | Some(QuotedPositionalAtSegment::ArrayAt(..))
-
                     )
                 {
                     // Only an unquoted literal directly after $@ emulates the
@@ -1766,7 +1800,6 @@ where
                     current_has_quoted = *quoted;
                     for value in &values[1..values.len() - 1] {
                         words.push((value.clone(), *quoted));
-
                     }
                     current.push_str(&values[values.len() - 1]);
                 }

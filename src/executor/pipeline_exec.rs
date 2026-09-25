@@ -76,7 +76,7 @@ fn wait_for_windows_pipeline_member(
     }
 }
 use crate::executor::external_setup::shared_combined_output_process_substitution;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 #[derive(Debug, Clone)]
 struct TimedPipelineInput {
@@ -153,12 +153,9 @@ impl Executor {
             // execute_command for the other kinds; brace groups dispatch
             // here instead.
             if !command.redirects.is_empty() {
-                self.shell_state.stdin_redir.set(
-                    command
-                        .redirects
-                        .iter()
-                        .any(redirect_updates_stdin_redir),
-                );
+                self.shell_state
+                    .stdin_redir
+                    .set(command.redirects.iter().any(redirect_updates_stdin_redir));
             }
             let mut redirect_command = command.clone();
             let group_outputs =
@@ -170,7 +167,8 @@ impl Executor {
             // whole group (redir.c do_redirection_internal applies compound
             // redirections once), like with_loop_fd_heredocs does for loops.
             let result = self.with_loop_fd_heredocs(command, |executor| {
-                executor.with_command_input_redirects(command, |executor| executor.execute_ast(&ast))
+                executor
+                    .with_command_input_redirects(command, |executor| executor.execute_ast(&ast))
             });
             // GNU Bash 5.2 (probes y1/y3, 2026-08-24): a word-expansion failure
             // inside a brace group ends only the group tail. The command
@@ -211,7 +209,11 @@ impl Executor {
         };
         let inner = inner.trim().trim_end_matches(';').trim();
         if inner == "hash -t cat | grep cat >/dev/null" {
-            self.exit_code = if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, "cat").is_some()
+            self.exit_code = if crate::builtins::hash::hashed_path(
+                &self.shell_state.env_vars,
+                "cat",
+            )
+            .is_some()
             {
                 0
             } else {
@@ -226,7 +228,8 @@ impl Executor {
         let start_line = command
             .line
             .or_else(|| {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get("__RUBASH_CURRENT_LINE")
                     .and_then(|value| value.parse::<usize>().ok())
             })
@@ -776,10 +779,15 @@ impl Executor {
         self.exit_code = saved_status;
         self.shell_state.variables.remove(name);
         if let Some(saved_value) = saved_value {
-            let _ = self.shell_state.variables.set(name.to_string(), saved_value);
+            let _ = self
+                .shell_state
+                .variables
+                .set(name.to_string(), saved_value);
         }
         let (stdout, stderr, _) = result?;
-        stderr.is_empty().then(|| stdout.replace(crate::executor::markers::CTLESC, ""))
+        stderr
+            .is_empty()
+            .then(|| stdout.replace(crate::executor::markers::CTLESC, ""))
     }
 
     /// Connect a pipeline of native external processes with OS pipes.  The
@@ -860,10 +868,12 @@ impl Executor {
             if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
                 return Ok(None);
             }
-            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars).or_else(|| {
-                matches!(expanded_name.as_str(), "yes" | "head" | "wc")
-                    .then(|| internal_pipeline_program(&expanded_name))
-            }) else {
+            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars)
+                .or_else(|| {
+                    matches!(expanded_name.as_str(), "yes" | "head" | "wc")
+                        .then(|| internal_pipeline_program(&expanded_name))
+                })
+            else {
                 return Ok(None);
             };
             // GNU execute_cmd.c:6139-6233 (shell_execve): a member the OS
@@ -887,7 +897,9 @@ impl Executor {
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
-                if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+                if value.starts_with(STORAGE_WORD_PREFIX)
+                    || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                {
                     args.push(value.replace(crate::executor::markers::CTLESC, ""));
                     continue;
                 }
@@ -917,20 +929,67 @@ impl Executor {
             pipes.push((Some(read), Some(write)));
         }
 
+        // Stage 0's fd-0 payload is computed once and reused for the
+        // post-spawn stdin write below; a `/dev/stdin` operand on the first
+        // member materializes the same bytes.
+        let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
+
         let mut processes = Vec::with_capacity(commands.len());
+        let mut stage_dev_ops = Vec::with_capacity(commands.len());
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
         let mut intermediate_stderr = Vec::new();
         for (index, (program, args)) in specs.iter().enumerate() {
+            // The stage's fd 0/1 are OS pipes owned by this loop, not fd
+            // table endpoints — a `/dev/stdin` operand drains the incoming
+            // reader into a temp file and a `/dev/stdout` operand flushes
+            // its temp into a dup of the outgoing writer after exit.
+            // split_at_mut keeps the incoming reader (pipes[index-1].0) and
+            // the outgoing writer (pipes[index].1) borrowable at once.
+            let (before, current) = pipes.split_at_mut(index);
+            let dev_stdin = if index == 0 {
+                crate::executor::dev_fd_operands::DevOperandStdin::Payload(
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stage0_input),
+                )
+            } else {
+                match before.last_mut().and_then(|pipe| pipe.0.as_mut()) {
+                    Some(reader) => {
+                        crate::executor::dev_fd_operands::DevOperandStdin::Reader(reader)
+                    }
+                    None => crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                }
+            };
+            let dev_stdout = if index + 1 < commands.len()
+                && args
+                    .iter()
+                    .any(|arg| crate::executor::dev_fd_operands::dev_operand_targets_fd(arg, 1))
+            {
+                use std::os::windows::io::AsRawHandle;
+                current
+                    .first()
+                    .and_then(|pipe| pipe.1.as_ref())
+                    .and_then(|writer| {
+                        crate::fd::duplicate_handle(writer.as_raw_handle() as crate::fd::HANDLE)
+                            .ok()
+                    })
+                    .map(crate::executor::dev_fd_operands::DevOperandStdout::PipeWriter)
+                    .unwrap_or(crate::executor::dev_fd_operands::DevOperandStdout::FdTable)
+            } else if index + 1 == commands.len() {
+                crate::executor::dev_fd_operands::DevOperandStdout::Capture
+            } else {
+                crate::executor::dev_fd_operands::DevOperandStdout::FdTable
+            };
+            let (dev_args, dev_ops) = self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout);
+            stage_dev_ops.push(dev_ops);
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
                 let mut process = std::process::Command::new(std::env::current_exe()?);
-                process.arg(format!("--internal-{name}")).args(args);
+                process.arg(format!("--internal-{name}")).args(&dev_args);
                 (process, false)
             } else {
                 external_command_for_named_program(
                     program,
                     Some(&self.expand_word(&commands[index].words[0])),
-                    args,
+                    &dev_args,
                     &self.shell_state.env_vars,
                 )
             };
@@ -973,35 +1032,42 @@ impl Executor {
         // Spawn every stage before writing a heredoc. A large heredoc can fill
         // the first stdin pipe while the downstream stages are still absent.
         if let Some(mut stdin) = processes[0].stdin.take() {
-            let (input, stdin_base) = self.initial_pipeline_input(commands[0]);
-            if let Some(base) = stdin_base {
+            if let Some(base) = stage0_stdin_base {
                 // The spawned child was handed the whole unread tail; GNU's
                 // shared fd 0 models that as consumed.
                 self.shell_state.env_vars.insert(
                     FUNCTION_STDIN_OFFSET.to_string(),
-                    (base + input.len()).to_string(),
+                    (base + stage0_input.len()).to_string(),
                 );
             }
-            if !input.is_empty() {
+            if !stage0_input.is_empty() {
                 stdin.write_all(
-                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input),
+                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stage0_input),
                 )?;
             }
         }
 
-        let mut results = Vec::with_capacity(processes.len());
+        let mut results: Vec<(String, String, i32)> = vec![Default::default(); processes.len()];
         let last = processes.pop().expect("pipeline has at least two stages");
+        let last_index = processes.len();
+        // Reap non-final stages in forward order: a `/dev/stdout`-family
+        // operand on stage N flushes into a dup'd writer of pipe N, and that
+        // dup must close before stage N+1 can see EOF — reaping downstream
+        // first would deadlock the wait.
+        for (index, mut member) in processes.into_iter().enumerate() {
+            let status = wait_for_windows_pipeline_member(&mut member)?;
+            results[index] = (String::new(), String::new(), status.code().unwrap_or(1));
+            self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[index]));
+        }
         let output = last.wait_with_output()?;
-        results.push((
-            crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
+        let mut stdout_bytes = output.stdout;
+        stdout_bytes
+            .extend(self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[last_index])));
+        results[last_index] = (
+            crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
             output.status.code().unwrap_or(1),
-        ));
-        for mut process in processes.into_iter().rev() {
-            let status = wait_for_windows_pipeline_member(&mut process)?;
-            results.push((String::new(), String::new(), status.code().unwrap_or(1)));
-        }
-        results.reverse();
+        );
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
@@ -1010,7 +1076,11 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0, false)?;
+        self.write_pipeline_output(
+            commands[commands.len() - 1],
+            &results.last().unwrap().0,
+            false,
+        )?;
         if let Some((_, stderr, _)) = results.last() {
             if !stderr.is_empty() {
                 std::io::stderr().write_all(
@@ -1096,7 +1166,8 @@ impl Executor {
             if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
                 return Ok(None);
             }
-            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars) else {
+            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars)
+            else {
                 return Ok(None);
             };
             // GNU execute_simple_command pathname-expands every argument
@@ -1110,7 +1181,9 @@ impl Executor {
                 let value = self.expand_word(word);
                 // \x1d marks a fully quoted word and \x1b a quoted
                 // tilde; both stay literal.
-                if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+                if value.starts_with(STORAGE_WORD_PREFIX)
+                    || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                {
                     args.push(value.replace(crate::executor::markers::CTLESC, ""));
                     continue;
                 }
@@ -1223,7 +1296,11 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        self.write_pipeline_output(commands[commands.len() - 1], &results.last().unwrap().0, false)?;
+        self.write_pipeline_output(
+            commands[commands.len() - 1],
+            &results.last().unwrap().0,
+            false,
+        )?;
         if let Some((_, stderr, _)) = results.last() {
             if !stderr.is_empty() {
                 if let Some(capture) = &mut self.stderr_capture {
@@ -1331,7 +1408,9 @@ impl Executor {
             for expanded in self.expand_command_word(command, index, word, raw) {
                 //  marks a fully quoted word and  a quoted tilde;
                 // both stay literal, exactly as command_prepare does.
-                if expanded.starts_with(STORAGE_WORD_PREFIX) || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+                if expanded.starts_with(STORAGE_WORD_PREFIX)
+                    || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                {
                     out.push(expanded.replace(crate::executor::markers::CTLESC, ""));
                     continue;
                 }
@@ -1383,10 +1462,16 @@ impl Executor {
         // redirections like `cat < /dev/stdin` (niubash#118) resolve to the
         // stage input instead of the process's own stdin handle.
         let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-        self.shell_state.env_vars
+        let old_stdin_offset = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .cloned();
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN.to_string(), input.to_string());
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
         self.pipeline_stdin_consumed.set(None);
         let result = if command_has_pipeline_process_substitution(command) {
@@ -1394,14 +1479,24 @@ impl Executor {
             // upstream pipe — so expose the captured input while the
             // substitution sources run.
             let old_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-            let old_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
-            self.shell_state.env_vars
+            let old_stdin_offset = self
+                .shell_state
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .cloned();
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN.to_string(), input.to_string());
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             let materialized = self.command_with_process_substitution_files(command);
             restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
-            restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                FUNCTION_STDIN_OFFSET,
+                old_stdin_offset,
+            );
             match materialized {
                 Ok((materialized, process_substitutions)) => {
                     let inner = self.execute_pipeline_stage_inner(&materialized, input);
@@ -1420,14 +1515,19 @@ impl Executor {
         // is missing falls back to the cursor visible here.
         if self.pipeline_stdin_consumed.get().is_none() {
             let measured = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(0);
             self.pipeline_stdin_consumed.set(Some(measured));
         }
         restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_stdin);
-        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN_OFFSET, old_stdin_offset);
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FUNCTION_STDIN_OFFSET,
+            old_stdin_offset,
+        );
         let nounset_hit = self.restore_arithmetic_error_flags(&saved);
         match result {
             Ok(Some((output, stderr, _status))) if nounset_hit => {
@@ -1453,7 +1553,11 @@ impl Executor {
             else {
                 return Ok(None);
             };
-            print_time(&self.shell_state.env_vars, time_command.posix_format, started);
+            print_time(
+                &self.shell_state.env_vars,
+                time_command.posix_format,
+                started,
+            );
             let status = if time_command.inverted {
                 invert_exit_status(status)
             } else {
@@ -1655,7 +1759,9 @@ impl Executor {
                     let value = self.expand_word(word);
                     // \x1d marks a fully quoted word and \x1b a quoted
                     // tilde; both stay literal.
-                    if value.starts_with(STORAGE_WORD_PREFIX) || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) {
+                    if value.starts_with(STORAGE_WORD_PREFIX)
+                        || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+                    {
                         file_operands.push(value.replace(crate::executor::markers::CTLESC, ""));
                         continue;
                     }
@@ -1706,6 +1812,52 @@ impl Executor {
                                     &bytes,
                                 ),
                             );
+                            continue;
+                        }
+                        // `/dev/stdin`/`/dev/fd/N`/`/proc/self/fd/N`
+                        // operands resolve against this stage's fd
+                        // endpoints, not the filesystem: fd 0 is the
+                        // stage input (same lazy cursor as `-`), higher
+                        // fds come from the executor's fd table.
+                        if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&path) {
+                            let bytes_opt = if fd == 0 {
+                                if stdin_remaining.is_none() {
+                                    stdin_remaining = Some(
+                                        self.stdin_string_for_command_mut(command)
+                                            .unwrap_or_else(|| input.to_string()),
+                                    );
+                                }
+                                Some(
+                                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                                        &stdin_remaining.take().unwrap_or_default(),
+                                    ),
+                                )
+                            } else {
+                                self.dev_fd_operand_bytes_for_command(command, fd)
+                            };
+                            match bytes_opt {
+                                Some(bytes) => {
+                                    let bytes = if show_nonprinting {
+                                        crate::executor::external_file_builtins::cat_v_filter(
+                                            &bytes,
+                                        )
+                                    } else {
+                                        bytes
+                                    };
+                                    output.push_str(
+                                        &crate::executor::substitution_metadata::bytes_to_shell_text(
+                                            &bytes,
+                                        ),
+                                    );
+                                }
+                                None => {
+                                    stderr.push_str(&format!(
+                                        "{}cat: {path}: No such file or directory\n",
+                                        self.diagnostic_prefix()
+                                    ));
+                                    status = 1;
+                                }
+                            }
                             continue;
                         }
                         match fs::read(shell_path_to_windows(&path, &self.shell_state.env_vars)) {
@@ -2004,7 +2156,8 @@ impl Executor {
     fn initial_pipeline_input(&mut self, command: &CommandNode) -> (String, Option<usize>) {
         self.apply_comsub_stdin_writeback();
         let base = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -2018,7 +2171,8 @@ impl Executor {
             })
             .unwrap_or_default();
         if from_function_stdin {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), base.to_string());
             (input, Some(base))
         } else {

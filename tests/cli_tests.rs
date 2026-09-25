@@ -13,6 +13,8 @@ mod compat_issue78_multiline_arrays;
 mod compat_issue_regressions;
 #[path = "cli_tests/declare_output.rs"]
 mod declare_output;
+#[path = "cli_tests/dev_fd_operands.rs"]
+mod dev_fd_operands;
 #[path = "cli_tests/examples.rs"]
 mod examples;
 #[path = "cli_tests/fd_redirects.rs"]
@@ -3436,8 +3438,11 @@ fn this_sh_child_script_runs_history_expansion() {
     )
     .expect("write child script");
     let parent = dir.join("parent.sh");
-    std::fs::write(&parent, format!("${{THIS_SH}} {}\n", shell_test_path(&child)))
-        .expect("write parent script");
+    std::fs::write(
+        &parent,
+        format!("${{THIS_SH}} {}\n", shell_test_path(&child)),
+    )
+    .expect("write parent script");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&parent)
@@ -3480,7 +3485,11 @@ fn kill_zero_reports_dead_background_child_after_kill() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -3524,7 +3533,12 @@ fn kill_zero_and_terminate_foreign_windows_process() {
         .expect("run rubash");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout, "DEAD\n", "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        stdout,
+        "DEAD\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     // Idempotent cleanup in case the kill above failed the assert early.
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/F"])

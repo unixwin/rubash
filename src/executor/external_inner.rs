@@ -51,10 +51,15 @@ impl Executor {
             return Ok(());
         };
 
+        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+            &config.command[1..],
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+            crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&config.command[0]),
-            &config.command[1..],
+            &dev_args,
             &env_vars,
         );
         apply_env_command_environment(&mut process, &env_vars, !config.ignore_environment);
@@ -68,7 +73,7 @@ impl Executor {
             process.current_dir(directory);
         }
         self.apply_external_redirects(cmd, &mut process)?;
-        self.spawn_external_process(cmd, &program, process, used_shell)
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops)
     }
 
     fn parse_env_command_args(
@@ -448,15 +453,20 @@ impl Executor {
             }
         }
 
+        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+            &cmd.words[1..],
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+            crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+        );
         let (mut process, used_shell) = external_command_for_named_program(
             &program,
             Some(&cmd.words[0]),
-            &cmd.words[1..],
+            &dev_args,
             &self.shell_state.env_vars,
         );
         self.apply_external_environment(cmd, &mut process);
         self.apply_external_redirects(cmd, &mut process)?;
-        self.spawn_external_process(cmd, &program, process, used_shell)
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops)
     }
 
     fn handle_host_external_command(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
@@ -624,6 +634,7 @@ impl Executor {
         program: &PathBuf,
         mut process: Command,
         used_shell: bool,
+        dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
     ) -> Result<(), ExecuteError> {
         match process.spawn() {
             Ok(mut child) => {
@@ -676,6 +687,10 @@ impl Executor {
                         Err(error) => self.report_external_spawn_error(cmd, error)?,
                     }
                 }
+                // /dev/fd operands materialized as temps resolve now: write
+                // endpoints flush into their target and consumed input fds
+                // advance (GNU dup shares the fd offset).
+                self.finish_dev_fd_operands(dev_ops);
             }
             Err(error) => {
                 if !used_shell && is_exec_format_error(&error) {
@@ -699,7 +714,13 @@ impl Executor {
                         shell_process.args(&cmd.words[1..]);
                         self.apply_external_environment(cmd, &mut shell_process);
                         self.apply_external_redirects(cmd, &mut shell_process)?;
-                        return self.spawn_external_process(cmd, program, shell_process, true);
+                        return self.spawn_external_process(
+                            cmd,
+                            program,
+                            shell_process,
+                            true,
+                            dev_ops,
+                        );
                     }
                 }
                 self.report_external_spawn_error(cmd, error)?;
