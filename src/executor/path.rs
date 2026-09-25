@@ -733,8 +733,17 @@ fn windows_external_absolute_argument_needs_translation(
         return configured_shell_root(env_vars).is_some();
     }
 
-    if matches!(normalized, "/dev" | "/dev/null") || normalized.starts_with("/dev/") {
-        return true;
+    // /dev/* pseudo-device operands pass through literally: POSIX-aware
+    // children resolve them against their own descriptor table (winuxcmd's
+    // native_path layer maps /dev/std* and /dev/fd/N to the real fds,
+    // MSYS2/Cygwin tools via their emulation, and /dev/null -> NUL). Shell-
+    // side translation to CONOUT$/CONIN$/NUL either dangles (a shell-root
+    // `dev/stdout` path) or pins the child to the console device instead
+    // of its actual fd — `echo x | tee /dev/stdout | wc -l` must write the
+    // pipe, not CONOUT$ (unixwin/rubash#120). Redirect targets still go
+    // through shell_path_to_windows, which owns the fd/console mapping.
+    if normalized == "/dev" || normalized.starts_with("/dev/") {
+        return false;
     }
 
     if normalized == "/tmp" || normalized.starts_with("/tmp/") {
