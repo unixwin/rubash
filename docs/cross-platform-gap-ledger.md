@@ -126,3 +126,11 @@ aarch64-apple-darwin 干净；5 条 WSL GNU Bash 5.3.0 基线对齐。
 4. N1+N2（宿主 spawn 委托引擎 + Ctrl-C 归一）——niubash 跨平台的核心两刀；
 5. E2-E9 机械清欠（每项一处 cfg/委托，独立可验证）；
 6. C4 linux 83-suite smoke，账本驱动后续。
+
+**Wave-2 素材（A5/N2 回收时新增，2026-09-26）**：
+- 引擎加**非消费** `peek_pending_signals()`——宿主提示符时机反应的正确接口；
+  `take_pending_signals` 是破坏性排空（kill.rs `mem::take` + `Signals::pending()`），
+  REPL 轮询它会在引擎派发前偷走信号（等同吞没）。
+- `--noediting` 回退路径（无 raw mode）unix 下 ^C 产生真内核 SIGINT，
+  `read_line` 的 `ErrorKind::Interrupted` 需显式验证/处理。
+- ~~删 rubash `ctrlc` 死依赖~~（已完成，防宿主/引擎内误用引发处理器替换或叠加）。

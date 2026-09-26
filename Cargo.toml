@@ -30,7 +30,6 @@ path = "src/bin/bash.rs"
 
 [dependencies]
 regex = "1"
-ctrlc = "3"
 os_pipe = "1.2"
 
 [target.'cfg(windows)'.dependencies]
