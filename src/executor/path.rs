@@ -4,14 +4,14 @@
 // - findcmd.c
 // - findcmd.h
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::support_names::split_shell_path;
 use crate::executor::markers::DATA_DOLLAR;
@@ -26,10 +26,46 @@ pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PA
 /// too slow to consult per lookup, so external resolution keeps a separate
 /// in-memory map here. On Windows a single miss costs tens of milliseconds
 /// (PATH entries x PATHEXT stat probes, plus a possible `winuxcmd help
-/// <name>` child process), so both hits and misses are cached.
+/// <name>` child process), so hits, misses, per-directory listings backing
+/// a merged PATH scan, and dispatcher probe outcomes are all cached
+/// (rubash#159).
 struct CommandLookupCache {
     fingerprint: String,
     results: HashMap<String, Option<PathBuf>>,
+    /// Lowercased file-name listing per physical PATH directory. Replaces
+    /// the PATH x PATHEXT per-candidate stat grid with one read_dir per
+    /// directory (rubash#159).
+    listings: HashMap<PathBuf, Arc<HashSet<String>>>,
+    /// `winuxcmd help NAME` dispatcher probe outcomes keyed by dispatch
+    /// name (rubash#159). Each uncached probe is a child process; GNU has
+    /// no analogue because findcmd.c:623 find_user_command_in_path is a
+    /// pure stat walk.
+    probes: HashMap<String, bool>,
+    /// Per-fingerprint PATH scan scaffold (rubash#159): the split and
+    /// translated PATH directories and the parsed PATHEXT order, built on
+    /// the first uncached lookup after a fingerprint change. They are pure
+    /// functions of the fingerprint's inputs, so recomputing them per
+    /// lookup (split_shell_path + shell_path_to_windows per directory,
+    /// which itself stats the pinned POSIX tools dir) is pure overhead.
+    path_dirs: Option<Arc<Vec<PathBuf>>>,
+    path_extensions: Option<Arc<Vec<String>>>,
+}
+
+impl CommandLookupCache {
+    /// Drop everything keyed on the previous fingerprint. GNU's
+    /// equivalent single flush point is phash_flush()
+    /// (builtins/hash.def:150, `hash -r`); the fingerprint mismatch path
+    /// mirrors GNU invalidating the hash table when PATH is assigned
+    /// (findcmd.c:356-380 search_for_command consults the live $PATH each
+    /// time, so a PATH change is observed immediately).
+    fn reset(&mut self, fingerprint: String) {
+        self.fingerprint = fingerprint;
+        self.results.clear();
+        self.listings.clear();
+        self.probes.clear();
+        self.path_dirs = None;
+        self.path_extensions = None;
+    }
 }
 
 static COMMAND_LOOKUP_CACHE: OnceLock<Mutex<CommandLookupCache>> = OnceLock::new();
@@ -39,6 +75,10 @@ fn command_lookup_cache() -> &'static Mutex<CommandLookupCache> {
         Mutex::new(CommandLookupCache {
             fingerprint: String::new(),
             results: HashMap::new(),
+            listings: HashMap::new(),
+            probes: HashMap::new(),
+            path_dirs: None,
+            path_extensions: None,
         })
     })
 }
@@ -48,8 +88,7 @@ pub(crate) fn clear_command_lookup_cache() {
     let mut cache = command_lookup_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.results.clear();
-    cache.fingerprint.clear();
+    cache.reset(String::new());
 }
 
 /// Forget one remembered command location.
@@ -181,20 +220,44 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         return None;
     }
 
-    // GNU findcmd.c:356-365: `hashing_enabled` is the runtime mirror of
-    // `set -h` / `set +h` (the `hashall` shell option). When it is off,
-    // search_for_command skips phash_search AND phash_insert entirely, so
-    // every lookup pays a full PATH scan and nothing is remembered.
-    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
-        return find_user_command_uncached(name, env_vars);
-    }
-
-    // GNU findcmd.c:356-359: if PATH is in the temporary command environment
-    // (PATH=foo cmd), search_for_command skips phash_search AND phash_insert
-    // entirely. Rubash tags temp-PATH state with __RUBASH_TEMP_PATH (set in
-    // apply_temporary_assignments, cleared in restore_temporary_assignments).
-    if env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1") {
-        return find_user_command_uncached(name, env_vars);
+    // GNU findcmd.c:348-427 search_for_command(): when hashing is disabled
+    // (`set +h`, findcmd.c:356 hashing_enabled) or PATH is in the command's
+    // temporary environment (findcmd.c:359 temp_path), phash_search AND
+    // phash_insert are both skipped and every lookup re-walks $PATH. GNU's
+    // walk costs microseconds so it needs no cache; the Windows walk costs
+    // milliseconds, so on these bypass paths a miss is memoized in the same
+    // process-internal, fingerprint-keyed store the hashed path uses
+    // (rubash#159). Only misses are memoized here: a file that appears
+    // mid-session without a PATH change must stay findable, which keeps
+    // GNU's re-scan semantics for positives (`hash -r` /
+    // builtins/hash.def:150 phash_flush and any fingerprint change still
+    // drop the memo).
+    if !crate::builtins::set::shell_option_enabled(env_vars, "hashall")
+        || env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1")
+    {
+        let fingerprint = command_lookup_fingerprint(env_vars);
+        {
+            let mut cache = command_lookup_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.fingerprint != fingerprint {
+                cache.reset(fingerprint.clone());
+            } else if cache.results.get(name) == Some(&None) {
+                return None;
+            }
+        }
+        let result = find_user_command_uncached(name, env_vars, &fingerprint);
+        if result.is_none() {
+            let mut cache = command_lookup_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.fingerprint != fingerprint {
+                cache.reset(fingerprint);
+            } else {
+                cache.results.insert(name.to_string(), None);
+            }
+        }
+        return result;
     }
 
     let fingerprint = command_lookup_fingerprint(env_vars);
@@ -203,8 +266,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if cache.fingerprint != fingerprint {
-            cache.results.clear();
-            cache.fingerprint = fingerprint.clone();
+            cache.reset(fingerprint.clone());
         } else if let Some(result) = cache.results.get(name) {
             // GNU findcmd.c:367-380: if check_hashed_filenames (the `checkhash`
             // shopt) is active, stat the cached path on every hit; a file
@@ -223,14 +285,13 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         }
     }
 
-    let result = find_user_command_uncached(name, env_vars);
+    let result = find_user_command_uncached(name, env_vars, &fingerprint);
 
     let mut cache = command_lookup_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if cache.fingerprint != fingerprint {
-        cache.results.clear();
-        cache.fingerprint = fingerprint;
+        cache.reset(fingerprint);
     }
     if cache.results.len() >= 4096 {
         cache.results.clear();
@@ -247,7 +308,130 @@ fn cached_path_still_valid(path: &Path) -> bool {
     path.exists() && path.is_file()
 }
 
-fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+/// Cached lowercased-name listing of one directory (rubash#159).
+///
+/// GNU bash stats each PATH-element/name candidate directly
+/// (findcmd.c:623 find_user_command_in_path -> find_in_path_element ->
+/// file_status, findcmd.c:113); on Linux that is a microsecond syscall, but
+/// on Windows the equivalent walk is one CreateFile per candidate per
+/// directory, which costs milliseconds across a realistic PATH x PATHEXT
+/// grid. One read_dir per directory replaces the grid and is remembered
+/// for the life of the fingerprint.
+///
+/// This is an in-process negative cache by design: bash has none (a miss
+/// re-walks and can observe a file that just appeared), so the divergence
+/// is bounded to "a file created inside an already-listed PATH directory
+/// after its listing was taken is not found until the fingerprint changes
+/// or `hash -r` (builtins/hash.def:150 phash_flush) clears the cache". An
+/// unreadable directory (missing PATH entry, permission denial) yields an
+/// empty listing -- exactly the set of names the per-candidate stat walk
+/// would have found there: none. `cache` must already be verified against
+/// the current fingerprint by the caller.
+#[cfg(not(unix))]
+fn cached_dir_listing(cache: &mut CommandLookupCache, directory: &Path) -> Arc<HashSet<String>> {
+    if let Some(listing) = cache.listings.get(directory) {
+        return Arc::clone(listing);
+    }
+    let names = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().to_lowercase())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let listing = Arc::new(names);
+    if cache.listings.len() >= 512 {
+        cache.listings.clear();
+    }
+    cache
+        .listings
+        .insert(directory.to_path_buf(), Arc::clone(&listing));
+    listing
+}
+
+/// Listing-assisted equivalent of executable_candidate() for the PATH walk
+/// (rubash#159). The candidate set and its order are byte-identical to
+/// executable_candidate() -- PATHEXT extensions first for extensionless
+/// names, the bare path first otherwise -- but a candidate is only stat'ed
+/// when the directory listing says its name exists, so a full miss costs
+/// zero per-candidate stats instead of one per PATH entry x extension.
+/// The final is_file() confirmation keeps the stat walk's exact semantics
+/// for names claimed by directories or dangling symlinks.
+#[cfg(not(unix))]
+fn executable_candidate_listed(
+    base: &Path,
+    listing: &HashSet<String>,
+    extensions: &[String],
+) -> Option<PathBuf> {
+    let listed_file = |candidate: &Path| -> Option<PathBuf> {
+        let file_name = candidate.file_name()?.to_string_lossy().to_lowercase();
+        (listing.contains(&file_name) && candidate.is_file()).then(|| candidate.to_path_buf())
+    };
+    if base.extension().is_some() {
+        if let Some(found) = listed_file(base) {
+            return Some(found);
+        }
+    }
+    for ext in extensions {
+        if let Some(found) = listed_file(&base.with_extension(ext)) {
+            return Some(found);
+        }
+    }
+    if base.extension().is_none() {
+        if let Some(found) = listed_file(base) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Merged Windows PATH scan (rubash#159). Mirrors the walk shape of GNU
+/// findcmd.c:623 find_user_command_in_path (first match wins, PATH order
+/// preserved, per-directory extension order from executable_candidate),
+/// but consults the per-fingerprint scan scaffold and the cached
+/// directory listings under one lock, so a warm miss performs no
+/// filesystem syscalls at all.
+#[cfg(not(unix))]
+fn find_in_path_via_listings(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    fingerprint: &str,
+) -> Option<PathBuf> {
+    let mut cache = command_lookup_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.fingerprint != fingerprint {
+        cache.reset(fingerprint.to_string());
+    }
+    if cache.path_dirs.is_none() {
+        let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
+            .into_iter()
+            .map(|dir| shell_path_to_windows(&dir, env_vars))
+            .collect::<Vec<_>>();
+        cache.path_dirs = Some(Arc::new(dirs));
+    }
+    if cache.path_extensions.is_none() {
+        cache.path_extensions = Some(Arc::new(executable_extensions(env_vars)));
+    }
+    let dirs = Arc::clone(cache.path_dirs.as_ref().unwrap());
+    let extensions = Arc::clone(cache.path_extensions.as_ref().unwrap());
+    for dir in dirs.iter() {
+        let base = dir.join(name);
+        let listing = cached_dir_listing(&mut cache, dir);
+        if let Some(found) = executable_candidate_listed(&base, &listing, &extensions) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+#[cfg_attr(unix, allow(unused_variables))]
+fn find_user_command_uncached(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+    fingerprint: &str,
+) -> Option<PathBuf> {
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
         // file (execve semantics). The substitute chain below (explicit
@@ -311,11 +495,10 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
     // 126), not not-found (127). Windows has no execute bit, so the
     // preference tier collapses to the first-existing-file behavior.
     #[cfg(unix)]
-    let mut file_to_lose_on: Option<PathBuf> = None;
-    for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
-        let candidate = shell_path_to_windows(&dir, env_vars).join(name);
-        #[cfg(unix)]
-        {
+    {
+        let mut file_to_lose_on: Option<PathBuf> = None;
+        for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
+            let candidate = shell_path_to_windows(&dir, env_vars).join(name);
             if !candidate.is_file() {
                 continue;
             }
@@ -326,16 +509,18 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
                 file_to_lose_on = Some(candidate);
             }
         }
-        #[cfg(not(unix))]
-        {
-            if let Some(found) = executable_candidate(&candidate, env_vars) {
-                return Some(found);
-            }
+        if let Some(fallback) = file_to_lose_on {
+            return Some(fallback);
         }
     }
-    #[cfg(unix)]
-    if let Some(fallback) = file_to_lose_on {
-        return Some(fallback);
+    // rubash#159: the Windows branch replaces GNU's per-element
+    // find_in_path_element -> file_status (findcmd.c:113) stat walk with a
+    // merged per-directory listing scan: one read_dir per PATH directory,
+    // cached per fingerprint, instead of one stat per PATH directory x
+    // PATHEXT extension.
+    #[cfg(not(unix))]
+    if let Some(found) = find_in_path_via_listings(name, env_vars, fingerprint) {
+        return Some(found);
     }
 
     // A workspace may expose WinuxCmd as one dispatcher executable instead of
@@ -343,7 +528,7 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
     // before returning it; unknown names must retain Bash's 127 behavior.
     #[cfg(windows)]
     if let Some(dispatcher) = find_winuxcmd_dispatcher(env_vars) {
-        if winuxcmd_has_command(&dispatcher, name, env_vars) {
+        if winuxcmd_has_command_cached(&dispatcher, name, env_vars) {
             return Some(dispatcher);
         }
     }
@@ -679,6 +864,44 @@ fn winuxcmd_has_command(dispatcher: &Path, name: &str, env_vars: &HashMap<String
     command.output().is_ok_and(|output| output.status.success())
 }
 
+/// rubash#159: `winuxcmd help NAME` probe memo. Each uncached probe is a
+/// child process (tens of milliseconds) and every PATH miss reaches it
+/// once per unique name. GNU has no analogue (findcmd.c:623
+/// find_user_command_in_path is a pure stat walk), so this is purely a
+/// Windows dispatcher concern: outcomes are remembered per dispatch name
+/// for the life of the env fingerprint, which covers the WINUXCMD*/
+/// COREUTILS_PATH variables that select the dispatcher itself.
+#[cfg(windows)]
+fn winuxcmd_has_command_cached(
+    dispatcher: &Path,
+    name: &str,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let fingerprint = command_lookup_fingerprint(env_vars);
+    {
+        let mut cache = command_lookup_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.fingerprint != fingerprint {
+            cache.reset(fingerprint.clone());
+        } else if let Some(cached) = cache.probes.get(name) {
+            return *cached;
+        }
+    }
+    let probed = winuxcmd_has_command(dispatcher, name, env_vars);
+    let mut cache = command_lookup_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.fingerprint != fingerprint {
+        cache.reset(fingerprint);
+    }
+    if cache.probes.len() >= 4096 {
+        cache.probes.clear();
+    }
+    cache.probes.insert(name.to_string(), probed);
+    probed
+}
+
 #[cfg(windows)]
 fn find_winuxcmd_absolute_command(
     name: &str,
@@ -686,7 +909,7 @@ fn find_winuxcmd_absolute_command(
 ) -> Option<PathBuf> {
     let command_name = logical_bin_command_name(name)?;
     let dispatcher = find_winuxcmd_dispatcher(env_vars)?;
-    winuxcmd_has_command(&dispatcher, &command_name, env_vars).then_some(dispatcher)
+    winuxcmd_has_command_cached(&dispatcher, &command_name, env_vars).then_some(dispatcher)
 }
 
 /// Return the native directory a Windows child should receive for one shell
@@ -2705,6 +2928,190 @@ mod tests {
             shell_path_to_windows("/mnt/c/", &env_vars),
             PathBuf::from(r"C:\")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_merged_listing_scan_preserves_path_and_extension_order() {
+        // rubash#159 merged scan must match the per-candidate stat walk it
+        // replaced (GNU findcmd.c:623 find_user_command_in_path: first
+        // match wins in PATH order; executable_candidate order within a
+        // directory: PATHEXT extensions before the bare extensionless
+        // file). Case-insensitive listing membership mirrors the
+        // case-insensitive Windows stat the old walk relied on.
+        let dir_a = std::env::temp_dir().join("rubash-merged-scan-a");
+        let dir_b = std::env::temp_dir().join("rubash-merged-scan-b");
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        fs::write(dir_a.join("toolA.exe"), b"").unwrap();
+        fs::write(dir_b.join("toolA.exe"), b"").unwrap(); // later PATH dir loses
+        fs::write(dir_b.join("TOOLB.exe"), b"").unwrap(); // case-insensitive hit
+        let wrapper = dir_b.join("code.cmd");
+        let script = dir_b.join("code");
+        fs::write(&wrapper, b"").unwrap();
+        fs::write(&script, b"").unwrap(); // extension probe wins over bare file
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "PATH".to_string(),
+            format!(
+                "{};{};C:/definitely/missing-dir",
+                dir_a.display(),
+                dir_b.display()
+            ),
+        );
+        env_vars.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+
+        assert_eq!(
+            find_user_command("toolA", &env_vars),
+            Some(dir_a.join("toolA.exe"))
+        );
+        // The candidate path is built from the lookup name; the
+        // case-insensitive hit resolves to that spelling, exactly as the
+        // per-candidate stat walk returned it (with_extension candidate).
+        assert_eq!(
+            find_user_command("toolb", &env_vars),
+            Some(dir_b.join("toolb.exe"))
+        );
+        assert_eq!(find_user_command("code", &env_vars), Some(wrapper));
+        // A miss in every listed directory stays a miss.
+        assert_eq!(find_user_command("no_such_tool_xyz", &env_vars), None);
+
+        let _ = fs::remove_dir_all(dir_a);
+        let _ = fs::remove_dir_all(dir_b);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_listing_negative_cache_boundary_hash_r_and_path_change() {
+        // rubash#159 documented divergence boundary: the per-directory
+        // listing and the per-name negative result are process-internal
+        // caches keyed by the env fingerprint. A file created inside an
+        // already-listed PATH directory after the miss is NOT found --
+        // not for the original name (per-name negative result, pre-#159
+        // behavior) and not for a never-seen name either (listing
+        // staleness). `hash -r` (phash_flush, builtins/hash.def:150) and
+        // any PATH change must make it findable again.
+        let dir = std::env::temp_dir().join("rubash-listing-negative-boundary");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert("PATH".to_string(), dir.to_string_lossy().to_string());
+
+        assert_eq!(find_user_command("late_tool", &env_vars), None);
+        assert_eq!(find_user_command("late_tool2", &env_vars), None);
+
+        fs::write(dir.join("late_tool.exe"), b"").unwrap();
+        fs::write(dir.join("late_tool2.exe"), b"").unwrap();
+
+        // Sanctioned staleness: both lookups consult cached negatives and
+        // a cached listing taken before the files existed.
+        assert_eq!(find_user_command("late_tool", &env_vars), None);
+        assert_eq!(find_user_command("late_tool3", &env_vars), None);
+
+        // `hash -r` drops everything; the fresh listing sees the files.
+        clear_command_lookup_cache();
+        assert_eq!(
+            find_user_command("late_tool", &env_vars),
+            Some(dir.join("late_tool.exe"))
+        );
+
+        // Re-arm the stale state, then change PATH: fingerprint mismatch
+        // resets listings along with results.
+        clear_command_lookup_cache();
+        assert_eq!(find_user_command("late_tool4", &env_vars), None);
+        fs::write(dir.join("late_tool4.exe"), b"").unwrap();
+        env_vars.insert(
+            "PATH".to_string(),
+            format!("{};{}", std::env::temp_dir().display(), dir.display()),
+        );
+        assert_eq!(
+            find_user_command("late_tool4", &env_vars),
+            Some(dir.join("late_tool4.exe"))
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_nohash_mode_memorizes_misses_but_not_hits() {
+        // GNU findcmd.c:348-427 search_for_command with hashing disabled
+        // (`set +h`): no phash_search / phash_insert, every lookup
+        // re-walks PATH. rubash#159 memoizes only the misses on that path
+        // (in-process, fingerprint-keyed); positives must keep GNU's
+        // re-scan semantics: a command that appears in an EARLIER PATH
+        // directory mid-session is found on the next lookup.
+        let dir0 = std::env::temp_dir().join("rubash-nohash-memo-0");
+        let dir1 = std::env::temp_dir().join("rubash-nohash-memo-1");
+        let _ = fs::remove_dir_all(&dir0);
+        let _ = fs::remove_dir_all(&dir1);
+        fs::create_dir_all(&dir0).unwrap();
+        fs::create_dir_all(&dir1).unwrap();
+        let later = dir1.join("memo_tool.exe");
+        fs::write(&later, b"").unwrap();
+
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "PATH".to_string(),
+            format!("{};{}", dir0.display(), dir1.display()),
+        );
+        env_vars.insert("__RUBASH_SETOPT_hashall".to_string(), "0".to_string());
+
+        // Positive: NOT memoized in the results map. Deletion is observed
+        // on the next lookup because every listing hit is confirmed with
+        // a live is_file() -- with hashing on, the stale cached path
+        // would be returned instead (GNU phash without checkhash).
+        assert_eq!(
+            find_user_command("memo_tool", &env_vars),
+            Some(later.clone())
+        );
+        fs::remove_file(&later).unwrap();
+        assert_eq!(find_user_command("memo_tool", &env_vars), None);
+
+        // Positives track a PATH reorder (fingerprint change resets the
+        // scan scaffold): the now-first directory wins. A file created
+        // inside an already-listed directory WITHOUT a fingerprint change
+        // stays invisible -- the sanctioned rubash#159 staleness below.
+        fs::write(dir1.join("memo_hit.exe"), b"").unwrap();
+        fs::write(dir0.join("memo_hit.exe"), b"").unwrap();
+        env_vars.insert(
+            "PATH".to_string(),
+            format!("{};{}", dir1.display(), dir0.display()),
+        );
+        assert_eq!(
+            find_user_command("memo_hit", &env_vars),
+            Some(dir1.join("memo_hit.exe"))
+        );
+        env_vars.insert(
+            "PATH".to_string(),
+            format!("{};{}", dir0.display(), dir1.display()),
+        );
+        assert_eq!(
+            find_user_command("memo_hit", &env_vars),
+            Some(dir0.join("memo_hit.exe"))
+        );
+
+        // Miss: memoized process-internally; the file created after the
+        // miss is only visible once the fingerprint changes (documented
+        // divergence; GNU would find it immediately).
+        assert_eq!(find_user_command("memo_missing", &env_vars), None);
+        fs::write(dir1.join("memo_missing.exe"), b"").unwrap();
+        assert_eq!(find_user_command("memo_missing", &env_vars), None);
+        env_vars.insert(
+            "PATH".to_string(),
+            format!("{};{}", dir1.display(), dir0.display()),
+        );
+        assert_eq!(
+            find_user_command("memo_missing", &env_vars),
+            Some(dir1.join("memo_missing.exe"))
+        );
+
+        let _ = fs::remove_dir_all(dir0);
+        let _ = fs::remove_dir_all(dir1);
     }
 
     fn windows_shell_path(path: &Path) -> String {
