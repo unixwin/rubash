@@ -1,5 +1,14 @@
 use super::*;
 
+/// Hidden fast-path builtins (not in BUILTIN_NAMES): the executor's
+/// dispatch claims these names even though `type`/`enable` report them
+/// as external (rubash#154 identity tools). Word-level substitution
+/// fast paths must consult this so `$(uname -s)` runs the engine
+/// builtin instead of whatever external happens to sit on PATH.
+pub(in crate::executor) fn is_hidden_late_builtin(word: &str) -> bool {
+    matches!(word, "uname" | "arch")
+}
+
 impl Executor {
     /// GNU builtins/test.c `test -v name[sub]` (and `[ -v ... ]`): the `-v`
     /// operand is argv data that already went through word expansion, so its

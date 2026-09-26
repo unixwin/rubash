@@ -872,13 +872,17 @@ impl Executor {
         }
         // Don't route shell builtins through the external-command path.
         // On Windows, "fc" resolves to system32\fc.exe (file compare),
-        // not the shell's "fc" builtin. Also respect "enable -n".
+        // not the shell's "fc" builtin. Also respect "enable -n". The
+        // hidden late builtins (uname/arch, rubash#154 identity tools)
+        // must fall through the same way or `$(uname -s)` would run
+        // whatever external sits on PATH instead of the engine builtin.
         let first_word = stdio
             .expanded_words
             .first()
             .map(String::as_str)
             .unwrap_or("");
-        if is_shell_builtin_name(first_word)
+        if (is_shell_builtin_name(first_word)
+            || crate::executor::command_dispatch_late::is_hidden_late_builtin(first_word))
             && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, first_word)
         {
             return None;
