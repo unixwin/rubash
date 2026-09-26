@@ -608,7 +608,6 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String 
         && !source.contains("${\t")
         && !source.contains("${\n")
         && !source.contains("${|")
-        && !source.contains("${(")
     {
         return source.to_string();
     }
@@ -634,13 +633,17 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String 
                     |chars, open| crate::lexer::skip_parenthesized_unit_corrected(chars, open),
                 );
             }
-            // Bash 5.3 funsub (parser.h:83-85 FUNSUB_CHAR, parse.y:5506):
-            // `${ ' followed by blank, newline, '|' or '(' parses a command
-            // list like `$(` — its body gets the same one-pass expansion.
+            // Bash 5.3 funsub (parser.h:85, the live `#else' arm of
+            // FUNSUB_CHAR, parse.y:5506): `${ ' followed by blank, newline
+            // or `|' parses a command list like `$(` — its body gets the
+            // same one-pass expansion. A `(' right after `${' is NOT a
+            // funsub opener (the parser.h:83 spelling listing `(' is `#if 0'
+            // dead code): `${(M)x}' stays parameter text for
+            // parse_matched_pair (parse.y:5513) and fails at expansion time.
             '$' if chars.get(pos + 1) == Some(&'{')
                 && chars
                     .get(pos + 2)
-                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|' | '(')) =>
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|')) =>
             {
                 pos = splice_substitution_body(
                     &mut chars,

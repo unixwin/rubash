@@ -512,6 +512,20 @@ impl Executor {
             return String::new();
         }
 
+        // GNU subst.c:10042-10046 `valid_brace_expansion_word` gate — the
+        // mutable-path mirror of the check expand_braced_parameter_word
+        // runs at its whole-word entry, for words that arrive here without
+        // passing a walker `${` arm.
+        if crate::executor::expand_word::braced_name_is_bad_substitution(name) {
+            eprintln!(
+                "{}{}: bad substitution",
+                self.diagnostic_prefix(),
+                crate::executor::expand_word::bad_substitution_display(word)
+            );
+            self.shell_state.parameter_bad_substitution.set(true);
+            return String::new();
+        }
+
         // This `\x1d`-quoted word IS one `${}` fragment: record site [0]
         // so the `:=`/`-=` operator set-checks dedup subscript side
         // effects against the pre-scan (SUB_RES_XPASS). An active site

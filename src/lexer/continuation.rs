@@ -241,10 +241,15 @@ struct UnclosedDelim {
 /// opened on — while the `$(`/`${` paths take the yyerror route
 /// (parse.y:6891) and report `line_number` at EOF.
 ///
-/// `${ ' followed by a FUNSUB_CHAR (parser.h:83-85: space, tab, newline,
-/// '|', '(') is a ksh-style function substitution parsed by parse_comsub
-/// (parse.y:5506): its `}' only closes at command position, so
-/// `_[${ a }]' is unterminated while `_[${ a; }]' runs `a'.
+/// `${ ' followed by a FUNSUB_CHAR (parser.h:85, the live `#else` arm —
+/// space, tab, newline, `|'; the parser.h:83 spelling that also lists `(' is
+/// inside `#if 0' dead code) is a ksh-style function substitution parsed by
+/// parse_comsub (parse.y:5506): its `}' only closes at command position, so
+/// `_[${ a }]' is unterminated while `_[${ a; }]' runs `a'. A `(' right after
+/// `${' is NOT a funsub opener: it takes parse_matched_pair
+/// (parse.y:5513, P_FIRSTCLOSE|P_DOLBRACE) where `(' is an ordinary
+/// character and the first unquoted `}' closes — `${(M)x}' parses fine and
+/// fails later as a runtime `bad substitution' (subst.c:10278).
 ///
 /// Returns (close char, open line, EOF line, report_open_line) for the
 /// innermost pending construct: callers print `open_line' when
@@ -469,9 +474,14 @@ pub(crate) fn unclosed_input_close_char_posix(
                         // function substitution parsed as commands; a
                         // parameter expansion takes parse_matched_pair
                         // (yyerror path: EOF line either way).
+                        // FUNSUB_CHAR is parser.h:85 (`#else' arm): blank,
+                        // newline or `|' only — NOT `(' (that spelling is
+                        // the `#if 0' dead arm at parser.h:83), so
+                        // `${(M)x}' is a parameter brace whose first
+                        // unquoted `}' closes (P_FIRSTCLOSE).
                         let funsub = chars
                             .get(i + 2)
-                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|' | '('));
+                            .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|'));
                         stack.push(UnclosedDelim {
                             close: '}',
                             open_line: line,

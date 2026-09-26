@@ -150,6 +150,22 @@ impl Executor {
             return String::new();
         }
 
+        // GNU subst.c:10042-10046: `valid_brace_expansion_word` gates the
+        // extracted parameter name BEFORE any operator arm; every failure is
+        // the subst.c:10276-10288 `bad substitution` default. Detected here
+        // (like the quote check above) rather than in a command pre-scan so
+        // a bad name nested in an unevaluated word (`${x:-${(M)y}}` with x
+        // set) stays silent, matching GNU's lazy expansion.
+        if braced_name_is_bad_substitution(name) {
+            eprintln!(
+                "{}{}: bad substitution",
+                self.diagnostic_prefix(),
+                bad_substitution_display(word)
+            );
+            self.shell_state.parameter_bad_substitution.set(true);
+            return String::new();
+        }
+
         if let Some(value) = self.expand_braced_special_or_indirect_parameter(name, true) {
             return value;
         }
@@ -464,4 +480,296 @@ pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
 /// must read back as the source characters like GNU's diagnostic.
 pub(in crate::executor) fn bad_substitution_display(word: &str) -> String {
     crate::locale::decode_to_visible_text(word)
+}
+
+/// The parameter-name terminator set GNU scans for in
+/// `parameter_brace_expand` (subst.c:9808, the CASEMOD_TOGGLECASE spelling
+/// `#%^,~:-=?+/@}` — config-top.h:113 enables the `~` arm in this build).
+/// `}` ends the scan the same way in GNU's charlist.
+const BRACE_NAME_TERMINATORS: &[u8] = b"#%^,~:-=?+/@}";
+
+fn brace_name_terminator(byte: u8) -> bool {
+    BRACE_NAME_TERMINATORS.contains(&byte)
+}
+
+fn is_variable_starter(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+/// general.c:288 `valid_identifier`: `legal_variable_starter` then
+/// `legal_variable_name` (ASCII letters, digits, `_`).
+fn valid_brace_identifier(bytes: &[u8]) -> bool {
+    !bytes.is_empty()
+        && is_variable_starter(bytes[0])
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+}
+
+/// CSPECVAR — the single-character special parameters (mksyntax.c:232,
+/// `@*#?-$!`; digits are covered by the all-digits arm).
+fn brace_special_single(byte: u8) -> bool {
+    matches!(byte, b'@' | b'*' | b'#' | b'?' | b'-' | b'$' | b'!')
+}
+
+/// VALID_INDIR_PARAM (subst.c:122): `@`/`*` always; `#`/`?` only outside
+/// POSIX mode (rubash matches GNU's default build here).
+fn brace_valid_indir_param(byte: u8) -> bool {
+    matches!(byte, b'@' | b'*' | b'#' | b'?')
+}
+
+/// subst.c:791 `string_extract` with SX_VARNAME: `\X` pairs stay in the
+/// name, a `[...]` subscript with a matching `]` is skipped whole, and the
+/// scan stops at the first terminator (an unmatched `[` is an ordinary
+/// character). Returns the extracted head slice.
+fn brace_name_head(bytes: &[u8]) -> &[u8] {
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'[' => match brace_subscript_end(bytes, index) {
+                Some(end) => index = end + 1,
+                None => index += 1,
+            },
+            b if brace_name_terminator(b) => return &bytes[..index],
+            _ => index += 1,
+        }
+    }
+    &bytes[..index.min(bytes.len())]
+}
+
+/// GNU skipsubscript: scan to the matching `]`, nesting `[`/`]` and taking
+/// `\X` pairs as units; quotes do not open nesting here.
+fn brace_subscript_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// subst.c:7583 `valid_brace_expansion_word` minus its array arm: subscript
+/// content errors keep their current reporting in the indexed-parameter
+/// arms, so a head carrying a `[` is deferred there (both `x[0]` and the
+/// malformed `x[a` class).
+fn valid_brace_gate_word(head: &[u8]) -> bool {
+    if !head.is_empty() && head.iter().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if head.len() == 1 && brace_special_single(head[0]) {
+        return true;
+    }
+    if head.contains(&b'[') {
+        return true;
+    }
+    valid_brace_identifier(head)
+}
+
+/// subst.c:8244 `valid_length_expression` on the operand after `#`: empty
+/// (`${#}`), a single special parameter (`${#!}`), all digits (`${#10}`),
+/// an array reference (`${#a[7]}`), or an identifier (`${#PS1}`).
+fn valid_length_operand(operand: &[u8]) -> bool {
+    if operand.is_empty() {
+        return true;
+    }
+    if operand.len() == 1 && brace_special_single(operand[0]) {
+        return true;
+    }
+    if operand.iter().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    if operand.contains(&b'[') {
+        return true;
+    }
+    valid_brace_identifier(operand)
+}
+
+/// GNU subst.c:9777 `parameter_brace_expand` name gate, mapped 1:1:
+///
+/// - subst.c:9800-9806: a `#` followed by an identifier starter extracts to
+///   the closing `}` (terminators do not stop it), and subst.c:9929-9950
+///   routes it to the length arm only when
+///   `valid_length_expression` (subst.c:8244) accepts the operand —
+///   `${#x:-y}` keeps its bad substitution.
+/// - subst.c:9843-9853: when the scan stops at the first body character,
+///   only the VALID_SPECIAL_LENGTH_PARAM leads (`-?#@`) are rebuilt from
+///   that character plus the terminator-bounded remainder; any other lead
+///   (`${}`, `${:-x}`, `${%x}`) keeps the empty name and fails the gate.
+///   A rebuilt single character is the special parameter itself
+///   (`${-}`, `${-?x}`); growth past it (`${-x}`, `${@x}`) is invalid.
+/// - subst.c:9914: `!`-led names take the indirect path only when the next
+///   byte is an identifier starter, a digit, or VALID_INDIR_PARAM; the
+///   subst.c:9960-10021 early returns (`${!P*}` ending `*`/`@`, `${!A[@]}`
+///   ending `]`) stay with their own arms, and everything else is gated on
+///   the name after `!`.
+/// - subst.c:10042-10046: the gate itself is `valid_brace_expansion_word`
+///   (subst.c:7583) — all digits, a single special parameter, an array
+///   reference, or an identifier. Everything else lands on the
+///   subst.c:10276-10288 `bad substitution` default: `${(M)x}` (the zsh
+///   form git-completion.bash guards behind `[[ -n $ZSH_VERSION ]]`),
+///   `${x(M)}`, `${1a}`, `${x!}`, `${a\b}`, `${${x}}`, `${日本}`.
+pub(in crate::executor) fn braced_name_is_bad_substitution(name: &str) -> bool {
+    let bytes = name.as_bytes();
+
+    // `${#name}` with an identifier starter: whole-body length form.
+    if bytes.first() == Some(&b'#') && bytes.get(1).is_some_and(|b| is_variable_starter(*b)) {
+        return !valid_length_operand(&bytes[1..]);
+    }
+
+    let head = brace_name_head(bytes);
+    if head.is_empty() {
+        let Some(&lead) = bytes.first() else {
+            return true; // `${}`
+        };
+        if !matches!(lead, b'-' | b'?' | b'#' | b'@') {
+            return true; // `${%x}`, `${:=x}`: no fixup rebuilds these
+        }
+        let rest = brace_name_head(&bytes[1..]);
+        let mut rebuilt = Vec::with_capacity(1 + rest.len());
+        rebuilt.push(lead);
+        rebuilt.extend_from_slice(rest);
+        if rebuilt.len() == 1 {
+            return false; // `${-}`, `${?}`, `${#}`, `${@}`
+        }
+        if rebuilt[0] == b'#' {
+            return !valid_length_operand(&rebuilt[1..]); // `${#-}`, `${#10}`
+        }
+        return true; // `${-x}`, `${@x}`: invalid grown name
+    }
+
+    if head[0] == b'!' && head.len() >= 2 {
+        let want_indir = is_variable_starter(head[1])
+            || head[1].is_ascii_digit()
+            || brace_valid_indir_param(head[1]);
+        if !want_indir {
+            return true; // `${!(M)x}`: gate sees the whole name
+        }
+        // `${!P*}` / `${!A[@]}` early returns: the terminator-bounded head
+        // must run to the end of the body for the list/key forms.
+        if head.len() == bytes.len() {
+            let last = head[head.len() - 1];
+            if matches!(last, b'*' | b'@') && is_variable_starter(head[1]) {
+                return false;
+            }
+            if last == b']' {
+                return false;
+            }
+        }
+        return !valid_brace_gate_word(&head[1..]);
+    }
+
+    !valid_brace_gate_word(head)
+}
+
+#[cfg(test)]
+mod braced_name_gate_tests {
+    use super::braced_name_is_bad_substitution;
+
+    // Every row verified against WSL GNU Bash 5.3.0 (probe scripts under
+    // target/issue-suites/results/eco-param-paren/): `bad substitution`
+    // reports the word and abandons the command with status 1.
+    #[test]
+    fn invalid_names_are_gated() {
+        for name in [
+            "(M)x",      // zsh-ism (git-completion.bash:403)
+            "(M)x:-def", // ...with an operator tail
+            "x(M)",
+            "x (y)", // a blank is not a terminator
+            "",      // ${}
+            ":-x",   // empty name before the operator
+            "%x",    // no VALID_SPECIAL_LENGTH_PARAM lead
+            ":=x",
+            "1a", // not all digits, not an identifier
+            "x!",
+            r"a\b", // the escape pair stays in the name
+            "${x}", // nested ${ is name text
+            "-x",   // -x: rebuilt from `-`, grows invalid
+            "@x",
+            "!(M)x", // `!` without an indirect lead
+            "#(M)x", // length of an invalid operand
+            "#x:-y", // length scan runs to `}` (subst.c:9800-9806)
+            "!P*-x", // `${!P*}` early return needs the `*` last
+            "日本",  // names are ASCII
+        ] {
+            assert!(
+                braced_name_is_bad_substitution(name),
+                "expected bad substitution: {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_names_pass_the_gate() {
+        for name in [
+            "x",
+            "PATH",
+            "_v1",
+            "10",
+            "1",
+            "", // placeholder; "" is invalid (tested above)
+            "-",
+            "?",
+            "#",
+            "@",
+            "*",
+            "$",
+            "!",   // single specials
+            "-?x", // `-` then operator
+            "#x",
+            "#10",
+            "#-",
+            "#!",
+            "#a[7]",
+            "#BASH_REMATCH",
+            "!ref",
+            "!1",
+            "!@",
+            "!P*",
+            "!P@",
+            "!arr[@]",
+            "!x[a]",
+            "x:-def",
+            "x:-",
+            "x:=$(cmd)",
+            "x:- (y)",
+            "x-y",
+            "x+word",
+            "x[0]",
+            "x[$((1+1))]",
+            "x[(1)]",
+            "arr[@]",
+            "arr[*]",
+            "x:1:2",
+            "x//a/b",
+            "x^^",
+            "x~U",
+            "x@Q",
+            "x#a",
+            "x%pat",
+            "x:-$(echo sub)",
+        ] {
+            if name.is_empty() {
+                continue;
+            }
+            assert!(
+                !braced_name_is_bad_substitution(name),
+                "unexpected bad substitution: {name:?}"
+            );
+        }
+    }
 }
