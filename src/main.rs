@@ -417,11 +417,9 @@ fn run_args(executor: &mut Executor, args: &[String]) -> i32 {
 
     // shell.c:1830-1842 init_interactive: when -i is set, the shell
     // enables history (remember_on_history = enable_history_list = 1).
-    // Create the session history so commands are recorded and saved
-    // to $HISTFILE on exit (bashhist.c maybe_save_shell_history).
-    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
-        prepare_interactive_history(executor);
-    }
+    // prepare_interactive_history now runs inside run_no_script_with_init
+    // (after the init file, matching shell.c:799-811 ordering) so the -c /
+    // script / -s paths share it (rubash#151).
     run_no_script_with_init(executor, init_file.as_deref())
 }
 
@@ -453,11 +451,59 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
         'C' => Some("noclobber"),
         'f' => Some("noglob"),
         'h' => Some("hashall"),
+        'm' => Some("monitor"),
         'n' => Some("noexec"),
         'B' => Some("braceexpand"),
         'r' => Some("restricted"),
         _ => None,
     }
+}
+
+/// GNU jobs.c:4735 initialize_job_control (shell.c:1969 passes force =
+/// jobs_m_flag) ends with jobs.c:4869 `change_flag ('m', job_control ? '-' :
+/// '+')`. Without a terminal to take a process group on (non-interactive
+/// shell, stderr not a tty), give_terminal_to / tcgetpgrp fail with ENOTTY,
+/// job_control stays 0, and two sys_error/internal_error lines are printed
+/// (jobs.c:4841 "cannot set terminal process group (%d)" and jobs.c:4856
+/// "no job control in this shell") before `-m` is dropped from `$-`.
+/// Windows has no POSIX terminal process groups, so stderr-not-a-terminal is
+/// the honest port of that branch: the option is turned back off exactly as
+/// jobs.c:4869 does. An interactive shell or a terminal on stderr keeps `m`,
+/// matching the GNU paths where job_control could be established
+/// (empirical WSL 5.3.0: `bash -i -c 'echo $-'` -> `himBHc`, `bash -m -c
+/// 'echo $-'` -> the two diagnostics + `hBc`).
+fn apply_startup_job_control(executor: &mut Executor) {
+    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    if interactive {
+        // jobs.c:4869 `change_flag ('m', job_control ? '-' : '+')` keeps the
+        // letter for interactive shells: initialize_job_control establishes
+        // job control there even without -m (empirical WSL 5.3.0: `bash -i
+        // -c 'echo $-'` -> `himBHc`, with and without an explicit -m/-o
+        // monitor).
+        executor.set_shell_option("monitor", true);
+        return;
+    }
+    // shell_option_enabled semantics via the option's env key (options.rs:323
+    // shell_option_key); monitor defaults off (options.rs:66-69), so "1" is
+    // an explicit enable (-m or -o monitor).
+    if executor.get_env("__RUBASH_SETOPT_monitor").as_deref() != Some("1") {
+        return;
+    }
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        // Non-interactive with a real terminal on stderr: GNU takes the
+        // terminal process group successfully and keeps `m`.
+        return;
+    }
+    executor.set_shell_option("monitor", false);
+    let shell_name = executor
+        .get_env("__RUBASH_SHELL_NAME")
+        .or_else(|| executor.get_env("BASH_ARGV0"))
+        .unwrap_or("bash");
+    eprintln!(
+        "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
+        std::process::id()
+    );
+    eprintln!("{shell_name}: no job control in this shell");
 }
 
 /// State produced by the GNU long-option parser (shell.c:838-889).
@@ -719,8 +765,22 @@ fn run_command_string_with_init(
     init_file: Option<&str>,
 ) -> i32 {
     executor.inherit_process_stdin();
+    // GNU shell.c:1969 initialize_job_control runs inside
+    // initialize_shell_basics, long before the -c string is parsed, so the
+    // `-m`-without-a-terminal diagnostics and `$-` drop land before any
+    // command output (empirical: `bash -m -c 'echo $-'` -> two stderr lines
+    // then `hBc`).
+    apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
         let _ = run_init_file(executor, init_file);
+    }
+    // shell.c:546-547 `-i` forces init_interactive (histexp_flag -> H in
+    // `$-`), and shell.c:799-811 runs bash_initialize_history + load_history
+    // for every interactive shell — including one executing a -c string —
+    // after the startup files. rubash#151: this path previously skipped
+    // prepare_interactive_history entirely.
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        prepare_interactive_history(executor);
     }
     let line_offset = executor
         .get_env("__RUBASH_LINE_OFFSET")
@@ -747,6 +807,13 @@ fn run_script_file_with_init(
     args: &[String],
     init_file: Option<&str>,
 ) -> i32 {
+    // GNU shell.c:1969 initialize_job_control runs before open_shell_script
+    // (shell.c:1572), so the `-m`-without-a-terminal diagnostics precede
+    // both the script-name binding and any script output, and report the
+    // shell's own name, not the script's (empirical: `bash -m p.sh` ->
+    // "bash: cannot set terminal process group ... / no job control in this
+    // shell" then `hB`).
+    apply_startup_job_control(executor);
     // GNU shell.c:1572-1601 (open_shell_script): the script name is tried
     // as given; when that fails and the name has no path separator, it is
     // searched in $PATH (find_path_file, findcmd.c:258) - that is how
@@ -804,7 +871,14 @@ fn run_script_file_with_init(
     if let Some(init_file) = init_file {
         let _ = run_init_file(executor, init_file);
     }
+    // shell.c:546-547 + 799-811: `-i` before a script file still forces
+    // init_interactive and the interactive history setup, so `$-` gains
+    // H (rubash#151: previously missing on this path; empirical GNU:
+    // `bash -i p.sh` -> `himBH`).
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    if interactive {
+        prepare_interactive_history(executor);
+    }
     let status = if script_uses_history(&contents) || script_uses_aliases(&contents) {
         run_script_with_history(executor, &contents, None)
     } else {
@@ -815,8 +889,14 @@ fn run_script_file_with_init(
 
 fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> i32 {
     executor.inherit_process_stdin();
+    apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
         let _ = run_init_file(executor, init_file);
+    }
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        // shell.c:806-811 runs after the startup files; the -i no-arg
+        // fallback previously did this before them (main.rs call site).
+        prepare_interactive_history(executor);
     }
     if io::stdin().is_terminal() {
         run_repl(executor);
@@ -835,8 +915,17 @@ fn run_no_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> 
 
 fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) -> i32 {
     executor.inherit_process_stdin();
+    // Same ordering as the script-file path: shell.c:1969
+    // initialize_job_control precedes stdin reader setup, and shell.c:547 +
+    // 799-811 make `-i -s` an interactive shell with history initialized, so
+    // `$-` gains H (rubash#151; empirical GNU: `echo 'echo $-' | bash -i -s`
+    // -> `himBHs`).
+    apply_startup_job_control(executor);
     if let Some(init_file) = init_file {
         let _ = run_init_file(executor, init_file);
+    }
+    if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        prepare_interactive_history(executor);
     }
     run_stdin_script(executor)
 }

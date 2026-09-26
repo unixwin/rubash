@@ -474,6 +474,14 @@ impl Executor {
             ('h', Some("hashall")),
             ('i', None),
             ('k', Some("keyword")),
+            // flags.c:177 `{ 'm', &jobs_m_flag }` in its table slot between
+            // `k` and `n`. GNU turns jobs_m_flag on via `set -m` /
+            // change_flag (flags.c:216 case 'm') and at startup
+            // initialize_job_control ends with `change_flag ('m', job_control
+            // ? '-' : '+')` (jobs.c:4869) — dropping the letter when no
+            // terminal process group could be taken. The invocation-side
+            // drop lives in main.rs apply_startup_job_control.
+            ('m', Some("monitor")),
             ('n', Some("noexec")),
             ('p', Some("privileged")),
             ('r', Some("restricted")),
