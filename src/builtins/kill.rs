@@ -5,6 +5,37 @@
 
 use std::io::{self, Write};
 
+/// Signal table: `(signal number, number as string, name without `SIG`)`.
+///
+/// GNU bash builds this table per-target at configure time: Makefile.in
+/// compiles support/mksignames.c against the TARGET machine's `<signal.h>`
+/// (Makefile.in:599-617 CREATED_SUPPORT/signames.h, rules at :775-804) and
+/// support/signames.c:69 `initialize_signames()` fills `signal_names[]`
+/// indexed by signal number, guarded per signal — SIGPWR at signames.c:278,
+/// SIGSTKFLT at :292, SIGEMT at :353, SIGINFO at :442 — with the
+/// SIGRTMIN..SIGRTMAX arithmetic names generated at :92-139
+/// (`signal_names[rtmin+i] = "SIGRTMIN+%d"`). This is the Rust compile-time
+/// equivalent of that generator: numbers come from the libc crate, which
+/// resolves them per target.
+///
+/// * `cfg(not(unix))`: the literal Linux x86 table is the wire format of
+///   the Windows file-mailbox protocol (other rubash processes write these
+///   numbers into `%TEMP%\rubash-signals`) and of the suspend/resume state
+///   backend — Linux numbering is the design contract. DO NOT renumber.
+/// * `cfg(unix)`: numbers follow the target platform via libc (Darwin:
+///   7=EMT, 10=BUS, 12=SYS, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD, 29=INFO,
+///   30=USR1, 31=USR2; no STKFLT/PWR/RT signals). Where Linux and the BSD
+///   family disagree, both alternatives occupy the same numeric slot
+///   (Linux BUS=7 / Darwin EMT=7, Linux USR1=10 / Darwin BUS=10, ...), so
+///   the interleaved table stays in numeric order on every platform —
+///   `kill -l` walks it in order and GNU's `signal_names[]` is indexed by
+///   signal number, so ordering is part of the GNU-compatible surface.
+/// * The Linux RT block pins the glibc contract 34..64 as literals:
+///   `libc::SIGRTMIN` is a FUNCTION on glibc (linux_like libc, forwarding
+///   to `__libc_current_sigrtmin()`), not a const, so it cannot populate a
+///   const table. `signal_table_tests::linux_realtime_block_matches_libc`
+///   guards the equality at runtime on every Linux CI run.
+#[cfg(not(unix))]
 const SIGNALS: &[(i32, &str, &str)] = &[
     (1, "1", "HUP"),
     (2, "2", "INT"),
@@ -69,6 +100,168 @@ const SIGNALS: &[(i32, &str, &str)] = &[
     (63, "63", "RTMAX-1"),
     (64, "64", "RTMAX"),
 ];
+
+/// Unix half of the signal seam: same triple format and per-platform numeric
+/// order as the mailbox table above, but every number is resolved from libc
+/// for the compilation target (the mksignames.c contract — see the table
+/// doc above for the GNU anchors).
+#[cfg(unix)]
+const SIGNALS: &[(i32, &str, &str)] = &[
+    (libc::SIGHUP as i32, "1", "HUP"),
+    (libc::SIGINT as i32, "2", "INT"),
+    (libc::SIGQUIT as i32, "3", "QUIT"),
+    (libc::SIGILL as i32, "4", "ILL"),
+    (libc::SIGTRAP as i32, "5", "TRAP"),
+    (libc::SIGABRT as i32, "6", "ABRT"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGBUS as i32, "7", "BUS"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGEMT as i32, "7", "EMT"),
+    (libc::SIGFPE as i32, "8", "FPE"),
+    (libc::SIGKILL as i32, "9", "KILL"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGUSR1 as i32, "10", "USR1"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGBUS as i32, "10", "BUS"),
+    (libc::SIGSEGV as i32, "11", "SEGV"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGUSR2 as i32, "12", "USR2"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGSYS as i32, "12", "SYS"),
+    (libc::SIGPIPE as i32, "13", "PIPE"),
+    (libc::SIGALRM as i32, "14", "ALRM"),
+    (libc::SIGTERM as i32, "15", "TERM"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGSTKFLT as i32, "16", "STKFLT"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGURG as i32, "16", "URG"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGCHLD as i32, "17", "CHLD"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGSTOP as i32, "17", "STOP"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGCONT as i32, "18", "CONT"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGTSTP as i32, "18", "TSTP"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGSTOP as i32, "19", "STOP"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGCONT as i32, "19", "CONT"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGTSTP as i32, "20", "TSTP"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGCHLD as i32, "20", "CHLD"),
+    (libc::SIGTTIN as i32, "21", "TTIN"),
+    (libc::SIGTTOU as i32, "22", "TTOU"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGURG as i32, "23", "URG"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGIO as i32, "23", "IO"),
+    (libc::SIGXCPU as i32, "24", "XCPU"),
+    (libc::SIGXFSZ as i32, "25", "XFSZ"),
+    (libc::SIGVTALRM as i32, "26", "VTALRM"),
+    (libc::SIGPROF as i32, "27", "PROF"),
+    (libc::SIGWINCH as i32, "28", "WINCH"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGIO as i32, "29", "IO"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGINFO as i32, "29", "INFO"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGPWR as i32, "30", "PWR"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGUSR1 as i32, "30", "USR1"),
+    #[cfg(target_os = "linux")]
+    (libc::SIGSYS as i32, "31", "SYS"),
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    (libc::SIGUSR2 as i32, "31", "USR2"),
+    // Linux-only POSIX realtime block, numbered 34..64 per the glibc
+    // contract (see the table doc above). Darwin/BSD targets have no RT
+    // signals and compile the whole block out, exactly like GNU's
+    // `#if defined (SIGRTMIN)` at signames.c:97-139.
+    #[cfg(target_os = "linux")]
+    (34, "34", "RTMIN"),
+    #[cfg(target_os = "linux")]
+    (35, "35", "RTMIN+1"),
+    #[cfg(target_os = "linux")]
+    (36, "36", "RTMIN+2"),
+    #[cfg(target_os = "linux")]
+    (37, "37", "RTMIN+3"),
+    #[cfg(target_os = "linux")]
+    (38, "38", "RTMIN+4"),
+    #[cfg(target_os = "linux")]
+    (39, "39", "RTMIN+5"),
+    #[cfg(target_os = "linux")]
+    (40, "40", "RTMIN+6"),
+    #[cfg(target_os = "linux")]
+    (41, "41", "RTMIN+7"),
+    #[cfg(target_os = "linux")]
+    (42, "42", "RTMIN+8"),
+    #[cfg(target_os = "linux")]
+    (43, "43", "RTMIN+9"),
+    #[cfg(target_os = "linux")]
+    (44, "44", "RTMIN+10"),
+    #[cfg(target_os = "linux")]
+    (45, "45", "RTMIN+11"),
+    #[cfg(target_os = "linux")]
+    (46, "46", "RTMIN+12"),
+    #[cfg(target_os = "linux")]
+    (47, "47", "RTMIN+13"),
+    #[cfg(target_os = "linux")]
+    (48, "48", "RTMIN+14"),
+    #[cfg(target_os = "linux")]
+    (49, "49", "RTMIN+15"),
+    #[cfg(target_os = "linux")]
+    (50, "50", "RTMAX-14"),
+    #[cfg(target_os = "linux")]
+    (51, "51", "RTMAX-13"),
+    #[cfg(target_os = "linux")]
+    (52, "52", "RTMAX-12"),
+    #[cfg(target_os = "linux")]
+    (53, "53", "RTMAX-11"),
+    #[cfg(target_os = "linux")]
+    (54, "54", "RTMAX-10"),
+    #[cfg(target_os = "linux")]
+    (55, "55", "RTMAX-9"),
+    #[cfg(target_os = "linux")]
+    (56, "56", "RTMAX-8"),
+    #[cfg(target_os = "linux")]
+    (57, "57", "RTMAX-7"),
+    #[cfg(target_os = "linux")]
+    (58, "58", "RTMAX-6"),
+    #[cfg(target_os = "linux")]
+    (59, "59", "RTMAX-5"),
+    #[cfg(target_os = "linux")]
+    (60, "60", "RTMAX-4"),
+    #[cfg(target_os = "linux")]
+    (61, "61", "RTMAX-3"),
+    #[cfg(target_os = "linux")]
+    (62, "62", "RTMAX-2"),
+    #[cfg(target_os = "linux")]
+    (63, "63", "RTMAX-1"),
+    #[cfg(target_os = "linux")]
+    (64, "64", "RTMAX"),
+];
+
+/// The platform's SIGCHLD number for dispatch paths that special-case child
+/// notifications (GNU keys them on SIGCHLD via the target's signal.h —
+/// signames.c initialize_signames). Linux: 17; Darwin/BSD: 20. The
+/// non-unix value stays 17 because the Windows file-mailbox wire format
+/// speaks Linux numbering by design (see SIGNALS above).
+#[cfg(unix)]
+pub const SIGCHLD_NUMBER: i32 = libc::SIGCHLD;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGCHLD_NUMBER: i32 = 17;
+
+/// The platform's SIGCONT number. GNU jobs.c:3928 `killpg (jobs[job]->pgrp,
+/// SIGCONT)` (start_job/continue_job; also jobs.c:4010) resumes a stopped
+/// job with the TARGET's SIGCONT: 18 on Linux, 19 on Darwin/BSD. Non-unix
+/// keeps the wire-format 18.
+#[cfg(unix)]
+pub const SIGCONT_NUMBER: i32 = libc::SIGCONT;
+/// Non-unix (Windows mailbox wire format, Linux numbering by contract).
+#[cfg(not(unix))]
+pub const SIGCONT_NUMBER: i32 = 18;
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -666,6 +859,15 @@ fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {
     // reject that child merely because the marker names the parent.
     // SIGKILL is not trappable. STOP/TSTP/CONT must use the native Windows
     // process-state backend rather than a mailbox event.
+    //
+    // NOTE: these are Linux wire-format numbers (9=KILL, 17=CHLD, 18=CONT,
+    // 19=STOP), and this whole branch is reachable only on the non-unix
+    // mailbox path: on unix nothing ever creates the `{pid}.alive` marker
+    // (register_signal_mailbox installs the kernel backend instead), so the
+    // `is_file()` check above returns first and delivery routes through the
+    // real kill(2) in signal_process with platform numbering. Do NOT
+    // constant-ize these against libc — that would renumber the Windows
+    // mailbox wire format.
     if matches!(signal, 9 | 17 | 18 | 19) {
         return Ok(false);
     }
@@ -920,5 +1122,142 @@ mod kernel_signal_tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("SIGUSR1 did not reach the pending-signal queue");
+    }
+}
+
+/// Compile-time-table guards: the mksignames.c contract (support/signames.c
+/// initialize_signames) says every number must come from the target's
+/// signal numbering, so each row is asserted against the libc constant of
+/// the platform the tests run on (CI: ubuntu + macos — this is the trip
+/// wire for Darwin drift, where CHLD=20/CONT=19/USR1=30/EMT=7).
+#[cfg(all(test, unix))]
+mod signal_table_tests {
+    /// Every row's digit string must parse back to its own number: the
+    /// second field feeds `kill -l USR1`-style name→number output.
+    #[test]
+    fn digit_field_matches_signal_number() {
+        for (number, digits, _) in super::SIGNALS {
+            assert_eq!(
+                digits.parse::<i32>().unwrap(),
+                *number,
+                "digit field {digits:?} does not match number {number}"
+            );
+        }
+    }
+
+    /// `kill -l` output order is a GNU-compatible surface; the table must
+    /// stay in strictly ascending signal-number order on every platform.
+    #[test]
+    fn table_is_in_ascending_signal_number_order() {
+        for pair in super::SIGNALS.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "signal table out of numeric order at {} then {}",
+                pair[0].0,
+                pair[1].0
+            );
+        }
+    }
+
+    /// Number→name for the libc constants of THIS platform.
+    #[test]
+    fn libc_numbers_translate_to_names() {
+        assert_eq!(super::signal_name(libc::SIGHUP as i32), Some("HUP"));
+        assert_eq!(super::signal_name(libc::SIGINT as i32), Some("INT"));
+        assert_eq!(super::signal_name(libc::SIGUSR1 as i32), Some("USR1"));
+        assert_eq!(super::signal_name(libc::SIGUSR2 as i32), Some("USR2"));
+        assert_eq!(super::signal_name(libc::SIGCHLD as i32), Some("CHLD"));
+        assert_eq!(super::signal_name(libc::SIGCONT as i32), Some("CONT"));
+        assert_eq!(super::signal_name(libc::SIGSTOP as i32), Some("STOP"));
+        assert_eq!(super::signal_name(libc::SIGTSTP as i32), Some("TSTP"));
+        assert_eq!(super::signal_name(libc::SIGTERM as i32), Some("TERM"));
+    }
+
+    /// Name→number round trip through the public spec parser.
+    #[test]
+    fn names_translate_to_libc_numbers() {
+        for (name, constant) in [
+            ("HUP", libc::SIGHUP as i32),
+            ("USR1", libc::SIGUSR1 as i32),
+            ("USR2", libc::SIGUSR2 as i32),
+            ("CHLD", libc::SIGCHLD as i32),
+            ("CONT", libc::SIGCONT as i32),
+            ("STOP", libc::SIGSTOP as i32),
+            ("TSTP", libc::SIGTSTP as i32),
+        ] {
+            assert_eq!(
+                super::signal_number_for_spec(name),
+                Some(constant),
+                "{name}"
+            );
+            assert_eq!(
+                super::translate_signal(name),
+                Some(constant.to_string().as_str()),
+                "{name}"
+            );
+        }
+        // `kill -l <number>` prints the name; `kill -l SIG<name>` prints the
+        // number (kill.def list_signals translation).
+        assert_eq!(
+            super::translate_signal(&(libc::SIGUSR1 as i32).to_string()),
+            Some("USR1")
+        );
+    }
+
+    #[test]
+    fn sigchld_and_sigcont_constants_match_table() {
+        assert_eq!(super::signal_name(super::SIGCHLD_NUMBER), Some("CHLD"));
+        assert_eq!(super::signal_name(super::SIGCONT_NUMBER), Some("CONT"));
+        assert_eq!(super::SIGCHLD_NUMBER, libc::SIGCHLD as i32);
+        assert_eq!(super::SIGCONT_NUMBER, libc::SIGCONT as i32);
+    }
+
+    /// Linux keeps the POSIX realtime block with GNU's arithmetic names
+    /// (signames.c:92-139). libc::SIGRTMIN is a function on glibc, so the
+    /// table pins the 34..64 contract as literals — assert the equality
+    /// here so a libc/ABI drift fails CI instead of shipping silently.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_realtime_block_matches_libc() {
+        assert_eq!(libc::SIGRTMIN(), 34);
+        assert_eq!(libc::SIGRTMAX(), 64);
+        assert_eq!(super::signal_name(34), Some("RTMIN"));
+        assert_eq!(super::signal_name(64), Some("RTMAX"));
+        assert_eq!(super::signal_name(35), Some("RTMIN+1"));
+        assert_eq!(super::signal_name(49), Some("RTMIN+15"));
+        assert_eq!(super::signal_name(50), Some("RTMAX-14"));
+        assert_eq!(super::signal_number_for_spec("RTMIN"), Some(34));
+        assert_eq!(super::signal_number_for_spec("RTMIN+1"), Some(35));
+        assert_eq!(super::signal_number_for_spec("RTMAX"), Some(64));
+        assert_eq!(super::signal_number_for_spec("SIGRTMIN+3"), Some(37));
+        assert_eq!(super::signal_name(libc::SIGSTKFLT as i32), Some("STKFLT"));
+        assert_eq!(super::signal_name(libc::SIGPWR as i32), Some("PWR"));
+        assert_eq!(super::signal_name(libc::SIGIO as i32), Some("IO"));
+    }
+
+    /// Darwin/BSD numbering: the slots that Linux fills differently
+    /// (signames.c guards SIGEMT/SIGINFO at :353/:442) must carry the BSD
+    /// names, and Linux-only signals must be absent.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn darwin_family_slots_follow_libc() {
+        assert_eq!(super::signal_name(libc::SIGEMT as i32), Some("EMT"));
+        assert_eq!(super::signal_name(libc::SIGINFO as i32), Some("INFO"));
+        assert_eq!(super::signal_name(libc::SIGBUS as i32), Some("BUS"));
+        assert_eq!(super::signal_name(libc::SIGSYS as i32), Some("SYS"));
+        // Stop-family reorder: STOP=17, TSTP=18, CONT=19, CHLD=20.
+        assert_eq!(libc::SIGSTOP, 17);
+        assert_eq!(libc::SIGTSTP, 18);
+        assert_eq!(libc::SIGCONT, 19);
+        assert_eq!(libc::SIGCHLD, 20);
+        // USR1/USR2 move to 30/31; slot 16 is URG, not STKFLT.
+        assert_eq!(libc::SIGUSR1, 30);
+        assert_eq!(libc::SIGUSR2, 31);
+        assert_eq!(super::signal_name(16), Some("URG"));
+        assert_eq!(super::signal_name(29), Some("INFO"));
+        // No realtime signals on this platform.
+        assert!(super::signal_number("RTMIN").is_none());
+        assert!(super::signal_number("RTMAX").is_none());
+        assert!(super::signal_name(32).is_none());
     }
 }

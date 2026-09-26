@@ -19,10 +19,26 @@ pub(crate) const TRAP_ORIG_IGNORES: &str = "__RUBASH_TRAP_ORIG_IGN";
 /// parent's traps; the reset set records which entries may not fire.
 const TRAP_RESET: &str = "__RUBASH_TRAP_RESET";
 const EX_USAGE: i32 = 2;
-/// Linux signal numbering (the GNU 5.3.0 contract baseline runs on WSL,
-/// where BASH_TRAPSIG, `trap 17`, `kill -l 10` and friends all speak this
-/// table). Slots 32/33 do not exist on Linux; GNU's `trap -l` skips them
-/// and accepts the specifiers silently.
+/// Positional signal-name table: entry i-1 is signal i's name (GNU's
+/// `signal_names[]` is indexed by signal number — support/signames.c:69
+/// initialize_signames, generated per target by support/mksignames.c from
+/// the TARGET machine's `<signal.h>`; Makefile.in:599-617/:775-804). Empty
+/// strings mark numbers the platform has no name for; `trap -l` and
+/// trap.c:236 `decode_signal` skip them.
+///
+/// * `not(unix)` (Windows mailbox): the literal Linux x86 table is the wire
+///   contract — `trap 17`/`kill -l 10`/BASH_TRAPSIG all speak Linux
+///   numbering there, and the GNU 5.3.0 baseline runs on WSL. Slots 32/33
+///   do not exist on Linux; GNU's `trap -l` skips them and accepts the
+///   specifiers silently. DO NOT renumber.
+/// * `target_os = "linux"`: same Linux table (RTMIN..RTMAX arithmetic names
+///   are GNU-generated at signames.c:92-139 and are Linux-only, matching
+///   the `#if defined (SIGRTMIN)` guard there).
+/// * other unix (macos/freebsd): the BSD-family numbering where
+///   7=EMT, 10=BUS, 12=SYS, 16=URG, 17=STOP, 18=TSTP, 19=CONT, 20=CHLD,
+///   23=IO, 29=INFO, 30=USR1, 31=USR2 (libc resolves these per target; the
+///   tests below pin every slot against libc::SIGxxx). No RT signals.
+#[cfg(not(unix))]
 pub(crate) const SIGNALS: [&str; 64] = [
     "SIGHUP",
     "SIGINT",
@@ -88,6 +104,115 @@ pub(crate) const SIGNALS: [&str; 64] = [
     "SIGRTMAX-2",
     "SIGRTMAX-1",
     "SIGRTMAX",
+];
+
+/// Linux table: identical layout to the non-unix wire table above (it IS
+/// the Linux numbering; see the shared doc comment).
+#[cfg(target_os = "linux")]
+pub(crate) const SIGNALS: [&str; 64] = [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGBUS",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGUSR1",
+    "SIGSEGV",
+    "SIGUSR2",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGSTKFLT",
+    "SIGCHLD",
+    "SIGCONT",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGURG",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGIO",
+    "SIGPWR",
+    "SIGSYS",
+    "",
+    "",
+    "SIGRTMIN",
+    "SIGRTMIN+1",
+    "SIGRTMIN+2",
+    "SIGRTMIN+3",
+    "SIGRTMIN+4",
+    "SIGRTMIN+5",
+    "SIGRTMIN+6",
+    "SIGRTMIN+7",
+    "SIGRTMIN+8",
+    "SIGRTMIN+9",
+    "SIGRTMIN+10",
+    "SIGRTMIN+11",
+    "SIGRTMIN+12",
+    "SIGRTMIN+13",
+    "SIGRTMIN+14",
+    "SIGRTMIN+15",
+    "SIGRTMAX-14",
+    "SIGRTMAX-13",
+    "SIGRTMAX-12",
+    "SIGRTMAX-11",
+    "SIGRTMAX-10",
+    "SIGRTMAX-9",
+    "SIGRTMAX-8",
+    "SIGRTMAX-7",
+    "SIGRTMAX-6",
+    "SIGRTMAX-5",
+    "SIGRTMAX-4",
+    "SIGRTMAX-3",
+    "SIGRTMAX-2",
+    "SIGRTMAX-1",
+    "SIGRTMAX",
+];
+
+/// BSD-family table (macos/freebsd): positional names for signals 1..31 in
+/// the target's numbering (see the shared doc comment). Positional layout
+/// means no libc constants appear here; the tests pin each slot against
+/// libc::SIGxxx so CI fails on numbering drift.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) const SIGNALS: [&str; 31] = [
+    "SIGHUP",
+    "SIGINT",
+    "SIGQUIT",
+    "SIGILL",
+    "SIGTRAP",
+    "SIGABRT",
+    "SIGEMT",
+    "SIGFPE",
+    "SIGKILL",
+    "SIGBUS",
+    "SIGSEGV",
+    "SIGSYS",
+    "SIGPIPE",
+    "SIGALRM",
+    "SIGTERM",
+    "SIGURG",
+    "SIGSTOP",
+    "SIGTSTP",
+    "SIGCONT",
+    "SIGCHLD",
+    "SIGTTIN",
+    "SIGTTOU",
+    "SIGIO",
+    "SIGXCPU",
+    "SIGXFSZ",
+    "SIGVTALRM",
+    "SIGPROF",
+    "SIGWINCH",
+    "SIGINFO",
+    "SIGUSR1",
+    "SIGUSR2",
 ];
 
 pub fn execute(args: &[String]) -> io::Result<i32> {
@@ -475,7 +600,12 @@ pub(crate) fn seed_startup_traps(env_vars: &mut HashMap<String, String>) {
     // GNU 5.3.0 contract baseline lists "trap -- '' SIGRTMIN" in every
     // fresh shell (both 5.2.21 and 5.3.0 under WSL show it, including
     // `bash -c 'trap'`). Seed that inherited ignore when no trap table
-    // entry arrived.
+    // entry arrived. SIGRTMIN exists only where the SIGNALS table has it
+    // (signames.c:97 `#if defined (SIGRTMIN)`): Windows keeps the WSL
+    // wire-format contract and Linux has RT signals; Darwin/BSD compile
+    // the block out so no phantom SIGRTMIN trap appears in `trap` output
+    // there (GNU bash on Darwin has no SIGRTMIN).
+    #[cfg(any(not(unix), target_os = "linux"))]
     if env_vars.get(&trap_key("SIGRTMIN")).is_none() {
         env_vars.insert(trap_key("SIGRTMIN"), String::new());
         let mut signals = trap_list(env_vars);
@@ -645,4 +775,147 @@ fn store_trap_list(env_vars: &mut HashMap<String, String>, signals: BTreeSet<Str
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The trap table and the kill builtin's table must name the same signal
+    /// for the same number on every platform (GNU has ONE signal_names[]
+    /// serving trap.c:236 decode_signal and builtins/kill.def). Any cfg
+    /// drift between trap.rs and kill.rs breaks here first.
+    #[test]
+    fn trap_table_agrees_with_kill_table() {
+        for (index, slot) in super::SIGNALS.iter().enumerate() {
+            let number = (index + 1).to_string();
+            let kill_name = crate::builtins::kill::translate_signal(&number);
+            match (slot.is_empty(), kill_name) {
+                (true, None) => {}
+                (false, Some(name)) => {
+                    assert_eq!(*slot, format!("SIG{name}"), "signal {}", index + 1);
+                }
+                (true, Some(name)) => panic!(
+                    "kill names signal {} ({name}) but trap slot {} is empty",
+                    index + 1,
+                    index + 1
+                ),
+                (false, None) => panic!(
+                    "trap names signal {} ({slot}) but kill has no name for it",
+                    index + 1
+                ),
+            }
+        }
+        // Reverse direction: every kill-table row lands on the same trap slot.
+        for number in 1..=super::SIGNALS.len() {
+            if let Some(name) = crate::builtins::kill::translate_signal(&number.to_string()) {
+                let expected = format!("SIG{name}");
+                assert_eq!(
+                    super::normalize_signal(&number.to_string()),
+                    Some(expected.as_str()),
+                    "trap slot for signal {number}"
+                );
+            }
+        }
+    }
+
+    /// Positional slots must carry the libc name of THIS platform's signal
+    /// number (the mksignames.c contract; CI runs this on ubuntu and macos,
+    /// where it is the Darwin-drift trip wire: CHLD=20, CONT=19, USR1=30).
+    #[cfg(unix)]
+    #[test]
+    fn positional_slots_match_libc() {
+        for (constant, name) in [
+            (libc::SIGHUP, "SIGHUP"),
+            (libc::SIGINT, "SIGINT"),
+            (libc::SIGQUIT, "SIGQUIT"),
+            (libc::SIGILL, "SIGILL"),
+            (libc::SIGTRAP, "SIGTRAP"),
+            (libc::SIGABRT, "SIGABRT"),
+            (libc::SIGFPE, "SIGFPE"),
+            (libc::SIGKILL, "SIGKILL"),
+            (libc::SIGSEGV, "SIGSEGV"),
+            (libc::SIGPIPE, "SIGPIPE"),
+            (libc::SIGALRM, "SIGALRM"),
+            (libc::SIGTERM, "SIGTERM"),
+            (libc::SIGCHLD, "SIGCHLD"),
+            (libc::SIGCONT, "SIGCONT"),
+            (libc::SIGSTOP, "SIGSTOP"),
+            (libc::SIGTSTP, "SIGTSTP"),
+            (libc::SIGTTIN, "SIGTTIN"),
+            (libc::SIGTTOU, "SIGTTOU"),
+            (libc::SIGXCPU, "SIGXCPU"),
+            (libc::SIGXFSZ, "SIGXFSZ"),
+            (libc::SIGVTALRM, "SIGVTALRM"),
+            (libc::SIGPROF, "SIGPROF"),
+            (libc::SIGWINCH, "SIGWINCH"),
+            (libc::SIGUSR1, "SIGUSR1"),
+            (libc::SIGUSR2, "SIGUSR2"),
+        ] {
+            let slot = super::SIGNALS
+                .get(constant as usize - 1)
+                .copied()
+                .unwrap_or("<past end>");
+            assert_eq!(slot, name, "slot for libc signal {name}");
+            assert_eq!(super::normalize_signal(name), Some(name), "{name}");
+            let bare = name.trim_start_matches("SIG");
+            assert_eq!(super::normalize_signal(bare), Some(name), "{bare}");
+            assert_eq!(
+                super::normalize_signal(&constant.to_string()),
+                Some(name),
+                "numeric {name}"
+            );
+        }
+    }
+
+    /// Linux keeps the RT arithmetic names (signames.c:92-139) and the
+    /// 32/33 holes GNU's trap -l skips.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_realtime_and_holes() {
+        assert_eq!(super::normalize_signal("RTMIN"), Some("SIGRTMIN"));
+        assert_eq!(super::normalize_signal("RTMIN+1"), Some("SIGRTMIN+1"));
+        assert_eq!(super::normalize_signal("34"), Some("SIGRTMIN"));
+        assert_eq!(super::normalize_signal("64"), Some("SIGRTMAX"));
+        assert_eq!(super::normalize_signal("STKFLT"), Some("SIGSTKFLT"));
+        assert_eq!(super::normalize_signal("17"), Some("SIGCHLD"));
+        assert_eq!(super::normalize_signal("32"), Some(""));
+        assert_eq!(super::normalize_signal("33"), Some(""));
+        assert_eq!(super::normalize_signal("65"), None);
+    }
+
+    /// Darwin/BSD: reordered slots follow libc, Linux-only names are gone.
+    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    #[test]
+    fn darwin_family_slots() {
+        assert_eq!(super::normalize_signal("EMT"), Some("SIGEMT"));
+        assert_eq!(super::normalize_signal("INFO"), Some("SIGINFO"));
+        assert_eq!(super::normalize_signal("17"), Some("SIGSTOP"));
+        assert_eq!(super::normalize_signal("18"), Some("SIGTSTP"));
+        assert_eq!(super::normalize_signal("19"), Some("SIGCONT"));
+        assert_eq!(super::normalize_signal("20"), Some("SIGCHLD"));
+        assert_eq!(super::normalize_signal("30"), Some("SIGUSR1"));
+        assert_eq!(super::normalize_signal("31"), Some("SIGUSR2"));
+        assert_eq!(super::normalize_signal("STKFLT"), None);
+        assert_eq!(super::normalize_signal("PWR"), None);
+        assert_eq!(super::normalize_signal("RTMIN"), None);
+        assert_eq!(super::normalize_signal("RTMAX"), None);
+        assert_eq!(super::normalize_signal("32"), None);
+        assert_eq!(super::normalize_signal("64"), None);
+    }
+
+    /// Non-unix builds pin the Windows mailbox wire format (Linux
+    /// numbering) — the GNU 5.3.0 WSL baseline contract.
+    #[cfg(not(unix))]
+    #[test]
+    fn wire_format_slots_are_linux_numbering() {
+        assert_eq!(super::SIGNALS.len(), 64);
+        assert_eq!(super::SIGNALS[16], "SIGCHLD");
+        assert_eq!(super::SIGNALS[17], "SIGCONT");
+        assert_eq!(super::SIGNALS[18], "SIGSTOP");
+        assert_eq!(super::SIGNALS[19], "SIGTSTP");
+        assert_eq!(super::SIGNALS[9], "SIGUSR1");
+        assert_eq!(super::SIGNALS[28], "SIGIO");
+        assert_eq!(super::SIGNALS[29], "SIGPWR");
+        assert_eq!(super::SIGNALS[33], "SIGRTMIN");
+        assert_eq!(super::SIGNALS[63], "SIGRTMAX");
+    }
 }

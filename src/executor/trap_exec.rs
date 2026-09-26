@@ -553,8 +553,11 @@ impl Executor {
                 // Bash's default disposition for SIGCHLD is to ignore it.
                 // Child completion/reaping notifications must not turn into
                 // a synthetic 128+SIGCHLD shell exit when no CHLD trap is
-                // installed (busybox ash `reap*.tests`).
-                if signal == 17 {
+                // installed (busybox ash `reap*.tests`). SIGCHLD follows
+                // the TARGET numbering: 17 on Linux, 20 on Darwin/BSD
+                // (crate::builtins::kill::SIGCHLD_NUMBER resolves libc on
+                // unix; non-unix keeps the mailbox wire-format 17).
+                if signal == crate::builtins::kill::SIGCHLD_NUMBER {
                     continue;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));

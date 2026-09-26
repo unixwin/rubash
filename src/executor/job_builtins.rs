@@ -772,7 +772,10 @@ impl Executor {
         let mut interrupt = None;
         for &signal in &signals {
             // SIGCHLD only breaks out of `wait` under posixly_correct.
-            if signal == 17 && !posixly {
+            // SIGCHLD follows the target numbering (17 Linux / 20 Darwin)
+            // via kill::SIGCHLD_NUMBER; the non-unix mailbox wire format
+            // keeps Linux numbering by contract.
+            if signal == crate::builtins::kill::SIGCHLD_NUMBER && !posixly {
                 continue;
             }
             let Some(name) = super::trap_exec::signal_trap_name(signal) else {
@@ -1202,8 +1205,12 @@ impl Executor {
             .map(|entry| (entry.command.clone(), entry.pids.clone()))
             .unwrap_or_default();
         writeln!(stdout, "{command}")?;
+        // SIGCONT follows the target numbering (18 Linux / 19 Darwin) via
+        // kill::SIGCONT_NUMBER — jobs.c:3928 `killpg (..., SIGCONT)` uses
+        // the platform's own number, not a Linux literal.
         for member in &pids {
-            let _ = crate::builtins::kill::send_signal(*member, 18);
+            let _ =
+                crate::builtins::kill::send_signal(*member, crate::builtins::kill::SIGCONT_NUMBER);
         }
         self.shell_state.job_table.mark_running(pid);
         if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
@@ -1299,8 +1306,14 @@ impl Executor {
                     .map(|entry| (entry.command.clone(), entry.pids.clone()))
                     .unwrap_or_default();
                 writeln!(stdout, "[{job_id}]{marker}{command} &")?;
+                // SIGCONT follows the target numbering (18 Linux / 19
+                // Darwin) via kill::SIGCONT_NUMBER — see the fg twin above
+                // (jobs.c:3928).
                 for member in &pids {
-                    let _ = crate::builtins::kill::send_signal(*member, 18);
+                    let _ = crate::builtins::kill::send_signal(
+                        *member,
+                        crate::builtins::kill::SIGCONT_NUMBER,
+                    );
                 }
                 self.shell_state.job_table.mark_running(pid);
                 if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
