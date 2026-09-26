@@ -181,6 +181,29 @@ impl Executor {
             if let Some(status) = self.last_command_substitution_status.get() {
                 self.exit_code = status;
                 self.last_command_substitution_status.set(None);
+            } else {
+                // GNU execute_cmd.c:4625-4640 execute_simple_command: with
+                // WORDS == 0 the command dispatches to execute_null_command
+                // (execute_cmd.c:4203), which performs no command lookup and
+                // returns 0 — the status does NOT keep the previous
+                // command's value (`false; "${arr[@]}"` is status 0,
+                // rubash#134). Only a command substitution inside the
+                // vanished words can still impose its own status.
+                self.exit_code = 0;
+            }
+            // GNU execute_cmd.c:4638 bind_lastarg((char *)NULL): a null
+            // command binds `$_` to the null string. The typed variable
+            // store shadows env_vars in shell_variable_value, so both maps
+            // must carry the binding.
+            self.shell_state
+                .env_vars
+                .insert("_".to_string(), String::new());
+            if let Some(old) = self.shell_state.variables.get("_") {
+                let replacement = crate::shell::Variable {
+                    value: crate::shell::ShellValue::Scalar(String::new()),
+                    ..old.clone()
+                };
+                let _ = self.shell_state.variables.set("_", replacement);
             }
             if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
                 return Err(ExecuteError::ExitCode(self.exit_code));
