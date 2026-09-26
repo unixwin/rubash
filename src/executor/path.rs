@@ -1860,7 +1860,7 @@ mod tests {
         // first existing non-executable regular file is the command; the
         // exec then fails with EACCES (126), not 127.
         assert_eq!(
-            find_user_command_uncached("rubash-execwalk", &env),
+            find_user_command_uncached("rubash-execwalk", &env, ""),
             Some(non_exec)
         );
         // FS_EXEC_PREFERRED (findcmd.c:580): an executable in a LATER PATH
@@ -1871,7 +1871,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&exec, perms).unwrap();
         assert_eq!(
-            find_user_command_uncached("rubash-execwalk", &env),
+            find_user_command_uncached("rubash-execwalk", &env, ""),
             Some(exec)
         );
         let _ = std::fs::remove_dir_all(&base);
