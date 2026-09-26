@@ -1021,6 +1021,25 @@ fn signal_process(pid: u32, signal: i32) -> Result<(), &'static str> {
 
 #[cfg(unix)]
 fn signal_process(pid: u32, signal: i32) -> Result<(), &'static str> {
+    // A signal this shell sends to ITSELF must be delivered before the
+    // kill builtin returns: GNU's single-threaded bash runs the SIGUSR1
+    // handler during kill(2), so the pending-trap dispatch at the very
+    // next command boundary (still inside the calling function) sees it —
+    // trap9.sub's `func() { kill -USR1 $$; }` runs its trap inside func.
+    // This process is multithreaded, and kill(2) hands the signal to any
+    // thread that does not block it, so the handler's queue write may lag
+    // past the function's last boundary (~35% of runs: the trap fired
+    // after the function returned and its `return` errored at top level).
+    // raise(3) targets the calling thread: the handler completes before
+    // raise returns, restoring GNU's observable ordering.
+    if pid == std::process::id() {
+        let result = unsafe { libc::raise(signal) };
+        return if result == 0 {
+            Ok(())
+        } else {
+            Err("Failed to signal process")
+        };
+    }
     let result = unsafe { libc::kill(pid as libc::pid_t, signal) };
     if result == 0 {
         return Ok(());
