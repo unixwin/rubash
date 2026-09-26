@@ -39,6 +39,25 @@ pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     remove_shell_quotes_with_posix(raw, false)
 }
 
+/// Whether the word has any content outside single quotes — a word-wide
+/// fact, decided before quote removal runs. GNU subst.c:11882-11886 treats
+/// every character inside `'...'` as quoted data no matter where the span
+/// sits in the word, so the data-quote tagging of a `"` inside single
+/// quotes must not depend on segment order (a first-segment `'..."'...`
+/// is as literal as a later one); a fully single-quoted word is the one
+/// exception, kept raw because its fast path restores \x1f only.
+fn has_content_outside_single_quotes(raw: &str) -> bool {
+    let mut in_single = false;
+    for ch in raw.chars() {
+        if ch == '\'' {
+            in_single = !in_single;
+        } else if !in_single {
+            return true;
+        }
+    }
+    false
+}
+
 /// Quote removal with the lexer's POSIX mode. Inside double quotes the
 /// `${...}` span scan must agree with the tokenizing skip phase: in POSIX
 /// mode the Interp 221 big hammer closes the span at the first `}` (single
@@ -55,17 +74,8 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
     // True while the emitted tail is an unbraced `$name` parameter; a quote
     // boundary at that point must carry PARAM_NAME_END_MARKER (see above).
     let mut pending_name = false;
-    // True once any content outside single quotes has been seen.  A `"`
-    // inside single quotes must be tagged with the data-double-quote marker
-    // (\x18) so the expansion walker does not strip it — but only when the
-    // word is NOT fully single-quoted (the fast path for fully single-quoted
-    // words only restores \x1f, so tagging there would leak the marker).
-    let mut saw_outside_single = false;
 
     while let Some(ch) = chars.next() {
-        if ch != '\'' {
-            saw_outside_single = true;
-        }
         match ch {
             '[' => {
                 subscript_depth += 1;
@@ -131,14 +141,22 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     out.push(PARAM_NAME_END_MARKER);
                 }
                 pending_name = false;
-                // When the word has content outside single quotes, a `"`
-                // inside single quotes must carry the data-double-quote
-                // marker (\x18) so the expansion walker treats it as data
-                // instead of a quote delimiter (nquote.tests line 27:
-                // `$"hello"', $"world"'` → `hello, $"world"`).  For fully
-                // single-quoted words the fast path only restores \x1f,
-                // so raw `"` is kept there.
-                let protect_dquote = saw_outside_single;
+                // GNU subst.c:11882-11886 expand_word_internal case '\'':
+                // string_extract_single_quoted hands the whole span to
+                // add_quoted_string as quoted data — position-independent.
+                // A `"` inside single quotes therefore carries the
+                // data-double-quote marker (\x18) whenever the word has
+                // ANY content outside single quotes, so the expansion
+                // walker treats it as data instead of a quote delimiter
+                // (nquote.tests line 27: `$"hello"', $"world"'` →
+                // `hello, $"world"`). The decision is word-wide, not
+                // positional: the bashdb getopts_long idiom
+                // `'set -- "${'"$1"'}" "$@"'` has its single-quoted
+                // segment FIRST, and a position-gated tag dropped its `"`
+                // (the eval then died on an unterminated quote). A fully
+                // single-quoted word keeps the raw `"` — its downstream
+                // fast path restores \x1f only.
+                let protect_dquote = has_content_outside_single_quotes(raw);
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
                         break;

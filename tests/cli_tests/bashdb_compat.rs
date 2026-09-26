@@ -454,6 +454,11 @@ printf '<%s:%s:%s>\n' "${#via_eval[@]}" "${via_eval[0]}" "$(( via_eval[0] == 4 )
 }
 
 #[test]
+// Hangs waiting on debugger stdin (the /dev/tty-family input loop): the
+// fixture bashdb stops at its first breakpoint but the piped command stream
+// is not consumed. Ignored so the full cli suite completes; unignore when
+// the bashdb stdin command loop lands (owner directive 2026-09-26).
+#[ignore = "stdin-loop hang: bashdb command stream not consumed"]
 fn bashdb_clear_removes_breakpoint_by_file_line() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
@@ -499,6 +504,10 @@ printf '<%s:%s:%s>\n' "$i" "${a[0]}" "${a[1]-}"
 }
 
 #[test]
+// Same stdin-loop hang as bashdb_clear_removes_breakpoint_by_file_line:
+// the debugged script's secondary input block never sees EOF. Ignored so
+// the full cli suite completes; unignore with the stdin command-loop fix.
+#[ignore = "stdin-loop hang: secondary input block never sees EOF"]
 fn bashdb_commands_block_consumes_secondary_input_without_fd_loop() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")

@@ -1228,10 +1228,16 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
     let mut in_double = false;
     let mut escaped = false;
     let mut backtick_depth = 0i32;
+    // GNU parse.y:3629-3642 read_token: a `#' at a token start comments out
+    // the rest of the line, and parse.y:7131-7135 allows newlines inside a
+    // compound assignment — so a comment line in `name=( ... )' never
+    // reaches the parser and its `&'/`<'/... text cannot be a syntax error.
+    let mut word_start = true;
     while i < bytes.len() {
         let c = bytes[i];
         if escaped {
             escaped = false;
+            word_start = false;
             i += 1;
             continue;
         }
@@ -1242,6 +1248,7 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
                 b'`' if !in_single && !in_double => backtick_depth -= 1,
                 _ => {}
             }
+            word_start = false;
             i += 1;
             continue;
         }
@@ -1249,16 +1256,24 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             b'\\' if !in_single => escaped = true,
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            b'#' if !in_single && !in_double && word_start => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
             // Skip $(...) command substitution — GNU read_token_word
             // consumes it as one unit; control operators inside are
             // part of the subshell, not the compound assignment.
             b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'(' => {
                 i = skip_dollar_paren(bytes, i + 2);
+                word_start = false;
                 continue;
             }
             // Skip ${...} parameter expansion — same reasoning.
             b'$' if !in_single && i + 1 < bytes.len() && bytes[i + 1] == b'{' => {
                 i = skip_dollar_brace(bytes, i + 2);
+                word_start = false;
                 continue;
             }
             // Skip backtick command substitution.
@@ -1270,6 +1285,7 @@ fn find_unquoted_ctrl_op(value: &str) -> Option<char> {
             }
             _ => {}
         }
+        word_start = matches!(c, b' ' | b'\t' | b'\n' | b'\r');
         i += 1;
     }
     None

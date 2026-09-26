@@ -166,6 +166,20 @@ pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {
             continue;
         }
 
+        // GNU parse.y:3629-3642 read_token: a `#' at a token start comments
+        // out the rest of the line, and parse.y:7131-7135 allows newlines in
+        // a compound assignment — comment lines in `name=( ... )' produce no
+        // elements. `current` empty = word start, so mid-word `a#b` stays
+        // one element (the `#` is not quoted there but not word-initial).
+        if ch == '#' && !single && !double && current.is_empty() {
+            for (_, comment_ch) in chars.by_ref() {
+                if comment_ch == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+
         if ch == '\\' && !single {
             current.push(ch);
             escaped = true;

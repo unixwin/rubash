@@ -1709,6 +1709,18 @@ pub(in crate::executor) fn split_compound_element_words(value: &str) -> Vec<Stri
             escaped = false;
             continue;
         }
+        // GNU parse.y:3629-3642 read_token: a word-start `#' comments out
+        // the rest of the line; parse.y:7131-7135 admits newlines inside a
+        // compound assignment, so comment lines yield no elements here
+        // either. `token` empty = word start (mid-word `a#b` is literal).
+        if ch == '#' && !single && !double && token.is_empty() {
+            for (_, comment_ch) in chars.by_ref() {
+                if comment_ch == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
         if ch == '$' && !single && matches!(chars.peek(), Some((_, '{'))) {
             // A `${...}` body is scanned by GNU parse_matched_pair with its
             // own nested-pair quote state: body quotes neither split the
