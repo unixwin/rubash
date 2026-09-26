@@ -308,7 +308,21 @@ pub(crate) fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> 
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
         "sourcepath" => sourcepath_enabled(),
-        _ => state(env_vars).contains(name),
+        _ => state_contains(env_vars, name),
+    }
+}
+
+/// Allocation-free membership test against the serialized shopt state.
+/// Equivalent to `state(env_vars).contains(name)`: the set is exactly the
+/// nonempty `$__RUBASH_SHOPT_STATE` segments, so splitting the serialized
+/// string and comparing slices answers the same question without building
+/// a HashSet. The former per-query rebuild allocated one String per
+/// enabled option on every lookup — a measured hot cost of each `(( ))`
+/// evaluation and each glob word (rubash#156/#157).
+fn state_contains(env_vars: &HashMap<String, String>, name: &str) -> bool {
+    match env_vars.get(SHOPT_STATE) {
+        Some(value) => value.split(DATA_DOLLAR).any(|entry| entry == name),
+        None => default_state().contains(name),
     }
 }
 

@@ -26,6 +26,43 @@ fn materialize_expanded_command_word(word: &str) -> String {
     ))
 }
 
+/// Whitelist admission for the bare `(( ... ))` fast dispatch: the command
+/// carries nothing beyond the arithmetic expression itself. Everything the
+/// generic simple-command path would additionally do (redirect handling,
+/// tempenv assignments, background/pipe execution, process-substitution
+/// cleanup, `_`-less underscore semantics variants) is excluded here and
+/// still handled by falling through to that path. A false negative only
+/// costs speed, never semantics (rubash#117 whitelist rule; rubash#156).
+fn arithmetic_command_is_bare(cmd: &CommandNode) -> bool {
+    cmd.assignments.is_empty()
+        && cmd.compound_assignments.is_empty()
+        && cmd.array_element_assignments.is_empty()
+        && cmd.redirects.is_empty()
+        && cmd.redirect_in.is_none()
+        && cmd.redirect_out.is_none()
+        && cmd.append.is_none()
+        && cmd.redirect_err.is_none()
+        && cmd.redirect_err_append.is_none()
+        && cmd.heredoc.is_none()
+        && cmd.heredoc_body.is_none()
+        && cmd.heredoc_redirects.is_empty()
+        && cmd.here_string.is_none()
+        && cmd.here_string_carrier.is_none()
+        && cmd.process_substitutions.is_empty()
+        && cmd.command_substitutions.is_empty()
+        && !cmd.background
+        && cmd.pipe.is_none()
+        && cmd.pipeline_command.is_none()
+        && cmd.and_or.is_none()
+        && cmd.and_or_list.is_none()
+        && !cmd.inverted
+        && cmd.inverted_command.is_none()
+        && cmd.time_command.is_none()
+        && cmd.background_command.is_none()
+        && cmd.subshell_command.is_none()
+        && !cmd.subshell
+}
+
 #[allow(dead_code)]
 /// GNU subst.c::param_expand reaches `bad_substitution:` for a whitespace-led
 /// `${ command; }` word and reports the FULL word text under expansion
@@ -133,6 +170,24 @@ impl Executor {
         if command_is_time_prefixed_compound(cmd) {
             return Some(self.execute_time_prefixed_compound_command(cmd));
         }
+        // GNU execute_cmd.c:485 (shell_control_structure) counts cm_arith,
+        // and execute_command_internal's dispatch reaches `case cm_arith:`
+        // (execute_cmd.c:1125) directly — an arithmetic command never runs
+        // the simple-command machinery (word-list expansion, alias scan,
+        // materialization). Rubash used to reach execute_arithmetic_command
+        // only through the generic simple-command path, paying ~30µs of
+        // per-command overhead per `(( ))` evaluation (measured via
+        // RUBASH_EXEC_PROFILE: dispatch 7.96s of 8.5s total for 200k
+        // evaluations; rubash#156). This fast entry reuses the existing
+        // evaluation and keeps every semantic the generic path provided
+        // (errexit, nounset exit-127, `_` binding); the whitelist admits
+        // only bare arithmetic commands — anything else (redirects,
+        // assignments, background, pipes, subshells, process or command
+        // substitutions) falls through to the generic path unchanged, so a
+        // false negative only costs speed.
+        if cmd.arithmetic_command.is_some() && arithmetic_command_is_bare(cmd) {
+            return Some(self.execute_bare_arithmetic_command(cmd));
+        }
         if let Some(for_command) = &cmd.for_command {
             return Some(self.execute_for_command_with_redirects(for_command, cmd));
         }
@@ -161,6 +216,32 @@ impl Executor {
             return Some(self.define_function(cmd, function_command));
         }
         None
+    }
+
+    /// Fast entry for a bare `(( ... ))` command (GNU execute_cmd.c:1125
+    /// `case cm_arith:` -> execute_arith_command at execute_cmd.c:3893/1147).
+    /// Only reachable when [`arithmetic_command_is_bare`] admitted the
+    /// command, so no redirects/assignments/background modifiers exist.
+    fn execute_bare_arithmetic_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        self.exit_code = self.execute_arithmetic_command(cmd);
+        // The generic path's execute_materialized_command tail behaviors for
+        // an arithmetic command: `_` binding and the errexit check (GNU
+        // set_pipestatus_from_exit at execute_cmd.c:1217 is the exit_code
+        // itself; execute_command_internal applies errexit after the
+        // dispatch). The nounset FORCE_EOF exit is the `((` dispatch arm's
+        // behavior (command_dispatch_late.rs, GNU expr.c FORCE_EOF under
+        // `set -u`).
+        self.update_underscore_parameter(cmd);
+        if self.shell_state.arithmetic_nounset_error.get() {
+            self.shell_state.arithmetic_nounset_error.set(false);
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.exit_code = 127;
+            return Err(ExecuteError::ExitCode(127));
+        }
+        if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+            return Err(ExecuteError::ExitCode(self.exit_code));
+        }
+        Ok(())
     }
 
     fn execute_conditional_command_with_redirects(

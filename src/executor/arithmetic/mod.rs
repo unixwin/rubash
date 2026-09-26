@@ -275,14 +275,31 @@ impl Executor {
                 &self.shell_state.env_vars,
                 "array_expand_once",
             );
-        let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, assoc_noexpand);
-
-        let expression = if expand {
-            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys))
+        // Fast admission (rubash#156): an expression drawn entirely from
+        // the pure arithmetic alphabet contains none of the characters the
+        // pre-evaluation pipeline reacts to (no `$`/backquote for the
+        // expansion passes, no `'`/`"`/`\` for the quote checks and
+        // normalization, no `[` for the assoc/indexed subscript passes), so
+        // that pipeline is provably the identity for it and the expression
+        // can go straight to the evaluator. This mirrors GNU's
+        // expand_arith_string, which leaves an expansion-character-free
+        // string untouched. A false admission is impossible (the whitelist
+        // is the character class itself, not a symptom blacklist); a
+        // non-matching expression falls through to the full pipeline.
+        let preexpansion_is_identity = arithmetic_preexpansion_is_identity(expression.as_bytes());
+        let expression = if preexpansion_is_identity {
+            std::borrow::Cow::Borrowed(expression)
         } else {
-            normalize_arithmetic_quotes(&self.expand_arith_eval_subscripts(&with_assoc_keys))
+            let with_assoc_keys =
+                self.expand_arithmetic_assoc_subscripts(expression, assoc_noexpand);
+            let expanded = if expand {
+                self.expand_arithmetic_expression_mut(&with_assoc_keys)
+            } else {
+                self.expand_arith_eval_subscripts(&with_assoc_keys)
+            };
+            std::borrow::Cow::Owned(normalize_arithmetic_quotes(&expanded).into_owned())
         };
-        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
             {
@@ -301,11 +318,16 @@ impl Executor {
         // single quote inside an associative-array subscript is a different
         // thing: there it delimits a string key, which GNU accepts
         // (`(( A['a b']++ ))`), so only bare quotes are rejected.
-        if has_bare_single_quote(&expression, &self.shell_state.env_vars) {
-            return None;
-        }
-        if empty_quoted_operand_has_operator(&expression) {
-            return None;
+        // Both quote checks are provably false for a whitelisted
+        // (identity-preexpansion) expression: the alphabet admits no
+        // quote characters at all.
+        if !preexpansion_is_identity {
+            if has_bare_single_quote(&expression, &self.shell_state.env_vars) {
+                return None;
+            }
+            if empty_quoted_operand_has_operator(&expression) {
+                return None;
+            }
         }
         // GNU expr.c: by the time evalexp parses, the expression text is
         // already expanded (expand_arith_string at execute_cmd.c:3936 /
@@ -456,7 +478,7 @@ impl Executor {
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(&reexpanded, false);
 
         let expression = normalize_arithmetic_quotes(&with_assoc_keys);
-        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
@@ -547,9 +569,9 @@ impl Executor {
         // (expr.c:1171).
 
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, false);
-        let expression =
-            normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
-        *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
+        let expanded = self.expand_arithmetic_expression_mut(&with_assoc_keys);
+        let expression = normalize_arithmetic_quotes(&expanded);
+        *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
             {
@@ -1596,7 +1618,14 @@ fn has_bare_single_quote(expression: &str, env_vars: &HashMap<String, String>) -
     false
 }
 
-fn normalize_arithmetic_quotes(input: &str) -> String {
+/// Reduce `\"` to `"` (the arith-text quote normalization). Borrowed when no
+/// backslash is present — the overwhelmingly common case for arithmetic
+/// expressions — so the three normalize sites on the evaluation path no
+/// longer allocate per evaluation (rubash#156).
+fn normalize_arithmetic_quotes(input: &str) -> std::borrow::Cow<'_, str> {
+    if !input.as_bytes().contains(&b'\\') {
+        return std::borrow::Cow::Borrowed(input);
+    }
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -1607,7 +1636,7 @@ fn normalize_arithmetic_quotes(input: &str) -> String {
             output.push(ch);
         }
     }
-    output
+    std::borrow::Cow::Owned(output)
 }
 
 /// Produces a Bash-style error message for an arithmetic expansion that
@@ -2152,10 +2181,10 @@ pub(super) fn eval_mutable_arith_value_with_random_flags(
     // This matters for expansion and variable contexts, where an empty
     // quoted operand is valid rather than a parser failure. Lexer quote
     // markers must be normalized before lvalue parsing as well as expansion.
-    let normalized = normalize_arithmetic_quotes(value);
-    if normalized.trim().is_empty() {
-        return (Some(0), None);
-    }
+    // The normalization and empty check are not repeated here:
+    // eval_mutable_arith_result performs both, so this wrapper only passes
+    // the flags through (the former duplicate normalize was one of the
+    // ~10 full-string scans per `(( ))` evaluation; rubash#156).
     eval_mutable_arith_result(value, env_vars, random_state, no_expand)
 }
 
@@ -2174,6 +2203,7 @@ fn eval_mutable_arith_result(
     if normalized.trim().is_empty() {
         return (Some(0), None);
     }
+    let normalized = normalized.into_owned();
     let mut parser = ConditionalArithParser {
         input: normalized.as_bytes(),
         pos: 0,
@@ -2715,4 +2745,45 @@ pub(in crate::executor) fn trailing_operator_error(
     Some(format!(
         "{expression}: {message} (error token is \"{token}\")"
     ))
+}
+
+/// Whitelist for the identity-preexpansion fast path: every byte belongs to
+/// the pure arithmetic alphabet (identifiers, digits, operators, parens,
+/// comma, colon, question mark, whitespace). A string over this alphabet
+/// contains none of the characters the pre-evaluation pipeline reacts to —
+/// no `$`/backquote (expansion), no `'`/`"`/`\` (quote handling), no `[`
+/// (array subscripts), no `#` (base# literals) — so every pre-evaluation
+/// pass (route_current_shell_substitutions, expand_arithmetic_special_
+/// parameters, assoc/indexed subscript expansion, normalize_arithmetic_
+/// quotes, the bare-quote checks) is the identity on it, matching GNU's
+/// expand_arith_string behavior for expansion-character-free input.
+/// rubash#156.
+fn arithmetic_preexpansion_is_identity(bytes: &[u8]) -> bool {
+    bytes.iter().all(|b| {
+        matches!(b,
+            b'a'..=b'z'
+                | b'A'..=b'Z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'+'
+                | b'-'
+                | b'*'
+                | b'/'
+                | b'%'
+                | b'<'
+                | b'>'
+                | b'='
+                | b'!'
+                | b'&'
+                | b'|'
+                | b'^'
+                | b'~'
+                | b'?'
+                | b':'
+                | b','
+                | b'('
+                | b')'
+                | b' '
+                | b'\t')
+    })
 }
