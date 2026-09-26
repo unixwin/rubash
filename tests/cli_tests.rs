@@ -1445,6 +1445,44 @@ fn unterminated_conditional_is_a_syntax_error() {
 }
 
 #[test]
+fn conditional_numeric_compares_expand_subscripted_parameter_references() {
+    // GNU test.c:357 arithcomp sees operands after cond word expansion, so
+    // `${a[0]}` must arrive as its resolved value. The operand scanner that
+    // cooks `name[sub]` subscripts (conditional.rs expand_cond_arith_operand)
+    // once treated the `[` inside `${a[0]}`/`${h[k]}` as an operand-level
+    // subscript, leaking the `}` into evalexp (`a[30]}: arithmetic syntax
+    // error` — the regression starship init hit on
+    // `"${BASH_VERSINFO[0]}" -gt 4 || ( ... )`).
+    let script = "a=(7 9 2)\n\
+                  declare -A h=([k]=9)\n\
+                  i=1\n\
+                  [[ \"${a[0]}\" -gt 4 ]] && echo q-gt:T || echo q-gt:F\n\
+                  [[ ${a[0]} -gt 4 ]] && echo uq-gt:T || echo uq-gt:F\n\
+                  [[ \"${a[1]}\" -le 4 ]] && echo q1-le:T || echo q1-le:F\n\
+                  [[ \"${a[i]}\" -ge 4 ]] && echo ai-ge:T || echo ai-ge:F\n\
+                  [[ \"${h[k]}\" -gt 4 ]] && echo h-gt:T || echo h-gt:F\n\
+                  [[ \"${a[0]}\" -gt 4 || ( \"${a[0]}\" -eq 4 && \"${a[1]}\" -ge 4 ) ]] \\\n\
+                      && echo group:T || echo group:F\n";
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run rubash");
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "q-gt:T\nuq-gt:T\nq1-le:F\nai-ge:T\nh-gt:T\ngroup:T\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "",
+        "no arithmetic diagnostics expected"
+    );
+}
+
+#[test]
 fn unterminated_command_substitution_is_a_syntax_error() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

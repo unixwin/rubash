@@ -1444,7 +1444,7 @@ pub(crate) fn assoc_subscript_end(bytes: &[u8], open: usize) -> usize {
 /// `$(`, `$((`, `${`, or a backtick) and return the index just past it. An
 /// unterminated substitution runs to the end of the input so a missing close
 /// can never make a stray `]` look like the subscript delimiter.
-fn assoc_skip_substitution(bytes: &[u8], start: usize) -> usize {
+pub(in crate::executor) fn assoc_skip_substitution(bytes: &[u8], start: usize) -> usize {
     let opener = bytes[start];
     let (open, close) = if opener == b'`' {
         (b'`', b'`')

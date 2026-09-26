@@ -11,7 +11,7 @@ use super::{
     parse_helpers::decode_ansi_c_escapes, Executor, ARRAY_VARS, NAMEREF_VARS,
 };
 use crate::executor::arithmetic::{
-    assoc_subscript_end, eval_mutable_arith_value_with_random_flags,
+    assoc_skip_substitution, assoc_subscript_end, eval_mutable_arith_value_with_random_flags,
 };
 use crate::executor::arrays::format_indexed_array_storage;
 use crate::parser::QuoteKind;
@@ -828,6 +828,14 @@ impl Executor {
                 b'\\' => index += 1,
                 b'\'' if !double => single = !single,
                 b'"' if !single => double = !double,
+                // `$(`/`${`/backquote bodies own their `[`: `${a[0]}` is a
+                // parameter expansion for expand_word_mut, not an operand-level
+                // array reference. GNU's arithcomp (test.c:357) sees it after
+                // cond word expansion as the resolved value.
+                b'`' => index = assoc_skip_substitution(bytes, index),
+                b'$' if matches!(bytes.get(index + 1), Some(&b'(') | Some(&b'{')) => {
+                    index = assoc_skip_substitution(bytes, index);
+                }
                 b'[' if !single && !double => {
                     let mut name_start = index;
                     while name_start > literal_start
