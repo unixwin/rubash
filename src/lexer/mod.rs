@@ -34,6 +34,7 @@ pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
 use heredoc::heredoc_delimiters;
 use scanner::{Lexer, LexerParseState};
+pub(crate) use skip::command_substitutions_balanced;
 pub(crate) use skip::skip_parenthesized_unit_corrected;
 
 use crate::executor::markers::DATA_DOLLAR;

@@ -368,27 +368,17 @@ impl Executor {
         Ok(output)
     }
 
-    fn execute_external_pipeline_stage_inner(
-        &mut self,
-        command: &CommandNode,
-        input: &str,
-        stdin_inherit: bool,
-    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+    /// Expands a pipeline stage's words into its final argv:
+    /// (program name, argument words). Field-splits the expanded first word
+    /// like GNU bash (`v="echo -n hi there"; $v | cat` dispatches on the
+    /// first field "echo" and passes the rest as leading arguments), restores
+    /// path-escape carriers, and pathname-expands unquoted argument words
+    /// (execute_cmd.c execute_simple_command -> expand_words). Computed once
+    /// per stage so substitution side effects in arguments do not run twice.
+    fn expand_stage_argv(&mut self, command: &CommandNode) -> (String, Vec<String>) {
         let Some(name) = command.words.first() else {
-            return Ok(Some((String::new(), String::new(), 0)));
+            return (String::new(), Vec::new());
         };
-        if let Some(output) = self.invoke_host_external_command(command) {
-            return Ok(Some((
-                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
-                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
-                output.status,
-            )));
-        }
-        // Field-split the expanded first word like GNU bash: `v="echo -n hi
-        // there"; $v | cat` dispatches on the first field "echo" and passes
-        // the remaining fields as leading arguments. expand_word alone joined
-        // the whole expansion into one command name and reported
-        // "echo -n hi there: command not found".
         let first_raw = command
             .word_metadata
             .first()
@@ -404,46 +394,7 @@ impl Executor {
                 )
             });
         let expanded_name = first_fields.next().unwrap_or_default();
-        let leading_args: Vec<String> = first_fields.collect();
-        let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars) else {
-            let diagnostic = format!(
-                "{}{}: command not found\n",
-                self.diagnostic_prefix(),
-                super::execution_misc::printable_filename(&expanded_name)
-            );
-            // Bash applies a pipeline element's redirections before the
-            // command lookup fails (redir.c do_redirection_internal runs for
-            // every command): `2>/dev/null` discards the diagnostic,
-            // `2>file` writes it there, and `2>&1` sends it down this
-            // stage's pipe (issue #70's `git ... 2>/dev/null | sed` idiom).
-            if let Some(redirect) = &command.redirect_err {
-                let target = self.expand_redirect_target(redirect);
-                if redirect_target_fd(&target) == Some(1) {
-                    return Ok(Some((diagnostic, String::new(), 127)));
-                }
-                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) = self.create_redirect_output(&target, redirect.clobber) {
-                        let _ = file.write_all(diagnostic.as_bytes());
-                    }
-                    return Ok(Some((String::new(), String::new(), 127)));
-                }
-            } else if let Some(redirect) = &command.redirect_err_append {
-                let target = self.expand_redirect_target(redirect);
-                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
-                    {
-                        let _ = file.write_all(diagnostic.as_bytes());
-                    }
-                    return Ok(Some((String::new(), String::new(), 127)));
-                }
-            }
-            return Ok(Some((String::new(), diagnostic, 127)));
-        };
-
-        let mut args: Vec<String> = leading_args;
+        let mut args: Vec<String> = first_fields.collect();
         // GNU execute_simple_command runs pathname expansion on every
         // argument of an external command in a pipeline element, so
         // `ls *` hands ls the directory listing rather than a literal
@@ -489,6 +440,106 @@ impl Executor {
                 }
             }
         }
+        (expanded_name, args)
+    }
+
+    fn execute_external_pipeline_stage_inner(
+        &mut self,
+        command: &CommandNode,
+        input: &str,
+        stdin_inherit: bool,
+    ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        let Some(name) = command.words.first() else {
+            return Ok(Some((String::new(), String::new(), 0)));
+        };
+        // Expand the argv once up front. The host external handler receives
+        // the same contract as the top-level dispatch (execute_cmd.c
+        // expand_words before execute_disk_command): raw word text would leak
+        // lexer carriers (\x1a) to the child argv — a single-quoted sed
+        // script 'a`q`c' reached the host sed as "a\x1aq\x1ac" and its output
+        // lost the literal backticks (rubash#177).
+        let (expanded_name, args) = self.expand_stage_argv(command);
+        let mut host_cmd = command.clone();
+        host_cmd.words = std::iter::once(expanded_name.clone())
+            .chain(args.iter().cloned())
+            // expand_command_word keeps the lexer's C0 data carriers; the
+            // host external handler contract (top-level dispatch) receives
+            // visible argv text, so decode the carriers here.
+            .map(|word| super::execution_misc::restore_command_substitution_output(&word))
+            .collect();
+        if let Some(output) = self.invoke_host_external_command(&host_cmd) {
+            return Ok(Some((
+                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
+                crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
+                output.status,
+            )));
+        }
+        let _ = name;
+        let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars) else {
+            // GNU findcmd.c:385-386: a slash-containing name skips the PATH
+            // search and its failure is classified by execve's errno
+            // (execute_cmd.c:6126-6159) — "No such file or directory" /
+            // "Is a directory" / "Permission denied" — not the PATH-miss
+            // "command not found" (rubash#173).
+            let not_found_word = super::execution_misc::printable_filename(&expanded_name);
+            let (word, message, status) =
+                match super::external_inner::slash_command_execve_error_message(
+                    &expanded_name,
+                    &self.shell_state.env_vars,
+                ) {
+                    Some((message, status)) => (
+                        format!("{not_found_word}: {message}"),
+                        String::new(),
+                        status,
+                    ),
+                    None => (
+                        not_found_word.clone(),
+                        ": command not found".to_string(),
+                        127,
+                    ),
+                };
+            let diagnostic = format!("{}{}{}\n", self.diagnostic_prefix(), word, message);
+            // Bash applies a pipeline element's redirections before the
+            // command lookup fails (redir.c do_redirection_internal runs for
+            // every command): `2>/dev/null` discards the diagnostic,
+            // `2>file` writes it there, and `2>&1` sends it down this
+            // stage's pipe (issue #70's `git ... 2>/dev/null | sed` idiom).
+            if let Some(redirect) = &command.redirect_err {
+                let target = self.expand_redirect_target(redirect);
+                if redirect_target_fd(&target) == Some(1) {
+                    return Ok(Some((diagnostic, String::new(), 127)));
+                }
+                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                    if let Ok(mut file) = self.create_redirect_output(&target, redirect.clobber) {
+                        let _ = file.write_all(diagnostic.as_bytes());
+                    }
+                    return Ok(Some((String::new(), String::new(), 127)));
+                }
+            } else if let Some(redirect) = &command.redirect_err_append {
+                let target = self.expand_redirect_target(redirect);
+                if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
+                    if let Ok(mut file) = OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                    {
+                        let _ = file.write_all(diagnostic.as_bytes());
+                    }
+                    return Ok(Some((String::new(), String::new(), 127)));
+                }
+            }
+            return Ok(Some((String::new(), diagnostic, 127)));
+        };
+
+        let mut args: Vec<String> = args
+            .into_iter()
+            // The spawned child receives visible argv text; the lexer's C0
+            // data carriers (\x1a for a quoted backtick) would reach the
+            // external program as control bytes (rubash#177 sequential
+            // pipeline stages). The concurrent path already decodes them
+            // through expand_word.
+            .map(|word| super::execution_misc::restore_command_substitution_output(&word))
+            .collect();
         // GNU execute_cmd.c:6139-6233 (shell_execve): a file the OS cannot
         // exec natively is classified by its first bytes before the
         // shell-script fallback: an unresolvable #! interpreter is refused

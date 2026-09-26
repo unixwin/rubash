@@ -192,12 +192,22 @@ fn remove_shell_quotes_inner(raw: &str, posix: bool, assignment: bool) -> String
                         // Preserve the existing protected-dollar contract used by
                         // downstream expansion, but do not protect literal globs.
                         out.push(DATA_DOLLAR);
-                    } else if assignment && quoted == '`' {
-                        // Assignment words only (see remove_shell_quotes_assignment):
-                        // the word path leaves a literal backtick in place —
-                        // plain `echo 'a`b'` prints through paths that do not
-                        // decode \x1a (probed 2026-09-26: leaks `a\032b`), so
-                        // the carrier must not leave the assignment pipeline.
+                    } else if quoted == '`' {
+                        // GNU parse.y:5416-5432 read_token_word (shellquote
+                        // branch) + subst.c:11882-11886 expand_word_internal
+                        // (case '\''): single-quoted text is literal data at
+                        // expansion, so a backtick inside '...' never opens a
+                        // command substitution there. Rubash erases the quote
+                        // at tokenize time, so the literal backtick must
+                        // travel as the DATA_BACKTICK carrier — a raw ` left
+                        // in the token value is re-scanned by the embedded
+                        // expansion walker (embedded_parameters.rs backtick
+                        // arm) and executed as a nested substitution
+                        // (rubash#177: `` x="`echo hi | sed 's/\`x\`/y/'`" ``
+                        // ran the phantom command `x`). Output paths decode
+                        // the carrier (echo.rs, execution_misc.rs,
+                        // command_prepare.rs) the same way the assignment
+                        // pipeline already does.
                         out.push(crate::executor::markers::DATA_BACKTICK);
                     } else if protect_dquote && quoted == '"' {
                         out.push(crate::executor::markers::DATA_DQUOTE);

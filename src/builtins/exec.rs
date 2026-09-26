@@ -11,6 +11,7 @@ use std::process::{Command, Stdio};
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
 const EX_NOTFOUND: i32 = 127;
+const EX_NOEXEC: i32 = 126;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 
 /// GNU exec.def diagnostics go through builtin_error -> error_prolog, which
@@ -130,6 +131,64 @@ where
 
     if let Some(command) = command {
         let Some(program) = crate::executor::path::find_user_command(command, env_vars) else {
+            // GNU builtins/exec.def:151: a slash-containing operand bypasses
+            // search_for_command and is handed to shell_execve directly, so
+            // the diagnostic is the execve errno text (exec.def:231 ->
+            // execute_cmd.c:6126-6159 file_error) — `exec ./missing` reports
+            // "No such file or directory", not "not found". A directory gets
+            // exec.def's own "cannot execute" wording (EX_NOEXEC).
+            if command.contains('/') || command.contains('\\') {
+                let candidate = crate::executor::path::shell_path_to_windows(command, env_vars);
+                let metadata = std::fs::metadata(&candidate)
+                    .or_else(|_| std::fs::metadata(command))
+                    .ok();
+                match metadata {
+                    None => {
+                        // exec.def:166-168 full_pathname: the failing path is
+                        // reported resolved against the current directory.
+                        let full = if command.starts_with('/')
+                            || command.starts_with('\\')
+                            || command.as_bytes().get(1) == Some(&b':')
+                        {
+                            command.to_string()
+                        } else {
+                            match std::env::current_dir() {
+                                Ok(cwd) => format!(
+                                    "{}/{}",
+                                    cwd.to_string_lossy().replace('\\', "/"),
+                                    command
+                                )
+                                .replace("/./", "/"),
+                                Err(_) => command.to_string(),
+                            }
+                        };
+                        writeln!(
+                            stderr,
+                            "{}{}: No such file or directory",
+                            diagnostic_prefix(env_vars),
+                            full
+                        )?;
+                        return Ok(EX_NOTFOUND);
+                    }
+                    Some(metadata) if metadata.is_dir() => {
+                        writeln!(
+                            stderr,
+                            "{}exec: {command}: cannot execute: Is a directory",
+                            diagnostic_prefix(env_vars)
+                        )?;
+                        return Ok(EX_NOEXEC);
+                    }
+                    Some(_) => {
+                        writeln!(
+                            stderr,
+                            "{}{}: Permission denied",
+                            diagnostic_prefix(env_vars),
+                            command
+                        )?;
+                        return Ok(EX_NOEXEC);
+                    }
+                }
+            }
             writeln!(
                 stderr,
                 "{}exec: {command}: not found",

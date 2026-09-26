@@ -915,10 +915,15 @@ impl Executor {
     }
 
     fn external_sed(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        let args = cmd.words[1..]
-            .iter()
-            .map(|word| self.expand_word(word))
-            .collect::<Vec<_>>();
+        // cmd.words are the already-expanded argv (the simple-command
+        // executor expanded each word once, execute_cmd.c
+        // execute_disk_command -> expand_words). Re-running expand_word here
+        // would be a second expansion pass: a quoted argument whose literal
+        // text contains ` or $ (e.g. sed 's/\`x\`/y/' — single-quoted data,
+        // parse.y:5416 read_token_word shellquote branch) gets its decoded
+        // backticks re-scanned as live command substitution and executed
+        // (rubash#177). Use the argv as-is.
+        let args = cmd.words[1..].to_vec();
         if apply_simple_sed_args("", &args).is_none() {
             return Ok(false);
         }

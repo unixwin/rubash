@@ -505,7 +505,18 @@ impl Executor {
                 .map(|v| v.as_str())
                 .chain(cmd.word_metadata.iter().map(|m| m.raw.as_str()))
             {
-                if crate::lexer::has_unclosed_command_substitution(raw) {
+                // Same composition as the driver's completeness gate
+                // (lexer/mod.rs has_unclosed_input_syntax_posix): the
+                // corrected skip::command_substitutions_balanced overrides
+                // false positives from has_unclosed_command_substitution —
+                // e.g. `$(cat <<< hi)` inside a double-quoted word, where
+                // the here-string operator previously read as a `<<` heredoc
+                // and swallowed the closing `)` (rubash#168). Without the
+                // secondary check here the executor re-killed scripts the
+                // driver had already accepted.
+                if crate::lexer::has_unclosed_command_substitution(raw)
+                    && !crate::lexer::command_substitutions_balanced(raw)
+                {
                     self.mark_parse_error();
                     self.report_unclosed_comsub_eof(raw, base_line);
                     reported = true;

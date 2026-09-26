@@ -948,6 +948,19 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             continue;
         }
         // Skip heredoc body so its `)` chars stay opaque.
+        // GNU parse.y read_token: `<<<` is the here-string redirection
+        // operator (LESS_LESS_LESS) whose operand is the next ordinary
+        // word — there is no body to skip, and the comsub's `)` after the
+        // word still closes the substitution (`$(cat <<< hi)`). Check it
+        // BEFORE the `<<` heredoc arm: otherwise the second `<` of `<<<`
+        // reads as `<<` and the heredoc delimiter scan swallows the
+        // here-string word and the closing `)` to EOF, misreporting the
+        // substitution as unbalanced (rubash#168).
+        if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) == Some(&'<') {
+            index += 3;
+            token_boundary = true;
+            continue;
+        }
         if ch == '<' && chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') {
             let (next, _closes) =
                 super::heredoc_scan::skip_heredoc_in_chars_with_closure(chars, index);

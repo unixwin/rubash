@@ -403,11 +403,34 @@ impl Executor {
 
         let Some(program) = find_user_command(&cmd.words[0], &self.shell_state.env_vars) else {
             let mut stderr = Vec::new();
+            // GNU findcmd.c:385-386 (search_for_command): a name containing
+            // a slash is never PATH-searched — it goes straight to execve,
+            // so a missing file reports the errno text from
+            // execute_cmd.c:6126-6159 shell_execve ("No such file or
+            // directory", EX_NOTFOUND), a directory reports EISDIR
+            // ("Is a directory", EX_NOEXEC), and an unexecutable file
+            // reports "Permission denied" (EX_NOEXEC). Only a slash-free
+            // name that PATH could not resolve is "command not found"
+            // (rubash#173).
+            let name = super::execution_misc::printable_filename(&cmd.words[0]);
+            if let Some((message, status)) =
+                slash_command_execve_error_message(&cmd.words[0], &self.shell_state.env_vars)
+            {
+                writeln!(
+                    &mut stderr,
+                    "{}{}: {}",
+                    self.diagnostic_prefix(),
+                    name,
+                    message
+                )?;
+                self.finish_external_error(cmd, &stderr, status)?;
+                return Ok(());
+            }
             writeln!(
                 &mut stderr,
                 "{}{}: command not found",
                 self.diagnostic_prefix(),
-                super::execution_misc::printable_filename(&cmd.words[0])
+                name
             )?;
             self.finish_external_error(cmd, &stderr, 127)?;
             return Ok(());
@@ -993,5 +1016,31 @@ fn is_exec_format_error(error: &io::Error) -> bool {
     {
         let _ = error;
         false
+    }
+}
+
+/// GNU general.c:843 absolute_program: a name containing `/` (or `\` on a
+/// MSYS-like host). Such a name is never PATH-searched (findcmd.c:385-386
+/// search_for_command), so its failure text is classified by the execve
+/// result, not by the PATH miss: execute_cmd.c:6126-6159 shell_execve —
+/// ENOENT ("No such file or directory", 127), a directory (EISDIR text,
+/// 126), an unexecutable file ("Permission denied", 126). Returns None for
+/// slash-free names, which keep the "command not found" PATH wording
+/// (execute_cmd.c:5910 notfound_str).
+pub(crate) fn slash_command_execve_error_message(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<(&'static str, i32)> {
+    if !name.contains('/') && !name.contains('\\') {
+        return None;
+    }
+    let candidate = crate::executor::path::shell_path_to_windows(name, env_vars);
+    let metadata = std::fs::metadata(&candidate)
+        .or_else(|_| std::fs::metadata(name))
+        .ok();
+    match metadata {
+        None => Some(("No such file or directory", 127)),
+        Some(metadata) if metadata.is_dir() => Some(("Is a directory", 126)),
+        Some(_) => Some(("Permission denied", 126)),
     }
 }
