@@ -47,6 +47,26 @@ jobs:
         continue-on-error: true
         run: cargo test --test cli_tests
 
+  rust-macos:
+    name: Rust tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The bashdb fixture is only required by cli_tests (continue-on-error
+      # above); lib tests run fixture-free. This job gives the #[cfg(unix)]
+      # engine tests (signal tables, PATH walk, wait decode, fd extras)
+      # their first real darwin execution -- cross-target-check only proves
+      # they compile FOR darwin.
+      - name: Run Rust library tests
+        run: cargo test --lib
+
   cross-target-check:
     name: Cross-target check (linux/darwin)
     runs-on: ubuntu-latest

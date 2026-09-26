@@ -182,6 +182,44 @@ jobs:
             --latest \
             --verify-tag
 
+  github-release-macos:
+    name: Publish macOS release binary
+    runs-on: macos-latest
+    needs:
+      - github-release
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # macos-latest is arm64, so this builds the aarch64-apple-darwin
+      # binary natively; the linux job above produces x86_64-linux-gnu.
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package and upload macOS binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          mkdir -p dist
+          cp target/release/rubash dist/rubash
+          tar -C dist -czf "dist/rubash-${tag}-aarch64-apple-darwin.tar.gz" rubash
+          shasum -a 256 "dist/rubash-${tag}-aarch64-apple-darwin.tar.gz" > dist/SHA256SUMS-darwin
+          gh release upload "$tag" \
+            "dist/rubash-${tag}-aarch64-apple-darwin.tar.gz" \
+            "dist/SHA256SUMS-darwin" \
+            --clobber
+
   crates-io-publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
