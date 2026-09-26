@@ -7,10 +7,10 @@ use crate::executor::{
     array_value_at, assoc_entries, assoc_value_at, current_epoch_seconds,
     env_derived_dynamic_parameter_value, format_assoc_storage, format_indexed_array_storage,
     indexed_array_entries, is_marked_var, is_noassign_bash_array, is_shell_name,
-    is_shell_name_char, mark_env_name,
-    next_random_from_state, next_srandom_from_state, parse_array_subscript,
-    resolve_indexed_array_subscript, set_process_env, unmark_env_name, ARRAY_VARS, ASSOC_128_VARS,
-    ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET, SHELL_START_EPOCH,
+    is_shell_name_char, mark_env_name, next_random_from_state, next_srandom_from_state,
+    parse_array_subscript, resolve_indexed_array_subscript, set_process_env, unmark_env_name,
+    ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, NAMEREF_VARS, READONLY_VARS, SECONDS_OFFSET,
+    SHELL_START_EPOCH,
 };
 
 impl ConditionalArithParser<'_> {
@@ -175,11 +175,7 @@ impl ConditionalArithParser<'_> {
                     let rest = &text[index + 2..];
                     let close = rest.find('}');
                     match close {
-                        Some(close)
-                            if rest[..close]
-                                .chars()
-                                .all(|ch| is_shell_name_char(ch)) =>
-                        {
+                        Some(close) if rest[..close].chars().all(|ch| is_shell_name_char(ch)) => {
                             let value = self
                                 .env_vars
                                 .get(&rest[..close])

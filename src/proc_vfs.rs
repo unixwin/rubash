@@ -85,11 +85,11 @@ fn pid_identity(pid: u32) -> Option<(String, Vec<u8>)> {
 /// or None when the pid does not exist.
 #[cfg(windows)]
 fn snapshot_identity(pid: u32) -> Option<(String, Vec<u8>)> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return None;
@@ -124,7 +124,11 @@ fn snapshot_identity(pid: u32) -> Option<(String, Vec<u8>)> {
 /// Linux /proc/<pid>/status field set (name/state/pid/ppid/threads...).
 #[cfg(windows)]
 fn pid_status(pid: u32, image: &str) -> String {
-    let ppid = if pid == std::process::id() { 0 } else { std::process::id() };
+    let ppid = if pid == std::process::id() {
+        0
+    } else {
+        std::process::id()
+    };
     format!(
         "Name:\t{image}\n\
          State:\tS (sleeping)\n\
@@ -178,10 +182,7 @@ fn mem_snapshot() -> MemSnapshot {
         total_phys_kb: status.ullTotalPhys / 1024,
         free_phys_kb: status.ullAvailPhys / 1024,
         swap_total_kb: status.ullTotalPageFile.saturating_sub(status.ullTotalPhys) / 1024,
-        swap_free_kb: status
-            .ullAvailPageFile
-            .saturating_sub(status.ullAvailPhys)
-            / 1024,
+        swap_free_kb: status.ullAvailPageFile.saturating_sub(status.ullAvailPhys) / 1024,
     }
 }
 
@@ -271,9 +272,8 @@ fn cpu_times() -> [u64; 8] {
     if unsafe { GetSystemTimes(&mut idle, &mut kernel, &mut user) } == 0 {
         return [0; 8];
     }
-    let ticks = |t: FILETIME| {
-        (((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64) / 100_000
-    };
+    let ticks =
+        |t: FILETIME| (((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64) / 100_000;
     let (idle_t, user_t, kern_t) = (ticks(idle), ticks(user), ticks(kernel));
     let sys = kern_t.saturating_sub(idle_t);
     [user_t, 0, sys, idle_t, 0, 0, 0, 0]
@@ -288,8 +288,12 @@ fn uptime_secs() -> u64 {
 #[cfg(windows)]
 fn stat() -> String {
     let t = cpu_times();
-    let line =
-        |name: &str| format!("{name} {} {} {} {} {} {} {} {} 0 0\n", t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
+    let line = |name: &str| {
+        format!(
+            "{name} {} {} {} {} {} {} {} {} 0 0\n",
+            t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]
+        )
+    };
     let mut out = line("cpu ");
     for i in 0..cpu_count() {
         out.push_str(&line(&format!("cpu{i}")));
@@ -323,8 +327,7 @@ fn loadavg() -> String {
 
 #[cfg(windows)]
 fn version() -> String {
-    "Linux version 6.1-rubash-proc (rubash minimal /proc emulation) (windows) #1 SMP\n"
-        .to_string()
+    "Linux version 6.1-rubash-proc (rubash minimal /proc emulation) (windows) #1 SMP\n".to_string()
 }
 
 /// Standard per-CPU block. Win32 exposes CPUID, so vendor/family/flags come
@@ -395,7 +398,11 @@ fn cpuid_identity() -> (&'static str, u32, u32, u32, String, u64) {
                     _ => "GenuineIntel",
                 };
                 let family = (leaf1.eax >> 8) & 0xf;
-                let family = if family == 0xf { family + ((leaf1.eax >> 20) & 0xff) } else { family };
+                let family = if family == 0xf {
+                    family + ((leaf1.eax >> 20) & 0xff)
+                } else {
+                    family
+                };
                 let model_base = (leaf1.eax >> 4) & 0xf;
                 let model_ext = (leaf1.eax >> 16) & 0xf;
                 let model = if (leaf1.eax >> 8) & 0xf == 0xf || (leaf1.eax >> 8) & 0xf >= 0x6 {
@@ -409,10 +416,17 @@ fn cpuid_identity() -> (&'static str, u32, u32, u32, String, u64) {
                 let edx = leaf1.edx;
                 let mut flags = String::from("fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht");
                 let extra: &[(u32, u32, &str)] = &[
-                    (ecx, 0, "sse3"), (ecx, 9, "ssse3"), (ecx, 19, "sse4_1"),
-                    (ecx, 20, "sse4_2"), (ecx, 23, "popcnt"), (ecx, 25, "aes"),
-                    (ecx, 28, "avx"), (edx, 19, "clflush"), (edx, 27, "pni"),
-                    (edx, 22, "acpi"), (edx, 29, "lm"),
+                    (ecx, 0, "sse3"),
+                    (ecx, 9, "ssse3"),
+                    (ecx, 19, "sse4_1"),
+                    (ecx, 20, "sse4_2"),
+                    (ecx, 23, "popcnt"),
+                    (ecx, 25, "aes"),
+                    (ecx, 28, "avx"),
+                    (edx, 19, "clflush"),
+                    (edx, 27, "pni"),
+                    (edx, 22, "acpi"),
+                    (edx, 29, "lm"),
                 ];
                 for (reg, bit, name) in extra {
                     if reg & (1 << bit) != 0 {
@@ -425,7 +439,14 @@ fn cpuid_identity() -> (&'static str, u32, u32, u32, String, u64) {
             }
         }
     }
-    ("GenuineIntel", 6, 0, 0, String::from("fpu tsc msr"), 2_000_000)
+    (
+        "GenuineIntel",
+        6,
+        0,
+        0,
+        String::from("fpu tsc msr"),
+        2_000_000,
+    )
 }
 
 #[cfg(test)]
@@ -441,9 +462,18 @@ mod tests {
         if cfg!(windows) {
             let t = text("/proc/meminfo");
             for field in [
-                "MemTotal:", "MemFree:", "MemAvailable:", "Buffers:", "Cached:",
-                "SwapTotal:", "SwapFree:", "Slab:", "Committed_AS:", "HugePages_Total:",
-                "Hugepagesize:", "DirectMap4k:",
+                "MemTotal:",
+                "MemFree:",
+                "MemAvailable:",
+                "Buffers:",
+                "Cached:",
+                "SwapTotal:",
+                "SwapFree:",
+                "Slab:",
+                "Committed_AS:",
+                "HugePages_Total:",
+                "Hugepagesize:",
+                "DirectMap4k:",
             ] {
                 assert!(t.contains(field), "missing {field}");
             }
@@ -459,7 +489,15 @@ mod tests {
             let lines: Vec<&str> = t.lines().collect();
             assert!(lines[0].starts_with("cpu  "));
             assert!(lines[1].starts_with("cpu0 "));
-            for field in ["intr ", "ctxt ", "btime ", "processes ", "procs_running ", "procs_blocked ", "softirq "] {
+            for field in [
+                "intr ",
+                "ctxt ",
+                "btime ",
+                "processes ",
+                "procs_running ",
+                "procs_blocked ",
+                "softirq ",
+            ] {
                 assert!(t.contains(field), "missing {field}");
             }
             // Ten values after each cpu label.
@@ -471,8 +509,16 @@ mod tests {
     fn cpuinfo_block_shape_matches_linux() {
         if cfg!(windows) {
             let t = text("/proc/cpuinfo");
-            for field in ["processor\t:", "vendor_id\t:", "cpu family\t:", "model name\t:",
-                          "cpu MHz\t\t:", "flags\t\t:", "bogomips\t:", "cache_alignment\t:"] {
+            for field in [
+                "processor\t:",
+                "vendor_id\t:",
+                "cpu family\t:",
+                "model name\t:",
+                "cpu MHz\t\t:",
+                "flags\t\t:",
+                "bogomips\t:",
+                "cache_alignment\t:",
+            ] {
                 assert!(t.contains(field), "missing {field}");
             }
             assert_eq!(t.matches("processor\t:").count(), cpu_count());
@@ -504,11 +550,11 @@ mod tests {
 /// Empty on non-Windows (the real procfs lists itself there).
 #[cfg(windows)]
 pub fn list_pids() -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Vec::new();

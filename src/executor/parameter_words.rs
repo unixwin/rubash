@@ -15,9 +15,7 @@ impl Executor {
         // re-read a data `"` as an opener and drop it plus everything after
         // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
         let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
-        let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
-            &expanded,
-        ));
+        let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(&expanded));
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
@@ -62,7 +60,8 @@ impl Executor {
         );
         if var_name == "*" {
             let ifs = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("IFS")
                 .cloned()
                 .unwrap_or_else(|| " \t\n".to_string());
@@ -118,7 +117,11 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
+                            &decode_double_quotes_in_quoted_parameter_word(
+                                default,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -131,7 +134,11 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
+                                &decode_double_quotes_in_quoted_parameter_word(
+                                    default,
+                                    self.posix_mode_enabled(),
+                                    false,
+                                ),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -148,7 +155,11 @@ impl Executor {
                     if !joined.is_empty() {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
+                                &decode_double_quotes_in_quoted_parameter_word(
+                                    alternate,
+                                    self.posix_mode_enabled(),
+                                    false,
+                                ),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -162,7 +173,11 @@ impl Executor {
                 {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
+                            &decode_double_quotes_in_quoted_parameter_word(
+                                alternate,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -278,7 +293,11 @@ impl Executor {
                     if non_empty {
                         return unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
+                                &decode_double_quotes_in_quoted_parameter_word(
+                                    alternate,
+                                    self.posix_mode_enabled(),
+                                    false,
+                                ),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -289,7 +308,11 @@ impl Executor {
                 if self.parameter_operator_value(var_name).is_some() {
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(alternate, self.posix_mode_enabled(), false),
+                            &decode_double_quotes_in_quoted_parameter_word(
+                                alternate,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -309,7 +332,11 @@ impl Executor {
                     }
                     return unescape_parameter_operator_result(
                         &self.expand_embedded_parameters(
-                            &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
+                            &decode_double_quotes_in_quoted_parameter_word(
+                                default,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
                         self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -321,7 +348,11 @@ impl Executor {
                     .unwrap_or_else(|| {
                         unescape_parameter_operator_result(
                             &self.expand_embedded_parameters(
-                                &decode_double_quotes_in_quoted_parameter_word(default, self.posix_mode_enabled(), false),
+                                &decode_double_quotes_in_quoted_parameter_word(
+                                    default,
+                                    self.posix_mode_enabled(),
+                                    false,
+                                ),
                             ),
                             SubstitutionQuoteContext::DoubleQuoted,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -370,8 +401,7 @@ impl Executor {
     ) -> String {
         if matches!(
             context,
-            SubstitutionQuoteContext::DoubleQuoted
-                | SubstitutionQuoteContext::HereDocument
+            SubstitutionQuoteContext::DoubleQuoted | SubstitutionQuoteContext::HereDocument
         ) {
             decode_double_quotes_in_quoted_parameter_word(
                 word,
@@ -473,7 +503,11 @@ impl Executor {
         // on the `bad substitution` default. Mirror of the same check in
         // expand_braced_parameter_word for the `\x1d`/whole-word entry.
         if crate::executor::expand_word::braced_name_ends_on_quote(name) {
-            eprintln!("{}{}: bad substitution", self.diagnostic_prefix(), crate::executor::expand_word::bad_substitution_display(word));
+            eprintln!(
+                "{}{}: bad substitution",
+                self.diagnostic_prefix(),
+                crate::executor::expand_word::bad_substitution_display(word)
+            );
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
         }
@@ -697,7 +731,9 @@ impl Executor {
                         let decoded = self.decode_operator_word_for_context(&alternate, context);
                         let expanded =
                             self.expand_embedded_parameters_mut_with_context(&decoded, context);
-                        return unescape_parameter_operator_result(&expanded, context,
+                        return unescape_parameter_operator_result(
+                            &expanded,
+                            context,
                             self.shell_state.env_vars.get("IFS").map(String::as_str),
                         );
                     }
@@ -708,9 +744,11 @@ impl Executor {
                     let decoded = self.decode_operator_word_for_context(&alternate, context);
                     let expanded =
                         self.expand_embedded_parameters_mut_with_context(&decoded, context);
-                    let final_value = unescape_parameter_operator_result(&expanded, context,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+                    let final_value = unescape_parameter_operator_result(
+                        &expanded,
+                        context,
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
+                    );
                     return final_value;
                 }
                 return String::new();
@@ -800,7 +838,8 @@ impl Executor {
         // 0x0e is unused by every other sentinel layer (the lexer's
         // PARAM_NAME_END_MARKER is 0x13); protect/restore is local to this
         // function, so the two never interact.
-        const PROTECTED_LITERAL_BACKSLASH: char = crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD;
+        const PROTECTED_LITERAL_BACKSLASH: char =
+            crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD;
         let chars: Vec<char> = value.chars().collect();
         let mut protected = String::with_capacity(value.len());
         let mut index = 0usize;
@@ -820,7 +859,11 @@ impl Executor {
         }
         // Remove double quotes from the alternate (matching the `+`/`-`
         // operator path which calls decode_double_quotes_in_quoted_parameter_word).
-        let decoded = decode_double_quotes_in_quoted_parameter_word(&protected, self.posix_mode_enabled(), false);
+        let decoded = decode_double_quotes_in_quoted_parameter_word(
+            &protected,
+            self.posix_mode_enabled(),
+            false,
+        );
         // Use DoubleQuoted context so single quotes are treated as data
         // (not quote delimiters), matching GNU's expand_string_for_rhs
         // behavior inside double quotes. Use unescape_parameter_operator_result
@@ -829,10 +872,11 @@ impl Executor {
             &decoded,
             SubstitutionQuoteContext::DoubleQuoted,
         );
-        let unescaped =
-            unescape_parameter_operator_result(&expanded, SubstitutionQuoteContext::DoubleQuoted,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+        let unescaped = unescape_parameter_operator_result(
+            &expanded,
+            SubstitutionQuoteContext::DoubleQuoted,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+        );
         unescaped.replace(PROTECTED_LITERAL_BACKSLASH, "\\")
     }
 
@@ -877,8 +921,7 @@ impl Executor {
             }
             let inner = &word[body_start..body_start + end];
             let _site_guard = (!inherit_site).then(|| {
-                let guard =
-                    crate::executor::expand_braced_indices::SubSiteGuard::new(frag_index);
+                let guard = crate::executor::expand_braced_indices::SubSiteGuard::new(frag_index);
                 frag_index += 1;
                 guard
             });
@@ -1324,10 +1367,7 @@ pub(in crate::executor) fn unescape_parameter_operator_result(
     // quote-protected, so its IFS characters are data for field splitting --
     // `"${x:-$(echo "foo bar")}"` stays one word (exp.tests:222).
     if matches!(context, SubstitutionQuoteContext::DoubleQuoted) {
-        crate::executor::command_substitution_values::protect_ifs_field_chars(
-            &unescaped,
-            ifs,
-        )
+        crate::executor::command_substitution_values::protect_ifs_field_chars(&unescaped, ifs)
     } else {
         unescaped
     }
@@ -1348,7 +1388,11 @@ mod scanner_tests {
 
     #[test]
     fn cs_span_in_quoted_word() {
-        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "A: $(printf '<%s> ' ${w=a\\ b}) | x");
+        let word = format!(
+            "{}{}",
+            crate::executor::markers::STORAGE_WORD_PREFIX_STR,
+            "A: $(printf '<%s> ' ${w=a\\ b}) | x"
+        );
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(cs);
@@ -1357,7 +1401,11 @@ mod scanner_tests {
 
     #[test]
     fn direct_dquote_body() {
-        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "${v=a\\ b}");
+        let word = format!(
+            "{}{}",
+            crate::executor::markers::STORAGE_WORD_PREFIX_STR,
+            "${v=a\\ b}"
+        );
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(dq);
@@ -1366,7 +1414,11 @@ mod scanner_tests {
 
     #[test]
     fn cs_closes_and_next_body_is_outer() {
-        let word = format!("{}{}", crate::executor::markers::STORAGE_WORD_PREFIX_STR, "A: $(f) ${v=a\\ b}");
+        let word = format!(
+            "{}{}",
+            crate::executor::markers::STORAGE_WORD_PREFIX_STR,
+            "A: $(f) ${v=a\\ b}"
+        );
         let start = word.find("${").unwrap();
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(!cs, "body after the CS span is outer");

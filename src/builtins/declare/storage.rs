@@ -1,4 +1,4 @@
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 mod array;
 mod assoc;
 mod words;

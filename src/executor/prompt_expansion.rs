@@ -199,10 +199,13 @@ impl Executor {
             return vec![value];
         }
 
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get(target_expr)
             .map(|value| {
-                if is_array_storage(value) || is_marked_array_var(&self.shell_state.env_vars, target_expr) {
+                if is_array_storage(value)
+                    || is_marked_array_var(&self.shell_state.env_vars, target_expr)
+                {
                     array_value_at(value, 0).into_iter().collect()
                 } else {
                     vec![value.clone()]
@@ -266,9 +269,13 @@ impl Executor {
                     // when the line editor is active; with no_line_editing (a
                     // script without `set -o emacs`/`vi`) they are dropped
                     // entirely.
-                    if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs")
-                        || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi")
-                    {
+                    if crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "emacs",
+                    ) || crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "vi",
+                    ) {
                         output.push(if marker == '[' {
                             crate::executor::markers::PROMPT_IGNORE_START
                         } else {
@@ -364,7 +371,12 @@ impl Executor {
     }
 
     pub(in crate::executor) fn prompt_working_directory(&self, basename_only: bool) -> String {
-        let pwd = self.shell_state.env_vars.get("PWD").cloned().unwrap_or_default();
+        let pwd = self
+            .shell_state
+            .env_vars
+            .get("PWD")
+            .cloned()
+            .unwrap_or_default();
         let rendered = if let Some(home) = self.shell_state.env_vars.get("HOME") {
             if pwd == *home {
                 "~".to_string()
@@ -476,7 +488,11 @@ impl Executor {
         }
         // Bash exposes `c` in `$-` while executing a command string passed
         // with `-c`; script-file and stdin execution do not set it.
-        if self.shell_state.env_vars.contains_key("BASH_EXECUTION_STRING") {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("BASH_EXECUTION_STRING")
+        {
             flags.push('c');
         }
         flags
@@ -487,7 +503,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn errexit_enabled(&self) -> bool {
-        self.shell_state.env_vars.get("__RUBASH_ERREXIT").map(String::as_str) == Some("1")
+        self.shell_state
+            .env_vars
+            .get("__RUBASH_ERREXIT")
+            .map(String::as_str)
+            == Some("1")
             || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
     }
 
@@ -506,7 +526,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn xtrace_enabled(&self) -> bool {
-        self.shell_state.env_vars.get("__RUBASH_XTRACE").map(String::as_str) == Some("1")
+        self.shell_state
+            .env_vars
+            .get("__RUBASH_XTRACE")
+            .map(String::as_str)
+            == Some("1")
             || crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "xtrace")
     }
 
@@ -592,7 +616,8 @@ impl Executor {
 
     pub(in crate::executor) fn xtrace_prefix(&self) -> String {
         let ps4 = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("PS4")
             .cloned()
             .unwrap_or_else(|| "+ ".to_string());

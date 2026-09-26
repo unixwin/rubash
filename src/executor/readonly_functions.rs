@@ -38,7 +38,11 @@ impl Executor {
         // the enclosing function (execute_cmd.c run_builtin sets it on the
         // function call and the body's assignment-word expansion runs before
         // the builtin resets it).
-        let context_name = self.shell_state.function_name_stack.first().map(String::as_str);
+        let context_name = self
+            .shell_state
+            .function_name_stack
+            .first()
+            .map(String::as_str);
         let status = crate::builtins::setattr::readonly_with_io(
             args.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
@@ -167,7 +171,8 @@ impl Executor {
                 continue;
             };
             let def_redirects = self
-                .shell_state.function_def_infos
+                .shell_state
+                .function_def_infos
                 .get(&name)
                 .map(|info| info.def_redirects.as_slice())
                 .unwrap_or(&[]);
@@ -196,7 +201,8 @@ impl Executor {
         // the per-signal "" trap keys cannot survive a Windows environment
         // block, so the merged ignore set rides in the ORIG_IGN variable
         // (trap.c original_signals -> SIG_HARD_IGNORE in the child).
-        let inherited_ignores = crate::builtins::trap::transport_inherited_ignores(&self.shell_state.env_vars);
+        let inherited_ignores =
+            crate::builtins::trap::transport_inherited_ignores(&self.shell_state.env_vars);
         if !inherited_ignores.is_empty() {
             process.env(crate::builtins::trap::TRAP_ORIG_IGNORES, inherited_ignores);
         }

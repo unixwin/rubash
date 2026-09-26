@@ -53,15 +53,18 @@ impl Executor {
             let value = self
                 .array_element_parameter_value(target_name)
                 .or_else(|| {
-                    self.shell_state.env_vars.get(target_name).and_then(|value| {
-                        if is_array_storage(value)
-                            || is_marked_array_var(&self.shell_state.env_vars, target_name)
-                        {
-                            array_value_at(value, 0)
-                        } else {
-                            Some(value.clone())
-                        }
-                    })
+                    self.shell_state
+                        .env_vars
+                        .get(target_name)
+                        .and_then(|value| {
+                            if is_array_storage(value)
+                                || is_marked_array_var(&self.shell_state.env_vars, target_name)
+                            {
+                                array_value_at(value, 0)
+                            } else {
+                                Some(value.clone())
+                            }
+                        })
                 })
                 .unwrap_or_default();
             return Some(self.apply_parameter_transform_value(&value, transform));
@@ -72,15 +75,19 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| target_name.strip_suffix("[*]"))
         {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .get(array_expr)
                 .and_then(|value| array_value_at(value, 0))
                 .unwrap_or_default()
         } else {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .get(target_name)
                 .and_then(|value| {
-                    if is_array_storage(value) || is_marked_array_var(&self.shell_state.env_vars, target_name) {
+                    if is_array_storage(value)
+                        || is_marked_array_var(&self.shell_state.env_vars, target_name)
+                    {
                         array_value_at(value, 0)
                     } else {
                         Some(value.clone())
@@ -100,7 +107,8 @@ impl Executor {
         let pattern = self.expand_parameter_pattern_word(pattern);
         if matches!(var_name, "@" | "*") {
             let result = self
-                .shell_state.positional_params
+                .shell_state
+                .positional_params
                 .iter()
                 .map(|value| {
                     remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -121,7 +129,8 @@ impl Executor {
 
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| {
                         remove_parameter_pattern(value, &pattern, operation, self.extglob_enabled())
@@ -294,7 +303,8 @@ impl Executor {
         // themselves escaped (`\\%` keeps `\\` for the decoder).
         let masked = mark_escaped_pattern_anchors(&masked);
 
-        let decoded = decode_parameter_pattern_quotes(&masked).replace(crate::executor::markers::QUOTED_WORD_PREFIX, "");
+        let decoded = decode_parameter_pattern_quotes(&masked)
+            .replace(crate::executor::markers::QUOTED_WORD_PREFIX, "");
 
         let mut restored = String::with_capacity(decoded.len());
         let mut rest = decoded.as_str();
@@ -322,11 +332,19 @@ impl Executor {
         // as a double-quote marker and converts it to `"`.  Protect it by mapping
         // to \x14 (which the expander preserves as a literal backslash) and restore
         // after expansion so the pattern matcher sees the correct marker.
-        let protected = restored.replace(crate::executor::markers::PATTERN_LITERAL_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR);
+        let protected = restored.replace(
+            crate::executor::markers::PATTERN_LITERAL_BACKSLASH,
+            crate::executor::markers::DATA_BACKSLASH_STR,
+        );
         let expanded = self.expand_embedded_parameters_preserving_escaped_single_quotes(&protected);
         // Quoted glob metacharacters remain pattern literals. Preserve the
         // escape for the parameter matcher instead of exposing a raw marker.
-        expanded.replace(crate::executor::markers::CTLESC, "\\").replace(crate::executor::markers::DATA_BACKSLASH, crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR)
+        expanded
+            .replace(crate::executor::markers::CTLESC, "\\")
+            .replace(
+                crate::executor::markers::DATA_BACKSLASH,
+                crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR,
+            )
     }
 
     /// The key of an associative-array subscript, expanded through the one
@@ -381,7 +399,12 @@ impl Executor {
 
         if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, array_name) {
             let key = self.assoc_subscript_key(key);
-            let current = self.shell_state.env_vars.get(array_name).cloned().unwrap_or_default();
+            let current = self
+                .shell_state
+                .env_vars
+                .get(array_name)
+                .cloned()
+                .unwrap_or_default();
             let mut entries = assoc_entries(&current);
             if let Some((_, entry_value)) = entries
                 .iter_mut()
@@ -392,7 +415,8 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
             return true;
         }
@@ -426,7 +450,12 @@ impl Executor {
             return false;
         };
 
-        let current = self.shell_state.env_vars.get(array_name).cloned().unwrap_or_default();
+        let current = self
+            .shell_state
+            .env_vars
+            .get(array_name)
+            .cloned()
+            .unwrap_or_default();
         let mut entries = indexed_array_entries(&current);
         entries.insert(index, value);
         self.shell_state.env_vars.insert(

@@ -3130,8 +3130,11 @@ fn run_noexec_script(script_name: &str, body: &str) -> (String, String, i32) {
 /// diagnostics and exit status as a normal parse (parse.y yyerror).
 #[test]
 fn cli_noexec_reports_unclosed_if_eof() {
-    let (stdout, stderr, code) = run_noexec_script("rubash-noexec-if.sh", "if x; then y
-");
+    let (stdout, stderr, code) = run_noexec_script(
+        "rubash-noexec-if.sh",
+        "if x; then y
+",
+    );
     assert_eq!(stdout, "");
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(
@@ -3143,20 +3146,39 @@ fn cli_noexec_reports_unclosed_if_eof() {
 #[test]
 fn cli_noexec_reports_unclosed_compound_kinds() {
     for (body, name) in [
-        ("while x; do y
-", "while"),
-        ("until x; do y
-", "until"),
-        ("for x in a; do y
-", "for"),
-        ("select x in a; do y
-", "select"),
-        ("case x in
-", "case"),
-        ("(echo a
-", "("),
-        ("foo() {
-", "{"),
+        (
+            "while x; do y
+",
+            "while",
+        ),
+        (
+            "until x; do y
+",
+            "until",
+        ),
+        (
+            "for x in a; do y
+",
+            "for",
+        ),
+        (
+            "select x in a; do y
+",
+            "select",
+        ),
+        (
+            "case x in
+",
+            "case",
+        ),
+        (
+            "(echo a
+", "(",
+        ),
+        (
+            "foo() {
+", "{",
+        ),
     ] {
         let (_stdout, stderr, code) = run_noexec_script("rubash-noexec-compound.sh", body);
         assert_eq!(code, 2, "{body:?} stderr: {stderr}");
@@ -3171,9 +3193,11 @@ fn cli_noexec_reports_unclosed_compound_kinds() {
 
 #[test]
 fn cli_noexec_reports_mismatched_closer_with_line_echo() {
-    let (stdout, stderr, code) =
-        run_noexec_script("rubash-noexec-done.sh", "if x; then y; done
-");
+    let (stdout, stderr, code) = run_noexec_script(
+        "rubash-noexec-done.sh",
+        "if x; then y; done
+",
+    );
     assert_eq!(stdout, "");
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(
@@ -3186,9 +3210,18 @@ fn cli_noexec_reports_mismatched_closer_with_line_echo() {
 
 #[test]
 fn cli_noexec_reports_if_grammar_offender() {
-    for (body, token) in [("if then; fi
-", "then"), ("if x; fi
-", "fi")] {
+    for (body, token) in [
+        (
+            "if then; fi
+",
+            "then",
+        ),
+        (
+            "if x; fi
+",
+            "fi",
+        ),
+    ] {
         let (_stdout, stderr, code) = run_noexec_script("rubash-noexec-ifo.sh", body);
         assert_eq!(code, 2, "{body:?} stderr: {stderr}");
         assert!(
@@ -3200,10 +3233,12 @@ fn cli_noexec_reports_if_grammar_offender() {
 
 #[test]
 fn cli_noexec_keeps_heredoc_eof_warning() {
-    let (stdout, stderr, code) =
-        run_noexec_script("rubash-noexec-heredoc.sh", "cat <<EOF
+    let (stdout, stderr, code) = run_noexec_script(
+        "rubash-noexec-heredoc.sh",
+        "cat <<EOF
 hi
-");
+",
+    );
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "");
     assert!(
@@ -3214,9 +3249,11 @@ hi
 
 #[test]
 fn cli_noexec_reports_unclosed_parameter_expansion() {
-    let (_stdout, stderr, code) =
-        run_noexec_script("rubash-noexec-brace.sh", "echo ${x
-");
+    let (_stdout, stderr, code) = run_noexec_script(
+        "rubash-noexec-brace.sh",
+        "echo ${x
+",
+    );
     assert_eq!(code, 2, "stderr: {stderr}");
     assert!(
         stderr.contains("unexpected EOF while looking for matching `}'"),
@@ -3226,11 +3263,16 @@ fn cli_noexec_reports_unclosed_parameter_expansion() {
 
 #[test]
 fn cli_noexec_reports_trailing_pipe_eof() {
-    let (_stdout, stderr, code) =
-        run_noexec_script("rubash-noexec-pipe.sh", "echo a |
-");
+    let (_stdout, stderr, code) = run_noexec_script(
+        "rubash-noexec-pipe.sh",
+        "echo a |
+",
+    );
     assert_eq!(code, 2, "stderr: {stderr}");
-    assert!(stderr.contains("syntax error: unexpected end of file"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("syntax error: unexpected end of file"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -3252,18 +3294,25 @@ fn cli_noexec_command_string_reports_syntax_error() {
 #[test]
 fn cli_set_n_mid_script_still_reports_syntax_errors() {
     let script_path = Path::new("target").join("rubash-setn-mid.sh");
-    fs::write(&script_path, "echo one
+    fs::write(
+        &script_path,
+        "echo one
 set -n
 if x; then y
-").unwrap();
+",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)
         .output()
         .expect("run rubash");
     let _ = fs::remove_file(&script_path);
     assert_eq!(output.status.code(), Some(2));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "one
-");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "one
+"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("syntax error: unexpected end of file from `if' command on line 3"),
@@ -3275,8 +3324,12 @@ if x; then y
 #[test]
 fn cli_exec_mode_reports_compound_eof_diagnostic() {
     let script_path = Path::new("target").join("rubash-exec-unclosed.sh");
-    fs::write(&script_path, "while x; do y
-").unwrap();
+    fs::write(
+        &script_path,
+        "while x; do y
+",
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)
         .output()

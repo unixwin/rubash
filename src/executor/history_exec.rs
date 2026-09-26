@@ -326,8 +326,10 @@ pub(in crate::executor) fn execute_history_session(
             // pops, and a second -s in one line never pops the first -s's
             // entry. The push goes through check_add_history (FORCE=1),
             // i.e. record() with HISTCONTROL/HISTIGNORE honored.
-            let remember =
-                crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "history");
+            let remember = crate::builtins::set::shell_option_enabled(
+                &executor.shell_state.env_vars,
+                "history",
+            );
             if remember
                 && !shell.last_line_pushed
                 && shell.last_line_added
@@ -347,8 +349,10 @@ pub(in crate::executor) fn execute_history_session(
         HistoryMode::Print => {
             // history.def:462-463: `-p` pops the current-line entry under
             // the same conditions as -s; failure to delete is a hard error.
-            let remember =
-                crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "history");
+            let remember = crate::builtins::set::shell_option_enabled(
+                &executor.shell_state.env_vars,
+                "history",
+            );
             if remember && !shell.last_line_pushed && shell.last_line_added {
                 if shell.entries.is_empty() {
                     return Ok(1);
@@ -386,9 +390,10 @@ pub(in crate::executor) fn execute_history_session(
             };
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
             // Windows forms the file APIs need; children see the same file.
-            let path = crate::executor::path::shell_path_to_windows(&path, &executor.shell_state.env_vars)
-                .to_string_lossy()
-                .to_string();
+            let path =
+                crate::executor::path::shell_path_to_windows(&path, &executor.shell_state.env_vars)
+                    .to_string_lossy()
+                    .to_string();
             let write_ts = write_timestamps_of(executor);
             let outcome = match mode {
                 HistoryMode::Append => shell.append_file(&path, write_ts).map(|_| 0),

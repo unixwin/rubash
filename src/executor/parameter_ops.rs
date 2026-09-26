@@ -525,10 +525,9 @@ pub(in crate::executor) fn positional_parameter_substring_with_zero(
 pub(in crate::executor) fn parse_parameter_replacement(
     name: &str,
 ) -> Option<(&str, &str, &str, bool)> {
-    if let Some((var_name, rest)) = name
-        .split_once("//")
-        .filter(|(var_name, _)| !var_name.ends_with('\\') && !var_name.ends_with(crate::executor::markers::DATA_BACKSLASH))
-    {
+    if let Some((var_name, rest)) = name.split_once("//").filter(|(var_name, _)| {
+        !var_name.ends_with('\\') && !var_name.ends_with(crate::executor::markers::DATA_BACKSLASH)
+    }) {
         // A slash immediately after `//` is part of the pattern. This is
         // ambiguous with the pattern/replacement separator, so skip it and
         // find the next unescaped slash (`${v////-}`, `${v///r/-}`).
@@ -599,8 +598,18 @@ mod tests {
     #[test]
     fn encoded_backslash_does_not_split_escaped_slash_pattern() {
         assert_eq!(
-            parse_parameter_replacement(&format!("{}{}{}", "v/b", crate::executor::markers::DATA_BACKSLASH_STR, "//x")),
-            Some(("v", format!("{}{}/", "b", crate::executor::markers::DATA_BACKSLASH_STR).as_str(), "x", false))
+            parse_parameter_replacement(&format!(
+                "{}{}{}",
+                "v/b",
+                crate::executor::markers::DATA_BACKSLASH_STR,
+                "//x"
+            )),
+            Some((
+                "v",
+                format!("{}{}/", "b", crate::executor::markers::DATA_BACKSLASH_STR).as_str(),
+                "x",
+                false
+            ))
         );
     }
 

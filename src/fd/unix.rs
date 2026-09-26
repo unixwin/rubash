@@ -82,7 +82,11 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
             }
             return ReadWait::Ready; // error → treat as readable like select
         }
-        return if n == 0 { ReadWait::Timeout } else { ReadWait::Ready };
+        return if n == 0 {
+            ReadWait::Timeout
+        } else {
+            ReadWait::Ready
+        };
     }
 }
 
@@ -181,10 +185,7 @@ pub fn process_std_handle(fd: u32) -> HANDLE {
     }
 }
 
-fn open_flags_for(
-    append: bool,
-    create_new: bool,
-) -> (libc::c_int, libc::mode_t) {
+fn open_flags_for(append: bool, create_new: bool) -> (libc::c_int, libc::mode_t) {
     // Mirrors the Windows access mapping in open_file_*: read = GENERIC_READ,
     // write = GENERIC_WRITE, append = write + forced end-of-file writes.
     let base = if append {
@@ -246,7 +247,11 @@ pub fn open_file_readwrite(path: &std::path::Path) -> std::io::Result<HANDLE> {
     Ok(n)
 }
 
-fn open_wr(path: &std::path::Path, flags: libc::c_int, mode: libc::mode_t) -> std::io::Result<HANDLE> {
+fn open_wr(
+    path: &std::path::Path,
+    flags: libc::c_int,
+    mode: libc::mode_t,
+) -> std::io::Result<HANDLE> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in path"))?;
     let n = unsafe { libc::open(c.as_ptr(), flags | libc::O_CLOEXEC, mode as libc::c_uint) };

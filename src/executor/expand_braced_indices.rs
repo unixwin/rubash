@@ -305,7 +305,9 @@ impl Executor {
         let writes = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         for (name, value) in writes {
             if self.shell_state.env_vars.get(&name) != Some(&value) {
-                self.shell_state.env_vars.insert(name.clone(), value.clone());
+                self.shell_state
+                    .env_vars
+                    .insert(name.clone(), value.clone());
                 // Also sync to shell_state.variables, which is checked
                 // first by shell_variable_value (variable_state.rs:178-184).
                 if let Some(variable) = self.shell_state.variables.get_mut(&name) {
@@ -322,7 +324,9 @@ impl Executor {
         name: &str,
     ) -> Option<String> {
         if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
-            return Some(crate::builtins::pushd::stack_words(&self.shell_state.env_vars));
+            return Some(crate::builtins::pushd::stack_words(
+                &self.shell_state.env_vars,
+            ));
         }
         if let Some(index) = name
             .strip_prefix("DIRSTACK[")
@@ -330,7 +334,8 @@ impl Executor {
             .and_then(|index| self.dirstack_subscript(index))
         {
             return Some(
-                crate::builtins::pushd::stack_value(&self.shell_state.env_vars, index).unwrap_or_default(),
+                crate::builtins::pushd::stack_value(&self.shell_state.env_vars, index)
+                    .unwrap_or_default(),
             );
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
@@ -420,7 +425,8 @@ impl Executor {
         }
         if let Some((array_name, index)) = parse_array_numeric_subscript(var_name) {
             return self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(array_name)
                 .and_then(|value| array_value_at(value, index))
                 .map(|value| parameter_char_length(&value).to_string())
@@ -512,7 +518,12 @@ impl Executor {
         // the length of the cell string itself
         // (nameref24.sub: name4 -> 'aa&bb' prints 5, name2 -> unset prints 0).
         if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, var_name) {
-            let cell = self.shell_state.env_vars.get(var_name).cloned().unwrap_or_default();
+            let cell = self
+                .shell_state
+                .env_vars
+                .get(var_name)
+                .cloned()
+                .unwrap_or_default();
             if is_shell_name(&cell) {
                 if let Some(target_value) = self.shell_state.env_vars.get(&cell) {
                     if is_array_storage(target_value) {
@@ -547,7 +558,8 @@ impl Executor {
                 }
                 if let Some(index) = key.parse::<usize>().ok() {
                     return self
-                        .shell_state.env_vars
+                        .shell_state
+                        .env_vars
                         .get(array_name)
                         .and_then(|value| array_value_at(value, index))
                         .map(|value| parameter_char_length(&value).to_string())
@@ -557,7 +569,8 @@ impl Executor {
             }
             return parameter_char_length(&cell).to_string();
         }
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get(var_name)
             .map(|value| {
                 if is_array_storage(value) {

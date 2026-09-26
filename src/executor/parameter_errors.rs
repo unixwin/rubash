@@ -1,6 +1,6 @@
 use super::*;
-use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
 /// Recognize `=` / `:=` whose parameter name is a bare special parameter
 /// (`!`, `@`, `*`). GNU subst.c parameter_brace_expand treats these like
@@ -317,7 +317,11 @@ impl Executor {
         // parameter_error_value, which returned $1's raw value ("a") as the
         // operator result.
         if let Ok(index) = indirect_name.parse::<usize>() {
-            return match self.shell_state.positional_params.get(index.saturating_sub(1)) {
+            return match self
+                .shell_state
+                .positional_params
+                .get(index.saturating_sub(1))
+            {
                 Some(target_name) => Some(self.parameter_operator_value(target_name)),
                 None => Some(None),
             };
@@ -626,11 +630,7 @@ impl Executor {
     /// expansion error reports status 1 in script mode. In `-c` mode
     /// shell.c:1471 run_one_command maps FORCE_EOF to 127.
     pub(in crate::executor) fn expansion_fatal_status(&self) -> i32 {
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_IS_C")
-        {
+        if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
             127
         } else {
             1
@@ -853,22 +853,23 @@ impl Executor {
                                 // variable's values (array_value with
                                 // AV_ALLOWALL, arrayfunc.c:1563), not the
                                 // raw storage text.
-                                let display =
-                                    if let Some(storage) = self.parameter_array_storage(base) {
-                                        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
-                                            assoc_hash_ordered_values(
-                                                &storage,
-                                                assoc_nbuckets(&self.shell_state.env_vars, base),
-                                            )
-                                            .join(" ")
-                                        } else {
-                                            array_values(&storage).join(" ")
-                                        }
-                                    } else if is_array_storage(value) {
-                                        array_values(value).join(" ")
+                                let display = if let Some(storage) =
+                                    self.parameter_array_storage(base)
+                                {
+                                    if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
+                                        assoc_hash_ordered_values(
+                                            &storage,
+                                            assoc_nbuckets(&self.shell_state.env_vars, base),
+                                        )
+                                        .join(" ")
                                     } else {
-                                        value.clone()
-                                    };
+                                        array_values(&storage).join(" ")
+                                    }
+                                } else if is_array_storage(value) {
+                                    array_values(value).join(" ")
+                                } else {
+                                    value.clone()
+                                };
                                 return Some((display, "invalid variable name".to_string(), 1));
                             }
                         }
@@ -1030,7 +1031,8 @@ impl Executor {
             // background job runs; under nounset it reports an unbound
             // variable (posixexp1).
             return self
-                .shell_state.last_background_pid
+                .shell_state
+                .last_background_pid
                 .is_none()
                 .then(|| String::from("!"));
         }
@@ -1124,8 +1126,7 @@ impl Executor {
             let resolved = self
                 .resolved_variable_name(target)
                 .unwrap_or_else(|| target.to_string());
-            return (!self.nounset_variable_bound(&resolved))
-                .then(|| stripped.to_string());
+            return (!self.nounset_variable_bound(&resolved)).then(|| stripped.to_string());
         }
 
         if name.contains('@') {
@@ -1176,7 +1177,12 @@ impl Executor {
             // unset variable (or to an absent array element) is unbound
             // (nameref25.sub ok 2-4); @/* cells and invalid cells are not.
             if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
-                let cell = self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
+                let cell = self
+                    .shell_state
+                    .env_vars
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default();
                 if cell.ends_with("[@]") || cell.ends_with("[*]") {
                     return None;
                 }
@@ -1230,8 +1236,9 @@ impl Executor {
         match self.shell_state.env_vars.get(name) {
             Some(value) => {
                 if has_array_marker || is_array_storage(value) {
-                    let resolved =
-                        self.resolved_variable_name(name).unwrap_or_else(|| name.to_string());
+                    let resolved = self
+                        .resolved_variable_name(name)
+                        .unwrap_or_else(|| name.to_string());
                     return self
                         .parameter_array_storage(&resolved)
                         .map(|storage| {
@@ -1276,9 +1283,12 @@ impl Executor {
         // Scalar (or unset) base: only element 0 exists, and only when the
         // variable itself is set. Array storage consults the element table.
         match self.shell_state.env_vars.get(base) {
-            Some(storage) if storage.starts_with(STORAGE_WORD_PREFIX) || storage.starts_with('(') => self
-                .nounset_indexed_element_absent(base, sub)
-                .then(|| reported.to_string()),
+            Some(storage)
+                if storage.starts_with(STORAGE_WORD_PREFIX) || storage.starts_with('(') =>
+            {
+                self.nounset_indexed_element_absent(base, sub)
+                    .then(|| reported.to_string())
+            }
             Some(_) => (self.eval_integer_assignment_value(sub) != 0).then(|| reported.to_string()),
             None => (!self.dynamic_parameter_is_set(base) && std::env::var(base).is_err()
                 || self.eval_integer_assignment_value(sub) != 0)
@@ -1291,7 +1301,8 @@ impl Executor {
     /// already been screened for unset names by the caller.
     fn nounset_indexed_element_absent(&self, base: &str, sub: &str) -> bool {
         let index = self.eval_integer_assignment_value(sub);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get(base)
             .and_then(|storage| {
                 resolve_indexed_array_subscript(storage, index)
@@ -1355,7 +1366,11 @@ impl Executor {
                     return Some(value);
                 }
                 if let Ok(index) = name.parse::<usize>() {
-                    return self.shell_state.positional_params.get(index.saturating_sub(1)).cloned();
+                    return self
+                        .shell_state
+                        .positional_params
+                        .get(index.saturating_sub(1))
+                        .cloned();
                 }
                 if let Some(value) = self.array_element_parameter_value(name) {
                     return Some(value);

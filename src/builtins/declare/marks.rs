@@ -8,7 +8,10 @@ pub(super) fn mark_exported(variables: &mut HashMap<String, String>, name: &str)
     // attribute. Keep a side table until Rubash has a real SHELL_VAR model.
     let mut exported = exported_vars(variables);
     exported.insert(name.to_string());
-    let value = exported.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR);
+    let value = exported
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(DATA_DOLLAR_STR);
     variables.insert(EXPORTED_VARS.to_string(), value);
 }
 

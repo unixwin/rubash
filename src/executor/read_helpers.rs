@@ -475,12 +475,10 @@ pub(in crate::executor) fn split_read_array_words(line: &str, ifs: Option<&str>)
         // rules as scalar names: interior empty fields bounded by
         // non-whitespace IFS delimiters are kept (`IFS=: read -a A` on
         // `:::` yields three empty elements).
-        Some(ifs) if !ifs.is_empty() => {
-            split_read_field_ranges(line, ifs, false)
-                .into_iter()
-                .map(|(start, end)| line[start..end].to_string())
-                .collect()
-        }
+        Some(ifs) if !ifs.is_empty() => split_read_field_ranges(line, ifs, false)
+            .into_iter()
+            .map(|(start, end)| line[start..end].to_string())
+            .collect(),
         _ => line.split_whitespace().map(str::to_string).collect(),
     }
 }
@@ -628,7 +626,8 @@ impl Executor {
         }
 
         let ifs = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("IFS")
             .map(String::as_str)
             .unwrap_or(" \t\n");

@@ -1,5 +1,5 @@
 /// Token types for bash
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     Word,

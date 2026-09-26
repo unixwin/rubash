@@ -16,48 +16,30 @@ fn diagnostic_prefix_three_modes_match_gnu() {
 
     // Interactive mode: only shell name, no line segment
     let mut exec_interactive = Executor::new();
-    exec_interactive
-        .set_env("__RUBASH_INTERACTIVE", "1");
-    exec_interactive
-        .set_env("__RUBASH_SHELL_NAME", "niu");
-    assert_eq!(
-        exec_interactive.diagnostic_prefix(),
-        "niu: "
-    );
+    exec_interactive.set_env("__RUBASH_INTERACTIVE", "1");
+    exec_interactive.set_env("__RUBASH_SHELL_NAME", "niu");
+    assert_eq!(exec_interactive.diagnostic_prefix(), "niu: ");
 
     // Script mode: script name + line (no INTERACTIVE flag)
     let mut exec_script = Executor::new();
     exec_script.unset_env("__RUBASH_INTERACTIVE");
-    exec_script
-        .set_env("__RUBASH_SCRIPT_NAME", "test.sh");
-    exec_script
-        .set_env("__RUBASH_CURRENT_LINE", "5");
-    assert_eq!(
-        exec_script.diagnostic_prefix(),
-        "test.sh: line 5: "
-    );
+    exec_script.set_env("__RUBASH_SCRIPT_NAME", "test.sh");
+    exec_script.set_env("__RUBASH_CURRENT_LINE", "5");
+    assert_eq!(exec_script.diagnostic_prefix(), "test.sh: line 5: ");
 
     // -c mode: bash + line (no script name, IS_C flag)
     let mut exec_c = Executor::new();
     exec_c.unset_env("__RUBASH_INTERACTIVE");
-    exec_c
-        .set_env("__RUBASH_CURRENT_LINE", "2");
-    exec_c
-        .set_env("__RUBASH_IS_C", "1");
-    assert_eq!(
-        exec_c.diagnostic_prefix(),
-        "bash: line 2: "
-    );
+    exec_c.set_env("__RUBASH_CURRENT_LINE", "2");
+    exec_c.set_env("__RUBASH_IS_C", "1");
+    assert_eq!(exec_c.diagnostic_prefix(), "bash: line 2: ");
 
     // Fallback: no context (no line, no script, no interactive)
     let mut exec_fallback = Executor::new();
     exec_fallback.unset_env("__RUBASH_INTERACTIVE");
     exec_fallback.unset_env("__RUBASH_CURRENT_LINE");
     exec_fallback.unset_env("__RUBASH_SCRIPT_NAME");
-    assert_eq!(
-        exec_fallback.diagnostic_prefix(),
-        "bash: "
-    );
+    assert_eq!(exec_fallback.diagnostic_prefix(), "bash: ");
 }
 
 #[test]

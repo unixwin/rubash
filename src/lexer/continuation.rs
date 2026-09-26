@@ -335,8 +335,8 @@ pub(crate) fn unclosed_input_close_char_posix(
                     }
                     continue;
                 }
-                comment_start = ch.is_whitespace()
-                    || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+                comment_start =
+                    ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
             }
             if d.funsub {
                 // Track command-terminator state: `${ cmd }' without a
@@ -396,8 +396,17 @@ pub(crate) fn unclosed_input_close_char_posix(
                     if !cur_word.is_empty() {
                         at_command = matches!(
                             cur_word.as_str(),
-                            "if" | "then" | "else" | "elif" | "while" | "until" | "do"
-                                | "in" | "!" | "time" | "coproc" | "case"
+                            "if" | "then"
+                                | "else"
+                                | "elif"
+                                | "while"
+                                | "until"
+                                | "do"
+                                | "in"
+                                | "!"
+                                | "time"
+                                | "coproc"
+                                | "case"
                         );
                         cur_word.clear();
                     }
@@ -1242,8 +1251,8 @@ fn skip_parenthesized_unit(chars: &[char], open: usize) -> Option<usize> {
             }
             _ => {}
         }
-        token_boundary = ch.is_whitespace()
-            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
     }
     None
@@ -1533,8 +1542,8 @@ fn comsub_residuals(input: &str) -> (usize, bool, bool, usize) {
             // GNU read_token: a token boundary follows whitespace and the
             // shell separators; every other live character continues or
             // begins a word, so a following `#` is mid-word text.
-            comment_start = ch.is_whitespace()
-                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+            comment_start =
+                ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
     }

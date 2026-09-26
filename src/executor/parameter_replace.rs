@@ -85,7 +85,10 @@ pub(in crate::executor) fn replace_parameter_pattern(
     // of converting to a real `\` which would be treated as a glob escape.
     // Convert \x14 (another internal backslash marker) to \x18 so the
     // matcher handles it uniformly.
-    let pattern = pattern.replace(crate::executor::markers::DATA_BACKSLASH, crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR);
+    let pattern = pattern.replace(
+        crate::executor::markers::DATA_BACKSLASH,
+        crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR,
+    );
     let pattern = pattern.as_str();
     let indices: Vec<usize> = value
         .char_indices()
@@ -147,7 +150,10 @@ fn parameter_pattern_match(pattern: &str, word: &str, nocase: bool, extglob: boo
 
 fn normalize_parameter_pattern_backslashes(pattern: &str) -> String {
     pattern
-        .replace(&crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR.repeat(2), "\\")
+        .replace(
+            &crate::executor::markers::PATTERN_LITERAL_BACKSLASH_STR.repeat(2),
+            "\\",
+        )
         .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
         .replace(crate::executor::markers::PATTERN_LITERAL_BACKSLASH, "\\")
 }
@@ -455,9 +461,9 @@ pub(in crate::executor) fn invalid_at_transform_base(inner: &str) -> Option<&str
     let valid_head = is_shell_name(head)
         || matches!(head, "@" | "*" | "!" | "?" | "-" | "$")
         || (!head.is_empty() && head.chars().all(|c: char| c.is_ascii_digit()))
-        || head.strip_prefix('!').is_some_and(|h: &str| {
-            is_shell_name(h) || (h.ends_with(']') && h.contains('['))
-        });
+        || head
+            .strip_prefix('!')
+            .is_some_and(|h: &str| is_shell_name(h) || (h.ends_with(']') && h.contains('[')));
     let valid_tail = matches!(
         tail,
         "a" | "A" | "K" | "k" | "E" | "P" | "Q" | "U" | "u" | "L"

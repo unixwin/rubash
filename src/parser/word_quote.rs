@@ -30,8 +30,7 @@ pub(super) fn word_quotes_in_raw(raw: &str) -> Vec<WordQuote> {
         // Nested expansion bodies have their own quote state (GNU parse.y
         // xparse_dolparen / parse_matched_pair): quotes and escapes inside
         // `$(...)`/`${...}`/`` `...` `` do not quote the enclosing word.
-        if let Some(next_index) = super::pathname_pattern::skip_nested_expansion(&chars, index)
-        {
+        if let Some(next_index) = super::pathname_pattern::skip_nested_expansion(&chars, index) {
             index = next_index;
             continue;
         }

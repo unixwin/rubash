@@ -36,7 +36,8 @@ impl Executor {
                     &mut std::io::sink(),
                 );
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+            let mut file =
+                File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
@@ -224,8 +225,10 @@ impl Executor {
                         continue;
                     }
                 }
-                let noexpand =
-                    crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
+                let noexpand = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "array_expand_once",
+                );
                 if !crate::executor::subscript_expansion::valid_array_reference_env(
                     &name,
                     noexpand,
@@ -283,7 +286,8 @@ impl Executor {
         for name in variable_args.iter().filter(|a| !a.starts_with('-')) {
             if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
                 if let Some(cell) = self
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get(name)
                     .filter(|cell| is_shell_name(cell))
                     .cloned()
@@ -343,7 +347,9 @@ impl Executor {
     /// NULL with vflags=0), which is why GNU silently unbinds a readonly
     /// nameref whose cell is empty.
     fn last_nameref_for_unset(&self, name: &str) -> Option<String> {
-        if !self.shell_state.env_vars.contains_key(name) && self.shell_state.variables.get(name).is_none() {
+        if !self.shell_state.env_vars.contains_key(name)
+            && self.shell_state.variables.get(name).is_none()
+        {
             return None;
         }
         if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
@@ -396,13 +402,19 @@ impl Executor {
                 let Some(cell) = self.shell_state.env_vars.get(&last).cloned() else {
                     break;
                 };
-                if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &cell) || !seen.insert(cell.clone())
+                if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &cell)
+                    || !seen.insert(cell.clone())
                 {
                     break;
                 }
                 last = cell;
             }
-            let cell = self.shell_state.env_vars.get(&last).cloned().unwrap_or_default();
+            let cell = self
+                .shell_state
+                .env_vars
+                .get(&last)
+                .cloned()
+                .unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
                 return self.unset_array_element(&cell, false).or(Some(0));
             }
@@ -445,7 +457,12 @@ impl Executor {
         if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base) {
             return None;
         }
-        let Some(cell) = self.shell_state.env_vars.get(base).filter(|cell| is_shell_name(cell)) else {
+        let Some(cell) = self
+            .shell_state
+            .env_vars
+            .get(base)
+            .filter(|cell| is_shell_name(cell))
+        else {
             return None;
         };
         let cell = cell.clone();
@@ -457,7 +474,8 @@ impl Executor {
         if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
             return false;
         }
-        let Some(current_scope_index) = self.shell_state.local_var_scopes.len().checked_sub(1) else {
+        let Some(current_scope_index) = self.shell_state.local_var_scopes.len().checked_sub(1)
+        else {
             return false;
         };
         let Some(scope_index) = self.visible_local_scope_index(name) else {
@@ -513,7 +531,8 @@ impl Executor {
         // the local's stale cell makes `${res-word}` report the variable as
         // still set (varenv10.sub inner/outer).
         let typed_previous = self
-            .shell_state.local_typed_scopes
+            .shell_state
+            .local_typed_scopes
             .get_mut(scope_index)
             .and_then(|scope| scope.remove(name));
         restore_optional_shell_var(&mut self.shell_state.env_vars, name, previous.flatten());
@@ -524,7 +543,11 @@ impl Executor {
         set_var_attrs(&mut self.shell_state.env_vars, name, attrs);
         // Same sv_ignoreeof hook as the invisible-local branch above.
         if matches!(name, "IGNOREEOF" | "ignoreeof") {
-            crate::builtins::set::sync_shell_option_flag(&mut self.shell_state.env_vars, "ignoreeof", false);
+            crate::builtins::set::sync_shell_option_flag(
+                &mut self.shell_state.env_vars,
+                "ignoreeof",
+                false,
+            );
         }
         true
     }
@@ -632,12 +655,14 @@ impl Executor {
             }
             let mut entries = assoc_entries(&current);
             entries.retain(|(entry_key, _)| *entry_key != key);
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(array_name.to_string(), format_assoc_storage(entries));
             return Some(0);
         }
 
-        if is_marked_array_var(&self.shell_state.env_vars, array_name) || is_array_storage(&current) {
+        if is_marked_array_var(&self.shell_state.env_vars, array_name) || is_array_storage(&current)
+        {
             // GNU unbind_array_element (arrayfunc.c:1180-1200): with the
             // default compat level (> 51), `unset arr[*]` / `unset arr[@]`
             // FLUSHES every element (behavior 2) instead of unsetting the
@@ -651,8 +676,11 @@ impl Executor {
                 );
                 return Some(0);
             }
-            let index = match self.eval_indexed_subscript(if arrayref { SubscriptSource::Protected(&subscript) } else { SubscriptSource::ExpandedOnce(&subscript) })
-            {
+            let index = match self.eval_indexed_subscript(if arrayref {
+                SubscriptSource::Protected(&subscript)
+            } else {
+                SubscriptSource::ExpandedOnce(&subscript)
+            }) {
                 IndexedSubscript::Index(index) => index,
                 // GNU: `unset 'a[]'` is a silent no-op.
                 IndexedSubscript::Empty => return Some(0),
@@ -692,7 +720,11 @@ impl Executor {
         if subscript == "*" || subscript == "@" {
             return None;
         }
-        match self.eval_indexed_subscript(if arrayref { SubscriptSource::Protected(&subscript) } else { SubscriptSource::ExpandedOnce(&subscript) }) {
+        match self.eval_indexed_subscript(if arrayref {
+            SubscriptSource::Protected(&subscript)
+        } else {
+            SubscriptSource::ExpandedOnce(&subscript)
+        }) {
             IndexedSubscript::Index(0) => {}
             IndexedSubscript::Index(_) => return None,
             IndexedSubscript::Empty => return Some(0),

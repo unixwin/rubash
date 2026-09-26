@@ -14,8 +14,8 @@ use super::{
     EXECUTION_FAILURE, EXECUTION_SUCCESS, INTEGER_VARS, NAMEREF_VARS, READONLY_VARS,
 };
 use crate::executor::arithmetic::eval_conditional_arith_value;
-use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
 
 pub(super) fn assign_declare_names<W>(
     command_name: &str,
@@ -139,8 +139,7 @@ where
             // element value; a fresh variable without an array flag also
             // gets the deprecated-compound warning
             // (`declare a[1]='(var)' -> [1]="(var)" + warning).
-            let paren_value =
-                !append_elem && value.starts_with('(') && value.ends_with(')');
+            let paren_value = !append_elem && value.starts_with('(') && value.ends_with(')');
             if paren_value && (array || assoc) {
                 let expanded_value = expand_compound_array_value(value, variables);
                 if assoc || marked_vars(variables, ASSOC_VARS).contains(base) {
@@ -261,9 +260,7 @@ where
                 }
                 let index = if index_expression.trim().is_empty() {
                     Some(0)
-                } else if index_expression
-                    == crate::executor::types::FAILED_SUBSCRIPT_SENTINEL
-                {
+                } else if index_expression == crate::executor::types::FAILED_SUBSCRIPT_SENTINEL {
                     // The executor's subscript pass already evaluated this
                     // subscript and printed the diagnostic (declare.def:
                     // assign_error after assign_array_element fails).
@@ -580,8 +577,7 @@ where
                 }
             } else {
                 let scalar = eval_arith_value(value).to_string();
-                scalar_assign_to_array(var_name, &scalar, variables)
-                    .unwrap_or(scalar)
+                scalar_assign_to_array(var_name, &scalar, variables).unwrap_or(scalar)
             }
         } else if value.starts_with('(')
             && value.ends_with(')')
@@ -615,7 +611,6 @@ where
                 }
             }
         } else {
-
             // GNU variables.c:3415-3422 assign_in_env (implicitarray): a
             // scalar `name=value` operand whose target is already an array
             // binds through bind_array_variable(lhs, 0, rhs) — element/key
@@ -641,7 +636,6 @@ where
             } else {
                 value.to_string()
             }
-
         };
         // GNU variables.c:3341-3358 bind_variable_value: an ASS_NAMEREF
         // assignment runs check_selfref on the RESULTING cell, so

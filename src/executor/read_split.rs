@@ -1,6 +1,6 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 pub(in crate::executor) fn read_array_storage(values: &[String]) -> String {
     let rendered = values
@@ -159,7 +159,10 @@ pub(in crate::executor) fn split_read_field_ranges(
             }
             // An IFS whitespace run adjacent to a non-whitespace delimiter forms
             // one delimiter sequence; do not expose the latter as an empty field.
-            if i < n && ifs_chars.contains(&units[i].2) && !ifs_whitespace_logical(units[i].2, &ifs_chars) {
+            if i < n
+                && ifs_chars.contains(&units[i].2)
+                && !ifs_whitespace_logical(units[i].2, &ifs_chars)
+            {
                 i += 1;
                 while i < n && ifs_whitespace_logical(units[i].2, &ifs_chars) {
                     i += 1;

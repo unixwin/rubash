@@ -183,14 +183,20 @@ pub(in crate::executor) fn command_has_output_redirects(cmd: &CommandNode) -> bo
         || cmd.append.is_some()
         || cmd.redirect_err.is_some()
         || cmd.redirect_err_append.is_some()
-        || cmd.redirects.iter().any(|redirect| redirect.is_output_side())
+        || cmd
+            .redirects
+            .iter()
+            .any(|redirect| redirect.is_output_side())
 }
 
 pub(in crate::executor) fn command_has_input_or_output_redirects(cmd: &CommandNode) -> bool {
     cmd.redirect_in.is_some()
         || cmd.heredoc.is_some()
         || cmd.here_string.is_some()
-        || cmd.redirects.iter().any(|redirect| redirect.is_input_side())
+        || cmd
+            .redirects
+            .iter()
+            .any(|redirect| redirect.is_input_side())
         || command_has_output_redirects(cmd)
 }
 
@@ -250,7 +256,9 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     for (name, value) in &cmd.assignments {
         // Assignment values may carry the lexer's private quoted-RHS marker.
         // BASH_COMMAND exposes shell source, never that expansion sentinel.
-        let value = value.strip_prefix(crate::executor::markers::IFS_GLUE).unwrap_or(value);
+        let value = value
+            .strip_prefix(crate::executor::markers::IFS_GLUE)
+            .unwrap_or(value);
         parts.push(format!("{name}={value}"));
     }
     let words = command_words_source_text_for_command(cmd);

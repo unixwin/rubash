@@ -15,7 +15,8 @@ impl Executor {
         if command.words.first().map(String::as_str) == Some("wait") {
             redirect_sources.extend(command.words.iter().map(String::as_str));
         }
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .iter()
             .filter_map(|(key, value)| {
                 let name = key.strip_suffix("_PID")?;
@@ -151,7 +152,10 @@ impl Executor {
                 // command sits in a suppressing `!`/&&/|| context
                 // (execute_cmd.c:1170-1175, set-e1.sub `(exit 17)`).
                 if self.exit_code != 0
-                    && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
+                    && crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "errexit",
+                    )
                     && self.suppress_errexit == 0
                     && !$command.inverted
                     && $command.and_or().is_none()
@@ -277,8 +281,7 @@ impl Executor {
             // body (depth > 1) the ambient stays frozen at whatever the
             // enclosing command established.
             if self.evalerror_exec_depth.get() == 1 {
-                self.ambient_line
-                    .set(command.end_line.or(command.line));
+                self.ambient_line.set(command.end_line.or(command.line));
             }
             self.set_current_line(command);
             if self.noexec_enabled() {
@@ -325,8 +328,11 @@ impl Executor {
                     let c = &ast.commands[fwd];
                     if c.subshell_end {
                         if let Some(input) = self.command_input_redirect(c) {
-                            self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                            self.shell_state.env_vars
+                            self.shell_state
+                                .env_vars
+                                .insert(FUNCTION_STDIN.to_string(), input);
+                            self.shell_state
+                                .env_vars
                                 .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
                         }
                         break;
@@ -377,8 +383,9 @@ impl Executor {
                 || command.coproc_command.is_some()
                 || command.background_command.is_some()
                 || command_is_time_prefixed_compound(command);
-            let debug_trap_active = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                .is_some_and(|action| !action.is_empty());
+            let debug_trap_active =
+                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty());
             // Do not fire for commands inside the trap action itself: Bash
             // does not re-enter the DEBUG trap while an action runs, and
             // firing would let the action's commands overwrite LINENO with
@@ -855,7 +862,9 @@ impl Executor {
                     continue;
                 }
                 Ok(false) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
+                    if self.shell_state.loop_depth == 0 =>
+                {
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -901,7 +910,9 @@ impl Executor {
                     continue;
                 }
                 Ok(None) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
+                    if self.shell_state.loop_depth == 0 =>
+                {
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -945,7 +956,9 @@ impl Executor {
             };
             match execution_result {
                 Ok(()) => {}
-                Err(ExecuteError::Break(_) | ExecuteError::Continue(_)) if self.shell_state.loop_depth == 0 => {
+                Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
+                    if self.shell_state.loop_depth == 0 =>
+                {
                     self.exit_code = 0;
                 }
                 // GNU expr.c: a fatal word-expansion error abandons the
@@ -1050,7 +1063,10 @@ impl Executor {
                     // the script (set-e1.sub), while `true && (exit 1)` and
                     // `! (exit 1)` contexts keep running.
                     if self.exit_code != 0
-                        && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errexit")
+                        && crate::builtins::set::shell_option_enabled(
+                            &self.shell_state.env_vars,
+                            "errexit",
+                        )
                         && self.suppress_errexit == 0
                         && !command.inverted
                         && command.and_or().is_none()

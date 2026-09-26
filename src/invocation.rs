@@ -269,9 +269,7 @@ impl ShellInvocation {
             // explicit operand must overwrite it or `$0` keeps the host name.
             executor.set_env("__RUBASH_SCRIPT_NAME", name);
             executor.set_env("BASH_ARGV0", name);
-        } else if self.command.is_some()
-            && executor.get_env("__RUBASH_SCRIPT_NAME").is_none()
-        {
+        } else if self.command.is_some() && executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
             // GNU `bash -c` without explicit $0 reports as "bash: -c: ...".
             // Internal respawns (coproc / async `&` children) carry the
             // parent's script name through init.rs — GNU's forked subshell

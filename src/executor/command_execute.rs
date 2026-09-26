@@ -44,9 +44,9 @@ impl Executor {
         // structure's whole dynamic extent and eval.c:181 resets it per
         // reader command. Async `cmd &` consults it (execute_cmd.c:2837).
         if command_is_shell_control_structure(cmd) && !cmd.redirects.is_empty() {
-            self.shell_state.stdin_redir.set(
-                cmd.redirects.iter().any(redirect_updates_stdin_redir),
-            );
+            self.shell_state
+                .stdin_redir
+                .set(cmd.redirects.iter().any(redirect_updates_stdin_redir));
         }
         let _t_heredoc = PhaseTimer::new(&super::exec_profile::P_HEREDOC);
         self.report_command_heredoc_errors(cmd)?;
@@ -430,7 +430,11 @@ impl Executor {
             // y.error echoes it as read); parse_error_source_display would
             // trim GNU's leading whitespace.
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!("{}`{}'", self.parser_diagnostic_prefix_for_line(line), source);
+                eprintln!(
+                    "{}`{}'",
+                    self.parser_diagnostic_prefix_for_line(line),
+                    source
+                );
             }
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
@@ -526,7 +530,6 @@ impl Executor {
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
-
 
         Ok(false)
     }

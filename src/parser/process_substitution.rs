@@ -1,7 +1,7 @@
 use super::{command_boundary_keyword_allowed, is_case_end_keyword, parse, ProcessSubstitution};
+use crate::executor::markers::DATA_DOLLAR;
 use crate::lexer::{Token, TokenKind};
 use std::collections::VecDeque;
-use crate::executor::markers::{DATA_DOLLAR};
 
 pub(super) fn process_substitution_redirect_target(
     tokens: &[Token],

@@ -81,7 +81,10 @@ impl<'a> Lexer<'a> {
             // TODO(parse.y/subst.c): Preserve quote state as WORD_DESC flags.
             // This prevents quoted literal `~` from undergoing tilde
             // expansion before builtins like `printf %q` see it.
-            format!("{}{value}", crate::executor::markers::QUOTED_WORD_PREFIX_STR)
+            format!(
+                "{}{value}",
+                crate::executor::markers::QUOTED_WORD_PREFIX_STR
+            )
         } else if kind == TokenKind::Assignment && assignment_value_is_quoted(raw) {
             // TODO(parse.y/subst.c): Replace this narrow quoted-RHS marker
             // with WORD_DESC quote flags. It lets assignment tilde expansion

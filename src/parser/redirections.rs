@@ -1,6 +1,6 @@
 use super::*;
-use crate::lexer::{Token, TokenKind};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
+use crate::lexer::{Token, TokenKind};
 
 pub(super) fn collect_trailing_redirections(
     tokens: &[Token],
@@ -244,11 +244,8 @@ pub(super) fn collect_trailing_redirections(
                     // DEQUOTED delimiter; it is used both for body-line
                     // matching and for the `delimited by end-of-file
                     // (wanted `%s')` warning, so drop CTLESC pairs here.
-                    command.heredoc_delimiter = Some(
-                        target
-                            .value
-                            .replace(crate::executor::markers::CTLESC, ""),
-                    );
+                    command.heredoc_delimiter =
+                        Some(target.value.replace(crate::executor::markers::CTLESC, ""));
                 }
                 *index += 2;
                 continue;
@@ -339,7 +336,11 @@ pub(super) fn dup_close_target(
     if !(operator.ends_with("<&") || operator.ends_with(">&")) {
         return (target.value.clone(), target.raw.clone());
     }
-    let Some(rest) = target.value.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+    let Some(rest) = target
+        .value
+        .strip_prefix('-')
+        .filter(|rest| !rest.is_empty())
+    else {
         return (target.value.clone(), target.raw.clone());
     };
     let raw_rest = target

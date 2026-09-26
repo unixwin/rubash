@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     /// Apply assignments from a command containing no command word. GNU Bash
@@ -120,7 +120,8 @@ impl Executor {
                     .cloned(),
                 None,
             ));
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_TEMP_PATH".to_string(), "1".to_string());
         }
         for (name, value) in assignments {
@@ -165,7 +166,9 @@ impl Executor {
             // (nameref11.sub: `declare -n r; r=/ f` shows `declare -x r="/"`
             // inside f and restores the empty nameref afterwards). A readonly
             // original still rejects the binding via ASSIGN_DISALLOWED.
-            if resolved_target.is_none() && is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name) {
+            if resolved_target.is_none()
+                && is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name)
+            {
                 if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, base_name) {
                     let line = format!(
                         "{}{base_name}: readonly variable
@@ -175,7 +178,8 @@ impl Executor {
                     self.emit_assignment_diag(line);
                     continue;
                 }
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert(base_name.to_string(), expanded_value.clone());
                 let _ = self.shell_state.variables.set(
                     base_name.to_string(),
@@ -202,7 +206,8 @@ impl Executor {
                     self.emit_assignment_diag(line);
                     continue;
                 }
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert(base_name.to_string(), compound.to_string());
                 let _ = self.shell_state.variables.set(
                     base_name.to_string(),
@@ -250,8 +255,15 @@ impl Executor {
         // An empty or invalid cell fails sh_invalidid and leaves the
         // nameref untouched (nameref12.sub: `typeset -n ref; ref[0]=foo`
         // reports `': not a valid identifier` and keeps `declare -n ref`).
-        if subscript_from_operand && is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, elem_base) {
-            let cell = self.shell_state.env_vars.get(elem_base).cloned().unwrap_or_default();
+        if subscript_from_operand
+            && is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, elem_base)
+        {
+            let cell = self
+                .shell_state
+                .env_vars
+                .get(elem_base)
+                .cloned()
+                .unwrap_or_default();
             if !is_shell_name(&cell) {
                 let line = format!(
                     "{}`{cell}': not a valid identifier
@@ -302,7 +314,11 @@ impl Executor {
             unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, elem_base);
             String::new()
         } else {
-            self.shell_state.env_vars.get(elem_base).cloned().unwrap_or_default()
+            self.shell_state
+                .env_vars
+                .get(elem_base)
+                .cloned()
+                .unwrap_or_default()
         };
         // GNU SET_VFLAGS provenance (builtins/common.h:277-289): a subscript
         // arriving inside the builtin operand (`read a[$x]`) is ExpandedOnce
@@ -377,7 +393,9 @@ impl Executor {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
-            self.shell_state.env_vars.insert(elem_base.to_string(), new_value);
+            self.shell_state
+                .env_vars
+                .insert(elem_base.to_string(), new_value);
             self.exit_code = 0;
             return true;
         }
@@ -432,7 +450,8 @@ impl Executor {
             value.to_string()
         };
         entries.insert(index, element);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(elem_base.to_string(), format_indexed_array_storage(entries));
         self.exit_code = 0;
         true
@@ -448,15 +467,20 @@ impl Executor {
     /// x alone, and never reaches `echo after`). Returns None on failure
     /// after reporting and arming the evalerror abort.
     fn eval_integer_assignment_checked(&mut self, value: &str) -> Option<i128> {
-        if let Some(result) =
-            crate::executor::arithmetic::eval_conditional_arith_value(value, &self.shell_state.env_vars)
-        {
+        if let Some(result) = crate::executor::arithmetic::eval_conditional_arith_value(
+            value,
+            &self.shell_state.env_vars,
+        ) {
             return Some(result);
         }
         let message =
             crate::executor::arithmetic::take_arith_eval_error().map(|record| record.render(true));
         let message = message.or_else(|| {
-            crate::executor::arithmetic::arithmetic_error_message(value, false, &self.shell_state.env_vars)
+            crate::executor::arithmetic::arithmetic_error_message(
+                value,
+                false,
+                &self.shell_state.env_vars,
+            )
         });
         if let Some(message) = message {
             let line = format!("{}{}\n", self.assignment_diagnostic_prefix(), message);
@@ -611,7 +635,12 @@ impl Executor {
         // empty, not a valid name) is left unchanged on any assignment
         // (nameref12.sub: r=^ against an invalid cell).
         if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name) {
-            let cell = self.shell_state.env_vars.get(base_name).cloned().unwrap_or_default();
+            let cell = self
+                .shell_state
+                .env_vars
+                .get(base_name)
+                .cloned()
+                .unwrap_or_default();
             let cell_valid = is_shell_name(&cell) || parse_array_subscript(&cell).is_some();
             if !append && !cell_valid {
                 // Distinguish valueless (empty) from already-invalid cells.
@@ -619,7 +648,9 @@ impl Executor {
                     || parse_array_subscript(value.as_str()).is_some();
                 if cell.is_empty() && value_valid {
                     // Valueless nameref: set the target to the new value.
-                    self.shell_state.env_vars.insert(base_name.to_string(), value.clone());
+                    self.shell_state
+                        .env_vars
+                        .insert(base_name.to_string(), value.clone());
                     self.exit_code = 0;
                     return true;
                 }
@@ -642,11 +673,13 @@ impl Executor {
         // find_variable_nameref_context, whose array-reference cell then
         // goes straight to assign_array_element (no attribute strip --
         // unlike the global bind_variable_internal path).
-        let operand_is_funcenv_nameref = is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name)
-            && self
-                .shell_state.local_var_scopes
-                .iter()
-                .any(|scope| scope.contains_key(base_name));
+        let operand_is_funcenv_nameref =
+            is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base_name)
+                && self
+                    .shell_state
+                    .local_var_scopes
+                    .iter()
+                    .any(|scope| scope.contains_key(base_name));
         let base_name = target_name.as_str();
         // GNU arrayfunc.c/variables.c: a nameref whose cell is an array
         // element (declare -in b="a[0]"; b+=1) binds through to that element
@@ -667,7 +700,11 @@ impl Executor {
                 if is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, elem_base)
                     || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, elem_base)
                 {
-                    if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
+                    if is_marked_var(
+                        &self.shell_state.env_vars,
+                        "__RUBASH_READONLY_VARS",
+                        elem_base,
+                    ) {
                         let line = format!(
                             "{}{}: readonly variable\n",
                             self.diagnostic_prefix(),
@@ -677,8 +714,9 @@ impl Executor {
                         self.exit_code = 1;
                         return false;
                     }
-                    let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
-                        || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, elem_base);
+                    let integer =
+                        is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
+                            || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
                         elem_base,
                         subscript,
@@ -718,7 +756,11 @@ impl Executor {
                     return false;
                 }
                 {
-                    if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", elem_base) {
+                    if is_marked_var(
+                        &self.shell_state.env_vars,
+                        "__RUBASH_READONLY_VARS",
+                        elem_base,
+                    ) {
                         // GNU error.c:453 err_readonly -> report_error: the
                         // bind-layer diagnostic is `name: readonly variable`
                         // with no builtin-name segment (read.def:1155
@@ -732,8 +774,9 @@ impl Executor {
                         self.exit_code = 1;
                         return false;
                     }
-                    let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
-                        || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, elem_base);
+                    let integer =
+                        is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
+                            || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, elem_base);
                     return self.apply_nameref_array_element_assignment(
                         elem_base,
                         subscript,
@@ -746,7 +789,11 @@ impl Executor {
                 }
             }
         }
-        if is_marked_var(&self.shell_state.env_vars, "__RUBASH_READONLY_VARS", base_name) {
+        if is_marked_var(
+            &self.shell_state.env_vars,
+            "__RUBASH_READONLY_VARS",
+            base_name,
+        ) {
             let line = format!(
                 "{}{}: readonly variable\n",
                 self.diagnostic_prefix(),
@@ -764,17 +811,23 @@ impl Executor {
         // ignoreeof option on — the option is "the variable is set", so
         // even `IGNOREEOF=` enables it.
         if matches!(base_name, "IGNOREEOF" | "ignoreeof") && !append {
-            crate::builtins::set::sync_shell_option_flag(&mut self.shell_state.env_vars, "ignoreeof", true);
+            crate::builtins::set::sync_shell_option_flag(
+                &mut self.shell_state.env_vars,
+                "ignoreeof",
+                true,
+            );
         }
         if base_name == "SECONDS" && !append {
             let assigned = value.trim().parse::<i64>().unwrap_or(0);
             let start = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(SHELL_START_EPOCH)
                 .and_then(|value| value.parse::<i64>().ok())
                 .unwrap_or_else(current_epoch_seconds);
             let elapsed = current_epoch_seconds() - start;
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
             set_process_env(base_name, assigned.to_string());
             return true;
@@ -843,7 +896,11 @@ impl Executor {
                     // existing or declared-but-unset target keeps its prior
                     // state.
                     if !self.shell_state.env_vars.contains_key(base_name)
-                        && !is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base_name)
+                        && !is_marked_var(
+                            &self.shell_state.env_vars,
+                            DECLARED_UNSET_VARS,
+                            base_name,
+                        )
                     {
                         self.shell_state.env_vars.insert(
                             base_name.to_string(),
@@ -852,12 +909,15 @@ impl Executor {
                         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base_name);
                     }
                     let current = self
-                        .shell_state.env_vars
+                        .shell_state
+                        .env_vars
                         .get(base_name)
                         .cloned()
                         .unwrap_or_default();
-                    let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name);
-                    let stored = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name) {
+                    let integer =
+                        is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name);
+                    let stored = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
+                    {
                         append_assoc_value(&current, &partial, integer, &self.shell_state.env_vars)
                     } else {
                         append_array_value(
@@ -869,7 +929,9 @@ impl Executor {
                         )
                         .unwrap_or(current)
                     };
-                    self.shell_state.env_vars.insert(base_name.to_string(), stored);
+                    self.shell_state
+                        .env_vars
+                        .insert(base_name.to_string(), stored);
 
                     self.exit_code = 1;
                     return false;
@@ -879,7 +941,12 @@ impl Executor {
             value
         };
         let value = if append {
-            let current = self.shell_state.env_vars.get(base_name).cloned().unwrap_or_default();
+            let current = self
+                .shell_state
+                .env_vars
+                .get(base_name)
+                .cloned()
+                .unwrap_or_default();
             if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name) {
                 if value.starts_with('(') && value.ends_with(')') {
                     append_assoc_value(
@@ -937,7 +1004,9 @@ impl Executor {
                 is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name),
                 &self.shell_state.env_vars,
             );
-            self.shell_state.env_vars.insert(base_name.to_string(), stored.clone());
+            self.shell_state
+                .env_vars
+                .insert(base_name.to_string(), stored.clone());
             for bare in &bare_elements {
                 let line = format!(
                     "{}{}: {}: must use subscript when assigning associative array
@@ -1021,7 +1090,11 @@ impl Executor {
         {
             mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base_name);
         }
-        unmark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, base_name);
+        unmark_env_name(
+            &mut self.shell_state.env_vars,
+            DECLARED_UNSET_VARS,
+            base_name,
+        );
         let is_array = compound_assignment
             || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, base_name)
             || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name);
@@ -1036,11 +1109,18 @@ impl Executor {
             && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
             && !value.starts_with(STORAGE_WORD_PREFIX)
         {
-            let current = self.shell_state.env_vars.get(base_name).cloned().unwrap_or_default();
+            let current = self
+                .shell_state
+                .env_vars
+                .get(base_name)
+                .cloned()
+                .unwrap_or_default();
             let mut entries = indexed_array_entries(&current);
             entries.insert(0, value.clone());
             let storage = format_indexed_array_storage(entries);
-            self.shell_state.env_vars.insert(base_name.to_string(), storage);
+            self.shell_state
+                .env_vars
+                .insert(base_name.to_string(), storage);
             mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base_name);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
                 set_process_env(base_name, self.shell_state.env_vars[base_name].clone());
@@ -1071,14 +1151,18 @@ impl Executor {
             && !value.starts_with(STORAGE_WORD_PREFIX)
         {
             let storage = format!("([\"0\"]={})", quote_assoc_storage_value(&value));
-            self.shell_state.env_vars.insert(base_name.to_string(), storage);
+            self.shell_state
+                .env_vars
+                .insert(base_name.to_string(), storage);
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
                 self.mark_exported(base_name);
             }
             self.exit_code = 0;
             return true;
         }
-        self.shell_state.env_vars.insert(base_name.to_string(), value.clone());
+        self.shell_state
+            .env_vars
+            .insert(base_name.to_string(), value.clone());
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
             self.mark_exported(base_name);
         }

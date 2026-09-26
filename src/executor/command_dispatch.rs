@@ -112,7 +112,8 @@ impl Executor {
             for (name, _) in &cmd.assignments {
                 let (base, _) = assignment_name_and_append(name);
                 let is_local = self
-                    .shell_state.local_var_scopes
+                    .shell_state
+                    .local_var_scopes
                     .iter()
                     .any(|scope| scope.contains_key(base));
                 let is_function_tempenv = self
@@ -126,8 +127,10 @@ impl Executor {
                         .iter()
                         .any(|(propagated, _)| propagated == base)
                 {
-                    self.tempenv_propagated_names
-                        .push((base.to_string(), capture_var_attrs(&self.shell_state.env_vars, base)));
+                    self.tempenv_propagated_names.push((
+                        base.to_string(),
+                        capture_var_attrs(&self.shell_state.env_vars, base),
+                    ));
                 }
             }
         }
@@ -138,7 +141,8 @@ impl Executor {
             && self.special_builtin_failed.get()
             && self.posix_mode_enabled()
             && self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_INTERACTIVE")
                 .map(String::as_str)
                 != Some("1")

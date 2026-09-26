@@ -3,8 +3,8 @@
 //! GNU Bash source ownership:
 // - builtins/echo.def
 
+use crate::executor::markers::DATA_DOLLAR;
 use std::io::{self, Write};
-use crate::executor::markers::{DATA_DOLLAR};
 
 /// Execute `echo` with arguments after the command name.
 pub fn execute(args: &[String]) -> io::Result<()> {
@@ -123,7 +123,9 @@ fn remove_residual_shell_quotes(arg: &str, unescape_alias_quotes: bool) -> Strin
     if arg.starts_with('$') && arg.contains(crate::executor::markers::PROTECTED_BACKSLASH) {
         let body = arg[1..].replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\");
         let decoded = crate::lexer::decode_ansi_c_quoted(&body);
-        return decoded.replace(DATA_DOLLAR, "$").replace(crate::executor::markers::DATA_BACKTICK, "`");
+        return decoded
+            .replace(DATA_DOLLAR, "$")
+            .replace(crate::executor::markers::DATA_BACKTICK, "`");
     }
 
     arg.to_string()

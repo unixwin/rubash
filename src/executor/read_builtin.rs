@@ -3,7 +3,6 @@ use super::*;
 const READ_USAGE: &str =
     "read: usage: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]";
 
-
 /// GNU read.def:405: `read` accepts a name that is either a valid identifier
 /// or a valid array reference `name[subscript]` (array.tests:80 `read x[1]`).
 /// The array-reference check is `valid_array_reference(name, arrayflags)`
@@ -15,12 +14,7 @@ const READ_USAGE: &str =
 /// `VA_NOEXPAND` alone takes the first (`read 'a[80's]'` keys on `80's`
 /// but `A[]]` is invalid), and flag-0 runs the quote-aware matched-pair
 /// scan (`read a[80's]` reports not-a-valid-identifier).
-fn is_valid_read_name(
-    name: &str,
-    w_arrayref: bool,
-    env_vars: &HashMap<String, String>,
-
-) -> bool {
+fn is_valid_read_name(name: &str, w_arrayref: bool, env_vars: &HashMap<String, String>) -> bool {
     // W_ARRAYREF arrives in-band as an ARRAYREF_FLAG prefix on the operand
     // text; it is a word flag, not name bytes, so strip it before the
     // identifier/reference checks (execute_cmd.c:4366 fix_arrayref_words).
@@ -36,7 +30,6 @@ fn is_valid_read_name(
         expand_once && w_arrayref,
         env_vars,
     )
-
 }
 
 impl Executor {
@@ -101,7 +94,11 @@ impl Executor {
                             self.word_is_arrayref(cmd, index),
                             &self.shell_state.env_vars,
                         ) {
-                            scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index]).1.to_string());
+                            scalar_names.push(
+                                crate::builtins::arrayref::take_arrayref_flag(&cmd.words[index])
+                                    .1
+                                    .to_string(),
+                            );
 
                             scalar_field_count += 1;
                         } else {
@@ -128,7 +125,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -153,7 +154,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -169,7 +174,11 @@ impl Executor {
                     raw = true;
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -194,7 +203,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -212,7 +225,11 @@ impl Executor {
                     raw = true;
                     let name = &word[4..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -237,7 +254,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -260,7 +281,11 @@ impl Executor {
                     raw = true;
                     let name = &word[5..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -283,7 +308,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -298,7 +327,11 @@ impl Executor {
                 word if word.starts_with("-sa") && word.len() > 3 => {
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -321,7 +354,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -336,7 +373,11 @@ impl Executor {
                 word if word.starts_with("-ea") && word.len() > 3 => {
                     let name = &word[3..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -361,7 +402,11 @@ impl Executor {
                         return self.finish_read_error(cmd, &stderr, 2);
                     };
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -379,7 +424,11 @@ impl Executor {
                     raw = true;
                     let name = &word[4..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -394,7 +443,11 @@ impl Executor {
                 word if word.starts_with("-a") && word.len() > 2 => {
                     let name = &word[2..];
                     if is_shell_name(name) {
-                        array_name = Some(crate::builtins::arrayref::take_arrayref_flag(name).1.to_string());
+                        array_name = Some(
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                        );
                     } else {
                         report_read_invalid_identifier(
                             &mut stderr,
@@ -1860,9 +1913,9 @@ impl Executor {
                     } else if let Some(value) = word.strip_prefix("-t") {
                         match parse_read_timeout(value) {
                             Ok(secs) => {
-                            timeout_zero = secs == 0.0;
-                            timeout_secs = Some(secs);
-                        }
+                                timeout_zero = secs == 0.0;
+                                timeout_secs = Some(secs);
+                            }
                             Err(()) => {
                                 let _ = writeln!(
                                     &mut stderr,
@@ -1889,9 +1942,16 @@ impl Executor {
                     return self.finish_read_error(cmd, &stderr, 2);
                 }
                 word if !stop_scalar_names => {
-
-                    if is_valid_read_name(word, self.word_is_arrayref(cmd, index), &self.shell_state.env_vars) {
-                        scalar_names.push(crate::builtins::arrayref::take_arrayref_flag(word).1.to_string());
+                    if is_valid_read_name(
+                        word,
+                        self.word_is_arrayref(cmd, index),
+                        &self.shell_state.env_vars,
+                    ) {
+                        scalar_names.push(
+                            crate::builtins::arrayref::take_arrayref_flag(word)
+                                .1
+                                .to_string(),
+                        );
 
                         scalar_field_count += 1;
                     } else {
@@ -1965,7 +2025,12 @@ impl Executor {
                         array_name = Some(target);
                     }
                     NamerefResolution::Unresolved => {
-                        let cell = self.shell_state.env_vars.get(&name).cloned().unwrap_or_default();
+                        let cell = self
+                            .shell_state
+                            .env_vars
+                            .get(&name)
+                            .cloned()
+                            .unwrap_or_default();
                         if cell.is_empty() {
                             let _ = writeln!(
                                 &mut stderr,
@@ -2003,7 +2068,9 @@ impl Executor {
                     .shell_state
                     .variables
                     .replace_indexed_array(&name, std::iter::empty::<String>());
-                self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                self.shell_state
+                    .env_vars
+                    .insert(name.clone(), read_array_storage(&[]));
                 mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return if invalid_name {
                     self.finish_read_error(cmd, &stderr, 1)
@@ -2056,7 +2123,9 @@ impl Executor {
                     .shell_state
                     .variables
                     .replace_indexed_array(&name, std::iter::empty::<String>());
-                self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                self.shell_state
+                    .env_vars
+                    .insert(name.clone(), read_array_storage(&[]));
                 mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                 return 0;
             }
@@ -2082,13 +2151,18 @@ impl Executor {
                         .shell_state
                         .variables
                         .replace_indexed_array(&name, std::iter::empty::<String>());
-                    self.shell_state.env_vars.insert(name.clone(), read_array_storage(&[]));
+                    self.shell_state
+                        .env_vars
+                        .insert(name.clone(), read_array_storage(&[]));
                     mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
                     return if read_timed_out { 142 } else { 1 };
                 }
             };
             let values = if raw {
-                split_read_array_words(&final_line, self.shell_state.env_vars.get("IFS").map(String::as_str))
+                split_read_array_words(
+                    &final_line,
+                    self.shell_state.env_vars.get("IFS").map(String::as_str),
+                )
             } else {
                 split_read_array_words_with_backslashes(
                     &final_line,
@@ -2262,7 +2336,11 @@ impl Executor {
             };
             // GNU read.def:539-562: on timeout the vars keep the partial
             // assignment above and the builtin returns 128+SIGALRM=142.
-            let status = if self.take_read_timed_out() { 142 } else { status };
+            let status = if self.take_read_timed_out() {
+                142
+            } else {
+                status
+            };
             return if invalid_name {
                 self.finish_read_error(cmd, &stderr, 1)
             } else {
@@ -2281,7 +2359,10 @@ impl Executor {
     }
 
     fn read_prompt_should_display(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
-        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_SCRIPT_NAME")
             || self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
             || command_redirects_stdin(cmd)
             || command_closes_stdin(cmd)
@@ -2302,9 +2383,7 @@ impl Executor {
     }
 
     fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
-        if self.coproc_read_file(fd).is_some()
-            || (fd == 0 && self.first_coproc_read().is_some())
-        {
+        if self.coproc_read_file(fd).is_some() || (fd == 0 && self.first_coproc_read().is_some()) {
             return true;
         }
         if self.fd_table.is_open_for_read(fd) {
@@ -2449,9 +2528,10 @@ impl Executor {
                     && !target.starts_with("<(")
                     && !is_closed_redirect_target(&target)
                 {
-                    let path =
-                        shell_path_to_windows(&target, &self.shell_state.env_vars);
-                    return std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false);
+                    let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                    return std::fs::metadata(&path)
+                        .map(|m| m.is_file())
+                        .unwrap_or(false);
                 }
             }
         }

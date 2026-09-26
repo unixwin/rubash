@@ -26,7 +26,10 @@ fn alias_defined_in_subshell_does_not_leak() {
         "alias ll='echo PARENT'\n( alias ll='echo CHILD'; alias newa='echo NEW' )\nalias ll\nalias newa",
     );
     assert_eq!(stdout, "alias ll='echo PARENT'\n");
-    assert!(stderr.contains("alias: newa: not found"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("alias: newa: not found"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -40,40 +43,36 @@ fn function_defined_in_subshell_does_not_leak() {
 
 #[test]
 fn subshell_alias_override_restores_parent_alias() {
-    let (stdout, _, _) = rubash(
-        "alias ll='echo PARENT'\n( alias ll='echo CHILD' )\nalias ll",
-    );
+    let (stdout, _, _) = rubash("alias ll='echo PARENT'\n( alias ll='echo CHILD' )\nalias ll");
     assert_eq!(stdout, "alias ll='echo PARENT'\n");
 }
 
 #[test]
 fn nested_subshell_definitions_do_not_leak() {
-    let (stdout, stderr, _) = rubash("( ( alias d='echo DEEP'; df() { echo DF; } ) )\nalias d\ndeclare -F df");
+    let (stdout, stderr, _) =
+        rubash("( ( alias d='echo DEEP'; df() { echo DF; } ) )\nalias d\ndeclare -F df");
     assert_eq!(stdout, "");
     assert!(stderr.contains("alias: d: not found"), "stderr: {stderr}");
 }
 
 #[test]
 fn function_body_paren_subshell_does_not_leak() {
-    let (stdout, stderr, _) = rubash(
-        "h() ( alias hb='echo HB'; hbf() { echo HBF; } )\nh\nalias hb\ndeclare -F hbf",
-    );
+    let (stdout, stderr, _) =
+        rubash("h() ( alias hb='echo HB'; hbf() { echo HBF; } )\nh\nalias hb\ndeclare -F hbf");
     assert_eq!(stdout, "");
     assert!(stderr.contains("alias: hb: not found"), "stderr: {stderr}");
 }
 
 #[test]
 fn command_substitution_definitions_do_not_leak() {
-    let (stdout, _, _) = rubash(
-        "x=$( alias cx='echo CS'; cf() { echo CF; }; echo done )\necho $x\ndeclare -F cf",
-    );
+    let (stdout, _, _) =
+        rubash("x=$( alias cx='echo CS'; cf() { echo CF; }; echo done )\necho $x\ndeclare -F cf");
     assert_eq!(stdout, "done\n");
 }
 
 #[test]
 fn subshell_function_mutation_restores_parent_body() {
-    let (stdout, _, _) =
-        rubash("f() { echo PARENT_F; }\n( f() { echo CHILD_F; } )\nf");
+    let (stdout, _, _) = rubash("f() { echo PARENT_F; }\n( f() { echo CHILD_F; } )\nf");
     assert_eq!(stdout, "PARENT_F\n");
 }
 

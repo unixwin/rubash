@@ -14,7 +14,7 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use super::support_names::split_shell_path;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 pub(crate) const COMPATIBLE_SHELL_PATH_ENV: &str = "__RUBASH_COMPATIBLE_SHELL_PATH";
 
@@ -1072,7 +1072,9 @@ fn unix_bin_basename(name: &str) -> Option<&str> {
     }
     // `normalized` is a local String; return the basename taken from
     // `name` itself so the borrowed tail outlives the function.
-    name.rsplit(['/', '\\']).next().filter(|base| !base.is_empty())
+    name.rsplit(['/', '\\'])
+        .next()
+        .filter(|base| !base.is_empty())
 }
 
 pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
@@ -1211,8 +1213,14 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
     if cfg!(windows) && shell_root.is_none() {
         #[cfg(windows)]
         if let Some(dir) = windows_posix_tools_dir(env_vars) {
-            const POSIX_BIN_DIRS: &[&str] =
-                &["/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin", "/usr/local/sbin"];
+            const POSIX_BIN_DIRS: &[&str] = &[
+                "/bin",
+                "/usr/bin",
+                "/usr/local/bin",
+                "/sbin",
+                "/usr/sbin",
+                "/usr/local/sbin",
+            ];
             for base in POSIX_BIN_DIRS {
                 if normalized == *base {
                     return dir;
@@ -1221,8 +1229,7 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
                     .strip_prefix(base)
                     .filter(|rest| rest.starts_with('/'))
                 {
-                    let candidate =
-                        dir.join(rest.trim_start_matches('/').replace('/', "\\"));
+                    let candidate = dir.join(rest.trim_start_matches('/').replace('/', "\\"));
                     // The toolset holds `X.exe`; the logical name is bare.
                     // Probe extensions so `/bin/sh` resolves to the real
                     // file — GNU open(2) then reports ENOTDIR for `cd`,
@@ -1806,7 +1813,10 @@ mod tests {
             "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
-        assert_eq!(shell_path_to_windows("/etc/config", &env_vars), root.join("etc").join("config"));
+        assert_eq!(
+            shell_path_to_windows("/etc/config", &env_vars),
+            root.join("etc").join("config")
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

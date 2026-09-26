@@ -405,8 +405,7 @@ impl Executor {
         // jobs9.sub's `kill -USR1 $$` must never leak into the parent and
         // kill it at a later command boundary).
         let saved_pending_signals = if this_shell_invocation {
-            crate::builtins::kill::take_pending_signals_now(std::process::id())
-                .unwrap_or_default()
+            crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default()
         } else {
             Vec::new()
         };

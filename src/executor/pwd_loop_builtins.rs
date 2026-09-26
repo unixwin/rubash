@@ -147,12 +147,14 @@ impl Executor {
             // action uses the current $? (trap9.sub: handler's return sees
             // setexit's 111, not the pre-trap status).
             let action_depth = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_SIGNAL_TRAP_DEPTH")
                 .and_then(|value| value.parse::<usize>().ok());
             let in_trap_action = action_depth == Some(self.shell_state.function_depth);
             if in_trap_action {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get("__RUBASH_SIGNAL_TRAP_STATUS")
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(self.exit_code)
@@ -162,7 +164,12 @@ impl Executor {
         };
 
         let in_function = self.shell_state.function_depth > 0;
-        let in_source = self.shell_state.env_vars.get("__RUBASH_IN_SOURCE").map(String::as_str) == Some("1");
+        let in_source = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_IN_SOURCE")
+            .map(String::as_str)
+            == Some("1");
         if in_function || in_source {
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             return Err(ExecuteError::Return(status));

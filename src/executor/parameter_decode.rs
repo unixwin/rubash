@@ -475,9 +475,7 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
         }
         if ch == '$' && chars.get(i + 1) == Some(&'{') {
             let rest: String = chars[i + 2..].iter().collect();
-            if let Some(end) =
-                crate::executor::parameter_ops::matching_parameter_brace(&rest)
-            {
+            if let Some(end) = crate::executor::parameter_ops::matching_parameter_brace(&rest) {
                 masked.extend(chars[i..i + 2 + end + 1].iter());
                 i += 2 + end + 1;
                 continue;
@@ -556,9 +554,9 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
                 }
                 if inner == '$' && chars.get(j + 1) == Some(&'{') {
                     let rest: String = chars[j + 2..].iter().collect();
-                    if let Some(end) = crate::executor::parameter_ops::matching_parameter_brace(
-                        &rest,
-                    ) {
+                    if let Some(end) =
+                        crate::executor::parameter_ops::matching_parameter_brace(&rest)
+                    {
                         content.extend(chars[j..j + 2 + end + 1].iter());
                         j += 2 + end + 1;
                         continue;

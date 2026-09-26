@@ -176,8 +176,7 @@ pub(crate) struct InteriorSnapshot {
     arithmetic_nonfatal_error: bool,
     arithmetic_fatal_error: bool,
     arithmetic_nounset_error: bool,
-    arithmetic_last_error_category:
-        Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
+    arithmetic_last_error_category: Option<crate::executor::arithmetic::ArithmeticErrorCategory>,
     parameter_bad_substitution: bool,
     debug_trap_command: Option<String>,
     xtrace_fd: i32,
@@ -238,7 +237,8 @@ impl ShellState {
             .set(snapshot.arithmetic_expansion_error);
         self.arithmetic_nonfatal_error
             .set(snapshot.arithmetic_nonfatal_error);
-        self.arithmetic_fatal_error.set(snapshot.arithmetic_fatal_error);
+        self.arithmetic_fatal_error
+            .set(snapshot.arithmetic_fatal_error);
         self.arithmetic_nounset_error
             .set(snapshot.arithmetic_nounset_error);
         self.arithmetic_last_error_category

@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 pub(in crate::executor) fn command_node_source_line(command: &CommandNode) -> String {
     command.words.join(" ")

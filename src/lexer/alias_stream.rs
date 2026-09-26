@@ -603,8 +603,12 @@ fn skip_backtick(buf: &[char], mut pos: usize) -> usize {
 /// can contribute the closing `)` itself: `short='echo ok 8 )'`).
 /// `'` bodies and `\` escapes hide `$(`; `"` and `` ` `` interiors do not.
 fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String {
-    if !source.contains("$(") && !source.contains("${ ") && !source.contains("${\t")
-        && !source.contains("${\n") && !source.contains("${|") && !source.contains("${(")
+    if !source.contains("$(")
+        && !source.contains("${ ")
+        && !source.contains("${\t")
+        && !source.contains("${\n")
+        && !source.contains("${|")
+        && !source.contains("${(")
     {
         return source.to_string();
     }
@@ -634,9 +638,9 @@ fn expand_comsub_alias_bodies(source: &str, lookup: &AliasLookup<'_>) -> String 
             // `${ ' followed by blank, newline, '|' or '(' parses a command
             // list like `$(` — its body gets the same one-pass expansion.
             '$' if chars.get(pos + 1) == Some(&'{')
-                && chars.get(pos + 2).is_some_and(|c| {
-                    matches!(c, ' ' | '\t' | '\n' | '|' | '(')
-                }) =>
+                && chars
+                    .get(pos + 2)
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '|' | '(')) =>
             {
                 pos = splice_substitution_body(
                     &mut chars,

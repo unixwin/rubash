@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn execute_declare_functions(
@@ -726,7 +726,8 @@ impl Executor {
                 .map(|name| assignment_name_and_append(name).0.to_string())
                 .collect::<Vec<_>>();
             let scope_keys_before_save: Vec<String> = self
-                .shell_state.local_var_scopes
+                .shell_state
+                .local_var_scopes
                 .last()
                 .map(|scope| scope.keys().cloned().collect())
                 .unwrap_or_default();
@@ -781,9 +782,10 @@ impl Executor {
             // take the same transform: the resolved name is localized before
             // the attribute pass marks it.
             if !nameref_flag {
-                for target in
-                    crate::builtins::declare::nameref_resolved_operand_names(&args, &self.shell_state.env_vars)
-                {
+                for target in crate::builtins::declare::nameref_resolved_operand_names(
+                    &args,
+                    &self.shell_state.env_vars,
+                ) {
                     let local_name = target.split('[').next().unwrap_or(&target);
                     if !local_name.is_empty() {
                         self.save_frame_local_name(local_name);
@@ -924,14 +926,11 @@ impl Executor {
             2
         } else {
             let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-            let mut args = match self.rewrite_declare_operand_subscripts(
-                &args,
-                &cmd.word_metadata,
-                "local",
-            ) {
-                Ok(args) => args,
-                Err(()) => return Ok(1),
-            };
+            let mut args =
+                match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata, "local") {
+                    Ok(args) => args,
+                    Err(()) => return Ok(1),
+                };
             if declare_args_request_integer(&args) {
                 args = self.evaluate_declare_integer_assignment_args(&args);
             }
@@ -947,13 +946,16 @@ impl Executor {
                 // "no duplicate instances" (declare.def:451): a second
                 // `local -` in the same frame keeps the first snapshot.
                 if self
-                    .shell_state.local_var_scopes
+                    .shell_state
+                    .local_var_scopes
                     .last()
                     .is_none_or(|scope| !scope.contains_key("-"))
                 {
                     self.save_frame_local_name("-");
                     let bitmap = self.current_options_bitmap();
-                    self.shell_state.env_vars.insert("-".to_string(), bitmap.clone());
+                    self.shell_state
+                        .env_vars
+                        .insert("-".to_string(), bitmap.clone());
                     let _ = self.shell_state.variables.set_scalar("-", bitmap);
                 }
                 args.retain(|arg| arg != "-");
@@ -965,7 +967,8 @@ impl Executor {
             // the args so the shared declare printer renders just those names.
             if !had_dash_operand && local_names(&args).is_empty() {
                 let local_names: Vec<String> = self
-                    .shell_state.local_var_scopes
+                    .shell_state
+                    .local_var_scopes
                     .last()
                     .map(|scope| {
                         scope
@@ -1065,7 +1068,8 @@ impl Executor {
                     .map(|name| assignment_name_and_append(name).0.to_string())
                     .collect::<Vec<_>>();
                 let scope_keys_before_save: Vec<String> = self
-                    .shell_state.local_var_scopes
+                    .shell_state
+                    .local_var_scopes
                     .last()
                     .map(|scope| scope.keys().cloned().collect())
                     .unwrap_or_default();
@@ -1326,7 +1330,8 @@ impl Executor {
                 readonly
                     && !self.tempenv_names.iter().any(|saved| saved == base)
                     && !self
-                        .shell_state.local_var_scopes
+                        .shell_state
+                        .local_var_scopes
                         .iter()
                         .any(|scope| scope.contains_key(base))
             })

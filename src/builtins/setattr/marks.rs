@@ -7,14 +7,20 @@ use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 pub(super) fn mark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut exported = marked_vars(env_vars, EXPORTED_VARS);
     exported.insert(name.to_string());
-    let value = exported.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR);
+    let value = exported
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(DATA_DOLLAR_STR);
     env_vars.insert(EXPORTED_VARS.to_string(), value);
 }
 
 pub(super) fn unmark_exported(env_vars: &mut HashMap<String, String>, name: &str) {
     let mut exported = marked_vars(env_vars, EXPORTED_VARS);
     exported.remove(name);
-    let value = exported.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR);
+    let value = exported
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(DATA_DOLLAR_STR);
     env_vars.insert(EXPORTED_VARS.to_string(), value);
 }
 
@@ -25,7 +31,10 @@ pub(super) fn mark_readonly(env_vars: &mut HashMap<String, String>, name: &str) 
     readonly.insert(name.to_string());
     env_vars.insert(
         READONLY_VARS.to_string(),
-        readonly.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
+        readonly
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(DATA_DOLLAR_STR),
     );
 }
 
@@ -65,7 +74,10 @@ pub(super) fn mark_assoc(env_vars: &mut HashMap<String, String>, name: &str, con
     }
     env_vars.insert(
         crate::executor::types::ASSOC_128_VARS.to_string(),
-        assoc128.into_iter().collect::<Vec<_>>().join(DATA_DOLLAR_STR),
+        assoc128
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(DATA_DOLLAR_STR),
     );
 }
 

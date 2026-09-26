@@ -3,10 +3,10 @@ use super::{
     EXECUTION_SUCCESS, EXPORTED_VARS, INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS,
     UPPERCASE_VARS,
 };
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 /// GNU shell.h:76 `EX_UTILERROR = 263` — a Posix special builtin utility error
 /// (> EX_SHERRBASE = 256). `unset_builtin` returns this when `posix_utility_error`

@@ -4,9 +4,9 @@
 //! Rubash owns shell execution, so these builtins live here and map obvious
 //! zsh options onto existing Bash-compatible shell/shopt state.
 
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;

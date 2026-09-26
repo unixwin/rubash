@@ -542,7 +542,8 @@ impl Executor {
             }
             let start = origin.unwrap_or(0);
             let mut entries = if origin.is_some() {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get(&name)
                     .map(|current| indexed_array_entries(current))
                     .unwrap_or_default()
@@ -563,7 +564,8 @@ impl Executor {
                 }
                 entries.insert(target_index, value);
             }
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(name.clone(), format_indexed_array_storage(entries));
             mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
             // Diagnostics already buffered (e.g. the nameref-attribute
@@ -572,7 +574,8 @@ impl Executor {
             return 0;
         }
 
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(name.clone(), format_indexed_array_storage(BTreeMap::new()));
         mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &name);
         let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);

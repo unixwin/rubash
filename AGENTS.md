@@ -311,6 +311,11 @@ kills WSL-side test runs, and inflated PASS claims from wrong baselines.
   Do not git stash/pop other agents work to get around a build break; report
   the break instead.
 
+- rustfmt is a pre-commit hook (owner directive 2026-09-26): `git config
+  core.hooksPath scripts/git-hooks` is already set repo-side; the hook runs
+  `cargo fmt --check` and rejects unformatted commits. Run `cargo fmt` before
+  committing; do not bypass the hook with --no-verify.
+
 - Commit discipline: the captain groups and commits per-author, per-family
   changes after WSL-baseline verification. Agents do NOT self-commit; they
   report a list of files, the owning task, and the verification result, then

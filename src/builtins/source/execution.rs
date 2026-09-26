@@ -155,7 +155,9 @@ fn execute_ast_with_args(
         // reassigned the dollar vars through the set builtin and we are not
         // inside a shell function, the new values stay and the saved copy is
         // discarded; otherwise the saved positionals are restored.
-        if executor.shell_state.dollar_vars_changed_by_set && executor.shell_state.function_depth == 0 {
+        if executor.shell_state.dollar_vars_changed_by_set
+            && executor.shell_state.function_depth == 0
+        {
             // keep the sourced script's new positionals
         } else {
             executor.set_positional_params(old_positional_params);

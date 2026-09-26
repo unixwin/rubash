@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 // Private markers used by the patsub replacement pipeline. They survive
 // expand_embedded_parameters untouched and are resolved by
@@ -38,7 +38,6 @@ impl Executor {
             return Some(value);
         }
         if matches!(var_name, "@" | "*") {
-
             // GNU pos_params_pat_subst (subst.c:9322) ->
             // string_list_pos_params (subst.c:3030-3074): `*` joins through
             // string_list_dollar_star (IFS[0]) when
@@ -58,8 +57,8 @@ impl Executor {
             // `inside_assignment_rhs` field for expand_string_assignment
             // (whole `b=...` RHS, subst.c:4365) and the ASSIGNMENT_RHS
             // thread-local for the `=`/`:=` brace-op RHS (subst.c:4487).
-            let assign_rhs = self.inside_assignment_rhs.get()
-                || ASSIGNMENT_RHS.with(|flag| flag.get());
+            let assign_rhs =
+                self.inside_assignment_rhs.get() || ASSIGNMENT_RHS.with(|flag| flag.get());
             let separator = match self.shell_state.env_vars.get("IFS").map(String::as_str) {
                 // IFS set and non-empty: dollar_star -> IFS[0] for `*`,
                 // dollar_at -> IFS[0] for `@` only outside assignment RHS.
@@ -75,10 +74,10 @@ impl Executor {
                 // the re-quoted dollar_star path; every other shape is ' '.
                 Some(_) if var_name == "*" && assign_rhs => String::new(),
                 _ => " ".to_string(),
-
             };
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .iter()
                     .map(|value| self.replace_patsub_pattern(value, &pattern, &replacement, global))
                     .collect::<Vec<_>>()
@@ -87,7 +86,8 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| {
                         self.replace_patsub_pattern(
@@ -108,7 +108,8 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]"))
         {
             return Some(
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get(array_name)
                     .map(|value| {
                         let values = array_values(value)
@@ -155,7 +156,10 @@ impl Executor {
             replacement,
             global,
             self.nocasematch_enabled(),
-            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "patsub_replacement"),
+            crate::builtins::shopt::option_enabled(
+                &self.shell_state.env_vars,
+                "patsub_replacement",
+            ),
             self.extglob_enabled(),
         )
     }
@@ -168,13 +172,17 @@ impl Executor {
     /// turns quoted `&`/backslash into the `\&`/`\\` data consumed by the
     /// strcreplace pass in pat_subst.
     pub(in crate::executor) fn expand_patsub_replacement_text(&self, replacement: &str) -> String {
-        let patsub_replacement =
-            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "patsub_replacement");
+        let patsub_replacement = crate::builtins::shopt::option_enabled(
+            &self.shell_state.env_vars,
+            "patsub_replacement",
+        );
         let chars: Vec<char> = replacement.chars().collect();
         // GNU expands a leading tilde in the replacement string regardless
         // of outer quoting and of the shopt state (new-exp16.sub P1/P2).
         if chars.first() == Some(&'~') && (replacement == "~" || replacement.starts_with("~/")) {
-            if let Some(expanded) = tilde_expand::expand_word_prefix(replacement, &self.shell_state.env_vars) {
+            if let Some(expanded) =
+                tilde_expand::expand_word_prefix(replacement, &self.shell_state.env_vars)
+            {
                 let expanded = self.expand_embedded_parameters(&expanded);
                 return self.finish_patsub_replacement(&expanded, patsub_replacement);
             }
@@ -293,14 +301,22 @@ impl Executor {
         // Golden assertion: PATSUB markers must never leak to output
         // These are function-local PUA markers (U+E310-E313) with no
         // external boundary; if they appear in output, the decode pass failed.
-        debug_assert!(!output.contains(PATSUB_QUOTED_VALUE_START),
-            "PATSUB_QUOTED_VALUE_START leaked to patsub output");
-        debug_assert!(!output.contains(PATSUB_QUOTED_VALUE_END),
-            "PATSUB_QUOTED_VALUE_END leaked to patsub output");
-        debug_assert!(!output.contains(PATSUB_QUOTED_AMP),
-            "PATSUB_QUOTED_AMP leaked to patsub output");
-        debug_assert!(!output.contains(PATSUB_QUOTED_BACKSLASH),
-            "PATSUB_QUOTED_BACKSLASH leaked to patsub output");
+        debug_assert!(
+            !output.contains(PATSUB_QUOTED_VALUE_START),
+            "PATSUB_QUOTED_VALUE_START leaked to patsub output"
+        );
+        debug_assert!(
+            !output.contains(PATSUB_QUOTED_VALUE_END),
+            "PATSUB_QUOTED_VALUE_END leaked to patsub output"
+        );
+        debug_assert!(
+            !output.contains(PATSUB_QUOTED_AMP),
+            "PATSUB_QUOTED_AMP leaked to patsub output"
+        );
+        debug_assert!(
+            !output.contains(PATSUB_QUOTED_BACKSLASH),
+            "PATSUB_QUOTED_BACKSLASH leaked to patsub output"
+        );
         output
     }
 
@@ -341,8 +357,12 @@ fn push_single_quoted_replacement_char(marked: &mut String, ch: char) {
         '`' => marked.push(crate::executor::markers::DATA_BACKTICK),
         // Decoded quote data must survive the expander, which drops a bare
         // quote as an unclosed span.
-        '\'' | crate::executor::markers::DATA_SQUOTE => marked.push(crate::executor::markers::DATA_SQUOTE),
-        '"' | crate::executor::markers::DATA_DQUOTE => marked.push(crate::executor::markers::DATA_DQUOTE),
+        '\'' | crate::executor::markers::DATA_SQUOTE => {
+            marked.push(crate::executor::markers::DATA_SQUOTE)
+        }
+        '"' | crate::executor::markers::DATA_DQUOTE => {
+            marked.push(crate::executor::markers::DATA_DQUOTE)
+        }
         other => marked.push(other),
     }
 }
@@ -379,7 +399,9 @@ fn push_double_quoted_replacement_char(marked: &mut String, chars: &[char], inde
                     // reach the expander protected (GNU subst.c
                     // string_extract_double_quoted keeps \' literally; a bare
                     // quote here would be eaten as a span delimiter).
-                    '\'' | crate::executor::markers::DATA_SQUOTE => marked.push(crate::executor::markers::DATA_SQUOTE),
+                    '\'' | crate::executor::markers::DATA_SQUOTE => {
+                        marked.push(crate::executor::markers::DATA_SQUOTE)
+                    }
                     '&' => marked.push(PATSUB_QUOTED_AMP),
                     _ => marked.push(*other),
                 }
@@ -569,7 +591,9 @@ fn push_replacement_dollar(
                 marked.push(crate::executor::markers::DATA_DQUOTE);
                 index + 2
             }
-            Some('\\') | Some(&crate::executor::markers::DATA_BACKSLASH) => push_unquoted_escape(marked, chars, index + 1),
+            Some('\\') | Some(&crate::executor::markers::DATA_BACKSLASH) => {
+                push_unquoted_escape(marked, chars, index + 1)
+            }
             Some('`') => {
                 marked.push(crate::executor::markers::DATA_BACKTICK);
                 index + 2

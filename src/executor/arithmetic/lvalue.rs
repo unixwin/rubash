@@ -61,7 +61,6 @@ impl ConditionalArithParser<'_> {
                     });
                 }
             }
-
         }
 
         if self.peek() == Some(b']') {
@@ -159,7 +158,6 @@ impl ConditionalArithParser<'_> {
 
         let resolved_name = self.resolved_lvalue_name(&name);
         if is_marked_var(self.env_vars, ASSOC_VARS, &resolved_name) {
-
             match self.parse_assoc_subscript(&resolved_name)? {
                 ParsedAssocSubscript::Key(key) => {
                     return Some(ArithLValue::Assoc {
@@ -173,7 +171,6 @@ impl ConditionalArithParser<'_> {
                     });
                 }
             }
-
         }
 
         if self.peek() == Some(b']') {
@@ -221,7 +218,6 @@ impl ConditionalArithParser<'_> {
         name.to_string()
     }
 
-
     /// The `name[...]` text GNU prints for an invalid subscript reference
     /// (`a[80's]: bad array subscript`, `` `a[80's]': not a valid
     /// identifier ``) — the STR token text: name through the first `]`,
@@ -243,7 +239,6 @@ impl ConditionalArithParser<'_> {
     /// lvalue text GNU prints in `bad array subscript` /
     /// `not a valid identifier` diagnostics.
     pub(super) fn parse_assoc_subscript(&mut self, name: &str) -> Option<ParsedAssocSubscript> {
-
         let start = self.pos;
         let mut depth = 0usize;
         let mut single = false;
@@ -272,8 +267,7 @@ impl ConditionalArithParser<'_> {
                         // A pre-expanded key (the Executor-side
                         // expand_subscript_string pass) is already the final
                         // string: use it verbatim and never expand it again.
-                        let key = match super::super::decode_arithmetic_assoc_key(&key)
-                        {
+                        let key = match super::super::decode_arithmetic_assoc_key(&key) {
                             Some(literal) => literal,
                             None => self.expand_assoc_subscript_key(&key),
                         };

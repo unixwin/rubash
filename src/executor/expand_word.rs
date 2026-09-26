@@ -57,10 +57,7 @@ impl Executor {
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
         let key = format!(
             "{:?}\x1f{}\x1f{:?}\x1f{}",
-            redirect.kind,
-            redirect.operator,
-            redirect.fd,
-            redirect.target
+            redirect.kind, redirect.operator, redirect.fd, redirect.target
         );
         if let Some(hit) = self.redirect_target_memo.borrow().get(&key) {
             return hit.clone();
@@ -320,11 +317,12 @@ impl Executor {
             // environment for this expansion (GNU applies redirect-side-effect
             // assignments immediately, so a later `$((` in the same command
             // sees them).
-            let overlaid = crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(&self.shell_state.env_vars);
+            let overlaid =
+                crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                    &self.shell_state.env_vars,
+                );
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-                if let Some(name) =
-                    arithmetic_unbound_variable(&expression, &overlaid)
-                {
+                if let Some(name) = arithmetic_unbound_variable(&expression, &overlaid) {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
                         eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
                     }

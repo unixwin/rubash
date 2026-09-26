@@ -277,9 +277,7 @@ impl<'a> CondCursor<'a> {
                 ("(", true) => CondTok::LParen,
                 (")", true) => CondTok::RParen,
                 ("]]", true) => CondTok::End,
-                ("&" | "|" | ";" | "<" | ">", true) => {
-                    CondTok::Char(value.chars().next().unwrap())
-                }
+                ("&" | "|" | ";" | "<" | ">", true) => CondTok::Char(value.chars().next().unwrap()),
                 _ => CondTok::Word,
             };
             return (tok, *line, Some(self.index), self.index);

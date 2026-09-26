@@ -85,7 +85,9 @@ impl Executor {
                 },
             );
         } else {
-            self.shell_state.function_definition_locations.remove(&function.name);
+            self.shell_state
+                .function_definition_locations
+                .remove(&function.name);
         }
         if command_has_input_or_output_redirects(cmd) {
             let mut redirects = CommandNode::new();
@@ -98,10 +100,13 @@ impl Executor {
             redirects.heredoc_body = cmd.heredoc_body.clone();
             redirects.here_string = cmd.here_string.clone();
             redirects.here_string_carrier = cmd.here_string_carrier.clone();
-            self.shell_state.function_definition_redirects
+            self.shell_state
+                .function_definition_redirects
                 .insert(function.name.clone(), redirects);
         } else {
-            self.shell_state.function_definition_redirects.remove(&function.name);
+            self.shell_state
+                .function_definition_redirects
+                .remove(&function.name);
         }
         // Print/roundtrip metadata: body kind plus the definition-level
         // redirect list (the generic `redirects` field collects `} >&2`
@@ -145,7 +150,8 @@ impl Executor {
         // built-in default cap (func4.sub recurses to completion when unset).
         // The chosen limit is reported in the diagnostic.
         let funcnest: Option<usize> = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("FUNCNEST")
             .and_then(|value| value.trim().parse::<usize>().ok());
         let nesting_limit: Option<usize> = match funcnest {
@@ -167,7 +173,11 @@ impl Executor {
         if self.execute_upstream_cprint_function(name) {
             return Ok(());
         }
-        let definition_redirects = self.shell_state.function_definition_redirects.get(name).cloned();
+        let definition_redirects = self
+            .shell_state
+            .function_definition_redirects
+            .get(name)
+            .cloned();
         let body_needs_redirects = definition_redirects
             .as_ref()
             .is_some_and(function_redirects_affect_body)
@@ -187,7 +197,8 @@ impl Executor {
         // FUNCTION_STDIN cursor before function_call_stdin carves the
         // remainder so the child's consumed prefix can fold back onto it.
         let parent_stdin_base = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -228,20 +239,35 @@ impl Executor {
             }
         }
         let (old_function, old_function_stdin, old_function_stdin_offset, old_positional_params) = {
-            let old_function = self.shell_state.env_vars.get("__RUBASH_CURRENT_FUNCTION").cloned();
+            let old_function = self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_FUNCTION")
+                .cloned();
             let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-            let old_function_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+            let old_function_stdin_offset = self
+                .shell_state
+                .env_vars
+                .get(FUNCTION_STDIN_OFFSET)
+                .cloned();
             let old_positional_params = self.shell_state.positional_params.clone();
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_CURRENT_FUNCTION".to_string(), name.to_string());
             if let Some(input) = call_stdin {
-                self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN.to_string(), input);
+                self.shell_state
+                    .env_vars
                     .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
             }
-            self.shell_state.function_name_stack.insert(0, name.to_string());
+            self.shell_state
+                .function_name_stack
+                .insert(0, name.to_string());
             let call_line = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_CURRENT_LINE")
                 .cloned()
                 .or_else(|| call_cmd.line.map(|line| line.to_string()))
@@ -262,7 +288,9 @@ impl Executor {
                     source
                 },
             );
-            self.shell_state.bash_argc_stack.insert(0, args.len().to_string());
+            self.shell_state
+                .bash_argc_stack
+                .insert(0, args.len().to_string());
             for arg in args {
                 self.shell_state.bash_argv_stack.insert(0, arg.clone());
             }
@@ -291,18 +319,21 @@ impl Executor {
         // restore_default_signal(DEBUG_TRAP) removed it. run_debug_trap's own
         // in-progress guard keeps the DEBUG trap handler function itself from
         // firing (sigmodes[DEBUG_TRAP] & SIG_INPROGRESS).
-        let functrace = crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
+        let functrace =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace");
         let function_traced = functrace || self.function_has_trace_attribute(name);
         // GNU execute_cmd.c:5269-5278: save the inherited DEBUG action and
         // remove it for the body unless the function inherits the trap; the
         // body may still set a new DEBUG trap, which then fires for the
         // remaining body commands (trap.tests: "func[29] funcdebug").
-        let saved_debug_action = crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG");
+        let saved_debug_action =
+            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG");
         if saved_debug_action.is_some() && !function_traced {
             crate::builtins::trap::clear_debug_trap(&mut self.shell_state.env_vars);
         }
         let definition_line = self
-            .shell_state.function_definition_locations
+            .shell_state
+            .function_definition_locations
             .get(name)
             .map(|location| location.line);
         if function_traced {
@@ -311,12 +342,14 @@ impl Executor {
                 .as_ref()
                 .and_then(|function| function.body_open_line)
                 .or(self
-                    .shell_state.function_definition_locations
+                    .shell_state
+                    .function_definition_locations
                     .get(name)
                     .and_then(|location| location.body_open_line))
                 .or(definition_line);
             if let Some(line) = body_open_line {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
             // GNU's the_printed_command at the entry fire (execute_cmd.c:5387)
@@ -327,7 +360,8 @@ impl Executor {
             // is recorded by set_current_command from the pre-expansion node,
             // so it carries the same raw source text GNU prints.
             let command_text = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_LAST_COMMAND")
                 .cloned()
                 .filter(|text| !text.is_empty() && !call_cmd.words.is_empty())
@@ -358,7 +392,10 @@ impl Executor {
         // (trap.tests listing shows the funcdebug action after func).
         if let Some(action) = saved_debug_action {
             if !function_traced {
-                crate::builtins::trap::maybe_restore_debug_trap(&mut self.shell_state.env_vars, action);
+                crate::builtins::trap::maybe_restore_debug_trap(
+                    &mut self.shell_state.env_vars,
+                    action,
+                );
             }
         }
         self.debug_trap_function_line = old_debug_trap_function_line;
@@ -370,7 +407,8 @@ impl Executor {
         // "return lineno: 30 fn1" at fn1's exit).
         if result.is_ok() {
             if let Some(line) = definition_line {
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.to_string());
             }
         }
@@ -401,14 +439,19 @@ impl Executor {
             // the child's FUNCTION_STDIN buffer, so it must apply while
             // that buffer is still installed.
             self.apply_comsub_stdin_writeback();
-            restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_function_stdin);
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                FUNCTION_STDIN,
+                old_function_stdin,
+            );
             if stdin_carved_from_parent {
                 // The child's FUNCTION_STDIN_OFFSET is its cursor into the
                 // carved remainder; fold it back into the parent's cursor so
                 // input the function did not read stays readable after return
                 // (GNU: shared fd 0 position).
                 let child_offset = self
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
@@ -425,11 +468,14 @@ impl Executor {
             }
             match old_function {
                 Some(value) => {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert("__RUBASH_CURRENT_FUNCTION".to_string(), value);
                 }
                 None => {
-                    self.shell_state.env_vars.remove("__RUBASH_CURRENT_FUNCTION");
+                    self.shell_state
+                        .env_vars
+                        .remove("__RUBASH_CURRENT_FUNCTION");
                 }
             }
         }
@@ -495,7 +541,11 @@ impl Executor {
                         | crate::parser::RedirectKind::CombinedAppend
                 )
         };
-        if let Some(redirect) = call_cmd.redirect_out.as_ref().filter(|r| is_stdout_write_redirect(r)) {
+        if let Some(redirect) = call_cmd
+            .redirect_out
+            .as_ref()
+            .filter(|r| is_stdout_write_redirect(r))
+        {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
@@ -506,13 +556,21 @@ impl Executor {
             append_redirect.clobber = false;
             apply_stdout_append_redirect(body, &append_redirect);
         }
-        if let Some(redirect) = call_cmd.append.as_ref().filter(|r| is_stdout_write_redirect(r)) {
+        if let Some(redirect) = call_cmd
+            .append
+            .as_ref()
+            .filter(|r| is_stdout_write_redirect(r))
+        {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = call_cmd.redirect_err.as_ref().filter(|r| is_stderr_write_redirect(r)) {
+        if let Some(redirect) = call_cmd
+            .redirect_err
+            .as_ref()
+            .filter(|r| is_stderr_write_redirect(r))
+        {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
@@ -523,7 +581,11 @@ impl Executor {
             append_redirect.clobber = false;
             apply_stderr_append_redirect(body, &append_redirect);
         }
-        if let Some(redirect) = call_cmd.redirect_err_append.as_ref().filter(|r| is_stderr_write_redirect(r)) {
+        if let Some(redirect) = call_cmd
+            .redirect_err_append
+            .as_ref()
+            .filter(|r| is_stderr_write_redirect(r))
+        {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             // `&>`/`&>>` store their fd-2 leg as a Combined* kind. A body
@@ -572,7 +634,8 @@ impl Executor {
             // stdin (for example, input-line.sh/input-line.sub).
             if let Some(input) = self.shell_state.env_vars.get(FUNCTION_STDIN) {
                 let offset = self
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .get(FUNCTION_STDIN_OFFSET)
                     .and_then(|value| value.parse::<usize>().ok())
                     .unwrap_or(0);
@@ -605,20 +668,20 @@ impl Executor {
             {
                 let saved = self.fd_table.entries.get(&0).cloned();
                 if self.fd_table.dup_input(0, source_fd).is_ok() {
-                    return Ok((
-                        None,
-                        false,
-                        Some(FunctionCallStdinBinding { entry: saved }),
-                    ));
+                    return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
                 }
             }
             return Ok((None, false, None));
         }
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-        if !std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+        if !std::fs::metadata(&path)
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+        {
             let file = FileFd::open_read(path.clone())?;
             let saved = self.fd_table.entries.get(&0).cloned();
-            self.fd_table.open_input(0, FdReadEndpoint::File(file), false);
+            self.fd_table
+                .open_input(0, FdReadEndpoint::File(file), false);
             return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
         }
         // A `<(cmd)` temp path is a draining stream, not a replayable

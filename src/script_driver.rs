@@ -17,8 +17,7 @@ use crate::executor::{ExecuteError, Executor};
 use crate::history::SessionHistory;
 use crate::history_expand::{HistChars, HistCtx};
 use crate::lexer::{
-    expand_aliases_in_source, tokenize, tokenize_with_initial_posix,
-    AliasLookup, TokenKind,
+    expand_aliases_in_source, tokenize, tokenize_with_initial_posix, AliasLookup, TokenKind,
 };
 use crate::parser::CommandNode;
 
@@ -232,8 +231,7 @@ fn run_history_group(
         .get_env("HISTIGNORE")
         .unwrap_or_default()
         .to_string();
-    let histsize =
-        crate::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
+    let histsize = crate::history::SessionHistory::size_limit(executor.get_env("HISTSIZE"));
     let chars = executor.get_env("histchars").unwrap_or("!^#");
     let mut chars = chars.chars();
     let ctx = HistCtx {
@@ -1011,13 +1009,11 @@ pub fn run_source_with_line_offset(
     }
 }
 
-
 // ===========================================================================
 // Interactive stdin driver (non-tty `bash -i`) — moved from main.rs so
 // product shells (niu) can delegate forced-interactive piped input here
 // instead of driving a terminal REPL that cannot run without a tty.
 // ===========================================================================
-
 
 /// GNU shell.c:806-811: interactive shells run bash_initialize_history and
 /// load_history at startup. bashhist.c:320-345 load_history: default
@@ -1050,16 +1046,13 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
     let write_ts = executor.get_env("HISTTIMEFORMAT").is_some();
     // bashhist.c:331-332: sv_histsize("HISTFILESIZE") truncates the file
     // before it is read.
-    if let Some(max) =
-        SessionHistory::size_limit(executor.get_env("HISTFILESIZE"))
-    {
+    if let Some(max) = SessionHistory::size_limit(executor.get_env("HISTFILESIZE")) {
         let _ = session
             .borrow_mut()
             .truncate_file(&path.to_string_lossy(), max, write_ts);
     }
     if path.exists() {
-        let histsize =
-            SessionHistory::size_limit(executor.get_env("HISTSIZE"));
+        let histsize = SessionHistory::size_limit(executor.get_env("HISTSIZE"));
         let mut shell = session.borrow_mut();
         shell.histfile_loaded = true;
         let _ = shell.load_file(&path.to_string_lossy(), histsize);
@@ -1091,7 +1084,6 @@ struct ISearchState {
     orig_index: Option<usize>,
     match_index: Option<usize>,
 }
-
 
 /// bash -i reading commands from a non-tty stdin. GNU still drives readline
 /// here (parse.y yy_readline_get -> bashline.c bash_readline): the prompt is
@@ -1153,20 +1145,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
 
             let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-            if pending_heredocs.is_empty() && !stdin_source_needs_more_posix(&pending, stdin_posix) {
+            if pending_heredocs.is_empty() && !stdin_source_needs_more_posix(&pending, stdin_posix)
+            {
                 // bashhist.c pre_process_line + bash_add_history: each
                 // complete command runs history expansion first (set -H
                 // defaults on for interactive shells), then records, then
                 // executes — the same pipeline as run_script_with_history.
                 let status = if let Some(session) = executor.get_session_history() {
-                    run_history_group(
-                        executor,
-                        &session,
-                        &group,
-                        pending_start_line,
-                        None,
-                        true,
-                    )
+                    run_history_group(executor, &session, &group, pending_start_line, None, true)
                 } else {
                     run_source_with_line_offset(
                         executor,
@@ -1209,15 +1195,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             // to stderr before exiting (builtins/exit.def:59-62). The
             // prompt is already on stderr, so the line reads `$ exit`.
             Ok(0) => {
-                if executor
-                    .get_env("__RUBASH_INTERACTIVE")
-                    .as_deref()
-                    == Some("1")
-                {
-                    let login = executor
-                        .get_env("__RUBASH_LOGIN_SHELL")
-                        .as_deref()
-                        == Some("1");
+                if executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
                     eprintln!("{}", if login { "logout" } else { "exit" });
                 }
                 eof = true;
@@ -1279,10 +1258,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         let search_str = search.search.clone();
                         if let Some(session) = executor.get_session_history() {
                             let shell = session.borrow();
-                            let upper = search
-                                .match_index
-                                .map(|m| m + 1)
-                                .unwrap_or(entries_len);
+                            let upper = search.match_index.map(|m| m + 1).unwrap_or(entries_len);
                             if let Some(found) = shell.entries[..upper]
                                 .iter()
                                 .rposition(|e| e.contains(&search_str))
@@ -1295,18 +1271,19 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         }
                         continue;
                     }
-                    c if c >= ' ' || c == '\n' || c == '\r' || c == '\x0f' || c == '\x10'
+                    c if c >= ' '
+                        || c == '\n'
+                        || c == '\r'
+                        || c == '\x0f'
+                        || c == '\x10'
                         || c == '\x0e' =>
                     {
-                        if c == '\n' || c == '\r' || c == '\x0f' || c == '\x10' || c == '\x0e'
-                        {
+                        if c == '\n' || c == '\r' || c == '\x0f' || c == '\x10' || c == '\x0e' {
                             // Accept the match (if any) and reprocess the
                             // terminating key in normal mode.
                             if let Some(m) = search.match_index {
                                 if let Some(session) = executor.get_session_history() {
-                                    if let Some(entry) =
-                                        session.borrow().entries.get(m).cloned()
-                                    {
+                                    if let Some(entry) = session.borrow().entries.get(m).cloned() {
                                         buffer = entry;
                                         cursor = buffer.len();
                                         history_index = Some(m);
@@ -1321,10 +1298,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                             let search_str = search.search.clone();
                             if let Some(session) = executor.get_session_history() {
                                 let shell = session.borrow();
-                                let upper = search
-                                    .match_index
-                                    .map(|m| m + 1)
-                                    .unwrap_or(entries_len);
+                                let upper =
+                                    search.match_index.map(|m| m + 1).unwrap_or(entries_len);
                                 if let Some(found) = shell.entries[..upper]
                                     .iter()
                                     .rposition(|e| e.contains(&search_str))
@@ -1342,8 +1317,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         // other control chars end the search and reprocess
                         if let Some(m) = search.match_index {
                             if let Some(session) = executor.get_session_history() {
-                                if let Some(entry) = session.borrow().entries.get(m).cloned()
-                                {
+                                if let Some(entry) = session.borrow().entries.get(m).cloned() {
                                     buffer = entry;
                                     cursor = buffer.len();
                                     history_index = Some(m);
@@ -1354,7 +1328,6 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     }
                 }
             }
-
 
             match c {
                 '\n' | '\r' => {
@@ -1379,8 +1352,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     // absolute history number (where_history()+history_base+1),
                     // so a HISTSIZE stifle dropping entries during the accepted
                     // command's own add_history cannot shift the target.
-                    let src_abs = history_index
-                        .map(|p| session_history_base(executor) + p + 1);
+                    let src_abs = history_index.map(|p| session_history_base(executor) + p + 1);
                     let line = std::mem::take(&mut buffer);
                     cursor = 0;
                     accept_line!(&line);
@@ -1504,11 +1476,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                                                 Some(i0) => i0.saturating_sub(1),
                                             };
                                             history_index = Some(idx);
-                                            if let Some(session) =
-                                                executor.get_session_history()
-                                            {
-                                                buffer =
-                                                    session.borrow().entries[idx].clone();
+                                            if let Some(session) = executor.get_session_history() {
+                                                buffer = session.borrow().entries[idx].clone();
                                             }
                                             cursor = buffer.len();
                                         }
@@ -1521,9 +1490,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                                                 if let Some(session) =
                                                     executor.get_session_history()
                                                 {
-                                                    buffer = session.borrow().entries
-                                                        [i0 + 1]
-                                                        .clone();
+                                                    buffer =
+                                                        session.borrow().entries[i0 + 1].clone();
                                                 }
                                             } else {
                                                 history_index = None;
@@ -1613,17 +1581,13 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     if interactive {
         // shell.c:1008: the save is gated on remember_on_history (the
         // `history` set option), which `set +o history` clears.
-        let remember_on_history = executor
-            .get_env("__RUBASH_SETOPT_history")
-            .as_deref()
-            == Some("1");
+        let remember_on_history =
+            executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
         if remember_on_history {
             if let Some(session) = executor.get_session_history() {
                 let write_ts = executor.get_env("HISTTIMEFORMAT").is_some();
                 let histfile = executor.get_env("HISTFILE").map(String::from);
-                let histfilesize = SessionHistory::size_limit(
-                    executor.get_env("HISTFILESIZE"),
-                );
+                let histfilesize = SessionHistory::size_limit(executor.get_env("HISTFILESIZE"));
                 let mut shell = session.borrow_mut();
                 if shell.lines_this_session > 0 {
                     if let Some(hf) = histfile.as_deref().filter(|hf| !hf.is_empty()) {
@@ -1690,7 +1654,6 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     }
 }
 
-
 /// shell.c:1830-1842 init_interactive + bashhist.c:320-345: create the
 /// session history for an interactive (`-i`) shell and load $HISTFILE.
 /// Hosts (niu) call this before run_interactive_stdin when a forced
@@ -1704,7 +1667,6 @@ pub fn prepare_interactive_history(executor: &mut Executor) {
     }
     initialize_interactive_history(executor);
 }
-
 
 /// general.c:718-741 check_binary_file: a script whose first line (two when
 /// it starts with a #! interpreter specifier) contains NUL, or an ELF image,

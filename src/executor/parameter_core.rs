@@ -1,6 +1,6 @@
 use super::*;
 use crate::executor::assignment_expansion::{hoist_data_double_quotes, hoist_data_single_quotes};
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn is_brace_expand_enabled(&self) -> bool {
@@ -184,7 +184,12 @@ impl Executor {
             if !compound_assignment
                 && !expanded.contains('=')
                 && tilde_expand::assignment_value_needs_tilde_expansion(raw_value, true)
-                && (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) != Some("1")
+                && (self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_POSIX_MODE")
+                    .map(String::as_str)
+                    != Some("1")
                     || expanded.starts_with("~/"))
             {
                 return format!("{name}={}", self.expand_assignment_tilde(&expanded));
@@ -206,7 +211,11 @@ impl Executor {
                 let command_source = format!("({expression})");
                 return self.expand_command_substitution_mut_with_context(&command_source, context);
             }
-            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self
+                .shell_state
+                .arithmetic_last_error_category
+                .take()
+                .is_some();
             if actual_fatal
                 || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
             {
@@ -333,7 +342,8 @@ impl Executor {
 
         if let Ok(index) = name.parse::<usize>() {
             return self
-                .shell_state.positional_params
+                .shell_state
+                .positional_params
                 .get(index.saturating_sub(1))
                 .cloned()
                 .unwrap_or_default();
@@ -414,7 +424,12 @@ impl Executor {
                     // expansion error. Returning None here would let the
                     // caller fall through to non-substring handlers (e.g.
                     // ${#} length), producing wrong output.
-                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
+                    if self
+                        .shell_state
+                        .arithmetic_last_error_category
+                        .take()
+                        .is_some()
+                    {
                         self.report_substring_arithmetic_error(var_name, offset_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -430,7 +445,12 @@ impl Executor {
             match self.eval_parameter_substring_offset(length_str) {
                 Some(value) => Some(value),
                 None => {
-                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
+                    if self
+                        .shell_state
+                        .arithmetic_last_error_category
+                        .take()
+                        .is_some()
+                    {
                         self.report_substring_arithmetic_error(var_name, length_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -473,7 +493,9 @@ impl Executor {
         let (evaluated, category) =
             eval_conditional_arith_value_categorized(&expression, &self.shell_state.env_vars);
         if evaluated.is_none() {
-            self.shell_state.arithmetic_last_error_category.set(category);
+            self.shell_state
+                .arithmetic_last_error_category
+                .set(category);
             // Save the expanded expression so report_substring_arithmetic_error
             // can use it — GNU evalexp operates on the expanded text, so the
             // error token must come from the post-expansion form (e.g.
@@ -521,9 +543,9 @@ impl Executor {
                         let key = self.expand_subscript_string(raw);
                         output.push_str(name);
                         output.push('[');
-                        output.push_str(
-                            &crate::executor::arithmetic::encode_arithmetic_assoc_key(&key),
-                        );
+                        output.push_str(&crate::executor::arithmetic::encode_arithmetic_assoc_key(
+                            &key,
+                        ));
                         output.push(']');
                         index = close + 1;
                         continue;
@@ -590,7 +612,12 @@ impl Executor {
                     // expansion error. Returning None here would let the
                     // caller fall through to non-substring handlers (e.g.
                     // ${#} length), producing wrong output.
-                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
+                    if self
+                        .shell_state
+                        .arithmetic_last_error_category
+                        .take()
+                        .is_some()
+                    {
                         self.report_substring_arithmetic_error(var_name, offset_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -606,7 +633,12 @@ impl Executor {
             match self.eval_parameter_substring_offset_mut(length_str) {
                 Some(value) => Some(value),
                 None => {
-                    if self.shell_state.arithmetic_last_error_category.take().is_some() {
+                    if self
+                        .shell_state
+                        .arithmetic_last_error_category
+                        .take()
+                        .is_some()
+                    {
                         self.report_substring_arithmetic_error(var_name, length_str);
                         return Some((var_name, 0, Some(0)));
                     }
@@ -689,8 +721,12 @@ impl Executor {
                     crate::executor::arithmetic::trailing_input_token(expression)
                 {
                     if token.trim() == expression.trim() {
-                        let command_context =
-                            self.shell_state.env_vars.get("__RUBASH_IS_C").map(String::as_str) != Some("1");
+                        let command_context = self
+                            .shell_state
+                            .env_vars
+                            .get("__RUBASH_IS_C")
+                            .map(String::as_str)
+                            != Some("1");
                         let operand_expected = if command_context {
                             "arithmetic syntax error: operand expected"
                         } else {

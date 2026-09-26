@@ -12,12 +12,12 @@ mod variable;
 
 pub(crate) use variable::variable_is_set;
 
+use crate::executor::markers::DATA_DOLLAR;
 use std::collections::HashMap;
+use std::fs;
 #[cfg(windows)]
 use std::fs::File;
-use std::fs;
 use std::io::{self, IsTerminal, Write};
-use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;

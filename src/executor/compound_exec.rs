@@ -84,10 +84,6 @@ impl Clone for BackgroundStdio {
     }
 }
 
-
-
-
-
 /// Drop redirections already consumed as spawn-time stdio from the command
 /// that gets serialized into the background child's `-c` source — GNU's
 /// dispose_redirects (execute_cmd.c:1762) after do_redirections in the async
@@ -155,8 +151,7 @@ fn strip_consumed_redirects(command: &mut CommandNode, consumed: &[bool]) {
             }
         });
         if !remaining.iter().any(|redirect| {
-            redirect.fd.is_none()
-                && matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
+            redirect.fd.is_none() && matches!(redirect.kind, crate::parser::RedirectKind::HereDoc)
         }) {
             command.heredoc = None;
             command.heredoc_body = None;
@@ -222,9 +217,7 @@ impl Executor {
             .entries
             .values()
             .find_map(|entry| match &entry.read {
-                Some(FdReadEndpoint::CoprocStdout { pid: p, fd }) if *p == pid => {
-                    Some(fd.clone())
-                }
+                Some(FdReadEndpoint::CoprocStdout { pid: p, fd }) if *p == pid => Some(fd.clone()),
                 _ => None,
             })
     }
@@ -234,9 +227,7 @@ impl Executor {
             .entries
             .values()
             .find_map(|entry| match &entry.write {
-                Some(FdWriteEndpoint::CoprocStdin { pid: p, fd }) if *p == pid => {
-                    Some(fd.clone())
-                }
+                Some(FdWriteEndpoint::CoprocStdin { pid: p, fd }) if *p == pid => Some(fd.clone()),
                 _ => None,
             })
     }
@@ -353,8 +344,7 @@ impl Executor {
         let display_source = bash_command_source_text(&background_command.command);
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
-        let mut env_map: std::collections::BTreeMap<String, String> =
-            std::env::vars().collect();
+        let mut env_map: std::collections::BTreeMap<String, String> = std::env::vars().collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
                 env_map.insert(key.clone(), value.clone());
@@ -378,10 +368,7 @@ impl Executor {
         {
             env_map.remove(key);
         }
-        env_map.insert(
-            "__RUBASH_SHELL_PID".to_string(),
-            self.shell_pid.to_string(),
-        );
+        env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
         // GNU execute_cmd.c:1761 (execute_in_subshell): a forked async
         // subshell keeps the parent's $0 and line number, so diagnostics
         // inside `xcase &` print `./script: line N:` rather than `bash:`. The
@@ -393,7 +380,12 @@ impl Executor {
                 .command
                 .line
                 .map(|line| line.to_string())
-                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned())
+                .or_else(|| {
+                    self.shell_state
+                        .env_vars
+                        .get("__RUBASH_CURRENT_LINE")
+                        .cloned()
+                })
                 .unwrap_or_else(|| "1".to_string());
             env_map.insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
             let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
@@ -445,7 +437,7 @@ impl Executor {
                     #[cfg(windows)]
                     {
                         crate::fd::duplicate_handle_inheritable(
-                            file.as_raw_handle() as crate::fd::HANDLE,
+                            file.as_raw_handle() as crate::fd::HANDLE
                         )?
                     }
                     #[cfg(unix)]
@@ -487,10 +479,7 @@ impl Executor {
                         dup
                     }
                 };
-                env_map.insert(
-                    format!("__RUBASH_FD_HANDLE_{fd}"),
-                    format!("{:#x}", dup),
-                );
+                env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{:#x}", dup));
                 env_map.insert(
                     format!("__RUBASH_FD_PATH_{fd}"),
                     f.path.to_string_lossy().into_owned(),
@@ -513,10 +502,7 @@ impl Executor {
                         dup
                     }
                 };
-                env_map.insert(
-                    format!("__RUBASH_FD_WHANDLE_{fd}"),
-                    format!("{:#x}", dup),
-                );
+                env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
                 env_map.insert(
                     format!("__RUBASH_FD_WPATH_{fd}"),
                     f.path.to_string_lossy().into_owned(),
@@ -537,14 +523,12 @@ impl Executor {
         let child = spawn_result?;
         let pid = child.id();
         self.background_children.insert(pid, child);
-        self.shell_state.job_table
+        self.shell_state
+            .job_table
             .register_process(pid, display_source.clone(), true);
         self.shell_state.job_table.set_job_control(
             pid,
-            crate::builtins::set::shell_option_enabled(
-                &self.shell_state.env_vars,
-                "monitor",
-            ),
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor"),
         );
         self.shell_state.last_background_pid = Some(pid);
         self.exit_code = 0;
@@ -560,7 +544,10 @@ impl Executor {
     /// returned `consumed` map as false so it stays in the child's `-c`
     /// source, where the child re-runs it and reports the same diagnostic
     /// GNU's subshell would.
-    fn resolve_background_stdio(&mut self, command: &CommandNode) -> ([BackgroundStdio; 3], Vec<bool>) {
+    fn resolve_background_stdio(
+        &mut self,
+        command: &CommandNode,
+    ) -> ([BackgroundStdio; 3], Vec<bool>) {
         use crate::parser::RedirectKind;
         // GNU execute_cmd.c:2837-2841 (execute_connection '&') + :595
         // async_redirect_stdin: CMD_STDIN_REDIR is set — and the spawned
@@ -570,19 +557,16 @@ impl Executor {
         // cleared per reader command at eval.c:181) decides: `{ read; } &`
         // inside `while ... done <<EOF` inherits the heredoc, while a bare
         // `sleep 5 &` gets /dev/null.
-        let job_control = crate::builtins::set::shell_option_enabled(
-            &self.shell_state.env_vars,
-            "monitor",
-        );
+        let job_control =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         let subshell_environment = self.shell_state.subshell_depth.get() > 0
             || self.shell_state.in_command_substitution.get();
-        let mut fd0 = if (subshell_environment || !job_control)
-            && !self.shell_state.stdin_redir.get()
-        {
-            BackgroundStdio::Null
-        } else {
-            self.inherited_async_stdin()
-        };
+        let mut fd0 =
+            if (subshell_environment || !job_control) && !self.shell_state.stdin_redir.get() {
+                BackgroundStdio::Null
+            } else {
+                self.inherited_async_stdin()
+            };
         let mut fd1 = BackgroundStdio::Inherit;
         let mut fd2 = BackgroundStdio::Inherit;
         let mut consumed = vec![false; command.redirects.len()];
@@ -780,8 +764,7 @@ impl Executor {
         // the virtual text wins, exactly like GNU's dup2 of the heredoc
         // temp file over the earlier descriptor.
         if let Some(remaining) = self.function_stdin_remaining() {
-            let bytes =
-                crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remaining);
+            let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(&remaining);
             match self.materialize_virtual_stdin_fd0(&bytes) {
                 Some(file) => {
                     // fd 0 now owns a real endpoint; drop the text channel
@@ -852,10 +835,8 @@ impl Executor {
         let ordinal = command.redirects[..index]
             .iter()
             .filter(|entry| {
-                matches!(
-                    entry.kind,
-                    RedirectKind::HereDoc | RedirectKind::HereString
-                ) && matches!(entry.kind, RedirectKind::HereString) == want_string
+                matches!(entry.kind, RedirectKind::HereDoc | RedirectKind::HereString)
+                    && matches!(entry.kind, RedirectKind::HereString) == want_string
                     && entry.fd == redirect.fd
             })
             .count();
@@ -885,11 +866,7 @@ impl Executor {
                 }
                 if want_string {
                     if command.here_string_carrier.is_some() {
-                        Some(
-                            self.expand_here_string_mut_from_carrier(
-                                &command.here_string_carrier,
-                            ),
-                        )
+                        Some(self.expand_here_string_mut_from_carrier(&command.here_string_carrier))
                     } else {
                         let body = command.here_string.clone()?;
                         Some(self.expand_here_string_mut(&body))
@@ -967,7 +944,11 @@ impl Executor {
             }
             self.execute_command(&time_command.command)?;
         }
-        print_time(&self.shell_state.env_vars, time_command.posix_format, started);
+        print_time(
+            &self.shell_state.env_vars,
+            time_command.posix_format,
+            started,
+        );
         if time_command.inverted {
             self.exit_code = invert_exit_status(self.exit_code);
         }
@@ -1096,11 +1077,16 @@ impl Executor {
         // step once per iteration) with that line restored, so $LINENO inside
         // the fire is the for command's line (dbg-support.tests: the double
         // "debug lineno: 108 main" per iteration).
-        let for_line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
+        let for_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
         let restore_for_line = |executor: &mut Executor| {
             if let Some(line) = &for_line {
                 executor
-                    .shell_state.env_vars
+                    .shell_state
+                    .env_vars
                     .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
             }
         };
@@ -1161,9 +1147,8 @@ impl Executor {
             let for_ambient = for_line
                 .as_deref()
                 .and_then(|line| line.parse::<usize>().ok());
-            let result = self.with_ambient_line(for_ambient, |executor| {
-                executor.execute_ast(&body_ast)
-            });
+            let result =
+                self.with_ambient_line(for_ambient, |executor| executor.execute_ast(&body_ast));
             drop(_t);
             self.shell_state.loop_depth -= 1;
             match result {
@@ -1412,11 +1397,10 @@ impl Executor {
                     // can only have been registered by the body itself; a
                     // trap action that calls exit N replaces the subshell
                     // status (bash exit_shell semantics).
-                    trap_result = Some(executor
-                        .run_exit_trap_for_status_with_output_redirects(
-                            status,
-                            Some(&stdio_redirect_cmd),
-                        ));
+                    trap_result = Some(executor.run_exit_trap_for_status_with_output_redirects(
+                        status,
+                        Some(&stdio_redirect_cmd),
+                    ));
                     Ok(())
                 })
             })
@@ -1501,7 +1485,11 @@ impl Executor {
         Ok(())
     }
 
-    pub(in crate::executor) fn with_loop_fd_heredocs<F>(&mut self, cmd: &CommandNode, f: F) -> Result<(), ExecuteError>
+    pub(in crate::executor) fn with_loop_fd_heredocs<F>(
+        &mut self,
+        cmd: &CommandNode,
+        f: F,
+    ) -> Result<(), ExecuteError>
     where
         F: FnOnce(&mut Executor) -> Result<(), ExecuteError>,
     {
@@ -1698,7 +1686,12 @@ impl Executor {
             let line = cmd
                 .line
                 .map(|line| line.to_string())
-                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned())
+                .or_else(|| {
+                    self.shell_state
+                        .env_vars
+                        .get("__RUBASH_CURRENT_LINE")
+                        .cloned()
+                })
                 .unwrap_or_else(|| "1".to_string());
             child.env("__RUBASH_CURRENT_LINE", line.clone());
             // The child re-parses `-c` source from line 1. Preserve the
@@ -1742,10 +1735,13 @@ impl Executor {
                             self.coproc_stderr_forwarders.insert(pid, forwarder);
                         }
                     }
-                    self.background_children.insert(pid, crate::fd::SpawnedChild::from(child_proc));
-                    let job_id =
-                        self.shell_state.job_table
-                            .register_process(pid, bash_command_source_text(cmd), true);
+                    self.background_children
+                        .insert(pid, crate::fd::SpawnedChild::from(child_proc));
+                    let job_id = self.shell_state.job_table.register_process(
+                        pid,
+                        bash_command_source_text(cmd),
+                        true,
+                    );
                     self.shell_state.job_table.set_job_control(
                         pid,
                         crate::builtins::set::shell_option_enabled(
@@ -1789,12 +1785,18 @@ impl Executor {
                         },
                         true,
                     );
-                    self.shell_state.job_table.attach_coproc_endpoint(job_id, pid);
+                    self.shell_state
+                        .job_table
+                        .attach_coproc_endpoint(job_id, pid);
                     // Store the file descriptors in env for COPROC array
                     let stdin_key = format!("__RUBASH_COPROC_STDIN_{}", pid);
                     let stdout_key = format!("__RUBASH_COPROC_STDOUT_{}", pid);
-                    self.shell_state.env_vars.insert(stdin_key, "pipe".to_string());
-                    self.shell_state.env_vars.insert(stdout_key, "pipe".to_string());
+                    self.shell_state
+                        .env_vars
+                        .insert(stdin_key, "pipe".to_string());
+                    self.shell_state
+                        .env_vars
+                        .insert(stdout_key, "pipe".to_string());
 
                     // Windows has no inherited POSIX fd for this pipe. Expose
                     // two shell-owned virtual descriptors instead; the PID
@@ -1845,14 +1847,20 @@ impl Executor {
                                 } else {
                                     let target_base =
                                         target.split('[').next().unwrap_or(target.as_str());
-                                    let target_exists = self.shell_state.env_vars.contains_key(target_base)
+                                    let target_exists = self
+                                        .shell_state
+                                        .env_vars
+                                        .contains_key(target_base)
                                         || self.shell_state.variables.get(target_base).is_some();
                                     if target_exists {
                                         // v != 0: ASSIGN_DISALLOWED on the resolved
                                         // var; elements bind to the target but
                                         // <name>_PID still uses the original name.
-                                        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, target_base)
-                                        {
+                                        if is_marked_var(
+                                            &self.shell_state.env_vars,
+                                            READONLY_VARS,
+                                            target_base,
+                                        ) {
                                             eprintln!(
                                                 "{}{}: readonly variable",
                                                 self.diagnostic_prefix(),
@@ -1884,8 +1892,16 @@ impl Executor {
                                     self.diagnostic_prefix(),
                                     array_name
                                 );
-                                unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, &array_name);
-                                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &array_name) {
+                                unmark_env_name(
+                                    &mut self.shell_state.env_vars,
+                                    NAMEREF_VARS,
+                                    &array_name,
+                                );
+                                if is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    READONLY_VARS,
+                                    &array_name,
+                                ) {
                                     eprintln!(
                                         "{}{}: readonly variable",
                                         self.diagnostic_prefix(),
@@ -1895,7 +1911,11 @@ impl Executor {
                                 }
                             }
                             NamerefResolution::NotNameref => {
-                                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &array_name) {
+                                if is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    READONLY_VARS,
+                                    &array_name,
+                                ) {
                                     eprintln!(
                                         "{}{}: readonly variable",
                                         self.diagnostic_prefix(),
@@ -1915,8 +1935,14 @@ impl Executor {
                     // coproc_unsetvars can still attempt the unbinds.
                     self.shell_state.coproc_names.insert(pid, c_name.clone());
                     if can_bind {
-                        self.shell_state.env_vars.insert(bind_name.clone(), array_value);
-                        mark_env_name(&mut self.shell_state.env_vars, "__RUBASH_ARRAY_VARS", &bind_name);
+                        self.shell_state
+                            .env_vars
+                            .insert(bind_name.clone(), array_value);
+                        mark_env_name(
+                            &mut self.shell_state.env_vars,
+                            "__RUBASH_ARRAY_VARS",
+                            &bind_name,
+                        );
                         // bind_variable (execute_cmd.c:2441) is nameref-aware:
                         // `coproc ref` with ref_PID a nameref assigns through
                         // it and hits the resolved target's readonly check.
@@ -1952,9 +1978,11 @@ impl Executor {
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 Some(CoprocStderrForwardTarget::File(path))
             }
-            FdWriteEndpoint::CoprocStdin { fd, .. } => crate::fd::duplicate_handle_inheritable(fd.handle)
-                .ok()
-                .map(|h| CoprocStderrForwardTarget::CoprocStdin(crate::fd::handle_to_file(h))),
+            FdWriteEndpoint::CoprocStdin { fd, .. } => {
+                crate::fd::duplicate_handle_inheritable(fd.handle)
+                    .ok()
+                    .map(|h| CoprocStderrForwardTarget::CoprocStdin(crate::fd::handle_to_file(h)))
+            }
         }
     }
 
@@ -2052,7 +2080,8 @@ impl Executor {
         let word = self.expand_case_word(&case_command.word);
         let word = tilde_expand::strip_assignment_quote_marker(&word);
         self.abandon_on_arithmetic_expansion_error()?;
-        let nocasematch = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
+        let nocasematch =
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "nocasematch");
         let mut fall_through = false;
         let mut matched_any = false;
         let mut index = 0;
@@ -2060,7 +2089,9 @@ impl Executor {
             let matched = fall_through
                 || clause.pattern_nodes.iter().any(|pattern| {
                     let stripped = self.expand_case_pattern(pattern);
-                    if self.shell_state.arithmetic_fatal_error.get() || self.shell_state.arithmetic_nounset_error.get() {
+                    if self.shell_state.arithmetic_fatal_error.get()
+                        || self.shell_state.arithmetic_nounset_error.get()
+                    {
                         return false;
                     }
                     if case_pattern_has_extglob(&stripped) {
@@ -2110,7 +2141,8 @@ impl Executor {
     }
 
     fn expand_case_pattern(&mut self, pattern: &crate::parser::CasePattern) -> String {
-        const PROTECTED_CASE_PATTERN_BACKSLASH: char = crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
+        const PROTECTED_CASE_PATTERN_BACKSLASH: char =
+            crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
         if !case_pattern_raw_has_quotes(&pattern.raw_text) {
             // Backslashes in a case pattern are escape characters, not quote

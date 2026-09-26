@@ -1,6 +1,6 @@
 use super::*;
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::substitution_metadata::bytes_to_shell_text;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
 
 impl Executor {
     pub(in crate::executor) fn finish_read_error(
@@ -170,12 +170,16 @@ impl Executor {
             // block forever on a device and `read -t` needs the bounded
             // wait. Bind it transiently so fd_table's deadline-aware record
             // reader handles the stream.
-            if !std::fs::metadata(&path).map(|m| m.is_file()).unwrap_or(false) {
+            if !std::fs::metadata(&path)
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
                 let Ok(file) = FileFd::open_read(path) else {
                     return None;
                 };
                 let saved = self.fd_table.entries.get(&0).cloned();
-                self.fd_table.open_input(0, FdReadEndpoint::File(file), false);
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file), false);
                 let line = self.read_virtual_fd_stdin(0, delimiter, char_limit, exact_char_limit);
                 match saved {
                     Some(entry) => {
@@ -192,9 +196,7 @@ impl Executor {
             // dropping the whole record at this boundary.
             // Q11 /proc P1: synthetic files are served before the filesystem
             // (docs/proc-vfs-plan.md hook B).
-            let input = if let Some(bytes) =
-                crate::proc_vfs::proc_file_content(&expanded_target)
-            {
+            let input = if let Some(bytes) = crate::proc_vfs::proc_file_content(&expanded_target) {
                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
             } else if let Some(bytes) = self.procsub_stream_take(&path) {
                 // `<(cmd)` carrier path: the word names a draining
@@ -411,7 +413,8 @@ impl Executor {
                 .read_text(fd, delimiter, char_limit, exact_char_limit)
             {
                 if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
                 }
                 return Some(trim_read_input(
@@ -452,7 +455,8 @@ impl Executor {
         self.apply_comsub_stdin_writeback();
         let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?.clone();
         let offset = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
@@ -505,7 +509,13 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
-        if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
+        if self
+            .shell_state
+            .env_vars
+            .get(INHERIT_PROCESS_STDIN)
+            .map(String::as_str)
+            != Some("1")
+        {
             return None;
         }
         if char_limit == Some(0) {
@@ -572,7 +582,13 @@ impl Executor {
     }
 
     pub(in crate::executor) fn read_inherited_process_stdin_to_string(&self) -> Option<String> {
-        if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) != Some("1") {
+        if self
+            .shell_state
+            .env_vars
+            .get(INHERIT_PROCESS_STDIN)
+            .map(String::as_str)
+            != Some("1")
+        {
             return None;
         }
 

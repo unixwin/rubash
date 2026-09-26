@@ -89,7 +89,8 @@ impl Executor {
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
         // may logout; anything else reports and continues.
         let login_shell = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_LOGIN_SHELL")
             .map(String::as_str)
             == Some("1");
@@ -106,7 +107,11 @@ impl Executor {
         if let Some(home) = self.shell_state.env_vars.get("HOME").cloned() {
             let logout_file = format!("{home}/.bash_logout");
             if !self.bash_logout_sourced
-                && std::fs::metadata(shell_path_to_windows(&logout_file, &self.shell_state.env_vars)).is_ok()
+                && std::fs::metadata(shell_path_to_windows(
+                    &logout_file,
+                    &self.shell_state.env_vars,
+                ))
+                .is_ok()
             {
                 self.bash_logout_sourced = true;
                 let mut node = CommandNode::default();
@@ -190,7 +195,8 @@ impl Executor {
                     &mut super::WriteFileStderr,
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+            let mut file =
+                File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
@@ -234,7 +240,8 @@ impl Executor {
                     &mut std::io::sink(),
                 )?);
             }
-            let mut file = File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+            let mut file =
+                File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
             return Ok(crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,

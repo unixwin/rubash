@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 pub(in crate::executor) fn is_shell_name(name: &str) -> bool {
     let mut chars = name.chars();
@@ -339,7 +339,8 @@ pub(in crate::executor) fn short_set_flag_option(flag: char) -> Option<&'static 
 /// resolve aliases against marked entries without persisting them.
 /// `operator_metadata.raw` is never consulted at execution time, so it is
 /// a safe carrier.
-pub(in crate::executor) const GROUP_REDIRECT_INJECTED_MARK: &str = crate::executor::markers::GROUP_REDIRECT_INJECTED_MARK;
+pub(in crate::executor) const GROUP_REDIRECT_INJECTED_MARK: &str =
+    crate::executor::markers::GROUP_REDIRECT_INJECTED_MARK;
 
 pub(in crate::executor) fn injected_group_redirect(redirect: &Redirect) -> Redirect {
     let mut cloned = redirect.clone();
@@ -373,7 +374,10 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
             .chain(command.append.iter())
             .filter(|own| own_fd1(own))
             .any(|own| {
-                let target = own.target.trim_start_matches([crate::executor::markers::QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX]);
+                let target = own.target.trim_start_matches([
+                    crate::executor::markers::QUOTED_WORD_PREFIX,
+                    STORAGE_WORD_PREFIX,
+                ]);
                 crate::executor::execution_misc::redirect_target_fd(target).is_some()
                     || crate::executor::execution_misc::dev_stdio_redirect_fd(target).is_some()
             });
@@ -381,10 +385,7 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
         // shields its body from the outer redirect entirely: GNU opens the
         // inner redirect before the body runs, so `{ { echo a; } >n1; } >n2`
         // sends `a` to n1 and never lets n2 reach the body (niubash#118).
-        let has_own_output_redirect = command
-            .redirect_out
-            .as_ref()
-            .is_some_and(|r| own_fd1(r))
+        let has_own_output_redirect = command.redirect_out.as_ref().is_some_and(|r| own_fd1(r))
             || command.append.as_ref().is_some_and(|r| own_fd1(r))
             || command.redirects.iter().any(|existing| {
                 matches!(
@@ -397,10 +398,7 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                         | crate::parser::RedirectKind::CombinedAppend
                 ) && existing.fd.unwrap_or(1) == 1
             });
-        let no_own_stdout_field = !command
-            .redirect_out
-            .as_ref()
-            .is_some_and(|r| own_fd1(r))
+        let no_own_stdout_field = !command.redirect_out.as_ref().is_some_and(|r| own_fd1(r))
             && !command.append.as_ref().is_some_and(|r| own_fd1(r));
         if own_output_is_fd_alias {
             command
@@ -576,8 +574,6 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         }
     }
 }
-
-
 
 pub(in crate::executor) fn split_shell_path(path: &str) -> Vec<String> {
     if cfg!(windows) {

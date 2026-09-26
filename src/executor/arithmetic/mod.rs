@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use super::Executor;
 use crate::executor::execution_misc::RandomGen;
-use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
+use crate::executor::{is_marked_var, SubstitutionQuoteContext, ASSOC_VARS};
 
 thread_local! {
     /// Variable writes performed by the arithmetic evaluator between the
@@ -258,7 +258,9 @@ impl Executor {
         // Stale nested-subscript failure marker (lvalue.rs records the
         // subscript text so evalerror reports it, GNU array_expand_index
         // style); each new evaluation starts clean.
-        self.shell_state.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+        self.shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
         // Associative subscripts are expanded first, in their own pass, and
         // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
         // so the ordinary expansion below cannot expand them a second time and
@@ -269,7 +271,10 @@ impl Executor {
         // EXP_EXPANDED, `(( ))` does not, so only the former switches the
         // assoc subscript scan to flag-1 (verbatim key) semantics.
         let assoc_noexpand = !expand
-            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
+            && crate::builtins::shopt::option_enabled(
+                &self.shell_state.env_vars,
+                "array_expand_once",
+            );
         let with_assoc_keys = self.expand_arithmetic_assoc_subscripts(expression, assoc_noexpand);
 
         let expression = if expand {
@@ -279,7 +284,8 @@ impl Executor {
         };
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
+            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            {
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
@@ -314,10 +320,14 @@ impl Executor {
         // under the option, so `let 'a[""]=26'` feeds `""` to evalexp
         // verbatim -> "operand expected" (verified GNU 5.3). The marker
         // mirrors EXP_EXPANDED for the parser's subscript evaluation.
-        let exp_expanded =
-            !expand && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
+        let exp_expanded = !expand
+            && crate::builtins::shopt::option_enabled(
+                &self.shell_state.env_vars,
+                "array_expand_once",
+            );
         if exp_expanded {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_ARITH_EXP_EXPANDED".to_string(), "1".to_string());
         }
         // Save a snapshot of variable values before evaluation to detect changes.
@@ -328,8 +338,12 @@ impl Executor {
             Some(&self.shell_state.random_state),
             true,
         );
-        self.shell_state.env_vars.remove("__RUBASH_ARITH_EXP_EXPANDED");
-        self.shell_state.arithmetic_last_error_category.set(category);
+        self.shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_EXP_EXPANDED");
+        self.shell_state
+            .arithmetic_last_error_category
+            .set(category);
         self.report_arithmetic_readonly_error();
         // GNU prints bind/subscript diagnostics (`a[]: bad array
         // subscript`, `` `a[]': not a valid identifier ``) while the
@@ -405,33 +419,35 @@ impl Executor {
             .and_then(crate::executor::expand_braced_indices::sub_idx_lookup)
         {
             return match hit {
-                crate::executor::subscript_expansion::IndexedSubscript::Index(index) => {
-                    Some(index)
-                }
+                crate::executor::subscript_expansion::IndexedSubscript::Index(index) => Some(index),
                 _ => None,
             };
         }
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
-        self.shell_state.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+        self.shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
         // GNU array_expand_index (arrayfunc.c:1368-1378): the resolved
         // subscript text is expanded AGAIN by expand_arith_string unless
         // array_expand_once is set — `a[$x]` in an already-expanded word
         // still expands `$x` under the default. The Q_DOUBLE_QUOTES variant
         // keeps quote characters as data (`a[\" \"]=v` -> evalexp(`" "`)
         // fails "operand expected", verified GNU 5.3).
-        let reexpanded =
-            if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once") {
-                resolved
-                    .replace(DATA_DOLLAR, "$")
-                    .replace(crate::executor::markers::DATA_BACKTICK, "`")
-                    .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
-                    .replace(crate::executor::markers::DATA_SQUOTE, "'")
-                    .replace(crate::executor::markers::DATA_DQUOTE, "\"")
-            } else {
-                self.expand_arithmetic_subscript_mut(resolved)
-            };
+        let reexpanded = if crate::builtins::shopt::option_enabled(
+            &self.shell_state.env_vars,
+            "array_expand_once",
+        ) {
+            resolved
+                .replace(DATA_DOLLAR, "$")
+                .replace(crate::executor::markers::DATA_BACKTICK, "`")
+                .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+                .replace(crate::executor::markers::DATA_SQUOTE, "'")
+                .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+        } else {
+            self.expand_arithmetic_subscript_mut(resolved)
+        };
 
         // GNU arrayfunc.c:1376 evalexp(t, eflag): eflag=0 for compat>51 —
         // the nested assoc subscript scan stays flag-0 even under
@@ -448,7 +464,9 @@ impl Executor {
             Some(&self.shell_state.random_state),
             true,
         );
-        self.shell_state.arithmetic_last_error_category.set(category);
+        self.shell_state
+            .arithmetic_last_error_category
+            .set(category);
         self.report_arithmetic_readonly_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
@@ -520,7 +538,9 @@ impl Executor {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
-        self.shell_state.env_vars.remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+        self.shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
 
         // $(( )) runs its own expansion pass inside evalexp — the operand is
         // not EXP_EXPANDED, so the assoc subscript scan stays flag-0
@@ -531,7 +551,8 @@ impl Executor {
             normalize_arithmetic_quotes(&self.expand_arithmetic_expression_mut(&with_assoc_keys));
         *self.arithmetic_last_eval_input.borrow_mut() = expression.clone();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars) {
+            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            {
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
@@ -555,7 +576,9 @@ impl Executor {
             Some(&self.shell_state.random_state),
             true,
         );
-        self.shell_state.arithmetic_last_error_category.set(category);
+        self.shell_state
+            .arithmetic_last_error_category
+            .set(category);
         self.report_arithmetic_readonly_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
@@ -573,7 +596,11 @@ impl Executor {
     }
 
     fn report_arithmetic_readonly_error(&mut self) {
-        let Some(name) = self.shell_state.env_vars.remove("__RUBASH_ARITH_READONLY_ERROR") else {
+        let Some(name) = self
+            .shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_READONLY_ERROR")
+        else {
             return;
         };
         if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -592,7 +619,9 @@ impl Executor {
     pub(crate) fn abandon_on_arithmetic_expansion_error(
         &mut self,
     ) -> Result<(), crate::executor::ExecuteError> {
-        if !self.shell_state.arithmetic_fatal_error.get() && !self.shell_state.arithmetic_nounset_error.get() {
+        if !self.shell_state.arithmetic_fatal_error.get()
+            && !self.shell_state.arithmetic_nounset_error.get()
+        {
             return Ok(());
         }
         let nounset = self.shell_state.arithmetic_nounset_error.replace(false);
@@ -640,7 +669,6 @@ impl Executor {
         expression: &str,
         noexpand: bool,
     ) -> String {
-
         let bytes = expression.as_bytes();
         let mut output = String::with_capacity(expression.len());
         let mut index = 0usize;
@@ -722,7 +750,6 @@ impl Executor {
                             .replace('', "\\")
                             .replace('', "'")
                             .replace('', "\"")
-
                     } else {
                         self.expand_assoc_subscript_once(raw)
                     };
@@ -870,8 +897,7 @@ impl Executor {
         let mut index = 0usize;
         while index < bytes.len() {
             let ch = bytes[index];
-            if ch == b'`'
-                || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')))
+            if ch == b'`' || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')))
             {
                 let end = assoc_skip_substitution(bytes, index);
                 protected.push_str(&expression[index..end]);
@@ -1140,7 +1166,11 @@ pub(crate) fn eval_conditional_arith_value_categorized(
 pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
     value: &str,
     env_vars: &HashMap<String, String>,
-) -> (Option<i128>, Vec<(String, String)>, Option<ArithmeticErrorCategory>) {
+) -> (
+    Option<i128>,
+    Vec<(String, String)>,
+    Option<ArithmeticErrorCategory>,
+) {
     let mut cloned = env_vars.clone();
     let (result, category) = eval_mutable_arith_result(value, &mut cloned, None, false);
     let writes = cloned

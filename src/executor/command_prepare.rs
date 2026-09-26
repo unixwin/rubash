@@ -283,7 +283,8 @@ impl Executor {
             if self.shell_state.parameter_bad_substitution.replace(false) {
                 if self.posix_mode_enabled()
                     && self
-                        .shell_state.env_vars
+                        .shell_state
+                        .env_vars
                         .get("__RUBASH_INTERACTIVE")
                         .map(String::as_str)
                         != Some("1")
@@ -668,18 +669,19 @@ impl Executor {
                     }
                 };
                 if suppress_glob {
-                    let materialized =
-                        materialize_expanded_command_word(word_text).replace(crate::executor::markers::DATA_SQUOTE, "'");
+                    let materialized = materialize_expanded_command_word(word_text)
+                        .replace(crate::executor::markers::DATA_SQUOTE, "'");
                     words.push(remark(materialized));
                 } else {
                     match pathname_expand_word(word_text, &self.shell_state.env_vars) {
-                        PathnameExpansion::Matches(matches) => words.extend(
-                            matches
-                                .into_iter()
-                                .map(|value| remark(value.replace(crate::executor::markers::DATA_SQUOTE, "'"))),
-                        ),
+                        PathnameExpansion::Matches(matches) => {
+                            words.extend(matches.into_iter().map(|value| {
+                                remark(value.replace(crate::executor::markers::DATA_SQUOTE, "'"))
+                            }))
+                        }
                         PathnameExpansion::NoMatch => words.push(remark(
-                            materialize_expanded_command_word(word_text).replace(crate::executor::markers::DATA_SQUOTE, "'"),
+                            materialize_expanded_command_word(word_text)
+                                .replace(crate::executor::markers::DATA_SQUOTE, "'"),
                         )),
                         PathnameExpansion::Fail(pattern) => {
                             self.report_failglob(&pattern);
@@ -831,7 +833,11 @@ impl Executor {
             self.shell_state.arithmetic_expansion_error.set(true);
             // GNU expr.c raises evalerror from the actual evaluation;
             // classify from the recorded real-environment category.
-            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
+            let actual_fatal = self
+                .shell_state
+                .arithmetic_last_error_category
+                .take()
+                .is_some();
             if actual_fatal
                 || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
             {
@@ -903,7 +909,9 @@ impl Executor {
         // the caller read it for suppress_glob, so it must not leak into
         // builtin arguments (dstack2/tilde `printf %q '~'`).
         if raw_word_is_fully_single_quoted(raw) {
-            let word = word.strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX).unwrap_or(word);
+            let word = word
+                .strip_prefix(crate::executor::markers::QUOTED_WORD_PREFIX)
+                .unwrap_or(word);
             // The \x1c quoted-assignment-value marker (word.rs) is placed
             // after the first '=' to suppress tilde expansion on the RHS.
             // It must be stripped here so it does not leak into builtin
@@ -950,13 +958,21 @@ impl Executor {
         // `set -- ' A ' ' B '`).
         if word == "${*}"
             && !raw_word_is_quoted(raw)
-            && self.shell_state.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+            && self
+                .shell_state
+                .env_vars
+                .get("IFS")
+                .is_some_and(|ifs| ifs.is_empty())
         {
             return self.shell_state.positional_params.clone();
         }
         if word == "$*"
             && !raw_word_is_quoted(raw)
-            && self.shell_state.env_vars.get("IFS").is_some_and(|ifs| ifs.is_empty())
+            && self
+                .shell_state
+                .env_vars
+                .get("IFS")
+                .is_some_and(|ifs| ifs.is_empty())
         {
             return self.shell_state.positional_params.clone();
         }
@@ -1101,7 +1117,8 @@ impl Executor {
                 if let Some(prefix) = body.strip_suffix('@') {
                     if !prefix.is_empty() && is_shell_name(prefix) {
                         let mut names: Vec<String> = self
-                            .shell_state.env_vars
+                            .shell_state
+                            .env_vars
                             .keys()
                             .filter(|name| is_shell_name(name) && name.starts_with(prefix))
                             .cloned()
@@ -1123,7 +1140,8 @@ impl Executor {
         // Only applied when IFS has non-whitespace characters and the word
         // has unquoted expansions (parameter or command substitution).
         let ifs_has_non_whitespace = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("IFS")
             .map(|ifs| ifs.chars().any(|ch| !matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(false);
@@ -1136,7 +1154,12 @@ impl Executor {
             });
         let marked_word;
         let word_to_expand: &str = if needs_ifs_marking {
-            let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str).unwrap_or("");
+            let ifs = self
+                .shell_state
+                .env_vars
+                .get("IFS")
+                .map(String::as_str)
+                .unwrap_or("");
             marked_word = mark_literal_ifs_chars(word, ifs);
             &marked_word
         } else {
@@ -1155,7 +1178,9 @@ impl Executor {
             // return ExpansionFailure(1) to skip the entire command.
             return Vec::new();
         }
-        self.shell_state.arithmetic_nonfatal_error.set(saved_nonfatal);
+        self.shell_state
+            .arithmetic_nonfatal_error
+            .set(saved_nonfatal);
         // Apply side-effect writes from arithmetic evaluation in array
         // subscripts (e.g. `count++` in `${arr[$((count++))]}`).
         self.apply_pending_subscript_writes();
@@ -1275,7 +1300,10 @@ impl Executor {
             // field_split_escaped_ifs read it as an escaped separator and
             // stripped the backslash (a + b). Escaping belongs to the lexer,
             // not to parameter-expansion results.
-            field_split_values_with_ifs(&decoded, self.shell_state.env_vars.get("IFS").map(String::as_str))
+            field_split_values_with_ifs(
+                &decoded,
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
+            )
         } else {
             vec![strip_ifs_protection_markers(&expanded)]
         }
@@ -1559,14 +1587,18 @@ impl Executor {
             let inner = &alternate[2..alternate.len() - 1];
             let base = &inner[..inner.len() - 3];
             if let Some(storage) = self.parameter_array_storage(base) {
-                let values: Vec<String> = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
-                    assoc_hash_ordered_values(&storage, assoc_nbuckets(&self.shell_state.env_vars, base))
-                } else {
-                    array_values(&storage)
-                }
-                .into_iter()
-                .map(normalize_array_expanded_value)
-                .collect();
+                let values: Vec<String> =
+                    if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
+                        assoc_hash_ordered_values(
+                            &storage,
+                            assoc_nbuckets(&self.shell_state.env_vars, base),
+                        )
+                    } else {
+                        array_values(&storage)
+                    }
+                    .into_iter()
+                    .map(normalize_array_expanded_value)
+                    .collect();
                 if values.is_empty() {
                     return Some(Vec::new());
                 }
@@ -1578,10 +1610,7 @@ impl Executor {
                         } else {
                             " ".to_string()
                         };
-                        return Some(field_split_values_with_ifs(
-                            &values.join(&separator),
-                            ifs,
-                        ));
+                        return Some(field_split_values_with_ifs(&values.join(&separator), ifs));
                     }
                 }
             }
@@ -1606,7 +1635,8 @@ impl Executor {
         // `a:b` whole under IFS=:), so those fragments stay on the
         // quote-aware re-parse path.
         let ifs_all_whitespace = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("IFS")
             .map(|ifs| ifs.chars().all(|ch| matches!(ch, ' ' | '\t' | '\n')))
             .unwrap_or(true);
@@ -1723,7 +1753,8 @@ impl Executor {
         }
         if !word_used && var_name == "*" {
             return Some(vec![self
-                .shell_state.positional_params
+                .shell_state
+                .positional_params
                 .join(&self.ifs_first_char_separator())]);
         }
 
@@ -1751,7 +1782,8 @@ impl Executor {
         // under IFS=':' stays `abc:def ghi:jkl`).
         if alternate == "$*" || alternate == "${*}" {
             return Some(vec![self
-                .shell_state.positional_params
+                .shell_state
+                .positional_params
                 .join(&self.ifs_first_char_separator())]);
         }
 
@@ -1766,8 +1798,8 @@ impl Executor {
         } else {
             format!("\"{alternate}\"")
         };
-        let values = self
-            .quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
+        let values =
+            self.quoted_positional_at_word_values_with_raw(alternate, Some(&synthetic_raw), None)?;
         // GNU subst.c:12026-12035: this word is \x1d-marked (fully
         // double-quoted), so a zero-field alternate still yields one empty
         // field (`"${foo-$@}"` with no positional parameters -> `argv[1] = <>`).
@@ -2401,7 +2433,8 @@ fn quoted_pure_reference_expands_empty(content: &str, executor: &Executor) -> bo
             return executor.script_name_value().is_empty();
         }
         return executor
-            .shell_state.positional_params
+            .shell_state
+            .positional_params
             .get(position - 1)
             .is_none_or(|value| value.is_empty());
     }
@@ -2595,7 +2628,15 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
             continue;
         }
         // Protected markers from the lexer — copy through
-        if matches!(ch, DATA_DOLLAR | crate::executor::markers::DATA_BACKTICK | crate::executor::markers::DATA_SQUOTE | crate::executor::markers::DATA_DQUOTE | crate::executor::markers::DATA_BACKSLASH | crate::executor::markers::PARAM_NAME_END_MARKER) {
+        if matches!(
+            ch,
+            DATA_DOLLAR
+                | crate::executor::markers::DATA_BACKTICK
+                | crate::executor::markers::DATA_SQUOTE
+                | crate::executor::markers::DATA_DQUOTE
+                | crate::executor::markers::DATA_BACKSLASH
+                | crate::executor::markers::PARAM_NAME_END_MARKER
+        ) {
             output.push(ch);
             index += 1;
             continue;
@@ -2670,7 +2711,8 @@ fn expanded_ends_with_ifs_separator(expanded: &str, executor: &Executor) -> bool
         return false;
     }
     executor
-        .shell_state.env_vars
+        .shell_state
+        .env_vars
         .get("IFS")
         .map(String::as_str)
         .unwrap_or(" \t\n")
@@ -2784,7 +2826,12 @@ mod command_word_materialization_tests {
     #[test]
     fn leaves_ordinary_command_word_bytes_unchanged() {
         assert_eq!(
-            materialize_expanded_command_word(&format!("{}{}{}", "plain", crate::executor::markers::PROTECTED_BACKSLASH_STR, "word")),
+            materialize_expanded_command_word(&format!(
+                "{}{}{}",
+                "plain",
+                crate::executor::markers::PROTECTED_BACKSLASH_STR,
+                "word"
+            )),
             "plain\\word"
         );
     }
@@ -2792,7 +2839,12 @@ mod command_word_materialization_tests {
     #[test]
     fn materializes_pathname_marker_before_payload_decode() {
         assert_eq!(
-            materialize_expanded_command_word(&format!("{}{}{}", "prefix", crate::executor::markers::PROTECTED_BACKSLASH_STR, "__RUBASH_CSB1_41;suffix")),
+            materialize_expanded_command_word(&format!(
+                "{}{}{}",
+                "prefix",
+                crate::executor::markers::PROTECTED_BACKSLASH_STR,
+                "__RUBASH_CSB1_41;suffix"
+            )),
             "prefix\\Asuffix"
         );
     }

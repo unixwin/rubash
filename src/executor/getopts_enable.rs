@@ -62,13 +62,15 @@ impl Executor {
         let silent = optstring.starts_with(':');
         let optspec: &str = if silent { &optstring[1..] } else { &optstring };
         let mut optind = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("OPTIND")
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(1);
         let mut offset = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_GETOPTS_OFFSET")
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
@@ -108,7 +110,8 @@ impl Executor {
             // identifiers report here and fail the call), then either bind
             // OPTARG = option character (silent) or unbind OPTARG and print
             // the diagnostic (unless OPTERR suppresses it).
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
             self.set_optind(optind);
             if silent {
@@ -146,7 +149,8 @@ impl Executor {
                 // OPTARG = option character; otherwise name "?" with OPTARG
                 // unbound and the "option requires an argument" diagnostic
                 // (suppressed when OPTERR is 0).
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
                 self.set_optind(optind);
                 if silent {
@@ -169,7 +173,8 @@ impl Executor {
             // return code is the name bind's result (getopts.def line 305).
             self.getopts_bind_optarg_checked(&argument, stderr);
             let status = self.getopts_bind_name(&variable, &option.to_string(), stderr);
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
             self.set_optind(optind);
             return status;
@@ -177,7 +182,8 @@ impl Executor {
 
         self.getopts_unbind_optarg();
         let status = self.getopts_bind_name(&variable, &option.to_string(), stderr);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
         self.set_optind(optind);
         status
@@ -192,7 +198,8 @@ impl Executor {
     }
 
     fn getopts_uses_ash_diagnostics(&self) -> bool {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get("__RUBASH_SHELL_NAME")
             .is_some_and(|name| is_ash_shell_name(name))
     }
@@ -309,13 +316,16 @@ impl Executor {
         self.getopts_unbind_optarg();
         let _ = self.getopts_bind_name(variable, "?", stderr);
         self.set_optind(optind);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("__RUBASH_GETOPTS_OFFSET".to_string(), "1".to_string());
     }
 
     pub(in crate::executor) fn set_optind(&mut self, optind: usize) {
         let value = optind.to_string();
-        self.shell_state.env_vars.insert("OPTIND".to_string(), value.clone());
+        self.shell_state
+            .env_vars
+            .insert("OPTIND".to_string(), value.clone());
         set_process_env("OPTIND", &value);
 
         // Also sync to shell_state.variables so parameter expansion sees the update

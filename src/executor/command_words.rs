@@ -1,10 +1,12 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
         if let Some(value) = cmd.words.last() {
-            self.shell_state.env_vars.insert("_".to_string(), value.clone());
+            self.shell_state
+                .env_vars
+                .insert("_".to_string(), value.clone());
         }
     }
 
@@ -23,13 +25,9 @@ impl Executor {
         // parameters) still yields one empty field. raw_word_is_quoted
         // skips ${...}/$() bodies, so only the word's own outer quoting
         // counts here.
-        if cmd
-            .word_metadata
-            .get(index)
-            .is_some_and(|metadata| {
-                crate::executor::command_prepare::raw_word_is_quoted(Some(&metadata.raw))
-            })
-        {
+        if cmd.word_metadata.get(index).is_some_and(|metadata| {
+            crate::executor::command_prepare::raw_word_is_quoted(Some(&metadata.raw))
+        }) {
             return false;
         }
 
@@ -222,7 +220,10 @@ impl Executor {
     }
 
     pub(in crate::executor) fn field_split_values(&self, value: &str) -> Vec<String> {
-        field_split_values_with_ifs(value, self.shell_state.env_vars.get("IFS").map(String::as_str))
+        field_split_values_with_ifs(
+            value,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+        )
     }
 
     pub(in crate::executor) fn expand_escaped_indirect_parameter_literal(

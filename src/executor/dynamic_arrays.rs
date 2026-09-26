@@ -47,21 +47,39 @@ impl Executor {
             "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get("__RUBASH_CURRENT_LINE")
                     .cloned()
                     .unwrap_or_else(|| "1".to_string()),
             ),
             "BASH_COMMAND" => Some(
-                self.shell_state.debug_trap_command
+                self.shell_state
+                    .debug_trap_command
                     .borrow()
                     .clone()
-                    .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_COMMAND").cloned())
+                    .or_else(|| {
+                        self.shell_state
+                            .env_vars
+                            .get("__RUBASH_CURRENT_COMMAND")
+                            .cloned()
+                    })
                     .unwrap_or_default(),
             ),
-            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(&self.shell_state.env_vars)),
-            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(&self.shell_state.env_vars)),
-            "PIPESTATUS" => Some(self.shell_state.pipestatus.first().copied().unwrap_or(0).to_string()),
+            "SHELLOPTS" => Some(crate::builtins::set::shellopts_value(
+                &self.shell_state.env_vars,
+            )),
+            "BASHOPTS" => Some(crate::builtins::shopt::bashopts_value(
+                &self.shell_state.env_vars,
+            )),
+            "PIPESTATUS" => Some(
+                self.shell_state
+                    .pipestatus
+                    .first()
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string(),
+            ),
             _ => None,
         }
     }
@@ -71,7 +89,8 @@ impl Executor {
     }
 
     pub(in crate::executor) fn last_background_pid_value(&self) -> String {
-        self.shell_state.last_background_pid
+        self.shell_state
+            .last_background_pid
             .map(|pid| pid.to_string())
             .unwrap_or_default()
     }
@@ -81,12 +100,16 @@ impl Executor {
     /// no separator.
     pub(in crate::executor) fn positional_params_star_joined(&self) -> String {
         let ifs = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("IFS")
             .cloned()
             .unwrap_or_else(|| " \t\n".to_string());
         match ifs.chars().next() {
-            Some(separator) => self.shell_state.positional_params.join(&separator.to_string()),
+            Some(separator) => self
+                .shell_state
+                .positional_params
+                .join(&separator.to_string()),
             None => self.shell_state.positional_params.concat(),
         }
     }
@@ -122,7 +145,10 @@ impl Executor {
     /// same condition FUNCNAME's synthetic "main" uses.
     pub(in crate::executor) fn bash_lineno_view(&self) -> Vec<String> {
         let mut stack = self.shell_state.bash_lineno_stack.clone();
-        if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_SCRIPT_NAME")
             && stack.last().map(String::as_str) != Some("0")
         {
             stack.push("0".to_string());
@@ -139,7 +165,10 @@ impl Executor {
                 let mut stack = self.shell_state.function_name_stack.clone();
                 // Bash exposes the script's top-level frame as `main`, but
                 // `bash -c` reports only real function frames.
-                if self.shell_state.env_vars.contains_key("__RUBASH_SCRIPT_NAME")
+                if self
+                    .shell_state
+                    .env_vars
+                    .contains_key("__RUBASH_SCRIPT_NAME")
                     && !stack.is_empty()
                     && stack.last().map(String::as_str) != Some("main")
                 {
@@ -147,11 +176,21 @@ impl Executor {
                 }
                 return Some(format_indexed_array_values(stack));
             }
-            "BASH_ARGC" => return Some(format_indexed_array_values(self.shell_state.bash_argc_stack.clone())),
-            "BASH_ARGV" => return Some(format_indexed_array_values(self.shell_state.bash_argv_stack.clone())),
+            "BASH_ARGC" => {
+                return Some(format_indexed_array_values(
+                    self.shell_state.bash_argc_stack.clone(),
+                ))
+            }
+            "BASH_ARGV" => {
+                return Some(format_indexed_array_values(
+                    self.shell_state.bash_argv_stack.clone(),
+                ))
+            }
             "BASH_LINENO" => return Some(format_indexed_array_values(self.bash_lineno_view())),
             "BASH_SOURCE" => {
-                return Some(format_indexed_array_values(self.shell_state.bash_source_stack.clone()))
+                return Some(format_indexed_array_values(
+                    self.shell_state.bash_source_stack.clone(),
+                ))
             }
             _ => {}
         }
@@ -211,7 +250,8 @@ impl Executor {
 
     pub(in crate::executor) fn bash_aliases_storage(&self) -> String {
         let mut entries: Vec<_> = self
-            .shell_state.aliases
+            .shell_state
+            .aliases
             .iter()
             .map(|(name, alias)| (name.clone(), alias.value.clone()))
             .collect();
@@ -220,7 +260,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn bash_cmds_storage(&self) -> String {
-        format_assoc_storage(crate::builtins::hash::hashed_entries(&self.shell_state.env_vars))
+        format_assoc_storage(crate::builtins::hash::hashed_entries(
+            &self.shell_state.env_vars,
+        ))
     }
 
     pub(in crate::executor) fn sync_dynamic_assoc_vars(&mut self) {
@@ -232,10 +274,12 @@ impl Executor {
         // empty in a shell that never named DIRSTACK (array.tests
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("BASH_ALIASES".to_string(), self.bash_aliases_storage());
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("BASH_CMDS".to_string(), self.bash_cmds_storage());
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
@@ -247,7 +291,8 @@ impl Executor {
     /// the stored cell untouched (variables.c:1618 get_dirstack,
     /// builtins/pushd.def:669 get_directory_stack).
     pub(in crate::executor) fn sync_dirstack_cell(&mut self) {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("DIRSTACK".to_string(), self.dirstack_storage());
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "DIRSTACK");
     }
@@ -257,10 +302,16 @@ impl Executor {
     }
 
     pub(in crate::executor) fn current_bash_source(&self) -> String {
-        self.shell_state.bash_source_stack
+        self.shell_state
+            .bash_source_stack
             .first()
             .cloned()
-            .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME").cloned())
+            .or_else(|| {
+                self.shell_state
+                    .env_vars
+                    .get("__RUBASH_SCRIPT_NAME")
+                    .cloned()
+            })
             .unwrap_or_default()
     }
 
@@ -273,7 +324,8 @@ impl Executor {
     }
 
     pub(in crate::executor) fn script_name_value(&self) -> String {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .get("BASH_ARGV0")
             .or_else(|| self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
             .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"))

@@ -80,7 +80,8 @@ impl Executor {
                     if let Some(pre) = preexpanded_stdin_body(&body) {
                         pre.to_string()
                     } else {
-                        strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body)).to_string()
+                        strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(&body))
+                            .to_string()
                     }
                 }
             } else if let Some(pre) = preexpanded_stdin_body(&body) {
@@ -175,7 +176,12 @@ impl Executor {
         let Some(command) = ast.commands.get(command_index) else {
             return Ok(None);
         };
-        let posix_mode = self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1");
+        let posix_mode = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_POSIX_MODE")
+            .map(String::as_str)
+            == Some("1");
         let words = if command.words.first().map(String::as_str) == Some("al")
             && command.words.get(1).map(String::as_str) == Some("for")
             && (posix_mode || !self.shell_state.aliases.contains_key("for"))

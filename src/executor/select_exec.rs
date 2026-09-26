@@ -117,7 +117,8 @@ impl Executor {
         values: &[String],
     ) -> Result<(), ExecuteError> {
         let ps3 = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("PS3")
             .cloned()
             .unwrap_or_else(|| "#? ".to_string());
@@ -171,7 +172,8 @@ impl Executor {
 
     fn select_stdin_offset(&self, has_stdin: bool) -> usize {
         if has_stdin {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .get(FUNCTION_STDIN_OFFSET)
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(0)
@@ -204,7 +206,11 @@ impl Executor {
                     eprintln!();
                     None
                 }
-                Ok(_) => Some(crate::executor::bytes_to_shell_text(&line).trim().to_string()),
+                Ok(_) => Some(
+                    crate::executor::bytes_to_shell_text(&line)
+                        .trim()
+                        .to_string(),
+                ),
                 Err(_) => {
                     self.exit_code = 1;
                     Some(String::new())
@@ -213,7 +219,8 @@ impl Executor {
         }
 
         let stdin_content = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN)
             .cloned()
             .unwrap_or_default();
@@ -229,7 +236,8 @@ impl Executor {
             *stdin_offset = stdin_content.len();
             remaining.to_string()
         };
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), stdin_offset.to_string());
         Some(input)
     }

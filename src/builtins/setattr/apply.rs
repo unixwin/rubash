@@ -7,8 +7,8 @@ use super::marks::{
     unmark_exported,
 };
 use super::value::{
-    array_attribute_assignment_value, diagnostic_prefix,
-    readonly_error_subject, split_assignment, valid_identifier,
+    array_attribute_assignment_value, diagnostic_prefix, readonly_error_subject, split_assignment,
+    valid_identifier,
 };
 use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS};
 
@@ -183,9 +183,7 @@ where
     let has_assign = value.is_some();
     let converted = env_vars.contains_key(name) || env::var(name).is_ok();
     let (value, bound_array) = value
-        .map(|value| {
-            array_attribute_assignment_value(value, array, assoc, append, env_vars, name)
-        })
+        .map(|value| array_attribute_assignment_value(value, array, assoc, append, env_vars, name))
         .unwrap_or_else(|| {
             (
                 env_vars

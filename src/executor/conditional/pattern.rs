@@ -209,10 +209,7 @@ fn case_pattern_atom_matches(
         // pattern "cannot match" — except the special case where the string
         // char is `\` AND it is the last character of the string (p == pe &&
         // sc == '\\' && n+1 == se breaks out as a match).
-        '\\' => (
-            candidate == '\\' && is_last_word_char,
-            pattern_index + 1,
-        ),
+        '\\' => (candidate == '\\' && is_last_word_char, pattern_index + 1),
         literal => (chars_match(literal, candidate, nocase), pattern_index + 1),
     }
 }

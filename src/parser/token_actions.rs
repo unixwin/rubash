@@ -69,8 +69,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     .raw
                     .split_once('=')
                     .is_some_and(|(lhs, _)| valid_compound_assignment_lhs(lhs));
-                if compound_candidate
-                    && !compound_assignment_position_ok(&state.current_cmd.words)
+                if compound_candidate && !compound_assignment_position_ok(&state.current_cmd.words)
                 {
                     return reject_compound_assignment_position(tokens, i, state, token);
                 }
@@ -1139,8 +1138,7 @@ fn compound_assignment_position_ok(words: &[String]) -> bool {
         if !is_assignment_word {
             return matches!(
                 word.as_str(),
-                "alias" | "declare" | "export" | "local" | "readonly" | "typeset" | "eval"
-                    | "let"
+                "alias" | "declare" | "export" | "local" | "readonly" | "typeset" | "eval" | "let"
             );
         }
     }

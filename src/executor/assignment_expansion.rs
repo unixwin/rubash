@@ -1,7 +1,7 @@
 use super::*;
 use crate::executor::embedded_mutations::collect_command_substitution_source;
-use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
 /// Hoisted data-quote sentinels: expand_assignment_value_inner lifts the
 /// lexer's \x17/\x18 escaped-quote carriers out of the embedded-parameter
@@ -9,7 +9,8 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 /// dequote_escapes keeps CTLESC-escaped quotes as data). The embedded
 /// walker still tracks DATA_DOUBLE_QUOTE as a "..." region boundary for
 /// its in_double state so `$'` inside it stays literal (issue #109).
-pub(in crate::executor) const DATA_DOUBLE_QUOTE: &'static str = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
+pub(in crate::executor) const DATA_DOUBLE_QUOTE: &'static str =
+    crate::executor::markers::ASSIGN_DATA_DQUOTE_STR;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(in crate::executor) struct AssignmentExpansionResult {
@@ -180,9 +181,12 @@ pub(in crate::executor) fn hoist_data_double_quotes(value: &str, marker: &str) -
 /// Sentinels for expansion-trigger characters inside a hoisted `'...'`
 /// span (GNU W_QUOTED - the span content never expands). Restored by the
 /// same callers that restore the quote `marker`.
-pub(in crate::executor) const SQ_DOLLAR_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_DOLLAR_STR;
-pub(in crate::executor) const SQ_BACKTICK_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_BACKTICK_STR;
-pub(in crate::executor) const SQ_BACKSLASH_DATA: &'static str = crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR;
+pub(in crate::executor) const SQ_DOLLAR_DATA: &'static str =
+    crate::executor::markers::ASSIGN_SQ_DOLLAR_STR;
+pub(in crate::executor) const SQ_BACKTICK_DATA: &'static str =
+    crate::executor::markers::ASSIGN_SQ_BACKTICK_STR;
+pub(in crate::executor) const SQ_BACKSLASH_DATA: &'static str =
+    crate::executor::markers::ASSIGN_SQ_BACKSLASH_STR;
 
 pub(in crate::executor) fn restore_sq_content_markers(value: String) -> String {
     value
@@ -779,8 +783,13 @@ impl Executor {
             // `${var@P}` reaches prompt_expansion; ordinary shell escapes
             // still undergo the normal assignment quote-removal pass.
             {
-                let mut restored = preserve_prompt_escapes(&expanded_value).replace(crate::executor::markers::CTLESC, "");
-                if value.contains([crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, crate::executor::markers::DATA_SQUOTE, crate::executor::markers::DATA_DQUOTE]) {
+                let mut restored = preserve_prompt_escapes(&expanded_value)
+                    .replace(crate::executor::markers::CTLESC, "");
+                if value.contains([
+                    crate::executor::markers::PROTECTED_ESCAPED_SQUOTE,
+                    crate::executor::markers::DATA_SQUOTE,
+                    crate::executor::markers::DATA_DQUOTE,
+                ]) {
                     restored = restored
                         .replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "'")
                         .replace(crate::executor::markers::DATA_SQUOTE, "'")
@@ -799,7 +808,8 @@ impl Executor {
             // removal into the stored value (`x=a\'b` stores `a'b`). Hoist the
             // markers out of the quote-removal pass so the data quotes they
             // become are not re-stripped as syntax, then restore them.
-            const DATA_SINGLE_QUOTE: &'static str = crate::executor::markers::ASSIGN_DATA_SQUOTE_STR;
+            const DATA_SINGLE_QUOTE: &'static str =
+                crate::executor::markers::ASSIGN_DATA_SQUOTE_STR;
             // GNU parse.y/arrayfunc.c: a compound array assignment preserves
             // the raw parenthesized text so split_storage_words sees the
             // original quoting. The embedded parameter walker treats a bare
@@ -810,9 +820,12 @@ impl Executor {
             // assignments so they survive as literal element text.
             let compound_paren_value = value.starts_with('(') && value.ends_with(')');
             const DATA_BACKTICK: &'static str = crate::executor::markers::ASSIGN_DATA_BACKTICK_STR;
-            const DATA_ESCAPED_DQUOTE: &'static str = crate::executor::markers::ASSIGN_ESCAPED_DQUOTE_STR;
-            const DATA_ESCAPED_SQUOTE: &'static str = crate::executor::markers::ASSIGN_ESCAPED_SQUOTE_STR;
-            const DATA_ESCAPED_BACKSLASH: &'static str = crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH_STR;
+            const DATA_ESCAPED_DQUOTE: &'static str =
+                crate::executor::markers::ASSIGN_ESCAPED_DQUOTE_STR;
+            const DATA_ESCAPED_SQUOTE: &'static str =
+                crate::executor::markers::ASSIGN_ESCAPED_SQUOTE_STR;
+            const DATA_ESCAPED_BACKSLASH: &'static str =
+                crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH_STR;
             // In preserve mode the walker emits escape pairs verbatim with
             // quote-context awareness, so hoisting `\X` here is both
             // redundant and wrong: a context-blind `.replace("\\'", ..)`
@@ -972,7 +985,11 @@ impl Executor {
                 // errors like `x+=2` on a declared integer, and a `set -u`
                 // unbound variable must stay fatal even though a fresh
                 // environment would happily evaluate it as 0.
-                let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some()
+                let actual_fatal = self
+                    .shell_state
+                    .arithmetic_last_error_category
+                    .take()
+                    .is_some()
                     || self.shell_state.arithmetic_nounset_error.get();
                 if !actual_fatal
                     && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
@@ -1002,7 +1019,8 @@ impl Executor {
             b'0' => self.script_name_value(),
             b'1'..=b'9' => {
                 let index = usize::from(parameter.as_bytes()[0] - b'0' - 1);
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .get(index)
                     .cloned()
                     .unwrap_or_default()
@@ -1014,7 +1032,8 @@ impl Executor {
             // PF_ASSIGNRHS || ifs == 0 || *ifs == 0 selects ' ').
             b'@' => self.shell_state.positional_params.join(" "),
             b'*' => self
-                .shell_state.positional_params
+                .shell_state
+                .positional_params
                 .join(&self.ifs_first_char_separator()),
             b'#' => self.shell_state.positional_params.len().to_string(),
             b'?' => self.exit_code.to_string(),
@@ -1029,7 +1048,12 @@ impl Executor {
     fn expand_assignment_tilde_if_needed(&self, value: String) -> String {
         if value.contains('=')
             || !tilde_expand::assignment_value_needs_tilde_expansion(&value, true)
-            || (self.shell_state.env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1")
+            || (self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_POSIX_MODE")
+                .map(String::as_str)
+                == Some("1")
                 && !value.starts_with("~/"))
         {
             return value;
@@ -1149,7 +1173,12 @@ impl Executor {
             let token_stripped = token.trim_matches('\u{E302}');
             if token_stripped == "$@" || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}") {
                 changed = true;
-                values.extend(self.shell_state.positional_params.iter().map(|value| store!(value)));
+                values.extend(
+                    self.shell_state
+                        .positional_params
+                        .iter()
+                        .map(|value| store!(value)),
+                );
             } else if let Some(array_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
@@ -1206,8 +1235,8 @@ impl Executor {
                     }
                     None => values.push(store!(&token, token_raw)),
                 }
-            } else if let Some(indirect_name) = whole_word_braced_parameter_body(&token)
-                .and_then(|name| name.strip_prefix('!'))
+            } else if let Some(indirect_name) =
+                whole_word_braced_parameter_body(&token).and_then(|name| name.strip_prefix('!'))
             {
                 // The lexer strips the token's quotes and marks the whole
                 // quoted-RHS value, so the value-level flag decides between
@@ -1320,12 +1349,8 @@ impl Executor {
                         }
                     } else {
                         for value in &element_values {
-                            let replaced = self.replace_patsub_pattern(
-                                value,
-                                &pattern,
-                                &replacement,
-                                global,
-                            );
+                            let replaced =
+                                self.replace_patsub_pattern(value, &pattern, &replacement, global);
                             for field in split_fields(replaced) {
                                 values.push(store!(&field));
                             }
@@ -1384,9 +1409,7 @@ impl Executor {
                                 // GNU array_subrange + string_list_pos_params:
                                 // a quoted `arr[*]:off` joins the slice into
                                 // ONE word with IFS[0] (new-exp5.sub nd=1).
-                                values.push(store!(
-                                    &sliced.join(&self.ifs_first_char_separator())
-                                ));
+                                values.push(store!(&sliced.join(&self.ifs_first_char_separator())));
                             } else {
                                 values.extend(sliced.iter().map(|value| store!(value)));
                             }
@@ -1426,7 +1449,10 @@ impl Executor {
                         let expanded = if name == "0" {
                             Some(self.script_name_value())
                         } else if let Ok(index) = name.parse::<usize>() {
-                            self.shell_state.positional_params.get(index.saturating_sub(1)).cloned()
+                            self.shell_state
+                                .positional_params
+                                .get(index.saturating_sub(1))
+                                .cloned()
                         } else {
                             None
                         };
@@ -1490,7 +1516,10 @@ impl Executor {
                 let storage_name = self.resolved_variable_name(array_name)?;
                 let storage = self.parameter_array_storage(array_name)?;
                 let keys = if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &storage_name) {
-                    assoc_keys(&storage, assoc_nbuckets(&self.shell_state.env_vars, &storage_name))
+                    assoc_keys(
+                        &storage,
+                        assoc_nbuckets(&self.shell_state.env_vars, &storage_name),
+                    )
                 } else {
                     array_indices(&storage)
                 };
@@ -1516,7 +1545,8 @@ impl Executor {
         match target_expr.as_str() {
             "@" => {
                 return Some(
-                    self.shell_state.positional_params
+                    self.shell_state
+                        .positional_params
                         .iter()
                         .map(|value| quote_array_value(value))
                         .collect(),
@@ -1525,7 +1555,8 @@ impl Executor {
             "*" => {
                 return Some(vec![quote_array_value(
                     &self
-                        .shell_state.positional_params
+                        .shell_state
+                        .positional_params
                         .join(&self.ifs_first_char_separator()),
                 )])
             }
@@ -1573,10 +1604,13 @@ impl Executor {
             return Some(vec![quote_array_value(&scalar)]);
         }
         Some(
-            field_split_values_with_ifs(&scalar, self.shell_state.env_vars.get("IFS").map(String::as_str))
-                .into_iter()
-                .map(|value| quote_array_value(&value))
-                .collect(),
+            field_split_values_with_ifs(
+                &scalar,
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
+            )
+            .into_iter()
+            .map(|value| quote_array_value(&value))
+            .collect(),
         )
     }
 
@@ -1613,16 +1647,18 @@ impl Executor {
                 quote_compound_field_value(&value)
             ));
         }
-        let values =
-            field_split_values_with_ifs(&value, self.shell_state.env_vars.get("IFS").map(String::as_str))
-                .into_iter()
-                .map(|value| {
-                    format!(
-                        "{ARRAY_FIELD_SPLIT_MARKER}{}",
-                        quote_compound_field_value(&value)
-                    )
-                })
-                .collect::<Vec<_>>();
+        let values = field_split_values_with_ifs(
+            &value,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+        )
+        .into_iter()
+        .map(|value| {
+            format!(
+                "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                quote_compound_field_value(&value)
+            )
+        })
+        .collect::<Vec<_>>();
         Some(format!("({})", values.join(" ")))
     }
 

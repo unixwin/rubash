@@ -81,8 +81,11 @@ impl Executor {
                 // returns ESRCH for a dead pid), not an unconditional yes.
                 // A pid the job table already marked Completed is dead even
                 // before the process object is reaped.
-                let job_dead =
-                    self.shell_state.job_table.completed_statuses.contains_key(&pid);
+                let job_dead = self
+                    .shell_state
+                    .job_table
+                    .completed_statuses
+                    .contains_key(&pid);
                 if job_dead || !process_exists(pid) {
                     writeln!(
                         stderr,
@@ -111,7 +114,9 @@ impl Executor {
             } else if matches!(request.signal, 19 | 20) {
                 self.shell_state.job_table.mark_stopped(pid);
             } else if operand.starts_with('%') {
-                self.shell_state.job_table.mark_completed(pid, 128 + request.signal);
+                self.shell_state
+                    .job_table
+                    .mark_completed(pid, 128 + request.signal);
                 self.close_coproc_endpoints(pid);
                 self.fd_table.close(pid);
                 self.shell_state.job_table.remove_job_by_pid(pid);

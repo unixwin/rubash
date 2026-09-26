@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 pub(in crate::executor) fn split_assignment_word(word: &str) -> Option<(&str, &str)> {
     let (name, value) = word.split_once('=')?;
@@ -525,7 +525,8 @@ pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+        if (ch == crate::executor::markers::IFS_GLUE
+            || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
             && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
         {
             chars.next();
@@ -615,7 +616,9 @@ impl Iterator for StorageWordIter<'_> {
             // the marker and its whitespace into the word so assoc kv-pairs
             // keep them; the indexed callers re-split on the marker. The
             // \x1c IFS-protection sentinel takes the same glued form here.
-            if ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+            if ch == crate::executor::markers::IFS_GLUE
+                || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+            {
                 word.push(ch);
                 if let Some((_, next)) = chars.next() {
                     word.push(next);

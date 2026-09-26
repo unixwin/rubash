@@ -113,7 +113,10 @@ pub struct SECURITY_ATTRIBUTES {
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +129,8 @@ pub struct FdEntry {
 
 impl FdEntry {
     fn mark_inheritable(&mut self) -> Result<(), String> {
-        let ok = unsafe { SetHandleInformation(self.handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        let ok =
+            unsafe { SetHandleInformation(self.handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
         if ok == 0 {
             return Err("SetHandleInformation failed".into());
         }
@@ -136,7 +140,9 @@ impl FdEntry {
 
     pub fn is_inheritable(&self) -> bool {
         let mut flags: DWORD = 0;
-        unsafe { GetHandleInformation(self.handle, &mut flags) != 0 && (flags & HANDLE_FLAG_INHERIT) != 0 }
+        unsafe {
+            GetHandleInformation(self.handle, &mut flags) != 0 && (flags & HANDLE_FLAG_INHERIT) != 0
+        }
     }
 }
 
@@ -167,7 +173,10 @@ impl FdTable {
         if let Some(old) = self.slots[slot].take() {
             unsafe { CloseHandle(old.handle) };
         }
-        self.slots[slot] = Some(FdEntry { handle, inheritable: false });
+        self.slots[slot] = Some(FdEntry {
+            handle,
+            inheritable: false,
+        });
         Ok(())
     }
 
@@ -307,7 +316,9 @@ impl FdTable {
     }
 
     pub fn query(&self, slot: usize) -> Option<HANDLE> {
-        self.slots.get(slot).and_then(|s| s.as_ref().map(|e| e.handle))
+        self.slots
+            .get(slot)
+            .and_then(|s| s.as_ref().map(|e| e.handle))
     }
 
     pub fn entry(&self, slot: usize) -> Option<&FdEntry> {
@@ -373,18 +384,24 @@ impl FdTable {
 
     /// Read up to `n` bytes from a slot (advancing the shared offset).
     pub fn read_n(&self, slot: usize, n: usize) -> Result<Vec<u8>, String> {
-        let h = self.query(slot).ok_or(format!("read: fd {slot} not open"))?;
+        let h = self
+            .query(slot)
+            .ok_or(format!("read: fd {slot} not open"))?;
         read_some(h, n).map_err(|e| format!("read fd {slot}: {e}"))
     }
 
     pub fn write_all(&self, slot: usize, bytes: &[u8]) -> Result<(), String> {
-        let h = self.query(slot).ok_or(format!("write: fd {slot} not open"))?;
+        let h = self
+            .query(slot)
+            .ok_or(format!("write: fd {slot} not open"))?;
         write_all(h, bytes).map_err(|e| format!("write fd {slot}: {e}"))
     }
 
     /// Explicit seek on the shared file object (SetFilePointer).
     pub fn seek(&self, slot: usize, pos: i32) -> Result<(), String> {
-        let h = self.query(slot).ok_or(format!("seek: fd {slot} not open"))?;
+        let h = self
+            .query(slot)
+            .ok_or(format!("seek: fd {slot} not open"))?;
         let r = unsafe { SetFilePointer(h, pos, std::ptr::null_mut(), FILE_BEGIN) };
         if r == 0xFFFF_FFFF {
             return Err(format!("seek fd {slot}: SetFilePointer failed"));
@@ -475,7 +492,13 @@ fn install_bytes_read_pipe(content: &[u8]) -> std::io::Result<HANDLE> {
     let mut written: DWORD = 0;
     let write_ok = content.is_empty()
         || unsafe {
-            WriteFile(w, content.as_ptr().cast(), content.len() as DWORD, &mut written, std::ptr::null_mut())
+            WriteFile(
+                w,
+                content.as_ptr().cast(),
+                content.len() as DWORD,
+                &mut written,
+                std::ptr::null_mut(),
+            )
         } != 0;
     if !write_ok || written as usize != content.len() {
         let err = std::io::Error::last_os_error();
@@ -647,7 +670,15 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
     let mut got: DWORD = 0;
-    let ok = unsafe { ReadFile(h, buf.as_mut_ptr(), n as DWORD, &mut got, std::ptr::null_mut()) };
+    let ok = unsafe {
+        ReadFile(
+            h,
+            buf.as_mut_ptr(),
+            n as DWORD,
+            &mut got,
+            std::ptr::null_mut(),
+        )
+    };
     if ok == 0 {
         const ERROR_BROKEN_PIPE: DWORD = 109;
         if std::io::Error::last_os_error().raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
@@ -695,9 +726,7 @@ pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
 pub fn handle_to_file(h: HANDLE) -> std::fs::File {
     use std::os::windows::io::FromRawHandle;
     std::fs::File::from(unsafe {
-        std::os::windows::io::OwnedHandle::from_raw_handle(
-            h as std::os::windows::io::RawHandle,
-        )
+        std::os::windows::io::OwnedHandle::from_raw_handle(h as std::os::windows::io::RawHandle)
     })
 }
 
@@ -881,8 +910,7 @@ pub struct WhitelistedSpawn {
 
 fn push_quoted_arg(cmdline: &mut Vec<u16>, arg: &str) {
     // msvcrt argument quoting (same rules std::process::Command applies).
-    let needs_quotes =
-        arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
+    let needs_quotes = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quotes {
         cmdline.extend(arg.encode_utf16());
         return;
@@ -959,23 +987,18 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     // buffer (passing a Vec's address would serialize ptr/len/cap).
     let mut attr_size: usize = 0;
     unsafe {
-        let _ = InitializeProcThreadAttributeList(
-            std::ptr::null_mut(),
-            1,
-            0,
-            &mut attr_size,
-        );
+        let _ = InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
     }
     let attr_buf = unsafe {
         std::alloc::alloc(std::alloc::Layout::from_size_align(attr_size.max(1), 16).unwrap())
     };
     if attr_buf.is_null() {
-        return Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "attr list"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "attr list",
+        ));
     }
-    if unsafe {
-        InitializeProcThreadAttributeList(attr_buf as _, 1, 0, &mut attr_size)
-    } == 0
-    {
+    if unsafe { InitializeProcThreadAttributeList(attr_buf as _, 1, 0, &mut attr_size) } == 0 {
         unsafe {
             std::alloc::dealloc(
                 attr_buf,
@@ -1111,9 +1134,7 @@ impl SpawnedChild {
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         match &mut self.inner {
             SpawnedChildInner::Std(child) => child.try_wait(),
-            SpawnedChildInner::Whitelisted { process, .. } => {
-                Self::whitelisted_status(process, 0)
-            }
+            SpawnedChildInner::Whitelisted { process, .. } => Self::whitelisted_status(process, 0),
         }
     }
 
@@ -1121,11 +1142,12 @@ impl SpawnedChild {
         match &mut self.inner {
             SpawnedChildInner::Std(child) => child.wait(),
             SpawnedChildInner::Whitelisted { process, .. } => {
-                Ok(Self::whitelisted_status(process, 0xFFFF_FFFF)?
-                    .unwrap_or_else(|| {
+                Ok(
+                    Self::whitelisted_status(process, 0xFFFF_FFFF)?.unwrap_or_else(|| {
                         use std::os::windows::process::ExitStatusExt;
                         std::process::ExitStatus::from_raw(1)
-                    }))
+                    }),
+                )
             }
         }
     }
@@ -1205,7 +1227,11 @@ mod tests {
         t.close(3).unwrap();
         assert!(!t.is_open(3));
         assert!(t.is_open(4));
-        assert_eq!(t.read_n(4, 4).unwrap(), b"abcd", "duplicate keeps the object alive");
+        assert_eq!(
+            t.read_n(4, 4).unwrap(),
+            b"abcd",
+            "duplicate keeps the object alive"
+        );
         t.close(4).unwrap();
         assert!(t.read_n(4, 1).is_err());
     }

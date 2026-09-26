@@ -99,8 +99,10 @@ impl Executor {
         }
 
         let saved_path = self.shell_state.env_vars.get("PATH").cloned();
-        self.shell_state.env_vars
-            .insert("PATH".to_string(), standard_path(&self.shell_state.env_vars));
+        self.shell_state.env_vars.insert(
+            "PATH".to_string(),
+            standard_path(&self.shell_state.env_vars),
+        );
         Some(saved_path)
     }
 

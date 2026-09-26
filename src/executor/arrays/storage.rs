@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::executor::{mark_env_name, split_storage_words, unquote_storage_value, ARRAY_VARS};
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::{mark_env_name, split_storage_words, unquote_storage_value, ARRAY_VARS};
 
 pub(in crate::executor) fn normalize_array_expanded_value(value: String) -> String {
     // GNU array.c: array element values are stored and retrieved verbatim.

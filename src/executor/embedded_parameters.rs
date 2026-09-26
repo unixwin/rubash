@@ -1,6 +1,6 @@
 use super::*;
 use crate::executor::embedded_mutations::mark_expansion_whitespace;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -112,12 +112,20 @@ impl Executor {
                 // storage word so split_storage_words does not re-read it as
                 // quote syntax (array6.sub: ("${a[@]/#/-iname \'}") stores
                 // `-iname 'abc`). unquote_storage_value decodes it.
-                output.push(if preserve_quotes { crate::executor::markers::DATA_SQUOTE } else { '\'' });
+                output.push(if preserve_quotes {
+                    crate::executor::markers::DATA_SQUOTE
+                } else {
+                    '\''
+                });
                 continue;
             }
 
             if ch == crate::executor::markers::DATA_DQUOTE {
-                output.push(if preserve_quotes { crate::executor::markers::DATA_DQUOTE } else { '"' });
+                output.push(if preserve_quotes {
+                    crate::executor::markers::DATA_DQUOTE
+                } else {
+                    '"'
+                });
                 continue;
             }
             if ch == crate::lexer::ANSI_C_QUOTE_MARKER {
@@ -327,25 +335,20 @@ impl Executor {
                     // GNU param_expand resolves one `${}` expansion once:
                     // memoize array-element fetches for this fragment so a
                     // subscript's side effects run once (AEPV_MEMO).
-                    let _memo_frame =
-                        crate::executor::expand_braced_indices::AepvMemoFrame::new();
+                    let _memo_frame = crate::executor::expand_braced_indices::AepvMemoFrame::new();
                     // Same fragment-site record as the mutable walker —
                     // subscript side effects dedup across layered passes
                     // (SUB_RES_XPASS). A walked word that IS the `${}`
                     // fragment being evaluated inherits the enclosing site
                     // instead of re-keying on the synthetic string.
                     let whole_braced =
-                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(
-                            word,
-                        ) && crate::executor::expand_braced_indices::sub_site_active();
+                        crate::executor::parameter_ops::braced_parameter_spans_whole_word(word)
+                            && crate::executor::expand_braced_indices::sub_site_active();
                     let this_frag = frag_index;
                     frag_index += 1;
-                    let _site_guard = (!whole_braced)
-                        .then(|| {
-                            crate::executor::expand_braced_indices::SubSiteGuard::new(
-                                this_frag,
-                            )
-                        });
+                    let _site_guard = (!whole_braced).then(|| {
+                        crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
+                    });
                     let name = collect_braced_parameter_name(&mut chars);
                     let value = self.expand_word(&format!("${{{name}}}"));
                     if preserve_quotes && !in_double {
@@ -402,7 +405,9 @@ impl Executor {
                                 output.push_str(&value);
                             }
                         } else {
-                            self.shell_state.arithmetic_last_error_category.set(actual_category);
+                            self.shell_state
+                                .arithmetic_last_error_category
+                                .set(actual_category);
                             // Bash reports arithmetic expansion errors
                             // (floating point, negative exponent, division
                             // by zero, ...) on stderr and sets rc=1; Rubash
@@ -410,7 +415,11 @@ impl Executor {
                             // unconditionally: a readonly diagnostic may have
                             // consumed the print gate, but the evaluation
                             // error still decides list abandonment.
-                            let actual_fatal = self.shell_state.arithmetic_last_error_category.take().is_some();
+                            let actual_fatal = self
+                                .shell_state
+                                .arithmetic_last_error_category
+                                .take()
+                                .is_some();
                             if !actual_fatal
                                 && !crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                     &expression,
@@ -544,7 +553,8 @@ impl Executor {
                         output.push_str(&self.script_name_value());
                     } else {
                         let value = self
-                            .shell_state.positional_params
+                            .shell_state
+                            .positional_params
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
@@ -596,8 +606,10 @@ impl Executor {
         &self,
         word: &str,
     ) -> String {
-        const PROTECTED_ESCAPED_SINGLE_QUOTE: char = crate::executor::markers::PROTECTED_ESCAPED_SQUOTE;
-        const PROTECTED_LITERAL_BACKSLASH: char = crate::executor::markers::PROTECTED_LITERAL_BACKSLASH;
+        const PROTECTED_ESCAPED_SINGLE_QUOTE: char =
+            crate::executor::markers::PROTECTED_ESCAPED_SQUOTE;
+        const PROTECTED_LITERAL_BACKSLASH: char =
+            crate::executor::markers::PROTECTED_LITERAL_BACKSLASH;
         const PROTECTED_LITERAL_DOLLAR: char = crate::executor::markers::PROTECTED_LITERAL_DOLLAR;
         let mut escaped_dollar_protected = String::with_capacity(word.len());
         let mut chars = word.chars().peekable();
@@ -630,11 +642,23 @@ impl Executor {
             }
         }
         let protected = escaped_dollar_protected
-            .replace(crate::executor::markers::DATA_SQUOTE, crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR)
-            .replace(crate::executor::markers::DATA_BACKSLASH, &PROTECTED_LITERAL_BACKSLASH.to_string());
+            .replace(
+                crate::executor::markers::DATA_SQUOTE,
+                crate::executor::markers::PROTECTED_ESCAPED_SQUOTE_STR,
+            )
+            .replace(
+                crate::executor::markers::DATA_BACKSLASH,
+                &PROTECTED_LITERAL_BACKSLASH.to_string(),
+            );
         self.expand_embedded_parameters(&protected)
-            .replace(PROTECTED_ESCAPED_SINGLE_QUOTE, crate::executor::markers::DATA_SQUOTE_STR)
-            .replace(PROTECTED_LITERAL_BACKSLASH, crate::executor::markers::DATA_BACKSLASH_STR)
+            .replace(
+                PROTECTED_ESCAPED_SINGLE_QUOTE,
+                crate::executor::markers::DATA_SQUOTE_STR,
+            )
+            .replace(
+                PROTECTED_LITERAL_BACKSLASH,
+                crate::executor::markers::DATA_BACKSLASH_STR,
+            )
             .replace(PROTECTED_LITERAL_DOLLAR, "$")
             // Decode protected backslash from command substitution output.
             // protect_command_substitution_output converts `\` to `\x15`;

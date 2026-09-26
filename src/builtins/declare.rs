@@ -64,8 +64,8 @@ const CAPCASE_VARS: &str = "__RUBASH_CAPCASE_VARS";
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 const TRACE_VARS: &str = "__RUBASH_TRACE_VARS";
 const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
 const EX_USAGE: i32 = 2;
 
 /// Synchronize indexed declarations into the typed variable owner after the
@@ -176,7 +176,11 @@ pub(crate) fn sync_typed_attributes(
             let entries: Vec<(String, String)> = if env_value.starts_with(STORAGE_WORD_PREFIX)
                 || (env_value.starts_with('(') && env_value.ends_with(')'))
             {
-                parse_assoc_words(env_value.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(&env_value))
+                parse_assoc_words(
+                    env_value
+                        .strip_prefix(STORAGE_WORD_PREFIX)
+                        .unwrap_or(&env_value),
+                )
             } else if env_value.is_empty() {
                 Vec::new()
             } else {

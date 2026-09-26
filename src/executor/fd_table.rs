@@ -27,12 +27,14 @@ pub(crate) struct FileFd {
 
 impl FileFd {
     pub(crate) fn open_read(path: PathBuf) -> std::io::Result<Rc<Self>> {
-        crate::fd::open_file_read(&path).map(|handle| {
-            Rc::new(Self { handle, path })
-        })
+        crate::fd::open_file_read(&path).map(|handle| Rc::new(Self { handle, path }))
     }
 
-    pub(crate) fn open_write(path: PathBuf, append: bool, create_new: bool) -> std::io::Result<Rc<Self>> {
+    pub(crate) fn open_write(
+        path: PathBuf,
+        append: bool,
+        create_new: bool,
+    ) -> std::io::Result<Rc<Self>> {
         let handle = if create_new {
             crate::fd::open_file_create_new(&path)
         } else if append {
@@ -44,9 +46,7 @@ impl FileFd {
     }
 
     pub(crate) fn open_readwrite(path: PathBuf) -> std::io::Result<Rc<Self>> {
-        crate::fd::open_file_readwrite(&path).map(|handle| {
-            Rc::new(Self { handle, path })
-        })
+        crate::fd::open_file_readwrite(&path).map(|handle| Rc::new(Self { handle, path }))
     }
 }
 
@@ -288,11 +288,9 @@ impl FdTable {
 
     /// Open in either direction — POSIX descriptors are not directional.
     pub(crate) fn is_open(&self, fd: u32) -> bool {
-        self.entries
-            .get(&fd)
-            .map_or(false, |entry| {
-                !entry.closed && (entry.read.is_some() || entry.write.is_some())
-            })
+        self.entries.get(&fd).map_or(false, |entry| {
+            !entry.closed && (entry.read.is_some() || entry.write.is_some())
+        })
     }
 
     pub(crate) fn is_closed(&self, fd: u32) -> bool {
@@ -426,7 +424,7 @@ impl FdTable {
                 }
             }
             let byte = match crate::fd::read_some(file.handle, 1) {
-                Ok(buf) if buf.is_empty() => break,          // EOF
+                Ok(buf) if buf.is_empty() => break, // EOF
                 Ok(buf) => buf[0],
                 Err(_) => break,
             };
@@ -455,7 +453,8 @@ impl FdTable {
 
     pub(crate) fn read_all_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
-        if let FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } = endpoint {
+        if let FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } = endpoint
+        {
             let mut out = Vec::new();
             loop {
                 match crate::fd::read_some(file.handle, 8192) {
@@ -482,10 +481,7 @@ impl FdTable {
     /// `&self` variant of consume_all_text for the pure-read serving
     /// paths (Text/ProcessSubstitution carry their offset in a RefCell).
     pub(crate) fn drain_input_to_eof(&self, fd: u32) {
-        let endpoint = self
-            .entries
-            .get(&fd)
-            .and_then(|entry| entry.read.clone());
+        let endpoint = self.entries.get(&fd).and_then(|entry| entry.read.clone());
         if let Some(FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input)) =
             endpoint
         {
@@ -533,11 +529,11 @@ impl FdTable {
     /// (input.c bash_input). Returns `None` when the fd is not a buffered
     /// text endpoint, `Some(vec![])` at end of the buffer.
     pub(crate) fn take_buffered_input_line(&self, fd: u32) -> Option<Vec<u8>> {
-        if let Some(FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. }) = self
-            .entries
-            .get(&fd)
-            .filter(|entry| !entry.closed)
-            .and_then(|entry| entry.read.clone())
+        if let Some(FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. }) =
+            self.entries
+                .get(&fd)
+                .filter(|entry| !entry.closed)
+                .and_then(|entry| entry.read.clone())
         {
             let mut line = Vec::new();
             loop {
@@ -658,8 +654,14 @@ impl PartialEq for FdWriteEndpoint {
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
             (Self::CoprocStdin { pid: a, .. }, Self::CoprocStdin { pid: b, .. }) => a == b,
             (
-                Self::ProcessSubstitution { path: p1, command: c1 },
-                Self::ProcessSubstitution { path: p2, command: c2 },
+                Self::ProcessSubstitution {
+                    path: p1,
+                    command: c1,
+                },
+                Self::ProcessSubstitution {
+                    path: p2,
+                    command: c2,
+                },
             ) => p1 == p2 && c1 == c2,
             _ => false,
         }

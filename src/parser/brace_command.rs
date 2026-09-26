@@ -26,11 +26,8 @@ pub(super) fn parse_brace_group_command(
         // inner source untrimmed so the tokenizer's newline counting keeps
         // positions anchored at the `{` token's line — trimming leading
         // newlines here would shift every body command up.
-        let body_tokens = crate::lexer::tokenize_with_initial_posix_and_line(
-            inner_source,
-            false,
-            token.position,
-        );
+        let body_tokens =
+            crate::lexer::tokenize_with_initial_posix_and_line(inner_source, false, token.position);
         let mut command = CommandNode::new();
         command.line = Some(token.position);
         command.brace_group = Some(Box::new(BraceGroupCommand {

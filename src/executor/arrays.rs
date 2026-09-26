@@ -8,13 +8,13 @@ mod mapfile;
 mod storage;
 
 pub(super) use mapfile::split_mapfile_input;
+pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 pub(super) use storage::{
     array_indices, array_value_at, array_values, format_indexed_array_storage,
     format_indexed_array_values, indexed_array_entries, is_array_storage, is_marked_array_var,
     normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
     parse_array_subscript, quote_array_value, resolve_indexed_array_subscript, store_indexed_array,
 };
-pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -22,12 +22,12 @@ use super::{
     apply_parameter_case_mod, assoc_value_at, eval_arith_value, eval_conditional_arith_value,
     is_marked_var, is_shell_name, parse_indirect_pattern_removal, parse_parameter_case_mod,
     parse_parameter_replacement, parse_parameter_transform, remove_parameter_pattern,
-    split_indexed_tagged_token, split_storage_words, unquote_storage_value,
-    Executor, ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
+    split_indexed_tagged_token, split_storage_words, unquote_storage_value, Executor,
+    ParameterTransform, ARRAY_FIELD_SPLIT_MARKER, ASSOC_VARS,
 };
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::lexer::remove_shell_quotes;
 use crate::CommandNode;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
     let Some((left, _)) = word.split_once('=') else {
@@ -105,10 +105,7 @@ pub(super) fn is_array_element_assignment_word(word: &str) -> bool {
 /// de-quoted text no longer shows the real delimiter. The cooked-text scan
 /// remains as a fallback for synthetic commands built without parser
 /// metadata.
-pub(super) fn command_word_is_array_element_assignment(
-    cmd: &CommandNode,
-    index: usize,
-) -> bool {
+pub(super) fn command_word_is_array_element_assignment(cmd: &CommandNode, index: usize) -> bool {
     if cmd
         .array_element_assignments
         .iter()
@@ -637,8 +634,7 @@ pub(super) fn word_is_unquoted_array_list_expansion(word: &str) -> bool {
         return false;
     }
 
-    let Some(inner) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word)
-    else {
+    let Some(inner) = crate::executor::parameter_ops::whole_word_braced_parameter_body(word) else {
         return false;
     };
     let name = inner.split_once(':').map_or(inner, |(name, _)| name);

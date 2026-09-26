@@ -1,5 +1,5 @@
+use crate::executor::markers::DATA_DOLLAR;
 use crate::executor::substitution_metadata::bytes_to_shell_text;
-use crate::executor::markers::{DATA_DOLLAR};
 
 pub(in crate::executor) fn collect_braced_parameter_name(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,

@@ -11,7 +11,7 @@ use std::io::{self, Write};
 use crate::executor::path::{shell_directory_entries, shell_path_entries};
 
 use crate::builtins::alias::Alias;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;

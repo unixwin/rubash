@@ -128,7 +128,8 @@ impl Executor {
         // A leading unquoted `~` tilde-expands; `x~` and `a:~` stay literal
         // and `"~"` never reaches here (its first character is the quote).
         if raw.starts_with('~') {
-            return tilde_expand::expand_word_prefix(&expanded, &self.shell_state.env_vars).unwrap_or(expanded);
+            return tilde_expand::expand_word_prefix(&expanded, &self.shell_state.env_vars)
+                .unwrap_or(expanded);
         }
         expanded
     }
@@ -151,14 +152,10 @@ impl Executor {
                 // (`$((i++))`, `$(...)`): dedup repeated resolves of the
                 // same `${}` fragment across the validate/pre-scan/real
                 // passes (SUB_RES_XPASS docs).
-                let Some(key) =
-                    crate::executor::expand_braced_indices::sub_site_key(raw)
-                else {
+                let Some(key) = crate::executor::expand_braced_indices::sub_site_key(raw) else {
                     return self.expand_subscript_string(raw);
                 };
-                if let Some(hit) =
-                    crate::executor::expand_braced_indices::sub_res_lookup(&key)
-                {
+                if let Some(hit) = crate::executor::expand_braced_indices::sub_res_lookup(&key) {
                     return hit;
                 }
                 let resolved = self.expand_subscript_string(raw);
@@ -166,7 +163,10 @@ impl Executor {
                 resolved
             }
             SubscriptSource::ExpandedOnce(text) => {
-                if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once") {
+                if crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "array_expand_once",
+                ) {
                     // VA_NOEXPAND / ASS_NOEXPAND: the first expansion was the
                     // word expansion; the consumer uses the text verbatim.
                     text.to_string()
@@ -179,21 +179,16 @@ impl Executor {
                     // is not re-lexed). Marking the whole operand's quotes
                     // as data here is wrong — it breaks the deferred-quote
                     // semantics the builtin paths rely on.
-                    let Some(key) =
-                        crate::executor::expand_braced_indices::sub_site_key(text)
+                    let Some(key) = crate::executor::expand_braced_indices::sub_site_key(text)
                     else {
                         return self.expand_subscript_string(text);
                     };
-                    if let Some(hit) =
-                        crate::executor::expand_braced_indices::sub_res_lookup(&key)
+                    if let Some(hit) = crate::executor::expand_braced_indices::sub_res_lookup(&key)
                     {
                         return hit;
                     }
                     let resolved = self.expand_subscript_string(text);
-                    crate::executor::expand_braced_indices::sub_res_store(
-                        key,
-                        resolved.clone(),
-                    );
+                    crate::executor::expand_braced_indices::sub_res_store(key, resolved.clone());
                     resolved
                 }
             }
@@ -394,7 +389,9 @@ impl Executor {
         // such protection, so hoist cooked `'`/`"` to the \x17/\x18 data
         // carriers before running the flag-0 validity scan — an expansion-
         // produced `'` is data, never an opening quote.
-        let hoisted_operand = operand.replace('\'', crate::executor::markers::DATA_SQUOTE_STR).replace('"', crate::executor::markers::DATA_DQUOTE_STR);
+        let hoisted_operand = operand
+            .replace('\'', crate::executor::markers::DATA_SQUOTE_STR)
+            .replace('"', crate::executor::markers::DATA_DQUOTE_STR);
         let valid = if arrayref && assoc {
             !subscript.is_empty()
         } else {
@@ -415,7 +412,9 @@ impl Executor {
         let source = if arrayref {
             SubscriptSource::Protected(subscript)
         } else {
-            hoisted = subscript.replace('\'', crate::executor::markers::DATA_SQUOTE_STR).replace('"', crate::executor::markers::DATA_DQUOTE_STR);
+            hoisted = subscript
+                .replace('\'', crate::executor::markers::DATA_SQUOTE_STR)
+                .replace('"', crate::executor::markers::DATA_DQUOTE_STR);
             SubscriptSource::Raw(&hoisted)
         };
         if assoc {
@@ -662,11 +661,9 @@ impl Executor {
                                 // GNU err_badarraysub prints the element
                                 // word as rebuilt by
                                 // expand_compound_array_assignment.
-                                self.report_bad_array_subscript(
-                                    &compound_element_diagnostic_word(
-                                        inner, index, sub_end, &key, true,
-                                    ),
-                                );
+                                self.report_bad_array_subscript(&compound_element_diagnostic_word(
+                                    inner, index, sub_end, &key, true,
+                                ));
                                 return Err(format!("({out})"));
                             }
                             out.push('[');
@@ -691,11 +688,9 @@ impl Executor {
                             self.expand_subscript_string(&once)
                         };
                         if resolved.is_empty() {
-                            self.report_bad_array_subscript(
-                                &compound_element_diagnostic_word(
-                                    inner, index, sub_end, &resolved, false,
-                                ),
-                            );
+                            self.report_bad_array_subscript(&compound_element_diagnostic_word(
+                                inner, index, sub_end, &resolved, false,
+                            ));
                             return Err(format!("({out})"));
                         }
                         let Some(index_value) = self.eval_indexed_subscript_expression(&resolved)
@@ -764,9 +759,7 @@ impl Executor {
             // GNU kvpair_assignment_p (arrayfunc.c:665): the FIRST word
             // decides — a `[`-led word selects the strict [key]=value loop,
             // anything else is alternating literal key/value pairs.
-            let strict = tokens
-                .first()
-                .is_some_and(|token| token.starts_with('['));
+            let strict = tokens.first().is_some_and(|token| token.starts_with('['));
             if !strict {
                 for pair in tokens.chunks(2) {
                     let key = self.expand_subscript_string(&pair[0]);
@@ -820,7 +813,8 @@ impl Executor {
         for token in &tokens {
             // Field-split products pre-marked by word-stage expansion
             // (\x10) and rendered-array words (\x1d) are already final.
-            if token.starts_with(ARRAY_FIELD_SPLIT_MARKER) || token.starts_with(STORAGE_WORD_PREFIX) {
+            if token.starts_with(ARRAY_FIELD_SPLIT_MARKER) || token.starts_with(STORAGE_WORD_PREFIX)
+            {
                 elements.push(token.clone());
                 continue;
             }
@@ -869,14 +863,15 @@ impl Executor {
             // the command-word expander reproduces all of it, including the
             // multi-word result of a quoted "${d[@]}" element.
             for field in self.expand_alternate_word_fragment(token) {
-                let fields = match super::glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
-                    super::glob::PathnameExpansion::Matches(matches) => matches,
-                    super::glob::PathnameExpansion::NoMatch => vec![field],
-                    super::glob::PathnameExpansion::Fail(pattern) => {
-                        self.report_failglob(&pattern);
-                        return Err(format!("({})", elements.join(" ")));
-                    }
-                };
+                let fields =
+                    match super::glob::pathname_expand_word(&field, &self.shell_state.env_vars) {
+                        super::glob::PathnameExpansion::Matches(matches) => matches,
+                        super::glob::PathnameExpansion::NoMatch => vec![field],
+                        super::glob::PathnameExpansion::Fail(pattern) => {
+                            self.report_failglob(&pattern);
+                            return Err(format!("({})", elements.join(" ")));
+                        }
+                    };
                 for field in fields {
                     // \x10 marks the field as a word-expansion product so the
                     // storage layer stores it bare even when it looks like a
@@ -909,7 +904,9 @@ impl Executor {
         let mut escaped = String::with_capacity(raw_value.len());
         let mut chars = raw_value.chars().peekable();
         while let Some(ch) = chars.next() {
-            if ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+            if ch == crate::executor::markers::IFS_GLUE
+                || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+            {
                 if let Some(next) = chars.next() {
                     escaped.push('\\');
                     escaped.push(next);
@@ -1027,10 +1024,7 @@ fn decode_ansi_c_spans(text: &str) -> String {
             index += 1;
             continue;
         }
-        if !in_single
-            && ch == '$'
-            && chars.get(index + 1) == Some(&'\'')
-        {
+        if !in_single && ch == '$' && chars.get(index + 1) == Some(&'\'') {
             // `$'...'`: the close quote is the first unescaped `'`.
             let mut inner_end = index + 2;
             let mut inner = String::new();
@@ -1224,8 +1218,16 @@ fn encode_compound_assoc_key(key: &str) -> String {
         && !key.chars().any(|ch| {
             matches!(
                 ch,
-                '[' | ']' | '=' | '+' | '\'' | '"' | '\\' | crate::executor::markers::SUBSCRIPT_CARRIER | DATA_DOLLAR
-                    | '`' | '$'
+                '[' | ']'
+                    | '='
+                    | '+'
+                    | '\''
+                    | '"'
+                    | '\\'
+                    | crate::executor::markers::SUBSCRIPT_CARRIER
+                    | DATA_DOLLAR
+                    | '`'
+                    | '$'
             ) || ch.is_ascii_whitespace()
         });
     if safe {

@@ -1,6 +1,6 @@
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use std::collections::HashMap;
 use std::env;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
@@ -35,10 +35,7 @@ pub(crate) fn variable_is_set(operand: &str, env_vars: &HashMap<String, String>)
     // (empty subscript) therefore report unset in every option state.
     let valid_arrayref = !operand.contains('[')
         || crate::executor::subscript_expansion::valid_array_reference_env(
-            operand,
-            false,
-            false,
-            env_vars,
+            operand, false, false, env_vars,
         );
     if !valid_arrayref {
         return env_vars.contains_key(operand) || env::var_os(operand).is_some();

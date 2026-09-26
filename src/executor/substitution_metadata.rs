@@ -332,9 +332,7 @@ pub(crate) fn decode_raw_byte_markers(bytes: &[u8]) -> Vec<u8> {
             // E400 + c is the literal-char escape: emit c verbatim.
             match next_char(bytes, index + char_len) {
                 Some((_, next_len)) => {
-                    output.extend_from_slice(
-                        &bytes[index + char_len..index + char_len + next_len],
-                    );
+                    output.extend_from_slice(&bytes[index + char_len..index + char_len + next_len]);
                     index += char_len + next_len;
                 }
                 None => {
@@ -831,17 +829,20 @@ mod tests {
     #[test]
     fn payload_protection_boundary_rejects_lexical_backticks_and_existing_tokens() {
         assert!(command_substitution_value_needs_payload_protection(
-            "$x", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
+            "$x",
+            &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
         assert!(!command_substitution_value_needs_payload_protection(
-            "`$x`", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
+            "`$x`",
+            &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
         assert!(!command_substitution_value_needs_payload_protection(
             "$x",
             "__RUBASH_CSB1_1a;",
         ));
         assert!(!command_substitution_value_needs_payload_protection(
-            "literal", &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
+            "literal",
+            &format!("{}{}", "a", crate::executor::markers::DATA_BACKTICK_STR)
         ));
     }
 

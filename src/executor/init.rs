@@ -94,7 +94,8 @@ impl Executor {
         }
         env_vars.remove("__RUBASH_CURRENT_FUNCTION");
         env_vars.remove("__RUBASH_IN_SOURCE");
-        let internal_respawn = env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str) == Some("1")
+        let internal_respawn = env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str)
+            == Some("1")
             || env_vars.contains_key("__RUBASH_SHELL_PID");
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
@@ -386,10 +387,7 @@ impl Executor {
         // scripts see the GNU-conventional shell name in ${THIS_SH##*/}
         // (type.tests expects `bash`, not the product binary name).
         let inherited_sh = env_vars.get("THIS_SH").is_some_and(|value| {
-            let basename = value
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(value.as_str());
+            let basename = value.rsplit(['/', '\\']).next().unwrap_or(value.as_str());
             let stem = basename.strip_suffix(".exe").unwrap_or(basename);
             (stem.eq_ignore_ascii_case("sh") || stem.eq_ignore_ascii_case("bash"))
                 && crate::executor::path::shell_path_to_windows(value, env_vars).is_file()

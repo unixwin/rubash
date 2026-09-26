@@ -1,9 +1,9 @@
 use super::*;
+use crate::executor::markers::STORAGE_WORD_PREFIX;
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 use crate::lexer::Token;
 use crate::lexer::TokenKind;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
-use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 pub(super) fn compound_assignment_from_word(
     word: &str,

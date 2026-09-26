@@ -18,7 +18,8 @@ impl Executor {
             return Ok(None);
         };
         if self
-            .shell_state.expanding_aliases
+            .shell_state
+            .expanding_aliases
             .iter()
             .any(|alias| alias == first_word)
         {

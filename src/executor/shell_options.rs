@@ -16,7 +16,10 @@ impl Executor {
 
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
         if is_null_device(target) {
-            return File::open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
+            return File::open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
         }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — a dup of fd N, not a filesystem path.
@@ -62,12 +65,10 @@ impl Executor {
                     .map_err(|_| {
                         io::Error::new(io::ErrorKind::Other, "failed to materialize input")
                     })?;
-                return File::open(&path)
-                    .map_err(|e| crate::posix_errors::path_error(target, e));
+                return File::open(&path).map_err(|e| crate::posix_errors::path_error(target, e));
             }
         }
-        File::open(win_path)
-            .map_err(|e| crate::posix_errors::path_error(target, e))
+        File::open(win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
     pub(in crate::executor) fn open_fd_read_endpoint(
@@ -80,9 +81,7 @@ impl Executor {
             // the fd at its current offset (POSIX open file description).
             Some(FdReadEndpoint::File(file_fd)) => crate::fd::duplicate_handle(file_fd.handle)
                 .map(crate::fd::handle_to_file)
-                .map_err(|e| {
-                    crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)
-                }),
+                .map_err(|e| crate::posix_errors::path_error(&file_fd.path.to_string_lossy(), e)),
             Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => {
                 let bytes = self
                     .virtual_fd_stdin_remaining_bytes(fd)
@@ -203,9 +202,7 @@ impl Executor {
                 }
                 Some(_) => false,
                 None => match self.fd_table.output_endpoint(source_fd) {
-                    Some(FdWriteEndpoint::File(file)) => {
-                        crate::fd::is_console_handle(file.handle)
-                    }
+                    Some(FdWriteEndpoint::File(file)) => crate::fd::is_console_handle(file.handle),
                     Some(FdWriteEndpoint::Stdout) => {
                         crate::fd::is_console_handle(crate::fd::process_std_handle(1))
                     }
@@ -217,21 +214,19 @@ impl Executor {
             });
         }
         let path = shell_path_to_windows(target, &self.shell_state.env_vars);
-        File::open(&path)
-            .ok()
-            .map(|file| {
-                #[cfg(windows)]
-                let raw = {
-                    use std::os::windows::io::AsRawHandle;
-                    file.as_raw_handle() as crate::fd::HANDLE
-                };
-                #[cfg(unix)]
-                let raw = {
-                    use std::os::unix::io::AsRawFd;
-                    file.as_raw_fd() as crate::fd::HANDLE
-                };
-                crate::fd::is_console_handle(raw)
-            })
+        File::open(&path).ok().map(|file| {
+            #[cfg(windows)]
+            let raw = {
+                use std::os::windows::io::AsRawHandle;
+                file.as_raw_handle() as crate::fd::HANDLE
+            };
+            #[cfg(unix)]
+            let raw = {
+                use std::os::unix::io::AsRawFd;
+                file.as_raw_fd() as crate::fd::HANDLE
+            };
+            crate::fd::is_console_handle(raw)
+        })
     }
 
     pub(in crate::executor) fn create_redirect_output(
@@ -240,13 +235,16 @@ impl Executor {
         clobber: bool,
     ) -> io::Result<File> {
         if is_null_device(target) {
-            return OpenOptions::new()
-                .write(true)
-                .open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
+            return OpenOptions::new().write(true).open(shell_path_to_windows(
+                "/dev/null",
+                &self.shell_state.env_vars,
+            ));
         }
         let target = self.redirect_output_path_target(target);
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-        if !clobber && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber") {
+        if !clobber
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
+        {
             // GNU wording (bash builtins/common.c): "<target>: cannot
             // overwrite existing file"; the redirect machinery prints the
             // payload after its script/line prefix.
@@ -296,8 +294,7 @@ impl Executor {
         // the shared file offset (POSIX open file description) instead of
         // reopening the path at offset 0.
         if let FdWriteEndpoint::File(file_fd) = endpoint {
-            return crate::fd::duplicate_handle(file_fd.handle)
-                .map(crate::fd::handle_to_file);
+            return crate::fd::duplicate_handle(file_fd.handle).map(crate::fd::handle_to_file);
         }
         let path = match endpoint {
             FdWriteEndpoint::ProcessSubstitution { path, .. } => path,
@@ -319,7 +316,10 @@ impl Executor {
             return OpenOptions::new()
                 .write(true)
                 .append(true)
-                .open(shell_path_to_windows("/dev/null", &self.shell_state.env_vars));
+                .open(shell_path_to_windows(
+                    "/dev/null",
+                    &self.shell_state.env_vars,
+                ));
         }
         OpenOptions::new().create(true).append(true).open(path)
     }
@@ -439,7 +439,11 @@ impl Executor {
         })
     }
 
-    pub(in crate::executor) fn write_fd_endpoint(&mut self, fd: u32, output: &[u8]) -> Result<(), ExecuteError> {
+    pub(in crate::executor) fn write_fd_endpoint(
+        &mut self,
+        fd: u32,
+        output: &[u8],
+    ) -> Result<(), ExecuteError> {
         if self.fd_table.is_closed(fd) {
             return Ok(());
         }
@@ -504,9 +508,14 @@ impl Executor {
             for flag in flags.chars() {
                 match (flag, enabled) {
                     ('e', true) => {
-                        self.shell_state.env_vars
+                        self.shell_state
+                            .env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", true);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "errexit",
+                            true,
+                        );
                     }
                     ('e', false) => {
                         self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
@@ -517,13 +526,22 @@ impl Executor {
                         );
                     }
                     ('x', true) => {
-                        self.shell_state.env_vars
+                        self.shell_state
+                            .env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", true);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "xtrace",
+                            true,
+                        );
                     }
                     ('x', false) => {
                         self.shell_state.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "xtrace",
+                            false,
+                        );
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(
@@ -588,7 +606,11 @@ impl Executor {
             if arg == "-" {
                 self.apply_set_flag_updates(&flag_updates);
                 self.shell_state.env_vars.remove("__RUBASH_XTRACE");
-                crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
+                crate::builtins::set::set_shell_option(
+                    &mut self.shell_state.env_vars,
+                    "xtrace",
+                    false,
+                );
                 if index + 1 < args.len() {
                     self.shell_state.dollar_vars_changed_by_set = true;
                     self.set_positional_params(args[index + 1..].to_vec());
@@ -626,12 +648,19 @@ impl Executor {
                 // reported instead of being silently applied here.
                 if option_name == "restricted"
                     && prefix == '+'
-                    && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
+                    && crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "restricted",
+                    )
                 {
                     return false;
                 }
                 let enabled = prefix == '-';
-                crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, option_name, enabled);
+                crate::builtins::set::set_shell_option(
+                    &mut self.shell_state.env_vars,
+                    option_name,
+                    enabled,
+                );
                 if option_name == "ignoreeof" {
                     // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
                     // mirror the env write into the typed owner expansion
@@ -667,7 +696,8 @@ impl Executor {
                         );
                     } else {
                         match self
-                            .shell_state.env_vars
+                            .shell_state
+                            .env_vars
                             .remove("__RUBASH_POSIX_SAVED_EXPAND_ALIASES")
                         {
                             Some(saved) => crate::builtins::shopt::set_option(
@@ -709,9 +739,14 @@ impl Executor {
             for flag in flags.chars() {
                 match (flag, enabled) {
                     ('e', true) => {
-                        self.shell_state.env_vars
+                        self.shell_state
+                            .env_vars
                             .insert("__RUBASH_ERREXIT".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "errexit", true);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "errexit",
+                            true,
+                        );
                     }
                     ('e', false) => {
                         self.shell_state.env_vars.remove("__RUBASH_ERREXIT");
@@ -722,13 +757,22 @@ impl Executor {
                         );
                     }
                     ('x', true) => {
-                        self.shell_state.env_vars
+                        self.shell_state
+                            .env_vars
                             .insert("__RUBASH_XTRACE".to_string(), "1".to_string());
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", true);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "xtrace",
+                            true,
+                        );
                     }
                     ('x', false) => {
                         self.shell_state.env_vars.remove("__RUBASH_XTRACE");
-                        crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "xtrace", false);
+                        crate::builtins::set::set_shell_option(
+                            &mut self.shell_state.env_vars,
+                            "xtrace",
+                            false,
+                        );
                     }
                     ('u', _) => {
                         crate::builtins::set::set_shell_option(
@@ -770,12 +814,13 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_case_word(&mut self, word: &str) -> String {
-        let mut expanded =
-            if let Some(value) = tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars) {
-                value
-            } else {
-                self.expand_word(word)
-            };
+        let mut expanded = if let Some(value) =
+            tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
+        {
+            value
+        } else {
+            self.expand_word(word)
+        };
         if expanded.contains("<(") || expanded.contains(">(") {
             expanded = self
                 .materialize_assignment_process_substitutions(&expanded)
@@ -803,12 +848,14 @@ impl Executor {
             return;
         };
         let same_buffer = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN)
             .map(|text| Self::function_stdin_fingerprint(text) == fingerprint)
             .unwrap_or(false);
         if same_buffer {
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
         }
     }
@@ -824,7 +871,8 @@ impl Executor {
             return None;
         }
         let offset = self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(FUNCTION_STDIN_OFFSET)
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0)
@@ -847,7 +895,9 @@ impl Executor {
         let stdin_body_kind = match last_fd0 {
             Some(kind) => match kind {
                 crate::parser::RedirectKind::HereDoc => Some(crate::parser::RedirectKind::HereDoc),
-                crate::parser::RedirectKind::HereString => Some(crate::parser::RedirectKind::HereString),
+                crate::parser::RedirectKind::HereString => {
+                    Some(crate::parser::RedirectKind::HereString)
+                }
                 // A later `<`/`<&`/`<>`/`<&-` outranks the stdin bodies.
                 _ => return self.stdin_string_for_command(cmd),
             },
@@ -860,33 +910,25 @@ impl Executor {
             None => None,
         };
         let wants_here_string = stdin_body_kind == Some(crate::parser::RedirectKind::HereString)
-            || (stdin_body_kind.is_none() && cmd.heredoc.is_none()
-                && !cmd.heredoc_redirects.iter().any(|r| {
-                    !r.here_string && (r.fd.is_none() || r.fd == Some(0))
-                }));
+            || (stdin_body_kind.is_none()
+                && cmd.heredoc.is_none()
+                && !cmd
+                    .heredoc_redirects
+                    .iter()
+                    .any(|r| !r.here_string && (r.fd.is_none() || r.fd == Some(0))));
         if !wants_here_string {
-            if let Some(redirect) = cmd
-                .heredoc_redirects
-                .iter()
-                .rev()
-                .find(|redirect| {
-                    !redirect.here_string
-                        && (redirect.fd.is_none() || redirect.fd == Some(0))
-                })
-            {
+            if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
+                !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+            }) {
                 if redirect.body_carrier.is_some() {
-                    return Some(
-                        self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier),
-                    );
+                    return Some(self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier));
                 }
                 if let Some(body) = redirect.body.clone() {
                     return Some(self.expand_heredoc_body_mut(&body));
                 }
             }
             if cmd.heredoc_body.is_some() {
-                return Some(
-                    self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body),
-                );
+                return Some(self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body));
             }
             if let Some(body) = cmd.heredoc.clone() {
                 return Some(self.expand_heredoc_body_mut(&body));
@@ -897,8 +939,7 @@ impl Executor {
         // bare data. Expand only substitutions with quotes-as-data semantics so
         // that literal survives (cat <<< 'double"quote' => double"quote).
         // Numbered `0<<<` carries its word in heredoc_redirects instead.
-        if stdin_body_kind != Some(crate::parser::RedirectKind::HereDoc)
-            && cmd.heredoc.is_none()
+        if stdin_body_kind != Some(crate::parser::RedirectKind::HereDoc) && cmd.heredoc.is_none()
             || wants_here_string
         {
             if let Some(redirect) = cmd
@@ -908,8 +949,8 @@ impl Executor {
                 .find(|redirect| redirect.here_string && redirect.fd == Some(0))
             {
                 if redirect.body_carrier.is_some() {
-                    let mut input = self
-                        .expand_here_string_mut_from_carrier(&redirect.body_carrier);
+                    let mut input =
+                        self.expand_here_string_mut_from_carrier(&redirect.body_carrier);
                     input.push('\n');
                     return Some(input);
                 }
@@ -924,15 +965,13 @@ impl Executor {
                 }
             }
             if cmd.here_string_carrier.is_some() {
-                let mut input =
-                    self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier);
+                let mut input = self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier);
                 input.push('\n');
                 return Some(input);
             }
             if let Some(word) = cmd.here_string.clone() {
                 let decoded = decode_ansi_c_quoted_word(&word);
-                let mut input =
-                    decoded.unwrap_or_else(|| self.expand_here_string_mut(&word));
+                let mut input = decoded.unwrap_or_else(|| self.expand_here_string_mut(&word));
                 input.push('\n');
                 return Some(input);
             }
@@ -943,11 +982,13 @@ impl Executor {
             // The child drains the stream from the cursor onward; GNU's
             // shared fd 0 means a subsequent `read` sees EOF.
             let end = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(FUNCTION_STDIN)
                 .map(|input| input.len())
                 .unwrap_or(0);
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert(FUNCTION_STDIN_OFFSET.to_string(), end.to_string());
         }
         result
@@ -956,10 +997,7 @@ impl Executor {
     /// True when the command's effective fd 0 resolves to the shared
     /// FUNCTION_STDIN buffer: no explicit `<` redirect wins and no virtual
     /// fd-0 endpoint shadows it (same predicate the drain above applies).
-    pub(in crate::executor) fn function_stdin_is_command_source(
-        &self,
-        cmd: &CommandNode,
-    ) -> bool {
+    pub(in crate::executor) fn function_stdin_is_command_source(&self, cmd: &CommandNode) -> bool {
         cmd.redirect_in.is_none()
             && self.virtual_fd_stdin_remaining(0).is_none()
             && self.function_stdin_remaining().is_some()
@@ -975,15 +1013,9 @@ impl Executor {
         let last_fd0 = fd0_stdin_redirect_winner(cmd);
         match last_fd0.as_ref() {
             Some(crate::parser::RedirectKind::HereDoc) => {
-                if let Some(redirect) = cmd
-                    .heredoc_redirects
-                    .iter()
-                    .rev()
-                    .find(|redirect| {
-                        !redirect.here_string
-                            && (redirect.fd.is_none() || redirect.fd == Some(0))
-                    })
-                {
+                if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
+                    !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+                }) {
                     if redirect.body_carrier.is_some() {
                         return Some(
                             self.expand_heredoc_body_readback_from_carrier(
@@ -994,9 +1026,7 @@ impl Executor {
                         );
                     }
                     if let Some(body) = redirect.body.as_deref() {
-                        return Some(
-                            self.expand_heredoc_body_readback(body).text_lossy(),
-                        );
+                        return Some(self.expand_heredoc_body_readback(body).text_lossy());
                     }
                 }
             }
@@ -1024,9 +1054,7 @@ impl Executor {
                             input.push('\n');
                             return Some(input);
                         }
-                        return Some(
-                            self.expand_heredoc_body_readback(body).text_lossy(),
-                        );
+                        return Some(self.expand_heredoc_body_readback(body).text_lossy());
                     }
                 }
                 // Unnumbered `<<<` keeps its word in cmd.here_string; it is
@@ -1043,9 +1071,8 @@ impl Executor {
                     let mut input = if let Some(pre) = preexpanded_stdin_body(word) {
                         pre.to_string()
                     } else {
-                        decode_ansi_c_quoted_word(word).unwrap_or_else(|| {
-                            self.expand_embedded_parameters_for_heredoc(word)
-                        })
+                        decode_ansi_c_quoted_word(word)
+                            .unwrap_or_else(|| self.expand_embedded_parameters_for_heredoc(word))
                     };
                     input.push('\n');
                     Some(input)
@@ -1056,15 +1083,9 @@ impl Executor {
             // No ordered redirect info (synthesized commands): legacy
             // body-first behavior.
             None => {
-                if let Some(redirect) = cmd
-                    .heredoc_redirects
-                    .iter()
-                    .rev()
-                    .find(|redirect| {
-                        !redirect.here_string
-                            && (redirect.fd.is_none() || redirect.fd == Some(0))
-                    })
-                {
+                if let Some(redirect) = cmd.heredoc_redirects.iter().rev().find(|redirect| {
+                    !redirect.here_string && (redirect.fd.is_none() || redirect.fd == Some(0))
+                }) {
                     if let Some(carrier) = &redirect.body_carrier {
                         if let crate::parser::StdinBody::Preexpanded(text) = carrier {
                             let mut input = text.clone();
@@ -1079,9 +1100,7 @@ impl Executor {
                             input.push('\n');
                             return Some(input);
                         }
-                        return Some(
-                            self.expand_heredoc_body_readback(body).text_lossy(),
-                        );
+                        return Some(self.expand_heredoc_body_readback(body).text_lossy());
                     }
                 }
                 if let Some(carrier) = &cmd.heredoc_body {
@@ -1092,9 +1111,7 @@ impl Executor {
                     }
                 }
                 if let Some(body) = &cmd.heredoc {
-                    return Some(
-                        self.expand_heredoc_body_readback(body).text_lossy(),
-                    );
+                    return Some(self.expand_heredoc_body_readback(body).text_lossy());
                 }
             }
         }
@@ -1136,9 +1153,9 @@ impl Executor {
                     // shell text; callers decode on the way out.
                     let mut buf = Vec::new();
                     let _ = file.read_to_end(&mut buf);
-                    return Some(
-                        crate::executor::substitution_metadata::bytes_to_shell_text(&buf),
-                    );
+                    return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                        &buf,
+                    ));
                 }
                 return None;
             }
@@ -1153,9 +1170,9 @@ impl Executor {
             // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic files
             // are served before the filesystem (read/cat/heredoc stdin path).
             if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
-                return Some(
-                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
-                );
+                return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                    &bytes,
+                ));
             }
             // GNU redir.c dup2's the descriptor — a character device has
             // no EOF, so slurping blocks forever on the console
@@ -1163,10 +1180,10 @@ impl Executor {
             // function_call_stdin). Decline the text channel; the caller
             // binds the live fd for the command's duration instead.
             {
-                #[cfg(windows)]
-                use std::os::windows::io::AsRawHandle;
                 #[cfg(unix)]
                 use std::os::unix::io::AsRawFd;
+                #[cfg(windows)]
+                use std::os::windows::io::AsRawHandle;
                 if let Ok(file) = File::open(&path) {
                     #[cfg(windows)]
                     let raw = file.as_raw_handle() as crate::fd::HANDLE;
@@ -1181,9 +1198,9 @@ impl Executor {
             // it must resume at the shared offset, not replay the contents
             // (subst.c:7143 command_substitute / redir.c dup semantics).
             if let Some(bytes) = self.procsub_stream_take(&path) {
-                return Some(
-                    crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
-                );
+                return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                    &bytes,
+                ));
             }
             return fs::read_to_string(path).ok();
         }

@@ -215,8 +215,8 @@ fn dollar_command_substitution(
         // arms; the boundary only tracks characters the live tokenizer
         // sees.
         if !single && !double {
-            token_boundary = ch.is_whitespace()
-                || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+            token_boundary =
+                ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
         index += 1;
     }
@@ -424,9 +424,7 @@ fn skip_command_substitution_heredoc(
         // pushed-back `)` (and anything before it, e.g. `x` in `EOFx)`)
         // re-enters the token stream, where the `)` closes the substitution.
         // Covers `EOF)`, `EOF )`, and `))` when the delimiter is `)` itself.
-        if candidate.starts_with(delimiter.as_str())
-            && candidate[delimiter.len()..].contains(')')
-        {
+        if candidate.starts_with(delimiter.as_str()) && candidate[delimiter.len()..].contains(')') {
             let resume = line_start
                 + (line.chars().count() - candidate.chars().count())
                 + delimiter.chars().count();

@@ -49,7 +49,8 @@ impl Executor {
             }
             if let Some((name, _)) = arg.split_once('=') {
                 if !name.is_empty() {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert(format!("__RUBASH_ALIAS_LINE_{name}"), line.to_string());
                 }
             }

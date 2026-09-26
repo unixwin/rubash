@@ -104,10 +104,7 @@ impl Executor {
             // NULL -> report_ambiguous_redirect, same as a multi-word split.
             // `>&WORD` targets carry a leading `&` in this representation,
             // so the emptiness test applies to the word body.
-            let empty_target = target
-                .strip_prefix('&')
-                .unwrap_or(&target)
-                .is_empty()
+            let empty_target = target.strip_prefix('&').unwrap_or(&target).is_empty()
                 && !matches!(
                     redirect.kind,
                     crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
@@ -336,9 +333,7 @@ impl Executor {
                             OutputTarget::SharedFile(file_fd.clone())
                         }
                     }
-                    FdWriteEndpoint::CoprocStdin { pid, .. } => {
-                        OutputTarget::CoprocStdin(*pid)
-                    }
+                    FdWriteEndpoint::CoprocStdin { pid, .. } => OutputTarget::CoprocStdin(*pid),
                     FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                         OutputTarget::Path(path.to_string_lossy().into_owned())
                     }
@@ -367,10 +362,7 @@ impl Executor {
                     // the group's shared File binding (the seeded state maps
                     // fd-table File endpoints to SharedFile one-to-one).
                     if self.injected_redirect_fd_is_bound(redirect, fd)
-                        && matches!(
-                            state.fds.get(&fd),
-                            Some(OutputTarget::SharedFile(_))
-                        )
+                        && matches!(state.fds.get(&fd), Some(OutputTarget::SharedFile(_)))
                     {
                         state.saw_output_redirect = true;
                         continue;
@@ -652,17 +644,13 @@ impl Executor {
         diag: &mut String,
         status: &mut i32,
     ) -> Result<(), ExecuteError> {
-        let bytes =
-            crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
+        let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
         match target {
             OutputTarget::Stdout | OutputTarget::Stderr => {}
             OutputTarget::Null => {}
             OutputTarget::Closed => {
-                if !output.is_empty()
-                    && !(fd == 1 && builtin_output_write_is_unchecked(cmd))
-                {
-                    let command =
-                        cmd.words.first().map(String::as_str).unwrap_or("command");
+                if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
+                    let command = cmd.words.first().map(String::as_str).unwrap_or("command");
                     diag.push_str(&format!(
                         "{}{command}: write error: Bad file descriptor\n",
                         self.diagnostic_prefix()

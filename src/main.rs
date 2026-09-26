@@ -578,7 +578,9 @@ fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let mut pending = String::new();
     let mut last_was_newline = false;
     for line in contents.lines() {
-        if line.trim().is_empty() && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix) {
+        if line.trim().is_empty()
+            && !rubash::lexer::has_unclosed_input_syntax_posix(&pending, posix)
+        {
             last_was_newline =
                 flush_pretty_print_chunk(&pending, posix, &mut output, last_was_newline);
             pending.clear();
@@ -1019,7 +1021,6 @@ fn internal_head_line_count(args: &[String]) -> Option<usize> {
     None
 }
 
-
 fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
     let input = input.trim();
     if input.is_empty() {
@@ -1028,4 +1029,3 @@ fn run_line(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
 
     run_source(executor, input, interactive)
 }
-

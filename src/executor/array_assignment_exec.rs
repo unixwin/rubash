@@ -20,8 +20,8 @@ impl Executor {
     ) -> Option<String> {
         let name = assignment.name.as_str();
         let raw_subscript = assignment.subscript_metadata.raw.as_str();
-        let associative =
-            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name);
+        let associative = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+            || self.is_assoc_parameter_array(name);
         if !associative {
             return None;
         }
@@ -216,7 +216,8 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            self.shell_state.aliases
+            self.shell_state
+                .aliases
                 .insert(alias_name.to_string(), Alias::new(value));
             self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
@@ -231,7 +232,11 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             };
-            crate::builtins::pushd::set_stack_value(&mut self.shell_state.env_vars, index, value.to_string());
+            crate::builtins::pushd::set_stack_value(
+                &mut self.shell_state.env_vars,
+                index,
+                value.to_string(),
+            );
             self.exit_code = 0;
             return true;
         }
@@ -248,7 +253,11 @@ impl Executor {
                 .trim_end_matches(']')
                 .trim_matches('\'')
                 .trim_matches('"');
-            crate::builtins::hash::set_hashed_path(&mut self.shell_state.env_vars, command_name, value);
+            crate::builtins::hash::set_hashed_path(
+                &mut self.shell_state.env_vars,
+                command_name,
+                value,
+            );
             self.sync_dynamic_assoc_vars();
             self.exit_code = 0;
             return true;
@@ -274,7 +283,9 @@ impl Executor {
             self.exit_code = 1;
             return true;
         }
-        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) || self.is_assoc_parameter_array(name) {
+        if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
+            || self.is_assoc_parameter_array(name)
+        {
             // GNU arrayfunc.c:392-408 assign_array_element_internal: the
             // subscript gets exactly one expand_subscript_string pass and
             // the result is the literal key — a `$(...)` produced by that
@@ -296,7 +307,12 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            let current = self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
+            let current = self
+                .shell_state
+                .env_vars
+                .get(name)
+                .cloned()
+                .unwrap_or_default();
             let mut entries = assoc_entries(&current);
             let value = if append {
                 let current = entries
@@ -351,7 +367,9 @@ impl Executor {
                     .collect::<Vec<_>>()
                     .join(" ")
             );
-            self.shell_state.env_vars.insert(name.to_string(), new_value);
+            self.shell_state
+                .env_vars
+                .insert(name.to_string(), new_value);
             self.exit_code = 0;
             return true;
         }
@@ -428,21 +446,27 @@ impl Executor {
             self.exit_code = 1;
             return true;
         }
-        let computed_index = match self.eval_indexed_subscript(SubscriptSource::Protected(eval_input)) {
-            IndexedSubscript::Index(index) => index,
-            IndexedSubscript::Empty => {
-                self.report_bad_array_subscript(&lhs_as_written);
-                self.exit_code = 1;
-                return true;
-            }
-            IndexedSubscript::Error => {
-                self.exit_code = 1;
-                return true;
-            }
-        };
+        let computed_index =
+            match self.eval_indexed_subscript(SubscriptSource::Protected(eval_input)) {
+                IndexedSubscript::Index(index) => index,
+                IndexedSubscript::Empty => {
+                    self.report_bad_array_subscript(&lhs_as_written);
+                    self.exit_code = 1;
+                    return true;
+                }
+                IndexedSubscript::Error => {
+                    self.exit_code = 1;
+                    return true;
+                }
+            };
         if computed_index < 0
             && resolve_indexed_array_subscript(
-                &self.shell_state.env_vars.get(name).cloned().unwrap_or_default(),
+                &self
+                    .shell_state
+                    .env_vars
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_default(),
                 computed_index,
             )
             .is_none()
@@ -456,7 +480,12 @@ impl Executor {
             return true;
         }
 
-        let current = self.shell_state.env_vars.get(name).cloned().unwrap_or_default();
+        let current = self
+            .shell_state
+            .env_vars
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
         let index = if computed_index < 0 {
             let Some(index) = resolve_indexed_array_subscript(&current, computed_index) else {
                 eprintln!(
@@ -491,7 +520,8 @@ impl Executor {
             element
         };
         entries.insert(index, element);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(name.to_string(), format_indexed_array_storage(entries));
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, name);
         self.exit_code = 0;

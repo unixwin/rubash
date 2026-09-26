@@ -636,10 +636,7 @@ impl Executor {
     /// `let --` → `let -- --`; AL_BEINGEXPANDED, parse.y:3259). Eval
     /// strings and trap actions are fresh input streams — their callers
     /// use `comsub_body_alias_splice` directly.
-    pub(in crate::executor) fn comsub_body_alias_splice_extracted(
-        &self,
-        source: &str,
-    ) -> String {
+    pub(in crate::executor) fn comsub_body_alias_splice_extracted(&self, source: &str) -> String {
         if self.alias_streamed() {
             source.to_string()
         } else {

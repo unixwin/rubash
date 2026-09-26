@@ -314,13 +314,15 @@ pub fn init_locale() {
 pub fn decode_to_visible_text(text: &str) -> String {
     use crate::executor::conditional::pattern::BYTE_CHAR_BASE;
     use crate::executor::embedded_mutations::{COMPOUND_EXPANSION_WS_TAG, QUOTED_NULL_MARKER};
+    use crate::executor::markers::COMSUB_PAYLOAD_PREFIX;
     use crate::executor::substitution_metadata::{
         RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
     };
-    use crate::executor::types::DEFERRED_COMPOUND_BODY;
-    use crate::lexer::{ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER, QUOTED_HEREDOC_MARKER};
-    use crate::executor::markers::COMSUB_PAYLOAD_PREFIX;
     use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
+    use crate::executor::types::DEFERRED_COMPOUND_BODY;
+    use crate::lexer::{
+        ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER, QUOTED_HEREDOC_MARKER,
+    };
 
     const CTLESC: char = crate::executor::markers::CTLESC;
     // DATA_* sentinels owned by assignment_expansion.rs (declared as
@@ -414,56 +416,93 @@ pub fn decode_to_visible_text(text: &str) -> String {
     // Note: This assertion is skipped for debug/test contexts where raw marker
     // strings may be passed directly to decode_to_visible_text.
     if !cfg!(test) {
-        debug_assert!(!out.contains(crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD),
-            "PARAM_WORD_BACKSLASH_GUARD leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ESCAPED_IFS_GUARD),
-            "ESCAPED_IFS_GUARD leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::PROMPT_ESCAPE_GUARD),
-            "PROMPT_ESCAPE_GUARD leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD),
-            "CASE_PATTERN_BACKSLASH_GUARD leaked to output");
+        debug_assert!(
+            !out.contains(crate::executor::markers::PARAM_WORD_BACKSLASH_GUARD),
+            "PARAM_WORD_BACKSLASH_GUARD leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ESCAPED_IFS_GUARD),
+            "ESCAPED_IFS_GUARD leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::PROMPT_ESCAPE_GUARD),
+            "PROMPT_ESCAPE_GUARD leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD),
+            "CASE_PATTERN_BACKSLASH_GUARD leaked to output"
+        );
         // Golden assertion: ASSIGN_DATA_* markers must never leak to output
         // These are storage-boundary PUA markers (U+E301-E30C) with no
         // external boundary; if they appear in output, the decode pass failed.
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_SQUOTE),
-            "ASSIGN_DATA_SQUOTE leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE),
-            "ASSIGN_DATA_DQUOTE leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_DATA_BACKTICK),
-            "ASSIGN_DATA_BACKTICK leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_DQUOTE),
-            "ASSIGN_ESCAPED_DQUOTE leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_SQUOTE),
-            "ASSIGN_ESCAPED_SQUOTE leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH),
-            "ASSIGN_ESCAPED_BACKSLASH leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_HOISTED_SQUOTE),
-            "ASSIGN_HOISTED_SQUOTE leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_HOISTED_BACKSLASH),
-            "ASSIGN_HOISTED_BACKSLASH leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG),
-            "COMPOUND_EXPANSION_WS_TAG leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_DOLLAR),
-            "ASSIGN_SQ_DOLLAR leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_BACKTICK),
-            "ASSIGN_SQ_BACKTICK leaked to output");
-        debug_assert!(!out.contains(crate::executor::markers::ASSIGN_SQ_BACKSLASH),
-            "ASSIGN_SQ_BACKSLASH leaked to output");
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_DATA_SQUOTE),
+            "ASSIGN_DATA_SQUOTE leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE),
+            "ASSIGN_DATA_DQUOTE leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_DATA_BACKTICK),
+            "ASSIGN_DATA_BACKTICK leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_ESCAPED_DQUOTE),
+            "ASSIGN_ESCAPED_DQUOTE leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_ESCAPED_SQUOTE),
+            "ASSIGN_ESCAPED_SQUOTE leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_ESCAPED_BACKSLASH),
+            "ASSIGN_ESCAPED_BACKSLASH leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_HOISTED_SQUOTE),
+            "ASSIGN_HOISTED_SQUOTE leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_HOISTED_BACKSLASH),
+            "ASSIGN_HOISTED_BACKSLASH leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG),
+            "COMPOUND_EXPANSION_WS_TAG leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_SQ_DOLLAR),
+            "ASSIGN_SQ_DOLLAR leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_SQ_BACKTICK),
+            "ASSIGN_SQ_BACKTICK leaked to output"
+        );
+        debug_assert!(
+            !out.contains(crate::executor::markers::ASSIGN_SQ_BACKSLASH),
+            "ASSIGN_SQ_BACKSLASH leaked to output"
+        );
         // Golden assertion: CTLESC must never leak to output
         // This is the most-traveled C0 carrier (0x11) used throughout the
         // lexer/parser/executor pipeline to protect characters through
         // intermediate passes. If it appears in output, the decode pass failed.
-        debug_assert!(!out.contains(CTLESC),
-            "CTLESC leaked to output");
+        debug_assert!(!out.contains(CTLESC), "CTLESC leaked to output");
         // Golden assertion: named string markers must never leak to output
         // These are multi-char protocol prefixes used in transport text.
         // If they appear in output, the decode pass failed.
-        debug_assert!(!out.contains(QUOTED_HEREDOC_MARKER),
-            "QUOTED_HEREDOC_MARKER leaked to output");
-        debug_assert!(!out.contains(COMSUB_PAYLOAD_PREFIX),
-            "COMSUB_PAYLOAD_PREFIX leaked to output");
-        debug_assert!(!out.contains(COMPOUND_ASSIGNMENT_MARKER),
-            "COMPOUND_ASSIGNMENT_MARKER leaked to output");
+        debug_assert!(
+            !out.contains(QUOTED_HEREDOC_MARKER),
+            "QUOTED_HEREDOC_MARKER leaked to output"
+        );
+        debug_assert!(
+            !out.contains(COMSUB_PAYLOAD_PREFIX),
+            "COMSUB_PAYLOAD_PREFIX leaked to output"
+        );
+        debug_assert!(
+            !out.contains(COMPOUND_ASSIGNMENT_MARKER),
+            "COMPOUND_ASSIGNMENT_MARKER leaked to output"
+        );
     }
     out
 }
@@ -541,8 +580,7 @@ pub fn strcoll_posixcmp(a: &str, b: &str) -> std::cmp::Ordering {
 #[cfg(windows)]
 fn platform_collate(a: &str, b: &str, locale: &str) -> Option<std::cmp::Ordering> {
     use windows_sys::Win32::Globalization::{
-        CompareStringEx, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN,
-        NORM_IGNORESYMBOLS,
+        CompareStringEx, CSTR_EQUAL, CSTR_GREATER_THAN, CSTR_LESS_THAN, NORM_IGNORESYMBOLS,
     };
     let loc: Vec<u16> = locale.encode_utf16().chain(Some(0)).collect();
     let aw: Vec<u16> = a.encode_utf16().collect();

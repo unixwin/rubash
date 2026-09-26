@@ -2148,11 +2148,11 @@ fn c_command_multiline_set_h_enables_history_expansion() {
         .expect("run -c history expansion probe");
 
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "alpha\necho alpha\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "echo echo alpha\n"
+        String::from_utf8_lossy(&output.stdout),
+        "alpha\necho alpha\n"
     );
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "echo echo alpha\n");
 
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

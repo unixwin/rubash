@@ -690,8 +690,6 @@ pub(crate) fn push_literal_char(output: &mut String, c: char) {
     output.push(c);
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

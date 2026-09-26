@@ -140,8 +140,10 @@ impl Executor {
         // name that never gets bound stays unset.
 
         if let Some((name, name_index)) = wait_assign_var(&cmd.words[1..]) {
-            let expand_once =
-                crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "array_expand_once");
+            let expand_once = crate::builtins::shopt::option_enabled(
+                &self.shell_state.env_vars,
+                "array_expand_once",
+            );
             // GNU wait.def:156 SET_VFLAGS (builtins/common.h:279): the -p
             // operand's arrayflags are VA_NOEXPAND when array_expand_once
             // is on, plus VA_ONEWORD only when the option is on AND the
@@ -169,7 +171,6 @@ impl Executor {
                     expand_once,
                     expand_once && w_arrayref,
                     &self.shell_state.env_vars,
-
                 )
             {
                 let mut stderr = Vec::new();
@@ -249,7 +250,9 @@ impl Executor {
                     // wait -n consumes the job (delete_job); the status stays
                     // in completed_statuses as the bgpids equivalent so a
                     // later operand-addressed `wait -n $pid` still reports it.
-                    self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
+                    self.shell_state
+                        .job_table
+                        .remove_job_by_pid_preserve_status(pid);
                     self.forget_background_runtime(pid);
                     if let Some(wait_var) = &request.assign_var {
                         let arrayref = self.wait_var_arrayref();
@@ -284,9 +287,17 @@ impl Executor {
             }
         }
 
-        if cmd.words.len() == 1 && self.shell_state.job_table.jobs.values().any(|job| job.background) {
+        if cmd.words.len() == 1
+            && self
+                .shell_state
+                .job_table
+                .jobs
+                .values()
+                .any(|job| job.background)
+        {
             let pids = self
-                .shell_state.job_table
+                .shell_state
+                .job_table
                 .jobs
                 .values()
                 .filter(|job| job.background)
@@ -319,7 +330,6 @@ impl Executor {
                 // waited for (pstat.pid; NO_PID when the last operand
                 // failed, leaving the pre-unbound variable unset).
                 let wait_var = wait_assign_var(&cmd.words[1..])
-
                     .map(|(name, _index)| (name, self.wait_var_arrayref()));
 
                 let status =
@@ -331,8 +341,7 @@ impl Executor {
         if cmd.words.len() == 2 {
             if let Some(pid) = self.resolve_background_job(&cmd.words[1]) {
                 match self.wait_for_background_pid(pid, true)? {
-                    WaitPidOutcome::Status(status)
-                    | WaitPidOutcome::Interrupted(status) => {
+                    WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
                         self.write_buffered_builtin_output(cmd, &[], &[])?;
                         return Ok(status);
                     }
@@ -340,8 +349,7 @@ impl Executor {
                 }
             } else if let Ok(pid) = cmd.words[1].parse::<u32>() {
                 match self.wait_for_background_pid(pid, true)? {
-                    WaitPidOutcome::Status(status)
-                    | WaitPidOutcome::Interrupted(status) => {
+                    WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
                         self.write_buffered_builtin_output(cmd, &[], &[])?;
                         return Ok(status);
                     }
@@ -390,7 +398,12 @@ impl Executor {
         } else {
             SubscriptSource::ExpandedOnce(subscript)
         };
-        let current = self.shell_state.env_vars.get(&base).cloned().unwrap_or_default();
+        let current = self
+            .shell_state
+            .env_vars
+            .get(&base)
+            .cloned()
+            .unwrap_or_default();
         if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &base)
             || (!is_marked_array_var(&self.shell_state.env_vars, &base)
                 && !is_array_storage(&current)
@@ -406,7 +419,9 @@ impl Executor {
             } else {
                 entries.push((key, value));
             }
-            self.shell_state.env_vars.insert(base.clone(), format_assoc_storage(entries));
+            self.shell_state
+                .env_vars
+                .insert(base.clone(), format_assoc_storage(entries));
             if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &base) {
                 mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, &base);
             }
@@ -416,7 +431,8 @@ impl Executor {
             IndexedSubscript::Index(index) => {
                 let mut entries = indexed_array_entries(&current);
                 entries.insert(index as usize, value);
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert(base.clone(), format_indexed_array_storage(entries));
                 if !is_marked_array_var(&self.shell_state.env_vars, &base) {
                     mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, &base);
@@ -509,10 +525,8 @@ impl Executor {
             .shell_state
             .env_vars
             .contains_key("__RUBASH_INTERACTIVE");
-        let job_control = crate::builtins::set::shell_option_enabled(
-            &self.shell_state.env_vars,
-            "monitor",
-        );
+        let job_control =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         if !interactive || !job_control {
             self.shell_state
                 .job_table
@@ -603,14 +617,14 @@ impl Executor {
 
     fn retire_completed_coproc(&mut self, pid: u32) {
         let is_coproc = self.fd_table.entries.values().any(|entry| {
-                matches!(
-                    entry.read.as_ref(),
-                    Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
-                ) || matches!(
-                    entry.write.as_ref(),
-                    Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
-                )
-            });
+            matches!(
+                entry.read.as_ref(),
+                Some(FdReadEndpoint::CoprocStdout { pid: endpoint_pid, .. }) if *endpoint_pid == pid
+            ) || matches!(
+                entry.write.as_ref(),
+                Some(FdWriteEndpoint::CoprocStdin { pid: endpoint_pid, .. }) if *endpoint_pid == pid
+            )
+        });
         if !is_coproc {
             return;
         }
@@ -639,9 +653,12 @@ impl Executor {
             self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
             self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
             self.shell_state.env_vars.remove(&fd_output_key(fd));
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .remove(&fd_output_process_substitution_key(fd));
-            self.shell_state.env_vars.insert(fd_closed_key(fd), "1".to_string());
+            self.shell_state
+                .env_vars
+                .insert(fd_closed_key(fd), "1".to_string());
         }
         self.coproc_unset_vars(pid);
 
@@ -689,11 +706,19 @@ impl Executor {
         pid: u32,
         _retain_for_explicit_wait: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
-        if let Some(status) = self.shell_state.job_table.completed_statuses.get(&pid).copied() {
+        if let Some(status) = self
+            .shell_state
+            .job_table
+            .completed_statuses
+            .get(&pid)
+            .copied()
+        {
             self.join_coproc_stderr_forwarder(pid)?;
             // Waiting consumes the jobs-table entry, but the completed status
             // remains available for a later explicit wait of the same PID.
-            self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
+            self.shell_state
+                .job_table
+                .remove_job_by_pid_preserve_status(pid);
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
         }
@@ -721,7 +746,9 @@ impl Executor {
         self.run_sigchld_trap_for_reaped_child()?;
         // Remove the visible job after any wait, while retaining the exit
         // status for repeated explicit PID waits.
-        self.shell_state.job_table.remove_job_by_pid_preserve_status(pid);
+        self.shell_state
+            .job_table
+            .remove_job_by_pid_preserve_status(pid);
         self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
     }
@@ -825,7 +852,8 @@ impl Executor {
         // (alloc_job_entry), stable across removals — holes stay open, so
         // with jobs %1 and %3 the list shows `[1] [3]`, never a renumbered
         // `[1] [2]`.
-        self.shell_state.job_table
+        self.shell_state
+            .job_table
             .jobs
             .values()
             .filter(|job| job.background)
@@ -846,7 +874,8 @@ impl Executor {
         let mut output = String::new();
         for (job_number, pid, source) in jobs {
             let state_text_opt = self
-                .shell_state.job_table
+                .shell_state
+                .job_table
                 .pid_to_job
                 .get(&pid)
                 .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
@@ -904,22 +933,25 @@ impl Executor {
             };
 
             if options.pids_only {
-                output.push_str(&format!("{pid}
-"));
+                output.push_str(&format!(
+                    "{pid}
+"
+                ));
             } else if options.long {
                 output.push_str(&format!(
                     "[{job_number}]{marker}  {pid} {state_text:<27}{source}{async_suffix}
 "
                 ));
             } else {
-                output.push_str(&format!("[{job_number}]{marker}  {state_text:<27}{source}{async_suffix}
-"));
+                output.push_str(&format!(
+                    "[{job_number}]{marker}  {state_text:<27}{source}{async_suffix}
+"
+                ));
             }
             // jobs.c:2219 pretty_print_job — printing a job's status IS
             // the notification, for every listing mode (plain `jobs`,
             // `-l`, `-n`); the flag is cleared on the next state change.
-            if let Some(entry) =
-                job_id.and_then(|id| self.shell_state.job_table.jobs.get_mut(&id))
+            if let Some(entry) = job_id.and_then(|id| self.shell_state.job_table.jobs.get_mut(&id))
             {
                 entry.notified = true;
             }
@@ -941,7 +973,8 @@ impl Executor {
             crate::builtins::disown::DisownAction::Complete(status) => status,
             crate::builtins::disown::DisownAction::All => {
                 let pids: Vec<u32> = self
-                    .shell_state.job_table
+                    .shell_state
+                    .job_table
                     .jobs
                     .values()
                     .flat_map(|job| job.pids.iter().copied())
@@ -1022,18 +1055,30 @@ impl Executor {
     pub(in crate::executor) fn resolve_background_job(&self, job: &str) -> Option<u32> {
         if job.starts_with('%') {
             let job_id = self.shell_state.job_table.resolve_jobspec(job)?;
-            return self.shell_state.job_table.jobs.get(&job_id)?.pids.last().copied();
+            return self
+                .shell_state
+                .job_table
+                .jobs
+                .get(&job_id)?
+                .pids
+                .last()
+                .copied();
         }
         let pid = job.parse::<u32>().ok()?;
         (self.shell_state.job_table.pid_to_job.contains_key(&pid)
-            || self.shell_state.job_table.completed_statuses.contains_key(&pid))
+            || self
+                .shell_state
+                .job_table
+                .completed_statuses
+                .contains_key(&pid))
         .then_some(pid)
     }
 
     fn background_job_number(&self, pid: u32) -> usize {
         // Same slot-index numbering as ordered_background_jobs — the
         // printed `%N` must resolve to the same job `wait %N` sees.
-        self.shell_state.job_table
+        self.shell_state
+            .job_table
             .pid_to_job
             .get(&pid)
             .map(|job_id| *job_id as usize)
@@ -1058,10 +1103,8 @@ impl Executor {
         // control" before any operand processing, regardless of whether
         // background jobs exist. A background job table entry alone does
         // not imply job control.
-        let has_job_control = crate::builtins::set::shell_option_enabled(
-            &self.shell_state.env_vars,
-            "monitor",
-        );
+        let has_job_control =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         let status = match action {
             // Bash reports the non-interactive job-control failure before
             // validating fg/bg operands or options when no jobs exist.
@@ -1282,7 +1325,13 @@ impl Executor {
 
     fn current_background_pid(&self) -> Option<u32> {
         let job_id = self.shell_state.job_table.current_job()?;
-        self.shell_state.job_table.jobs.get(&job_id)?.pids.last().copied()
+        self.shell_state
+            .job_table
+            .jobs
+            .get(&job_id)?
+            .pids
+            .last()
+            .copied()
     }
 
     fn write_job_not_found(
@@ -1636,9 +1685,11 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(1);
                 }
-                let editor_path =
-                    crate::executor::path::find_user_command(&editor_name, &self.shell_state.env_vars)
-                        .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
+                let editor_path = crate::executor::path::find_user_command(
+                    &editor_name,
+                    &self.shell_state.env_vars,
+                )
+                .unwrap_or_else(|| std::path::PathBuf::from(&editor_name));
                 let edit_status = std::process::Command::new(&editor_path).arg(&path).status();
                 match edit_status {
                     Ok(st) if st.success() => {}
@@ -1688,9 +1739,7 @@ impl Executor {
                     },
                 );
                 self.apply_command_output_redirects(cmd, &mut ast)?;
-                self.with_compound_output_redirects(cmd, |executor| {
-                    executor.execute_ast(&ast)
-                })?;
+                self.with_compound_output_redirects(cmd, |executor| executor.execute_ast(&ast))?;
                 Ok(self.exit_code)
             }
             crate::builtins::fc::FcResult::Status(status) => Ok(status),
@@ -1724,9 +1773,7 @@ impl Executor {
                     },
                 );
                 self.apply_command_output_redirects(cmd, &mut ast)?;
-                self.with_compound_output_redirects(cmd, |executor| {
-                    executor.execute_ast(&ast)
-                })?;
+                self.with_compound_output_redirects(cmd, |executor| executor.execute_ast(&ast))?;
                 Ok(self.exit_code)
             }
         }
@@ -1864,17 +1911,22 @@ impl Executor {
             // Register the compspec for every name (complete.def:480-485).
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
-                self.shell_state.completion_specs.insert(pseudo, spec.clone());
+                self.shell_state
+                    .completion_specs
+                    .insert(pseudo, spec.clone());
             }
             for target in &parsed.operands {
-                self.shell_state.completion_specs.insert(target, spec.clone());
+                self.shell_state
+                    .completion_specs
+                    .insert(target, spec.clone());
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
         }
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
-            .shell_state.job_table
+            .shell_state
+            .job_table
             .jobs
             .values()
             .filter(|job| job.background)
@@ -1956,7 +2008,9 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
                     // strip it so `A` never becomes the bound base name.
 
                     assign_var = Some(
-                        crate::builtins::arrayref::take_arrayref_flag(name).1.to_string(),
+                        crate::builtins::arrayref::take_arrayref_flag(name)
+                            .1
+                            .to_string(),
                     );
                     assign_var_index = Some(name_index);
                     break;
@@ -2009,7 +2063,11 @@ fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
     Some(
         words[index..]
             .iter()
-            .map(|word| crate::builtins::arrayref::take_arrayref_flag(word).1.to_string())
+            .map(|word| {
+                crate::builtins::arrayref::take_arrayref_flag(word)
+                    .1
+                    .to_string()
+            })
             .collect(),
     )
 }
@@ -2036,16 +2094,14 @@ fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
                     // wait.def:156 SET_VFLAGS consumes W_ARRAYREF off the
                     // raw word; the in-band ARRAYREF_FLAG prefix is a word
                     // flag, never operand text (execute_cmd.c:4366).
-                    return words
-                        .get(index + 1)
-                        .map(|name| {
-                            (
-                                crate::builtins::arrayref::take_arrayref_flag(name)
-                                    .1
-                                    .to_string(),
-                                index + 1,
-                            )
-                        });
+                    return words.get(index + 1).map(|name| {
+                        (
+                            crate::builtins::arrayref::take_arrayref_flag(name)
+                                .1
+                                .to_string(),
+                            index + 1,
+                        )
+                    });
                 }
                 _ => return None,
             }

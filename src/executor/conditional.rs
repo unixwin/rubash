@@ -332,9 +332,7 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata
-                        .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 let left = self.expand_word_mut(left);
                 let right = self.expand_word_mut(right);
@@ -349,9 +347,7 @@ impl Executor {
             }
             [left, op, right]
                 if matches!(op.as_str(), "=" | "==" | "!=")
-                    && metadata
-                        .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 let left = self.expand_word_mut(left);
                 let right = self.expand_word_mut(right);
@@ -367,17 +363,12 @@ impl Executor {
             [left, op, right, end]
                 if end == "]]"
                     && op == "=~"
-                    && metadata
-                        .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
+                    && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
             [left, op, right]
-                if op == "=~"
-                    && metadata
-                        .get(2)
-                        .is_some_and(|m| !m.word_quotes.is_empty()) =>
+                if op == "=~" && metadata.get(2).is_some_and(|m| !m.word_quotes.is_empty()) =>
             {
                 Some(self.conditional_quoted_regex_match_status(left, right, &metadata[2]))
             }
@@ -435,9 +426,9 @@ impl Executor {
             // `$(...)`/`${...}`/`` `...` `` quotes a character of the nested
             // body, not the outer word. Keep the span inside the unquoted
             // run so expand_word_mut handles its inner escapes.
-            if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(
-                &chars, index,
-            ) {
+            if let Some(next) =
+                crate::parser::pathname_pattern::skip_nested_expansion(&chars, index)
+            {
                 index = next;
                 continue;
             }
@@ -781,9 +772,9 @@ impl Executor {
                 // Nested `$(...)`/`${...}`/`` `...` `` bodies keep their own
                 // quote state (GNU xparse_dolparen): `\` and quotes inside
                 // them do not terminate the outer unquoted run.
-                if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(
-                    &chars, index,
-                ) {
+                if let Some(next) =
+                    crate::parser::pathname_pattern::skip_nested_expansion(&chars, index)
+                {
                     index = next;
                     continue;
                 }

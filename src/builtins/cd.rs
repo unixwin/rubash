@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 mod paths;
 
+use crate::executor::markers::DATA_DOLLAR;
 use paths::{
     current_logical_pwd, filesystem_path_for_display, logical_destination,
     logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
@@ -14,7 +15,6 @@ use paths::{
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;

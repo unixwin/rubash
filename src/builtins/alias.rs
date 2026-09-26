@@ -218,7 +218,9 @@ fn quote_single(value: &str) -> String {
 }
 
 fn strip_quote_marker(value: &str) -> &str {
-    value.strip_prefix(crate::executor::markers::IFS_GLUE).unwrap_or(value)
+    value
+        .strip_prefix(crate::executor::markers::IFS_GLUE)
+        .unwrap_or(value)
 }
 
 fn diagnostic_prefix() -> String {
@@ -243,7 +245,13 @@ mod tests {
         let mut err = Vec::new();
 
         let status = alias_with_io(
-            &[format!("{}{}{}", "a=", crate::executor::markers::QUOTED_WORD_VALUE_PREFIX_STR, "unalias -a\nv=2").to_string()],
+            &[format!(
+                "{}{}{}",
+                "a=",
+                crate::executor::markers::QUOTED_WORD_VALUE_PREFIX_STR,
+                "unalias -a\nv=2"
+            )
+            .to_string()],
             &mut aliases,
             &mut out,
             &mut err,

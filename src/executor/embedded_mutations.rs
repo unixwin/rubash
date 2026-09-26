@@ -734,20 +734,17 @@ impl Executor {
                             // balance check; otherwise the whole construct is
                             // a nested command substitution (`$(( echo ab
                             // cde ) )` runs `( echo ab cde )`).
-                            let temp2 = expression
-                                .strip_suffix(')')
-                                .unwrap_or(expression.as_str());
-                            let (expression, force_comsub) = if let Some(inner) =
-                                temp2.strip_suffix(')')
-                            {
-                                if arith_sub_parens_balanced(inner) {
-                                    (inner.to_string(), false)
+                            let temp2 = expression.strip_suffix(')').unwrap_or(expression.as_str());
+                            let (expression, force_comsub) =
+                                if let Some(inner) = temp2.strip_suffix(')') {
+                                    if arith_sub_parens_balanced(inner) {
+                                        (inner.to_string(), false)
+                                    } else {
+                                        (format!("({temp2}"), true)
+                                    }
                                 } else {
                                     (format!("({temp2}"), true)
-                                }
-                            } else {
-                                (format!("({temp2}"), true)
-                            };
+                                };
                             if force_comsub {
                                 let value = protect_command_substitution_output(
                                     &self.expand_command_substitution_mut_with_context(
@@ -900,16 +897,11 @@ impl Executor {
                             {
                                 self.shell_state.arithmetic_fatal_error.set(true);
                             }
-                            if !self
-                                .shell_state
-                                .arithmetic_expansion_error
-                                .replace(true)
-                            {
+                            if !self.shell_state.arithmetic_expansion_error.replace(true) {
                                 // GNU evalexp reports against the
                                 // post-expansion string (expand_arith_string
                                 // ran first).
-                                let eval_input =
-                                    self.arithmetic_last_eval_input.borrow().clone();
+                                let eval_input = self.arithmetic_last_eval_input.borrow().clone();
                                 let display = if eval_input.is_empty() {
                                     expression.as_str()
                                 } else {

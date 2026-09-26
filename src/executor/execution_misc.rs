@@ -166,7 +166,10 @@ pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
 }
 
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
-    let target = target.trim_start_matches([crate::executor::markers::QUOTED_WORD_PREFIX, STORAGE_WORD_PREFIX]);
+    let target = target.trim_start_matches([
+        crate::executor::markers::QUOTED_WORD_PREFIX,
+        STORAGE_WORD_PREFIX,
+    ]);
     let Some(fd) = target.strip_prefix('&') else {
         return dev_stdio_redirect_fd(target).map(|fd| (fd, false));
     };
@@ -199,9 +202,7 @@ pub(in crate::executor) fn redirect_updates_stdin_redir(
         | RedirectKind::HereDoc
         | RedirectKind::HereString => true,
         RedirectKind::DuplicateInput => {
-            if redirect_target_fd_and_move(&redirect.target)
-                .is_some_and(|(_, move_fd)| move_fd)
-            {
+            if redirect_target_fd_and_move(&redirect.target).is_some_and(|(_, move_fd)| move_fd) {
                 false
             } else {
                 redirect.fd.unwrap_or(0) == 0
@@ -217,9 +218,7 @@ pub(in crate::executor) fn redirect_updates_stdin_redir(
 /// subshells and coprocs are deliberately absent: a subshell recomputes
 /// stdin_redir from its own redirects inside execute_in_subshell
 /// (execute_cmd.c:1733) instead of feeding the parent's flag.
-pub(in crate::executor) fn command_is_shell_control_structure(
-    cmd: &CommandNode,
-) -> bool {
+pub(in crate::executor) fn command_is_shell_control_structure(cmd: &CommandNode) -> bool {
     cmd.for_command.is_some()
         || cmd.arithmetic_command.is_some()
         || cmd.if_command.is_some()
@@ -305,9 +304,10 @@ pub(in crate::executor) fn command_has_unterminated_heredoc(cmd: &CommandNode) -
 /// as a truly unterminated heredoc.  The `\x1e` marker is inserted by the
 /// lexer for this case.
 pub(in crate::executor) fn command_has_warned_heredoc(cmd: &CommandNode) -> bool {
-    cmd.heredoc
-        .as_deref()
-        .is_some_and(|body| strip_quoted_heredoc_marker(body).starts_with(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX))
+    cmd.heredoc.as_deref().is_some_and(|body| {
+        strip_quoted_heredoc_marker(body)
+            .starts_with(crate::executor::markers::HEREDOC_WARNED_BODY_PREFIX)
+    })
 }
 
 pub(in crate::executor) fn strip_unterminated_heredoc_marker(body: &str) -> &str {
@@ -336,7 +336,8 @@ pub(in crate::executor) fn strip_quoted_heredoc_marker(body: &str) -> &str {
 /// raw-byte marker pairs at collection time (parser/redirections.rs
 /// encode_stdin_body_enq) and the expand/emit boundary decodes them back
 /// (decode_stdin_body_enq).
-pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char = crate::executor::markers::PREEXPANDED_STDIN_BODY;
+pub(in crate::executor) const PREEXPANDED_STDIN_BODY: char =
+    crate::executor::markers::PREEXPANDED_STDIN_BODY;
 
 /// Returns the pre-expanded text when `body` carries
 /// PREEXPANDED_STDIN_BODY (legacy sentinel check for parser/compat paths).
@@ -346,7 +347,9 @@ pub(in crate::executor) fn preexpanded_stdin_body(body: &str) -> Option<&str> {
 }
 
 /// Returns the pre-expanded text from a StdinBody typed carrier.
-pub(in crate::executor) fn stdin_body_carrier_to_text(carrier: &Option<crate::parser::StdinBody>) -> Option<String> {
+pub(in crate::executor) fn stdin_body_carrier_to_text(
+    carrier: &Option<crate::parser::StdinBody>,
+) -> Option<String> {
     match carrier {
         Some(crate::parser::StdinBody::Preexpanded(text)) => Some(text.clone()),
         Some(crate::parser::StdinBody::NeedsExpansion(_)) => None,
@@ -361,16 +364,17 @@ pub(in crate::executor) fn stdin_body_carrier_to_text(carrier: &Option<crate::pa
 /// (carriers, >=0x80 bytes) must stay encoded, so only the 0x05 pair is
 /// touched.
 pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
-    if !text.contains(char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid")) {
+    if !text.contains(
+        char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE)
+            .expect("sentinel is valid"),
+    ) {
         return text.to_string();
     }
     let pair = [
         char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
             .expect("sentinel is valid"),
-        char::from_u32(
-            crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST + 0x05,
-        )
-        .expect("marker char is valid"),
+        char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_FIRST + 0x05)
+            .expect("marker char is valid"),
     ]
     .iter()
     .collect::<String>();
@@ -559,7 +563,9 @@ pub(in crate::executor) fn word_has_unquoted_command_substitution(word: &str) ->
 }
 
 pub(in crate::executor) fn for_word_has_unquoted_expansion(word: &str, raw: Option<&str>) -> bool {
-    if word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX) || word.starts_with(STORAGE_WORD_PREFIX) {
+    if word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+        || word.starts_with(STORAGE_WORD_PREFIX)
+    {
         return false;
     }
     let source = raw.unwrap_or(word);
@@ -829,7 +835,9 @@ pub(in crate::executor) fn command_substitution_value_needs_payload_protection(
     source.contains('$')
         && !source.contains('`')
         && !value.contains(COMMAND_SUBSTITUTION_PAYLOAD_PREFIX)
-        && value.chars().any(|ch| (crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR).contains(&ch))
+        && value.chars().any(|ch| {
+            (crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR).contains(&ch)
+        })
 }
 
 pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> String {
@@ -840,10 +848,9 @@ pub(in crate::executor) fn protect_command_substitution_output(value: &str) -> S
     let mut output = String::with_capacity(escaped_value.len());
     for ch in escaped_value.chars() {
         match ch {
-            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR => output.push_str(&format!(
-                "{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{:02x};",
-                ch as u32
-            )),
+            crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER..=DATA_DOLLAR => output.push_str(
+                &format!("{COMMAND_SUBSTITUTION_PAYLOAD_PREFIX}{:02x};", ch as u32),
+            ),
             '`' => output.push(crate::executor::markers::DATA_BACKTICK),
             '$' => output.push(DATA_DOLLAR),
             '\\' => output.push(crate::executor::markers::PROTECTED_BACKSLASH),
@@ -881,8 +888,7 @@ pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> Stri
     // the decoded 0x15 was read as PROTECTED_BACKSLASH).
     let restored = restore_command_substitution_output(value);
     let visible = crate::locale::decode_to_visible_text(&restored);
-    let bytes =
-        crate::executor::substitution_metadata::decode_raw_byte_markers(visible.as_bytes());
+    let bytes = crate::executor::substitution_metadata::decode_raw_byte_markers(visible.as_bytes());
     crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
 }
 
@@ -909,8 +915,6 @@ pub(in crate::executor) fn decode_command_substitution_payload(value: &str) -> S
     output.push_str(rest);
     output
 }
-
-
 
 #[cfg(test)]
 mod command_substitution_payload_tests {

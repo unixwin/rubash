@@ -15,7 +15,8 @@ impl Executor {
                 if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, resolved_name)
                     || is_marked_array_var(&self.shell_state.env_vars, resolved_name)
                     || self
-                        .shell_state.env_vars
+                        .shell_state
+                        .env_vars
                         .get(resolved_name)
                         .is_some_and(|value| is_array_storage(value))
                 {
@@ -30,7 +31,8 @@ impl Executor {
                 return String::new();
             };
             let Some(value) = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(&array_name)
                 .and_then(|value| array_value_at(value, index))
             else {
@@ -59,7 +61,8 @@ impl Executor {
             }
             let key = self.assoc_subscript_key(key);
             let Some(value) = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(&array_name)
                 .and_then(|value| assoc_value_at(value, &key))
             else {
@@ -91,7 +94,8 @@ impl Executor {
             // var_attribute_string flag set (subst.c:8712), not just -A.
             let flags = self.variable_assignment_flags(name, true);
             if let Some(value) = self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(name)
                 .and_then(|value| assoc_value_at(value, "0"))
             {
@@ -101,14 +105,16 @@ impl Executor {
         }
 
         if self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(name)
             .is_some_and(|value| is_array_storage(value))
             || is_marked_array_var(&self.shell_state.env_vars, name)
         {
             let flags = self.variable_assignment_flags(name, true);
             return self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get(name)
                 .and_then(|value| array_value_at(value, 0))
                 .map(|value| format!("declare -{flags} {name}={}", shell_reusable_quote(&value)))
@@ -275,7 +281,8 @@ impl Executor {
         if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name) {
             attrs.push('A');
         } else if self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get(base_name)
             .is_some_and(|value| is_array_storage(value))
             || is_marked_array_var(&self.shell_state.env_vars, base_name)
@@ -333,12 +340,14 @@ impl Executor {
                 // every `key "value"` element — including the last — while
                 // the indexed array_to_kvpair (array.c:896) only separates,
                 // and @k's string_list_pos_params path has no trailing pad.
-                let joined =
-                    assoc_hash_ordered_entries(value, assoc_nbuckets(&self.shell_state.env_vars, &array_name))
-                        .into_iter()
-                        .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
-                        .collect::<Vec<_>>()
-                        .join(" ");
+                let joined = assoc_hash_ordered_entries(
+                    value,
+                    assoc_nbuckets(&self.shell_state.env_vars, &array_name),
+                )
+                .into_iter()
+                .map(|(key, value)| format_key_value_transform_part(&key, &value, quoted))
+                .collect::<Vec<_>>()
+                .join(" ");
                 return if quoted && !joined.is_empty() {
                     format!("{joined} ")
                 } else {

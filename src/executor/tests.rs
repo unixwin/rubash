@@ -252,12 +252,14 @@ mod unit_tests {
         let mut executor = Executor::new();
 
         executor
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert("EUID".to_string(), "0".to_string());
         assert_eq!(executor.decode_prompt_string("\\$"), "#");
 
         executor
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .insert("EUID".to_string(), "1000".to_string());
         assert_eq!(executor.decode_prompt_string("\\$"), "$");
     }
@@ -503,11 +505,9 @@ mod unit_tests {
         let redirect = std::env::temp_dir().join("rubash-q16-group-redirect.log");
         let redirect = redirect.to_string_lossy().replace('\\', "/");
         let probe = cmdsub_external_probe_command(&redirect);
-        let probe = probe.replacen("for i in 1; do ", "{ ", 1).replacen(
-            " done > \"",
-            " } > \"",
-            1,
-        );
+        let probe = probe
+            .replacen("for i in 1; do ", "{ ", 1)
+            .replacen(" done > \"", " } > \"", 1);
         let tokens = tokenize(&probe);
         let ast = parse(&tokens);
         let mut executor = Executor::new();

@@ -1,6 +1,6 @@
 use super::types::INHERIT_PROCESS_STDIN;
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 impl Executor {
     pub(in crate::executor) fn parse_mapfile_usize(
@@ -191,7 +191,13 @@ impl Executor {
             }
             // Fallback: read from inherited process stdin when INHERIT_PROCESS_STDIN is set
             // (e.g., printf '...' | rubash -c 'mapfile arr')
-            if self.shell_state.env_vars.get(INHERIT_PROCESS_STDIN).map(String::as_str) == Some("1") {
+            if self
+                .shell_state
+                .env_vars
+                .get(INHERIT_PROCESS_STDIN)
+                .map(String::as_str)
+                == Some("1")
+            {
                 return self.read_inherited_process_stdin_to_string();
             }
             return None;
@@ -259,7 +265,8 @@ impl Executor {
         if self.fd_table.is_open_for_read(fd) {
             if let Some(input) = self.fd_table.read_all_text(fd) {
                 if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
                 }
                 return Some(input);

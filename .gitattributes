@@ -19,3 +19,4 @@ docs/builtins.md eol=lf
 # array names, and quoted strings). po/*.gmo are real binaries - leave alone.
 third_party/bash/** text eol=lf
 third_party/bash/po/*.gmo -text
+scripts/git-hooks/* text eol=lf

@@ -130,9 +130,7 @@ impl SessionHistory {
             for (i, e) in self.entries.iter().enumerate() {
                 if e != line {
                     kept.push(e.clone());
-                    kept_ts.push(
-                        self.timestamps.get(i).cloned().unwrap_or_default(),
-                    );
+                    kept_ts.push(self.timestamps.get(i).cloned().unwrap_or_default());
                 }
             }
             self.entries = kept;
@@ -240,8 +238,7 @@ impl SessionHistory {
                 // histfile.c:439-453: add as new entry carrying the saved
                 // timestamp (add_history_time).
                 self.entries.push(line.to_string());
-                self.timestamps
-                    .push(last_ts.clone().unwrap_or_default());
+                self.timestamps.push(last_ts.clone().unwrap_or_default());
                 self.stifle(histsize);
                 count += 1;
             }
@@ -299,7 +296,12 @@ impl SessionHistory {
     /// command's `#<epoch>` line travels with it and does not count toward
     /// the limit (`lines += history_write_timestamps` plus the
     /// HIST_TIMESTAMP_START backtrack at lines 633-657).
-    pub fn truncate_file(&self, path: &str, lines: usize, write_timestamps: bool) -> io::Result<()> {
+    pub fn truncate_file(
+        &self,
+        path: &str,
+        lines: usize,
+        write_timestamps: bool,
+    ) -> io::Result<()> {
         let Ok(content) = fs::read_to_string(path) else {
             return Ok(());
         };
@@ -352,13 +354,9 @@ impl SessionHistory {
     pub fn read_new_file(&mut self, path: &str, histsize: Option<usize>) -> io::Result<usize> {
         let content = fs::read_to_string(path)?;
         // Same #<digit> detection as load_file (histfile.c:377-381).
-        let has_timestamps = content
-            .lines()
-            .next()
-            .is_some_and(|l| {
-                l.starts_with('#')
-                    && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
-            });
+        let has_timestamps = content.lines().next().is_some_and(|l| {
+            l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+        });
         let mut count = 0usize;
         let mut last_ts: Option<String> = None;
         for line in content.lines() {

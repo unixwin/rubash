@@ -92,11 +92,7 @@ impl Executor {
             apply_stdout_append_redirect(body, &append_redirect);
         }
 
-        if let Some(redirect) = command
-            .append
-            .as_ref()
-            .filter(|r| r.fd.unwrap_or(1) == 1)
-        {
+        if let Some(redirect) = command.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
             let mut append_redirect = redirect.clone();
             append_redirect.target = self.expand_redirect_target(redirect);
             apply_stdout_append_redirect(body, &append_redirect);

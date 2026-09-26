@@ -53,7 +53,9 @@ impl Iterator for StorageWordIter<'_> {
             // its whitespace into the word so assoc kv-pairs keep them;
             // indexed callers re-split on the marker. The \x1c
             // IFS-protection sentinel takes the same glued form here.
-            if ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG {
+            if ch == crate::executor::markers::IFS_GLUE
+                || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+            {
                 word.push(ch);
                 escaped = true;
                 continue;
@@ -224,7 +226,9 @@ pub(in crate::builtins::declare) fn unquote_storage_value(value: &str) -> String
                     i += 1;
                     continue;
                 }
-                if !ansi && quote == '"' && c == '\\'
+                if !ansi
+                    && quote == '"'
+                    && c == '\\'
                     && matches!(chars.get(i + 1), Some('"' | '\\' | '$' | '`'))
                 {
                     span.push(chars[i + 1]);
@@ -294,7 +298,8 @@ pub(in crate::builtins::declare) fn split_indexed_tagged_token(token: &str) -> V
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == crate::executor::markers::IFS_GLUE || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+        if (ch == crate::executor::markers::IFS_GLUE
+            || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
             && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
         {
             chars.next();

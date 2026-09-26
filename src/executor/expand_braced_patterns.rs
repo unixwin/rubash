@@ -156,7 +156,8 @@ impl Executor {
                 " ".to_string()
             };
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .iter()
                     .map(|value| self.apply_parameter_transform_value(value, transform))
                     .collect::<Vec<_>>()
@@ -165,7 +166,8 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| self.apply_parameter_transform_value(value, transform))
                     .unwrap_or_default(),
@@ -212,7 +214,8 @@ impl Executor {
         }
         if matches!(var_name, "@" | "*") {
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .iter()
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .collect::<Vec<_>>()
@@ -221,7 +224,8 @@ impl Executor {
         }
         if let Ok(index) = var_name.parse::<usize>() {
             return Some(
-                self.shell_state.positional_params
+                self.shell_state
+                    .positional_params
                     .get(index.saturating_sub(1))
                     .map(|value| apply_parameter_case_mod(value, operation, &pattern))
                     .unwrap_or_default(),
@@ -235,7 +239,8 @@ impl Executor {
             .or_else(|| var_name.strip_suffix("[*]"))
         {
             return Some(
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get(array_name)
                     .map(|value| {
                         let values = array_values(value)
@@ -276,7 +281,8 @@ impl Executor {
             .or_else(|| target_name.strip_suffix("[*]"))
         {
             return Some(
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .get(array_expr)
                     .map(|value| {
                         let values = array_values(value)
@@ -292,7 +298,9 @@ impl Executor {
             return Some(apply_parameter_case_mod(&value, operation, pattern));
         }
         if let Some(value) = self.shell_state.env_vars.get(target_name) {
-            if is_marked_array_var(&self.shell_state.env_vars, target_name) || is_array_storage(value) {
+            if is_marked_array_var(&self.shell_state.env_vars, target_name)
+                || is_array_storage(value)
+            {
                 return Some(
                     array_value_at(value, 0)
                         .map(|value| apply_parameter_case_mod(&value, operation, pattern))

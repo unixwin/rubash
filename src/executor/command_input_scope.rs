@@ -1,6 +1,6 @@
 use super::*;
 use crate::executor::fd_table::FdEntry;
-use crate::executor::markers::{DATA_DOLLAR};
+use crate::executor::markers::DATA_DOLLAR;
 
 /// Saved descriptor state for a numbered fd opened by a compound command's
 /// input redirection (see open_compound_numbered_input_redirects).
@@ -68,19 +68,30 @@ impl Executor {
         };
 
         let old_function_stdin = self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
-        let old_function_stdin_offset = self.shell_state.env_vars.get(FUNCTION_STDIN_OFFSET).cloned();
+        let old_function_stdin_offset = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN_OFFSET)
+            .cloned();
         // GNU do_redirection_internal (redir.c:767-955, RX_UNDOABLE) saves
         // fd 0 before a compound's `<` and restores it at scope end — even
         // undoing a permanent `exec 0<g` inside the body. Snapshot the slot
         // so async-spawn stdin materialization (and any fd-0 mutation the
         // body performs) unwinds with the compound.
         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
-        self.shell_state.env_vars.insert(FUNCTION_STDIN.to_string(), input);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
+            .insert(FUNCTION_STDIN.to_string(), input);
+        self.shell_state
+            .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
 
         let result = execute(self);
-        restore_optional_env_var(&mut self.shell_state.env_vars, FUNCTION_STDIN, old_function_stdin);
+        restore_optional_env_var(
+            &mut self.shell_state.env_vars,
+            FUNCTION_STDIN,
+            old_function_stdin,
+        );
         restore_optional_env_var(
             &mut self.shell_state.env_vars,
             FUNCTION_STDIN_OFFSET,
@@ -145,8 +156,16 @@ impl Executor {
                     fd,
                     entry: self.fd_table.entries.get(&fd).cloned(),
                     fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
-                    fd_stdin_offset: self.shell_state.env_vars.get(&fd_stdin_offset_key(fd)).cloned(),
-                    fd_dynamic: self.shell_state.env_vars.get(&fd_dynamic_input_key(fd)).cloned(),
+                    fd_stdin_offset: self
+                        .shell_state
+                        .env_vars
+                        .get(&fd_stdin_offset_key(fd))
+                        .cloned(),
+                    fd_dynamic: self
+                        .shell_state
+                        .env_vars
+                        .get(&fd_dynamic_input_key(fd))
+                        .cloned(),
                     fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
                 });
             }
@@ -163,9 +182,7 @@ impl Executor {
                 // `{ cmd; } N<&M` — dup2 the source descriptor into the
                 // scoped slot (e.g. `4<&0` saves stdin for the group).
                 crate::parser::RedirectKind::DuplicateInput => {
-                    if let Some((source_fd, move_source)) =
-                        redirect_target_fd_and_move(&target)
-                    {
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         let _ = self.fd_table.dup_input(fd, source_fd);
                         self.shell_state.env_vars.remove(&fd_closed_key(fd));
                         if move_source {
@@ -230,7 +247,11 @@ impl Executor {
                     self.fd_table.entries.remove(&saved.fd);
                 }
             }
-            restore_optional_env_var(&mut self.shell_state.env_vars, &fd_stdin_key(saved.fd), saved.fd_stdin);
+            restore_optional_env_var(
+                &mut self.shell_state.env_vars,
+                &fd_stdin_key(saved.fd),
+                saved.fd_stdin,
+            );
             restore_optional_env_var(
                 &mut self.shell_state.env_vars,
                 &fd_stdin_offset_key(saved.fd),
@@ -277,21 +298,13 @@ impl Executor {
         saved.push(SavedOutputFd {
             fd,
             entry: self.fd_table.entries.get(&fd).cloned(),
-            fd_output: self
-                .shell_state
-                .env_vars
-                .get(&fd_output_key(fd))
-                .cloned(),
+            fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
             fd_procsub: self
                 .shell_state
                 .env_vars
                 .get(&fd_output_process_substitution_key(fd))
                 .cloned(),
-            fd_closed: self
-                .shell_state
-                .env_vars
-                .get(&fd_closed_key(fd))
-                .cloned(),
+            fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
         });
     }
 
@@ -344,9 +357,7 @@ impl Executor {
                             .insert(fd_closed_key(fd), "1".to_string());
                         continue;
                     }
-                    if let Some((source_fd, move_source)) =
-                        redirect_target_fd_and_move(&target)
-                    {
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         if move_source {
                             self.save_compound_output_fd(saved, source_fd);
                         }
@@ -388,8 +399,7 @@ impl Executor {
                     }
                     self.save_compound_output_fd(saved, 1);
                     self.save_compound_output_fd(saved, 2);
-                    let append =
-                        redirect.kind == crate::parser::RedirectKind::CombinedAppend;
+                    let append = redirect.kind == crate::parser::RedirectKind::CombinedAppend;
                     if !append {
                         self.create_redirect_output(&target, redirect.clobber)?;
                     }
@@ -569,9 +579,7 @@ impl Executor {
         carrier: &Option<crate::parser::StdinBody>,
     ) -> String {
         match carrier {
-            Some(crate::parser::StdinBody::Preexpanded(text)) => {
-                decode_stdin_body_enq(text)
-            }
+            Some(crate::parser::StdinBody::Preexpanded(text)) => decode_stdin_body_enq(text),
             Some(crate::parser::StdinBody::NeedsExpansion(body)) => {
                 self.expand_heredoc_body_mut(body)
             }

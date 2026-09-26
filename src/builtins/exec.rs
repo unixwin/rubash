@@ -3,10 +3,10 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
+use crate::executor::markers::DATA_DOLLAR;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
-use crate::executor::markers::{DATA_DOLLAR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_BADUSAGE: i32 = 2;
@@ -246,7 +246,9 @@ where
         Ok(output) => {
             stdout.write_all(&output.stdout)?;
             stderr.write_all(&output.stderr)?;
-            Ok(crate::executor::wait_status::process_exit_status(&output.status))
+            Ok(crate::executor::wait_status::process_exit_status(
+                &output.status,
+            ))
         }
         Err(error) => {
             writeln!(

@@ -3,9 +3,9 @@
 //! GNU Bash source ownership:
 // - builtins/hash.def
 
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use std::collections::HashMap;
 use std::io::{self, Write};
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -348,8 +348,12 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
                 .split(DATA_DOLLAR)
                 .filter_map(|entry| {
                     let (name, rest) = entry.split_once('=')?;
-                    let (path, tail) = rest.split_once(crate::executor::markers::HASH_ENV_FIELD_SEP).unwrap_or((rest, "0"));
-                    let (hits, seq) = tail.split_once(crate::executor::markers::HASH_ENV_FIELD_SEP).unwrap_or((tail, "0"));
+                    let (path, tail) = rest
+                        .split_once(crate::executor::markers::HASH_ENV_FIELD_SEP)
+                        .unwrap_or((rest, "0"));
+                    let (hits, seq) = tail
+                        .split_once(crate::executor::markers::HASH_ENV_FIELD_SEP)
+                        .unwrap_or((tail, "0"));
                     Some((
                         name.to_string(),
                         (
@@ -364,12 +368,20 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
         .unwrap_or_default()
 }
 
-fn store_hash_table(env_vars: &mut HashMap<String, String>, table: &HashMap<String, (String, u32, u64)>) {
+fn store_hash_table(
+    env_vars: &mut HashMap<String, String>,
+    table: &HashMap<String, (String, u32, u64)>,
+) {
     env_vars.insert(
         HASH_TABLE.to_string(),
         table
             .iter()
-            .map(|(name, (path, hits, seq))| format!("{name}={path}{s}{hits}{s}{seq}", s = crate::executor::markers::HASH_ENV_FIELD_SEP))
+            .map(|(name, (path, hits, seq))| {
+                format!(
+                    "{name}={path}{s}{hits}{s}{seq}",
+                    s = crate::executor::markers::HASH_ENV_FIELD_SEP
+                )
+            })
             .collect::<Vec<_>>()
             .join(DATA_DOLLAR_STR),
     );

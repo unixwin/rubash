@@ -27,16 +27,12 @@ impl Executor {
     /// execute_command prints. Shared so a command-substitution body that
     /// parsed to an error node can report GNU's `syntax error near ...`
     /// lines without executing the broken ast.
-    pub(in crate::executor) fn report_command_parse_error(
-        &self,
-        cmd: &crate::parser::CommandNode,
-    ) {
+    pub(in crate::executor) fn report_command_parse_error(&self, cmd: &crate::parser::CommandNode) {
         let message = cmd
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str)
             .unwrap_or("unexpected token");
-        if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:")
-        {
+        if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:") {
             eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
             if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                 eprintln!(
@@ -115,7 +111,8 @@ impl Executor {
     pub fn complete_line(&self, line: &str, cursor: usize) -> Vec<String> {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
-            .shell_state.job_table
+            .shell_state
+            .job_table
             .jobs
             .values()
             .filter(|job| job.background)
@@ -158,10 +155,13 @@ impl Executor {
     /// directories used by the shell.
     pub fn set_shell_root(&mut self, root: impl AsRef<std::path::Path>) {
         let value = root.as_ref().to_string_lossy().into_owned();
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("__RUBASH_SHELL_ROOT".to_string(), value.clone());
         // deprecated: niu bridge, remove after niu stops reading
-        self.shell_state.env_vars.insert("WINUXSH_ROOT".to_string(), value);
+        self.shell_state
+            .env_vars
+            .insert("WINUXSH_ROOT".to_string(), value);
         self.mark_exported("WINUXSH_ROOT");
     }
 
@@ -193,7 +193,8 @@ impl Executor {
     }
 
     pub fn clear_compatible_shell_path(&mut self) {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
     }
 
@@ -250,7 +251,9 @@ impl Executor {
         } else {
             value.to_string()
         };
-        self.shell_state.env_vars.insert(name.to_string(), value.clone());
+        self.shell_state
+            .env_vars
+            .insert(name.to_string(), value.clone());
         if is_valid_process_env(name, &value) {
             set_process_env(name, &value);
         }
@@ -272,7 +275,8 @@ impl Executor {
         }
         if name == "__RUBASH_SCRIPT_NAME" {
             let source_value = if self
-                .shell_state.env_vars
+                .shell_state
+                .env_vars
                 .get("__RUBASH_TOP_LEVEL_NAME")
                 .is_some_and(|name| name.rsplit(['/', '\\']).next() == Some("bashdb-generated"))
                 && !value.starts_with('/')
@@ -299,7 +303,11 @@ impl Executor {
                 return;
             }
             self.shell_state.bash_source_stack = vec![source_value.clone()];
-            store_indexed_array(&mut self.shell_state.env_vars, "BASH_SOURCE", vec![source_value]);
+            store_indexed_array(
+                &mut self.shell_state.env_vars,
+                "BASH_SOURCE",
+                vec![source_value],
+            );
         }
     }
 
@@ -363,7 +371,8 @@ impl Executor {
 
     pub(crate) fn push_bash_source(&mut self, source: String) {
         let source = if self
-            .shell_state.env_vars
+            .shell_state
+            .env_vars
             .get("__RUBASH_TOP_LEVEL_NAME")
             .is_some_and(|name| name.rsplit(['/', '\\']).next() == Some("bashdb-generated"))
         {
@@ -415,7 +424,9 @@ impl Executor {
     /// dbg-support.sub's stack trace shows a "source" frame between
     /// sourced_fn and the sourcing function).
     pub(crate) fn push_source_call_frame(&mut self, call_line: String) {
-        self.shell_state.function_name_stack.insert(0, "source".to_string());
+        self.shell_state
+            .function_name_stack
+            .insert(0, "source".to_string());
         self.shell_state.bash_lineno_stack.insert(0, call_line);
         store_indexed_array(
             &mut self.shell_state.env_vars,
@@ -425,7 +436,13 @@ impl Executor {
     }
 
     pub(crate) fn pop_source_call_frame(&mut self) {
-        if self.shell_state.function_name_stack.first().map(String::as_str) == Some("source") {
+        if self
+            .shell_state
+            .function_name_stack
+            .first()
+            .map(String::as_str)
+            == Some("source")
+        {
             self.shell_state.function_name_stack.remove(0);
         }
         if !self.shell_state.bash_lineno_stack.is_empty() {
@@ -599,14 +616,20 @@ impl Executor {
     }
 
     pub fn aliases_snapshot(&self) -> HashMap<String, String> {
-        self.shell_state.aliases
+        self.shell_state
+            .aliases
             .iter()
             .map(|(name, alias)| (name.clone(), alias.value.clone()))
             .collect()
     }
 
     pub fn functions_snapshot(&self) -> Vec<String> {
-        let mut names = self.shell_state.functions.keys().cloned().collect::<Vec<_>>();
+        let mut names = self
+            .shell_state
+            .functions
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
         names.sort();
         names
     }
@@ -628,7 +651,8 @@ impl Executor {
     }
 
     pub fn inherit_process_stdin(&mut self) {
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert(INHERIT_PROCESS_STDIN.to_string(), "1".to_string());
     }
 
@@ -680,7 +704,8 @@ impl Executor {
         };
         if let Some(line) = line {
             let line = line.to_string();
-            self.shell_state.env_vars
+            self.shell_state
+                .env_vars
                 .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
             if command_needs_process_line_env(cmd) {
                 set_process_env("__RUBASH_CURRENT_LINE", line);
@@ -726,7 +751,8 @@ impl Executor {
         // `a | b` text. bash_command_source_text is that renderer;
         // bash_command_text only knows simple commands.
         let command = bash_command_source_text(cmd);
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("__RUBASH_LAST_COMMAND".to_string(), command.clone());
         // GNU the_printed_command_except_trap is refreshed unconditionally
         // for every executed command (execute_cmd.c compound heads), and
@@ -734,7 +760,8 @@ impl Executor {
         // "only when the command text names BASH_COMMAND" gate. Indirect
         // references like ${!name} resolve through the same dynamic var, so
         // the command text is always recorded.
-        self.shell_state.env_vars
+        self.shell_state
+            .env_vars
             .insert("__RUBASH_CURRENT_COMMAND".to_string(), command);
     }
 
@@ -750,7 +777,11 @@ impl Executor {
     }
 
     pub(in crate::executor) fn pipestatus_values(&self) -> Vec<String> {
-        self.shell_state.pipestatus.iter().map(i32::to_string).collect()
+        self.shell_state
+            .pipestatus
+            .iter()
+            .map(i32::to_string)
+            .collect()
     }
 
     pub fn diagnostic_prefix(&self) -> String {
@@ -762,7 +793,11 @@ impl Executor {
         // Interactive mode (shell reading input from a terminal) omits the
         // line segment entirely (error.c:88-120 get_name_for_error returns
         // only base_pathname(shell_name), no line number).
-        if self.shell_state.env_vars.contains_key("__RUBASH_INTERACTIVE") {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_INTERACTIVE")
+        {
             // Interactive mode: report only the shell name, no line segment.
             // GNU error.c:88-120 (get_name_for_error) for interactive shells
             // returns base_pathname(shell_name) with no line number.
@@ -805,7 +840,11 @@ impl Executor {
             self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
             self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"),
         ) {
-            if self.shell_state.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            if self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_EVAL_CONTEXT")
+            {
                 return format!("{script}: eval: line {line}: ");
             }
             if is_c {
@@ -829,7 +868,11 @@ impl Executor {
     /// the outer line_number (evalstring.c push_stream(0)), so `line` is the
     /// script line where the substitution's input ran out.
     pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
-        if self.shell_state.env_vars.contains_key("__RUBASH_INTERACTIVE") {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_INTERACTIVE")
+        {
             // parser_error's interactive branch prints only the shell name.
             let name = self
                 .shell_state
@@ -862,7 +905,11 @@ impl Executor {
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // error.c yy_input_name: inside `eval` the input stream name is
         // "eval" and overrides the -c tag (`bash: eval: line N:`).
-        if self.shell_state.env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_EVAL_CONTEXT")
+        {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return format!("{script}: eval: line {line}: ");
             }

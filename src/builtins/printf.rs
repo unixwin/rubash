@@ -16,13 +16,13 @@ mod spec;
 pub(crate) mod time;
 mod value;
 
+use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use escape::expand_format_escape;
 use identifier::valid_identifier;
 use spec::{parse_format_spec, resolve_dynamic_format_args, valid_format_specifier};
 use time::format_time_value;
 use value::format_value;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
-use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -110,7 +110,11 @@ where
     // the operand text so it never leaks into format/arguments.
     let stripped_args: Vec<String> = args
         .into_iter()
-        .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1.to_string())
+        .map(|arg| {
+            crate::builtins::arrayref::take_arrayref_flag(arg)
+                .1
+                .to_string()
+        })
         .collect();
     let args: Vec<&str> = stripped_args.iter().map(String::as_str).collect();
     let mut output_var = None;
@@ -166,10 +170,9 @@ where
                 // diagnostic names `a[80's]`, not its carrier bytes.
                 let display = parse_printf_array_target(name)
                     .map(|(base, subscript)| {
-                        let key = crate::executor::arithmetic::decode_arithmetic_assoc_key(
-                            subscript,
-                        )
-                        .unwrap_or_else(|| subscript.to_string());
+                        let key =
+                            crate::executor::arithmetic::decode_arithmetic_assoc_key(subscript)
+                                .unwrap_or_else(|| subscript.to_string());
                         format!("{base}[{key}]")
                     })
                     .unwrap_or_else(|| name.to_string());
@@ -239,7 +242,6 @@ fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     }
     "rubash: ".to_string()
 }
-
 
 fn valid_printf_array_target(name: &str, env_vars: &HashMap<String, String>) -> bool {
     // GNU printf.def:305: valid_array_reference(vname, arrayflags) with the

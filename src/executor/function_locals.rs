@@ -42,7 +42,10 @@ impl Executor {
             if name == "OPTIND" && !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
                 scope.insert(
                     "__RUBASH_GETOPTS_OFFSET".to_string(),
-                    self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
+                    self.shell_state
+                        .env_vars
+                        .get("__RUBASH_GETOPTS_OFFSET")
+                        .cloned(),
                 );
                 self.shell_state.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
             }
@@ -55,7 +58,8 @@ impl Executor {
     /// when the name is already local at this frame.
     pub(in crate::executor) fn save_frame_local_name(&mut self, name: &str) {
         if self
-            .shell_state.local_var_scopes
+            .shell_state
+            .local_var_scopes
             .last()
             .is_none_or(|scope| scope.contains_key(name))
         {
@@ -76,7 +80,11 @@ impl Executor {
         if name == "OPTIND" {
             if let Some(scope) = self.shell_state.local_var_scopes.last_mut() {
                 if !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
-                    let saved = self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned();
+                    let saved = self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_GETOPTS_OFFSET")
+                        .cloned();
                     scope.insert("__RUBASH_GETOPTS_OFFSET".to_string(), saved);
                 }
             }
@@ -117,7 +125,10 @@ impl Executor {
             if name == "OPTIND" && !scope.contains_key("__RUBASH_GETOPTS_OFFSET") {
                 scope.insert(
                     "__RUBASH_GETOPTS_OFFSET".to_string(),
-                    self.shell_state.env_vars.get("__RUBASH_GETOPTS_OFFSET").cloned(),
+                    self.shell_state
+                        .env_vars
+                        .get("__RUBASH_GETOPTS_OFFSET")
+                        .cloned(),
                 );
                 self.shell_state.env_vars.remove("__RUBASH_GETOPTS_OFFSET");
             }
@@ -193,7 +204,8 @@ impl Executor {
             .map(|name| {
                 format!(
                     "{name}={}",
-                    crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name) as u8
+                    crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name)
+                        as u8
                 )
             })
             .collect::<Vec<_>>()
@@ -210,7 +222,9 @@ impl Executor {
                 continue;
             };
             let enabled = state == "1";
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name) == enabled {
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name)
+                == enabled
+            {
                 continue;
             }
             crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
@@ -248,13 +262,19 @@ impl Executor {
             }
         }
         let attr_scope = self.shell_state.local_attr_scopes.pop().unwrap_or_default();
-        let typed_scope = self.shell_state.local_typed_scopes.pop().unwrap_or_default();
+        let typed_scope = self
+            .shell_state
+            .local_typed_scopes
+            .pop()
+            .unwrap_or_default();
         let mut names = HashSet::new();
         for (name, value) in scope {
             names.insert(name.clone());
             match value {
                 Some(value) => {
-                    self.shell_state.env_vars.insert(name.clone(), value.clone());
+                    self.shell_state
+                        .env_vars
+                        .insert(name.clone(), value.clone());
                     // Internal pseudo-variables (e.g. the getopts scan
                     // offset saved alongside a local OPTIND) must not
                     // leak into the child process environment.
@@ -345,7 +365,8 @@ impl Executor {
     }
 
     pub(in crate::executor) fn visible_local_scope_index(&self, name: &str) -> Option<usize> {
-        self.shell_state.local_var_scopes
+        self.shell_state
+            .local_var_scopes
             .iter()
             .rposition(|scope| scope.contains_key(name))
     }
@@ -362,15 +383,25 @@ impl Executor {
             let Some(scope) = self.shell_state.local_var_scopes.get_mut(saved.scope_index) else {
                 continue;
             };
-            scope.insert(saved.name.clone(), self.shell_state.env_vars.get(&saved.name).cloned());
-            let Some(attr_scope) = self.shell_state.local_attr_scopes.get_mut(saved.scope_index) else {
+            scope.insert(
+                saved.name.clone(),
+                self.shell_state.env_vars.get(&saved.name).cloned(),
+            );
+            let Some(attr_scope) = self
+                .shell_state
+                .local_attr_scopes
+                .get_mut(saved.scope_index)
+            else {
                 continue;
             };
             attr_scope.insert(
                 saved.name.clone(),
                 capture_var_attrs(&self.shell_state.env_vars, &saved.name),
             );
-            let typed_scope = self.shell_state.local_typed_scopes.get_mut(saved.scope_index);
+            let typed_scope = self
+                .shell_state
+                .local_typed_scopes
+                .get_mut(saved.scope_index);
             if let Some(typed_scope) = typed_scope {
                 typed_scope.insert(
                     saved.name.clone(),
@@ -381,8 +412,16 @@ impl Executor {
             if let Some(variable) = saved.local_typed {
                 let _ = self.shell_state.variables.set(&saved.name, variable);
             }
-            restore_optional_shell_var(&mut self.shell_state.env_vars, &saved.name, saved.local_value);
-            set_var_attrs(&mut self.shell_state.env_vars, &saved.name, saved.local_attrs);
+            restore_optional_shell_var(
+                &mut self.shell_state.env_vars,
+                &saved.name,
+                saved.local_value,
+            );
+            set_var_attrs(
+                &mut self.shell_state.env_vars,
+                &saved.name,
+                saved.local_attrs,
+            );
         }
     }
 }

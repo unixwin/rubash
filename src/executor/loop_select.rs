@@ -76,7 +76,11 @@ impl Executor {
         // each per-iteration debug fire; without the reset the fire inherits
         // the last body command's line (dbg-support.tests:146-148 nested for
         // loops report the for head's line on every iteration).
-        let for_line = self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE").cloned();
+        let for_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
         for value in values {
             // GNU execute_cmd.c:3062-3063 (eval_arith... execute_for_command
             // iteration loop): `set -x` traces the for head once per
@@ -91,7 +95,8 @@ impl Executor {
             // inherit it, execute_cmd.c:5270).
             if self.debug_trap_in_scope() {
                 if let Some(line) = &for_line {
-                    self.shell_state.env_vars
+                    self.shell_state
+                        .env_vars
                         .insert("__RUBASH_CURRENT_LINE".to_string(), line.clone());
                 }
                 let _ = self.run_debug_trap(&for_text)?;
@@ -107,7 +112,11 @@ impl Executor {
             // (nameref5.sub: `typeset -n v=v1; for v in v1 v2` prints
             // "v1: 1" "v2: 2"). A non-nameref loop variable uses plain
             // bind_variable semantics.
-            let bound_name = if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &for_command.variable) {
+            let bound_name = if is_marked_var(
+                &self.shell_state.env_vars,
+                NAMEREF_VARS,
+                &for_command.variable,
+            ) {
                 let value_valid = is_shell_name(&value) || parse_array_subscript(&value).is_some();
                 if !value_valid {
                     eprintln!(
@@ -118,7 +127,11 @@ impl Executor {
                     self.exit_code = 1;
                     return Ok(());
                 }
-                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &for_command.variable) {
+                if is_marked_var(
+                    &self.shell_state.env_vars,
+                    READONLY_VARS,
+                    &for_command.variable,
+                ) {
                     eprintln!(
                         "{}{}: readonly variable",
                         self.diagnostic_prefix(),
@@ -127,7 +140,8 @@ impl Executor {
                     self.exit_code = 1;
                     return Ok(());
                 }
-                self.shell_state.env_vars
+                self.shell_state
+                    .env_vars
                     .insert(for_command.variable.clone(), value.clone());
                 for_command.variable.clone()
             } else {

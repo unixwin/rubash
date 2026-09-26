@@ -1,0 +1,13 @@
+#!/bin/sh
+# Enforce rustfmt on every commit (owner directive 2026-09-26: fmt must be a
+# commit hook). Fails the commit when any Rust source is not formatted.
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "pre-commit: cargo not found; skipping rustfmt check" >&2
+    exit 0
+fi
+if ! cargo fmt --check >/dev/null 2>&1; then
+    echo "pre-commit: rustfmt check failed. Run 'cargo fmt' and re-stage." >&2
+    cargo fmt --check 2>&1 | head -20 >&2
+    exit 1
+fi
+exit 0

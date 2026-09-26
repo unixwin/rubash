@@ -9,10 +9,10 @@ pub(crate) use support::is_supported_option;
 pub(crate) use support::SHOPT_OPTIONS;
 use support::{default_state, print_all_shopts, print_shopt, print_shopts_by_state};
 
+use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;

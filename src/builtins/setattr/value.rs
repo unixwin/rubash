@@ -4,12 +4,11 @@ use std::env;
 use super::marks::marked_vars;
 use super::COMPOUND_ASSIGNMENT_MARKER;
 use super::{ARRAY_VARS, ASSOC_VARS, INTEGER_VARS};
-use crate::builtins::declare::storage::{
-    format_assoc_storage, format_indexed_array_storage, indexed_array_entries,
-    parse_assoc_words,
-};
 use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::builtins::declare::storage::{
+    format_assoc_storage, format_indexed_array_storage, indexed_array_entries, parse_assoc_words,
+};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 pub(super) fn is_array_value(value: &str) -> bool {
     value.starts_with('(') && value.ends_with(')')
@@ -77,8 +76,7 @@ pub(super) fn array_attribute_assignment_value(
     };
     let assoc_target = assoc
         || marked_vars(env_vars, ASSOC_VARS).contains(name)
-        || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS)
-            .contains(name);
+        || marked_vars(env_vars, crate::executor::types::ASSOC_128_VARS).contains(name);
     let array_target = array
         || marked_vars(env_vars, ARRAY_VARS).contains(name)
         || env_vars.get(name).is_some_and(|current| {

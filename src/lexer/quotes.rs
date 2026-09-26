@@ -30,8 +30,10 @@ pub(crate) const ANSI_C_DQUOTE_MARKER: char = crate::executor::markers::ANSI_C_D
 
 /// `&str` forms for the `.replace(...)` restore sites, whose receivers are
 /// already `String` and therefore require `&str` arguments.
-pub(crate) const ANSI_C_QUOTE_MARKER_STR: &'static str = crate::executor::markers::ANSI_C_QUOTE_MARKER_STR;
-pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &'static str = crate::executor::markers::ANSI_C_DQUOTE_MARKER_STR;
+pub(crate) const ANSI_C_QUOTE_MARKER_STR: &'static str =
+    crate::executor::markers::ANSI_C_QUOTE_MARKER_STR;
+pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &'static str =
+    crate::executor::markers::ANSI_C_DQUOTE_MARKER_STR;
 
 pub(crate) fn remove_shell_quotes(raw: &str) -> String {
     remove_shell_quotes_with_posix(raw, false)
@@ -207,8 +209,21 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                     out.push(crate::executor::markers::DATA_BACKSLASH);
                 } else if matches!(
                     escaped,
-                    '*' | '?' | '[' | ']' | '@' | '+' | '!' | '(' | ')' | '|' | '/' | '-'
-                        | '^' | '.' | '=' | ':'
+                    '*' | '?'
+                        | '['
+                        | ']'
+                        | '@'
+                        | '+'
+                        | '!'
+                        | '('
+                        | ')'
+                        | '|'
+                        | '/'
+                        | '-'
+                        | '^'
+                        | '.'
+                        | '='
+                        | ':'
                 ) {
                     // GNU parse.y:5694-5706 got_escaped_character marks EVERY
                     // backslash-quoted char with CTLESC; the glob layer relies
@@ -603,7 +618,17 @@ mod tests {
         // quotes is ordinary data, carried with the same protected marker
         // as an escaped quote so expansion never re-reads it as a
         // single-quote delimiter.
-        assert_eq!(remove_shell_quotes("\"a:'b' c\""), format!("{}{}{}{}{}", "a:", crate::executor::markers::DATA_SQUOTE_STR, "b", crate::executor::markers::DATA_SQUOTE_STR, " c"));
+        assert_eq!(
+            remove_shell_quotes("\"a:'b' c\""),
+            format!(
+                "{}{}{}{}{}",
+                "a:",
+                crate::executor::markers::DATA_SQUOTE_STR,
+                "b",
+                crate::executor::markers::DATA_SQUOTE_STR,
+                " c"
+            )
+        );
     }
 }
 

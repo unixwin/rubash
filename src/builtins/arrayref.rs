@@ -10,8 +10,8 @@
 //! (subst.c:2086 skip_matched_pair, flags=0), so `a[80's]` — an unbalanced
 //! single quote — is not a valid reference (assoc9.sub `read a[$b]`).
 
+use crate::executor::markers::DATA_DOLLAR;
 use std::collections::HashMap;
-use crate::executor::markers::{DATA_DOLLAR};
 
 /// In-band W_ARRAYREF carrier (GNU execute_cmd.c:4366 fix_arrayref_words):
 /// an operand word of an ARRAYREF_BUILTIN whose pre-expansion text passed
@@ -39,7 +39,15 @@ pub(crate) fn take_arrayref_flag(word: &str) -> (bool, &str) {
 pub(crate) fn is_arrayref_builtin(name: &str) -> bool {
     matches!(
         name,
-        "declare" | "let" | "local" | "printf" | "read" | "test" | "[" | "typeset" | "unset"
+        "declare"
+            | "let"
+            | "local"
+            | "printf"
+            | "read"
+            | "test"
+            | "["
+            | "typeset"
+            | "unset"
             | "wait"
     )
 }

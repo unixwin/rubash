@@ -44,10 +44,14 @@ impl Executor {
             let stdout_target = self.expand_redirect_target(stdout_redirect);
             let stderr_target = self.expand_redirect_target(stderr_redirect);
             if stdout_target == stderr_target {
-                let mut file = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .open(shell_path_to_windows(&stdout_target, &self.shell_state.env_vars))?;
+                let mut file =
+                    OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .open(shell_path_to_windows(
+                            &stdout_target,
+                            &self.shell_state.env_vars,
+                        ))?;
                 file.seek(SeekFrom::End(0))?;
                 process.stderr(Stdio::from(file.try_clone()?));
                 process.stdout(Stdio::from(file));
@@ -253,14 +257,12 @@ impl Executor {
         fd: u32,
         stdout: bool,
     ) -> Result<bool, ExecuteError> {
-        let Some(FdWriteEndpoint::CoprocStdin { fd: pipe, .. }) =
-            self.fd_table.write_endpoint(fd)
+        let Some(FdWriteEndpoint::CoprocStdin { fd: pipe, .. }) = self.fd_table.write_endpoint(fd)
         else {
             return Ok(false);
         };
-        let dup = crate::fd::duplicate_handle_inheritable(pipe.handle).map_err(|_| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed")
-        })?;
+        let dup = crate::fd::duplicate_handle_inheritable(pipe.handle)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "coprocess input is closed"))?;
         let writer = crate::fd::handle_to_file(dup);
         if stdout {
             process.stdout(Stdio::from(writer));

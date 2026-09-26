@@ -117,8 +117,8 @@ impl<'a> Lexer<'a> {
                 }
                 _ => {}
             }
-            token_boundary = c.is_whitespace()
-                || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+            token_boundary =
+                c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         }
     }
 
@@ -1058,8 +1058,8 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             }
             _ => {}
         }
-        token_boundary = ch.is_whitespace()
-            || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        token_boundary =
+            ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
     }
     None

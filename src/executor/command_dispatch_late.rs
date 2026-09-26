@@ -21,7 +21,11 @@ impl Executor {
         // never consults it; strip so operand text compares clean.
         let mut args: Vec<String> = args
             .iter()
-            .map(|arg| crate::builtins::arrayref::take_arrayref_flag(arg).1.to_string())
+            .map(|arg| {
+                crate::builtins::arrayref::take_arrayref_flag(arg)
+                    .1
+                    .to_string()
+            })
             .collect();
         let mut index = 0;
         while index + 1 < args.len() {
