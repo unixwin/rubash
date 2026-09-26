@@ -1,6 +1,0 @@
-test	classification	evidence	next_action
-arith	runner-fixture	主体 stdout 304 lines mostly match; nested sections depend on ./bash -c and Rubash diagnostics differ	add compatible nested bash launcher and rerun before semantic fix
-arith-for	runner-fixture-plus-parser-candidate	fixture recursion emits -c command-not-found; common direct loop output matches, malformed EOF still needs isolation	rerun with launcher fixture, then isolate parser case
-invocation	runner-fixture	current ledger row is not a shell-invocation semantic result; src/invocation.rs is not wired into main CLI	do not count as semantic fix until CLI integration and focused comparison exist
-assoc	semantic-fixed-pending-ledger-rerun	declare assoc[key]=value on an existing associative array silently dropped the element; focused Bash/Rubash probe now preserves key/value	run assoc.tests with tracked runner; remaining declaration ordering, fixture recho, PATH, and expansion rows need separate classification
-case	semantic-fixed-pending-ledger-rerun	readonly arithmetic case pattern increment mutated xx and matched; Bash/Rubash minimal probe now matches stdout, stderr, and status	commit arithmetic readonly lvalue guard; rerun case.tests with the tracked runner
