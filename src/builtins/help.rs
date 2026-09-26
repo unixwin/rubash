@@ -1,11 +1,22 @@
 //! help module.
 //!
 //! GNU Bash source ownership:
-// - builtins/help.def
+// - builtins/help.def (help_builtin 91-190, show_longdoc 224-243,
+//   show_desc 245-283, show_manpage 287-368, dispcolumn 371-405)
+// - builtins/bashgetopt.c (internal_getopt 60-130 with NOTOPT at :37)
+// - builtins/common.h (ISHELP at :27)
+// - lib/glob/glob_loop.c (internal_glob_pattern_p 24-77 via glob_pattern_p)
+// - builtins/mkbuiltins.c (extraction of the doc table; see help_texts.rs)
 
 use std::io::{self, Write};
 
+#[path = "help_texts.rs"]
+mod help_texts;
+
+use help_texts::{HelpTopic, HELP_TOPICS_TABLE};
+
 const EXECUTION_SUCCESS: i32 = 0;
+const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
 // Consumed previously by the completion helptopic action, which now carries
@@ -115,176 +126,309 @@ where
     W: Write,
     E: Write,
 {
-    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    if args.first() == Some(&"--") {
-        args.remove(0);
+    // builtins/bashgetopt.c internal_getopt(list, "dms"): option processing
+    // stops at the first non-option word (NOTOPT at bashgetopt.c:37 also
+    // treats a bare `-` as a non-option, so `help -` searches for the topic
+    // `-`); `--` ends options; a `--help` word in option position (ISHELP,
+    // common.h:27) makes CASE_HELPOPT print this builtin's own help and
+    // return EX_USAGE (help.def:114).  Invalid option letters are reported
+    // one at a time by sh_invalidopt (bashgetopt.c:107).
+    let mut dflag = false;
+    let mut sflag = false;
+    let mut mflag = false;
+    let mut patterns: Vec<&str> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index].as_str();
+        if !word.starts_with('-') || word == "-" {
+            // Non-option word: it and every remaining word are the pattern
+            // list (loptend); no further option parsing happens.
+            patterns = args[index..].iter().map(String::as_str).collect();
+            break;
+        }
+        if word == "--help" {
+            if let Some(topic) = find_topic("help") {
+                print_topic_long(topic, stdout)?;
+            }
+            return Ok(EX_USAGE);
+        }
+        if word == "--" {
+            patterns = args[index + 1..].iter().map(String::as_str).collect();
+            break;
+        }
+        for option in word[1..].chars() {
+            match option {
+                'd' => dflag = true,
+                'm' => mflag = true,
+                's' => sflag = true,
+                _ => {
+                    writeln!(
+                        stderr,
+                        "{}help: -{option}: invalid option",
+                        diagnostic_prefix()
+                    )?;
+                    writeln!(stderr, "help: usage: help [-dms] [pattern ...]")?;
+                    return Ok(EX_USAGE);
+                }
+            }
+        }
+        index += 1;
     }
-
-    if args
-        .iter()
-        .any(|arg| arg.starts_with('-') && !matches!(*arg, "-s" | "-d" | "-m"))
-    {
-        writeln!(stderr, "{}help: -x: invalid option", diagnostic_prefix())?;
-        writeln!(stderr, "help: usage: help [-dms] [pattern ...]")?;
-        return Ok(EX_USAGE);
-    }
-
-    let short = args.contains(&"-s");
-    let desc = args.contains(&"-d");
-    let manpage = args.contains(&"-m");
-    let patterns: Vec<&str> = args
-        .into_iter()
-        .filter(|arg| !arg.starts_with('-'))
-        .collect();
 
     if patterns.is_empty() {
         print_help_list(stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
-    if short {
-        print_short_help(&patterns, stdout)?;
-        return Ok(EXECUTION_SUCCESS);
-    }
-
-    if desc {
-        print_desc_help(&patterns, stdout)?;
-        return Ok(EXECUTION_SUCCESS);
-    }
-
-    if manpage {
-        print_manpage_help(&patterns, stdout)?;
-        return Ok(EXECUTION_SUCCESS);
-    }
-
-    print_long_help(&patterns, stdout, stderr)?;
-    Ok(EXECUTION_SUCCESS)
-}
-
-fn print_short_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    match patterns {
-        ["help"] => writeln!(stdout, "help: help [-dms] [pattern ...]")?,
-        ["builtin", "shift"] => {
-            writeln!(stdout, "builtin: builtin [shell-builtin [arg ...]]")?;
-            writeln!(stdout, "shift: shift [n]")?;
-        }
-        ["read*"] => {
-            writeln!(stdout, "Shell commands matching keyword `read*'")?;
-            writeln!(stdout)?;
-            print_read_synopses(stdout)?;
-        }
-        ["rea"] => print_read_synopses(stdout)?,
-        _ => {}
-    }
-    Ok(())
-}
-
-fn print_read_synopses<W>(stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    writeln!(stdout, "read: read [-Eers] [-a array] [-d delim] [-i text] [-n nchars] [-N nchars] [-p prompt] [-t timeout] [-u fd] [name ...]")?;
-    writeln!(stdout, "readarray: readarray [-d delim] [-n count] [-O origin] [-s count] [-t] [-u fd] [-C callback] [-c quantum] [array]")?;
-    writeln!(
-        stdout,
-        "readonly: readonly [-aAf] [name[=value] ...] or readonly -p"
-    )
-}
-
-fn print_desc_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    if patterns == ["shift"] {
-        writeln!(stdout, "shift - Shift positional parameters.")?;
-    }
-    Ok(())
-}
-
-fn print_long_help<W, E>(patterns: &[&str], stdout: &mut W, stderr: &mut E) -> io::Result<()>
-where
-    W: Write,
-    E: Write,
-{
-    match patterns {
-        [":"] => {
-            writeln!(stdout, ":: :")?;
-            writeln!(stdout, "    Null command.")?;
-            writeln!(stdout, "    ")?;
-            writeln!(stdout, "    No effect; the command does nothing.")?;
-            writeln!(stdout, "    ")?;
-            writeln!(stdout, "    Exit Status:")?;
-            writeln!(stdout, "    Always succeeds.")?;
-        }
-        ["bash"] => {
-            writeln!(
-                stderr,
-                "{}help: no help topics match `bash'.  Try `help help' or `man -k bash' or `info bash'.",
-                diagnostic_prefix()
-            )?;
-        }
-        #[cfg(windows)]
-        ["sudo"] => {
-            crate::builtins::sudo::print_help_with_io(stdout)?;
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn print_manpage_help<W>(patterns: &[&str], stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    if patterns == [":"] {
-        writeln!(stdout, "NAME")?;
-        writeln!(stdout, "    : - Null command.")?;
-        writeln!(stdout)?;
-        writeln!(stdout, "SYNOPSIS")?;
-        writeln!(stdout, "    :")?;
-        writeln!(stdout)?;
-        writeln!(stdout, "DESCRIPTION")?;
-        writeln!(stdout, "    Null command.")?;
-        writeln!(stdout, "    ")?;
-        writeln!(stdout, "    No effect; the command does nothing.")?;
-        writeln!(stdout, "    ")?;
-        writeln!(stdout, "    Exit Status:")?;
-        writeln!(stdout, "    Always succeeds.")?;
-        writeln!(stdout)?;
-        writeln!(stdout, "SEE ALSO")?;
-        writeln!(stdout, "    bash(1)")?;
-        writeln!(stdout)?;
-        writeln!(stdout, "IMPLEMENTATION")?;
+    // help.def:131-136: when the first pattern word is a glob pattern,
+    // announce the search (ngettext picks keyword/keywords on whether the
+    // whole word list has more than one member).
+    if glob_pattern_p(patterns[0]) {
+        let keyword = if patterns.len() > 1 {
+            "keywords"
+        } else {
+            "keyword"
+        };
         writeln!(
             stdout,
-            "    Copyright (C) 2025 Free Software Foundation, Inc."
+            "Shell commands matching {keyword} `{}'",
+            patterns.join(", ")
         )?;
         writeln!(stdout)?;
     }
+
+    // help.def:138-181: for each pattern, pass 1 takes exact or pattern
+    // (strmatch, FNMATCH_EXTFLAG) matches over shell_builtins order; pass 2
+    // runs only when pass 1 found nothing for that pattern and takes prefix
+    // matches (strncmp of plen bytes).
+    let mut match_found = 0usize;
+    let last_pattern = patterns[patterns.len() - 1];
+    for &pattern in &patterns {
+        let mut this_found = false;
+        for pass in 1..=2u8 {
+            for topic in HELP_TOPICS_TABLE.iter() {
+                let matched = if pass == 1 {
+                    topic.name == pattern
+                        || crate::executor::conditional::shell_pattern_matches(pattern, topic.name)
+                } else {
+                    topic.name.starts_with(pattern)
+                };
+                if !matched {
+                    continue;
+                }
+                this_found = true;
+                match_found += 1;
+                // help.def:161-176: -d wins over -m; without them print
+                // `name: short_doc', and the long doc unless -s.
+                if dflag {
+                    show_desc(topic, stdout)?;
+                } else if mflag {
+                    show_manpage(topic, stdout)?;
+                } else {
+                    print_topic_synopsis(topic, stdout)?;
+                    if !sflag {
+                        print_topic_longdoc(topic, stdout)?;
+                    }
+                }
+            }
+            if pass == 1 && this_found {
+                break;
+            }
+        }
+    }
+
+    // help.def:183-187: no topic matched any pattern; the diagnostic names
+    // the last pattern searched.  (`help bash' deliberately does nothing
+    // special, per the comment at help.def:129.)
+    if match_found == 0 {
+        if let Some(status) = try_windows_help_extension(&patterns, dflag, mflag, sflag, stdout)? {
+            return Ok(status);
+        }
+        writeln!(
+            stderr,
+            "{}help: no help topics match `{last_pattern}'.  Try `help help' or `man -k {last_pattern}' or `info {last_pattern}'.",
+            diagnostic_prefix()
+        )?;
+        return Ok(EXECUTION_FAILURE);
+    }
+
+    Ok(EXECUTION_SUCCESS)
+}
+
+// rubash windows extension preserved from the previous implementation: the
+// windows-only `sudo` builtin keeps its hand-written help page for the exact
+// long-form invocation `help sudo`.  GNU has no such table entry.
+#[cfg(windows)]
+fn try_windows_help_extension<W>(
+    patterns: &[&str],
+    dflag: bool,
+    mflag: bool,
+    sflag: bool,
+    stdout: &mut W,
+) -> io::Result<Option<i32>>
+where
+    W: Write,
+{
+    if patterns == ["sudo"] && !dflag && !mflag && !sflag {
+        crate::builtins::sudo::print_help_with_io(stdout)?;
+        return Ok(Some(EXECUTION_SUCCESS));
+    }
+    Ok(None)
+}
+
+#[cfg(not(windows))]
+fn try_windows_help_extension<W>(
+    _patterns: &[&str],
+    _dflag: bool,
+    _mflag: bool,
+    _sflag: bool,
+    _stdout: &mut W,
+) -> io::Result<Option<i32>>
+where
+    W: Write,
+{
+    Ok(None)
+}
+
+fn find_topic(name: &str) -> Option<&'static HelpTopic> {
+    HELP_TOPICS_TABLE.iter().find(|topic| topic.name == name)
+}
+
+// help.def:172: `name: short_doc'.
+fn print_topic_synopsis<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(stdout, "{}: {}", topic.name, topic.short_doc)
+}
+
+// help.def:224-243 show_longdoc: every long-documentation line is printed
+// with a BASE_INDENT (builtins.h:50) four-space prefix; blank documentation
+// lines render as four spaces.  A doc string that mkbuiltins left ending in
+// `\n` (a `#`-guard line after the last text line) renders as one final
+// EMPTY line instead (see help_texts.rs).
+fn print_topic_longdoc<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    for line in topic.doc {
+        writeln!(stdout, "    {line}")?;
+    }
+    if topic.trailing_newline {
+        writeln!(stdout)?;
+    }
     Ok(())
+}
+
+// builtin_help (help.def:192-204), also used by `help --help`.
+fn print_topic_long<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    print_topic_synopsis(topic, stdout)?;
+    print_topic_longdoc(topic, stdout)
+}
+
+// help.def:245-283 show_desc: `name - <first doc line>'.
+fn show_desc<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(
+        stdout,
+        "{} - {}",
+        topic.name,
+        topic.doc.first().copied().unwrap_or("")
+    )
+}
+
+// help.def:287-368 show_manpage: pseudo-manpage rendering.  The version,
+// copyright, and license lines come from version.c:90-94 show_shell_version
+// and version.c:50-51 bash_copyright/bash_license (the license string itself
+// ends in a newline, so the page ends with a blank line).
+fn show_manpage<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    writeln!(stdout, "NAME")?;
+    writeln!(
+        stdout,
+        "    {} - {}",
+        topic.name,
+        topic.doc.first().copied().unwrap_or("")
+    )?;
+    writeln!(stdout)?;
+    writeln!(stdout, "SYNOPSIS")?;
+    writeln!(stdout, "    {}", topic.short_doc)?;
+    writeln!(stdout)?;
+    writeln!(stdout, "DESCRIPTION")?;
+    print_topic_longdoc(topic, stdout)?;
+    writeln!(stdout)?;
+    writeln!(stdout, "SEE ALSO")?;
+    writeln!(stdout, "    bash(1)")?;
+    writeln!(stdout)?;
+    writeln!(stdout, "IMPLEMENTATION")?;
+    writeln!(
+        stdout,
+        "    GNU bash, version 5.3.0(1)-release ({})",
+        crate::executor::machtype_value()
+    )?;
+    writeln!(
+        stdout,
+        "    Copyright (C) 2025 Free Software Foundation, Inc."
+    )?;
+    writeln!(
+        stdout,
+        "    License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>"
+    )?;
+    writeln!(stdout)
+}
+
+// lib/glob/glob_loop.c internal_glob_pattern_p (24-77), reached through
+// glob_pattern_p (lib/glob/glob.c:155): `*' and `?' anywhere, a `]' that
+// closes an earlier `[' (bracket expressions must be complete), and the
+// extended-glob openers `+(' `@(' `!(' make the word a pattern; a backslash
+// hides the following character, and a trailing backslash is not a pattern.
+fn glob_pattern_p(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut bracket_open = false;
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '?' | '*' => return true,
+            '[' => bracket_open = true,
+            ']' => {
+                if bracket_open {
+                    return true;
+                }
+            }
+            '+' | '@' | '!' => {
+                if chars.get(index + 1) == Some(&'(') {
+                    return true;
+                }
+            }
+            '\\' => {
+                if index + 1 < chars.len() {
+                    index += 1;
+                } else {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(crate) fn print_shift_help_with_io<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
 {
-    writeln!(stdout, "shift: shift [n]")?;
-    writeln!(stdout, "    Shift positional parameters.")?;
-    writeln!(stdout, "    ")?;
-    writeln!(
-        stdout,
-        "    Rename the positional parameters $N+1,$N+2 ... to $1,$2 ...  If N is"
-    )?;
-    writeln!(stdout, "    not given, it is assumed to be 1.")?;
-    writeln!(stdout, "    ")?;
-    writeln!(stdout, "    Exit Status:")?;
-    writeln!(
-        stdout,
-        "    Returns success unless N is negative or greater than $#."
-    )
+    if let Some(topic) = find_topic("shift") {
+        return print_topic_long(topic, stdout);
+    }
+    Ok(())
 }
 
 fn print_help_list<W>(stdout: &mut W) -> io::Result<()>
