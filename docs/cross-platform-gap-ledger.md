@@ -19,16 +19,11 @@ aarch64-apple-darwin 干净；5 条 WSL GNU Bash 5.3.0 基线对齐。
 
 ## 引擎层缺口（rubash）
 
-- **E1 🔴 信号名↔编号表 Linux-x86 硬编码**（`src/builtins/kill.rs:8` SIGNALS 表、
-  `src/builtins/trap.rs` 名字表）。Darwin 实际编号 17=STOP/18=TSTP/19=CONT/20=CHLD、
-  30=USR1/31=USR2，且 7/10/12/16 段不同、无 STKFLT/PWR/RT 信号（有 EMT/INFO）。
-  macOS 上 `kill -USR1` 会真发 SIGBUS(10)、`kill -CONT` 实发 TSTP——主动有害。
-  **修法**：`#[cfg(unix)]` 表改由 libc 常量按 target 生成（`libc::SIGUSR1 as i32`），
-  RTMIN 尾部（34+）`cfg(target_os = "linux")`；**Windows 字面量表不动**——mailbox
-  线格式就是 Linux 编号，设计如此。同构先例：bash 构建期由
-  `support/mksignames.c` 从目标机 `<signal.h>` 生成 signames.c
-  （third_party/bash/Makefile.in:602-783），zsh 同模式（configure 探测）。
-  这也是 macOS 路线唯一的真语义阻塞。
+- **E1 ✅ 信号名↔编号表 Linux-x86 硬编码**——已修（8b69cbae）：三平台按 mksignames 契约
+  从 libc 编译期生成（kill.rs 双表 + trap.rs 三位置表，Darwin 槽位 EMT/INFO/20=CHLD/30=USR1
+  全部落位，RT 块仅 Linux 且字面量+运行时测试锚定 glibc 34..64）；派发路径裸 17/18 换
+  `SIGCHLD_NUMBER`/`SIGCONT_NUMBER`（unix=libc、windows=wire 值）；Windows wire 表原样保留
+  （`kill -l` 与 WSL 基线逐字节一致）。表测试在 CI ubuntu+macos 作为 Darwin 漂移绊线。
 - **E2 🟡 `command -v`/`type` 自有查找器**（`src/builtins/command.rs:209` 用
   `env::split_paths`；`src/executor/lookup_paths.rs:14` 对 mv/cat/ls 硬编码
   `/usr/bin/mv`、`/bin/{name}`）。未接 B 的两档制，`type cat` 输出失真。
