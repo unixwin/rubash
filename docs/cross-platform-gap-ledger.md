@@ -70,6 +70,50 @@ aarch64-apple-darwin 干净；5 条 WSL GNU Bash 5.3.0 基线对齐。
 - **E16 ⚪ Windows NTSTATUS→信号映射**：落点已收在 `wait_status.rs`
   （`process_exit_status` 单点），需要时补映射表即可。
 
+## 重审计新增（2026-09-26，Audit 代理，wave-1 派发后合并）
+
+引擎层：
+- **E17 🟡 CRLF 剥除无门控（4 处一致）**：lexer 脚本/heredoc 行剥 CR
+  （`src/lexer/mod.rs:214`，同文件 :178 注释自证 GNU 不剥）；命令替换捕获剥成对 `\r`
+  （`command_subst_helpers.rs:235-259`）；`read` 行尾剥 `\r`（`read_helpers.rs:404,414`，
+  :406 NOTE 自认偏差）；`read -t` 超时路径（`pipeline_exec.rs:16-22`）。unix 上均为
+  GNU 偏差（83 套件可观察）。状态：后 3 处已派 A2 追加（cfg!(windows) 门控，
+  Windows 零变化）；lexer 处留 wave-2（文件被并行 crew 占用）。
+- **E18 🟡 `/bin/bash` 字面路径先走 PATH 搜索**（`src/executor/path.rs:252-263`）：
+  `is_standard_unix_bash_path` 命中后 `find_user_command("bash")` 先于字面文件探测且无门；
+  macOS 上 homebrew bash 顶替 `/bin/bash`。与 E6（miss 后回退）不同：这是命中前的
+  优先级倒置。状态：已派 A2 追加（回退链 cfg!(windows)，unix 先探字面文件）。
+- **E19 ⚪ 继承 TMPDIR/HOME 无条件 `\`→`/` 重写**（`src/executor/init.rs:357-363`）：
+  Linux 文件名合法含 `\`（`/home/a\b` 被改写）。状态：已派 A2 追加（cfg!(windows) 门）。
+- **E20 ⚪→发布层🔴 bash shim 无平台门**（`src/bin/bash.rs` + Cargo.toml
+  `[[bin]] name="bash"`）：unix 构建产出 `bash` 二进制且 `locate_shell` 只探
+  `niu.exe`/`winuxsh.exe` → 必 127；`cargo install`/unix tarball 会遮蔽系统 bash
+  （Windows 侧 package-release.ps1:47-109 依赖该 bin 产 bash.exe，不能删）。
+  修法：`locate_shell` 平台分叉候选名（unix 裸 `niu`）+ unix 发布不装 shim。归 C2 批次。
+- **E21 ✅ 引擎 ctrlc 死依赖已删**（959961a9）。
+- E9 修订：`~` 的 USERPROFILE 兜底（`tilde.rs:22-28`）随 getpwnam 改造一并 getpwuid；
+  unix HOME 未设时 `~` 现展开为空串。
+- E7 修订：`support_names.rs:668` 另有一个无门控的同名 `executable_extensions()`
+  （PATHEXT、`;` 切分），唯一调用点已被 cfg!(windows) 包裹——目前良性，建议改名防误用。
+
+niubash 层：
+- **N10 🔴 命令补全只认 Windows 后缀**（`completion/command.rs:154-196`）：PATH 扫描
+  仅收 .exe/.bat/.cmd/.ps1/.sh/.bash/.zsh/.niubash 且去后缀；unix 无后缀可执行全漏，
+  补全退化为硬编码 Windows 命令表——unix 上第一个用户可感知的功能失效。状态：已派 A6。
+- **N11 ⚪ which_tool 后缀探测无门控**（`completion/external.rs:988-1000`）：unix 上
+  `foo.exe` 抢先于真 `foo`；对照 runtime.rs:282-286 正确写法补 cfg。状态：已派 A6。
+- **N12 ⚪ windows_terminal 模块全平台编译**（`lib.rs:32` 无门）：unix 下
+  `--install-wt-profile` 与 fonts.rs:136 调用仍可达（静默跳过）。状态：已派 A6。
+- N1 修订：`repl.rs:97` 已漂移为 `spawn_self_update`（原 file:line 失效）；宿主直接
+  spawn 全量清单：`completion/runtime.rs:125`、`completion/external.rs:546`、
+  `shell.rs:2023/2100/2123/2162/4418/4534`（direnv/zoxide/thefuck/fzf/进程插件，
+  统一 `resolve_native_command_path*` :4677-4723）、`git_status.rs:476`、`prompt.rs:976`、
+  `plugins/external.rs:159/313`——全部并入"委托引擎"改造。
+- N6 修订：crossterm feature 固定 `["event-stream","windows"]` 且 default-features=false
+  ——关掉了 bracketed-paste、WinAPI 后端写死；feature 集按平台审，验证随 N9 runner。
+- 已验证无 API 编译断点：`set_winuxcmd_path`/`set_shell_root`/`set_compatible_shell_path`
+  无 cfg 但 unix 可编译（仅写 env）；`set_elevation_handler` 是 cfg(windows) 且 niubash 零调用。
+
 ## CI 与发布缺口
 
 - **C1 🔴 rubash CI 无 macOS runner**（`.github/workflows/ci.yml` 全 ubuntu；
