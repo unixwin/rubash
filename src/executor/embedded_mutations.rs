@@ -121,24 +121,155 @@ impl Executor {
         )
     }
 
-    // Here-string content has already had quote removal applied by the parser
-    // (single quotes stripped). Bare quotes left behind are literal data, not
-    // delimiters; only parameter/command/arithmetic substitution applies. This
-    // mirrors GNU subst.c here-string handling, where the word is expanded
-    // without re-parsing quotes.
+    // GNU redir.c:373 (r_reading_string) runs the redirectee word through
+    // expand_assignment_string_to_string, and inside that pipeline every
+    // single-quoted span is literal data (subst.c:11882-11886 — the '...'
+    // body goes to add_quoted_string without consulting the comsub
+    // scanner). The parser stores the raw herestring word (span boundaries
+    // intact, redirections.rs assign_here_string_redirect_raw), so walk it
+    // segment by segment: '...' spans verbatim, "..." spans and unquoted
+    // segments through the expansion walker, then a final
+    // dequote_string-equivalent carrier decode. Handing the
+    // quote-stripped value straight to the comsub walker executed
+    // `<<<'a'\''`b`'` and leaked \x17 (rubash#153 n20/n21/n25).
     pub(in crate::executor) fn expand_here_string_mut(&mut self, word: &str) -> String {
         if let Some(pre) = preexpanded_stdin_body(word) {
             return crate::executor::execution_misc::decode_stdin_body_enq(pre);
         }
+        let expanded = self.expand_here_string_segments(word);
         crate::executor::execution_misc::decode_stdin_body_enq(
-            &self.expand_embedded_parameters_mut_inner(
-                word,
+            &crate::executor::markers::decode_word_position_carriers(&expanded),
+        )
+    }
+
+    /// Segment walker for the here-string word: a top-level `'...'` span is
+    /// literal (GNU subst.c:11882-11886); `$'...'` gets ANSI-C decoding;
+    /// `"..."` spans and unquoted segments go through the heredoc-mode
+    /// expansion walker, where a `'` inside double quotes is data (parse.y
+    /// read_token_word's double-quote scanner never opens single-quote
+    /// state). Substitution units (`$(...)`, `${...}`, `` `...` ``) own
+    /// their internal quoting (parse.y parse_matched_pair), so the bare-
+    /// segment scanner skips them whole instead of reading their quotes as
+    /// span delimiters.
+    fn expand_here_string_segments(&mut self, raw: &str) -> String {
+        let chars: Vec<char> = raw.chars().collect();
+        let mut output = String::new();
+        let mut index = 0usize;
+
+        let mut expand_segment = |executor: &mut Self, segment: &str, sink: &mut String| {
+            sink.push_str(&executor.expand_embedded_parameters_mut_inner(
+                segment,
                 SubstitutionQuoteContext::Unquoted,
                 true,
                 false,
                 false,
-            ),
-        )
+            ));
+        };
+
+        while index < chars.len() {
+            if chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')) {
+                let quote = chars[index + 1];
+                if let Some(end) = crate::executor::compound_exec::quoted_case_pattern_end(
+                    &chars,
+                    index + 2,
+                    quote,
+                ) {
+                    let body: String = chars[index + 2..end].iter().collect();
+                    if quote == '\'' {
+                        output.push_str(&crate::executor::parse_helpers::decode_ansi_c_escapes(
+                            &body,
+                        ));
+                    } else {
+                        expand_segment(self, &body, &mut output);
+                    }
+                    index = end + 1;
+                    continue;
+                }
+            }
+
+            if chars[index] == '\'' {
+                if let Some(end) =
+                    crate::executor::compound_exec::quoted_case_pattern_end(&chars, index + 1, '\'')
+                {
+                    output.push_str(&chars[index + 1..end].iter().collect::<String>());
+                    index = end + 1;
+                    continue;
+                }
+            }
+
+            if chars[index] == '"' {
+                if let Some(end) =
+                    crate::executor::compound_exec::quoted_case_pattern_end(&chars, index + 1, '"')
+                {
+                    let body: String = chars[index + 1..end].iter().collect();
+                    expand_segment(self, &body, &mut output);
+                    index = end + 1;
+                    continue;
+                }
+            }
+
+            let mut pending_start = index;
+            while index < chars.len()
+                && chars[index] != '\''
+                && chars[index] != '"'
+                && !(chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')))
+            {
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                    if let Some(close) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                    {
+                        index = close.min(chars.len());
+                        continue;
+                    }
+                }
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    if let Some(close) =
+                        crate::executor::compound_exec::skip_braced_case_pattern_unit(
+                            &chars,
+                            index + 1,
+                        )
+                    {
+                        index = close + 1;
+                        continue;
+                    }
+                }
+                if chars[index] == '`' {
+                    index += 1;
+                    while index < chars.len() && chars[index] != '`' {
+                        if chars[index] == '\\' && index + 1 < chars.len() {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                    if index < chars.len() {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    // GNU parse.y:5366-5398 read_token_word: an unquoted
+                    // backslash quotes exactly the next character, which
+                    // survives as a quoted literal (got_escaped_character,
+                    // parse.y:5694-5706). Flush the pending expandable run,
+                    // then emit the escaped character as data.
+                    if pending_start < index {
+                        let segment: String = chars[pending_start..index].iter().collect();
+                        expand_segment(self, &segment, &mut output);
+                    }
+                    output.push(chars[index + 1]);
+                    index += 2;
+                    pending_start = index;
+                    continue;
+                }
+                index += 1;
+            }
+            if pending_start < index {
+                let segment: String = chars[pending_start..index].iter().collect();
+                expand_segment(self, &segment, &mut output);
+            }
+        }
+
+        output
     }
 
     /// Expands a here-string from a typed carrier. Returns the preexpanded

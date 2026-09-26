@@ -333,6 +333,27 @@ pub(crate) const COMPOUND_ASSIGNMENT_MARKER: &str = "__RUBASH_CA1__";
 /// (support_names.rs) — `\x1e`-prefixed so it sorts into the carrier family.
 pub(crate) const GROUP_REDIRECT_INJECTED_MARK: &str = "\u{1e}group-redirect";
 
+/// GNU subst.c:4807 dequote_string for word-position consumers (case word,
+/// here-string word, pipeline word — rubash#153). The data carriers that
+/// traveled through the expansion walkers as quote-protected bytes (the
+/// CTLESC port, parse.y:5694-5706 got_escaped_character) become the literal
+/// characters they denote. These consumers own the final value — stdin
+/// content, strmatch subject — and have no later quote-removal pass, so
+/// leaving the carriers encoded leaks \x17/\x1a into output.
+pub(in crate::executor) fn decode_word_position_carriers(value: &str) -> String {
+    value
+        .replace(DATA_SQUOTE, "'")
+        .replace(DATA_DQUOTE, "\"")
+        .replace(DATA_BACKTICK, "`")
+        .replace(DATA_DOLLAR, "$")
+        // The heredoc-mode walker protects a `'`/`"` in unquoted herestring
+        // text with the ANSI-C markers (the same decode
+        // eval_source_for_reparse applies, execution_misc.rs) — a `\'`
+        // escape pair in the raw word reaches this decoder as marker + '.
+        .replace(ANSI_C_QUOTE_MARKER, "'")
+        .replace(ANSI_C_DQUOTE_MARKER, "\"")
+}
+
 /// Field separator inside the `__RUBASH_DIR_STACK` env serialization
 /// (builtins/pushd/stack.rs). Shares the DATA_DOLLAR byte but lives in the
 /// env-serialization domain, not word text — do not decode it as a dollar.

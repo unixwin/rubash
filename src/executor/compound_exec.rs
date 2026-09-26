@@ -2076,7 +2076,24 @@ impl Executor {
             };
             let _ = self.run_debug_trap(&format!("case {raw_word} in "))?;
         }
-        let word = self.expand_case_word(&case_command.word);
+        // GNU execute_cmd.c:3695-3699: the case word is expanded by
+        // expand_word_leave_quoted and then passed through dequote_string —
+        // every single-quoted span is literal data (subst.c:11882-11886
+        // never consults the command-substitution scanner inside '...'), and
+        // only unquoted segments go through the full expansion pipeline.
+        // The raw token text carries those span boundaries; the lexer's word
+        // value has them stripped, which made `case 'a'\''`b`'` re-execute
+        // `b` as a live substitution (rubash#153). Walk the raw text like
+        // the pattern side (quote_aware_case_pattern) but without the
+        // glob-literal escaping, which belongs to the pattern domain only.
+        let word = if case_command.word_metadata.raw.is_empty()
+            || case_command.word_metadata.raw == case_command.word
+        {
+            self.expand_case_word(&case_command.word)
+        } else {
+            let raw = case_command.word_metadata.raw.clone();
+            quote_aware_case_word(&raw, |segment| self.expand_case_word(segment))
+        };
         let word = tilde_expand::strip_assignment_quote_marker(&word);
         self.abandon_on_arithmetic_expansion_error()?;
         let nocasematch =
@@ -2425,6 +2442,123 @@ fn case_pattern_raw_has_quotes(raw: &str) -> bool {
     false
 }
 
+/// Word-position twin of `quote_aware_case_pattern` (rubash#153).
+///
+/// GNU execute_cmd.c:3695-3699 expands the case word with
+/// expand_word_leave_quoted and then dequote_string: single-quoted spans
+/// are literal data — subst.c:11882-11886 hands the whole '...' body to
+/// add_quoted_string without ever consulting the command-substitution
+/// scanner — and only unquoted segments reach the full expansion
+/// pipeline. Double-quoted spans expand parameters/substitutions but keep
+/// a `'` inside literal (parse.y read_token_word's double-quote scanner
+/// never opens single-quote state). Unlike the pattern twin this applies
+/// no glob-literal escaping: the case word is the *subject* of
+/// strmatch(), not a pattern (execute_cmd.c:3727-3730).
+fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String) -> String {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        if chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')) {
+            let quote = chars[index + 1];
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 2, quote) {
+                let body = chars[index + 2..end].iter().collect::<String>();
+                if quote == '\'' {
+                    output.push_str(&decode_ansi_c_escapes(&body));
+                } else {
+                    output.push_str(&expand_word(&body));
+                }
+                index = end + 1;
+                continue;
+            }
+        }
+
+        if matches!(chars[index], '\'' | '"') {
+            let quote = chars[index];
+            if let Some(end) = quoted_case_pattern_end(&chars, index + 1, quote) {
+                let body = chars[index + 1..end].iter().collect::<String>();
+                if quote == '\'' {
+                    // GNU subst.c:11882-11886: every byte of a '...' span is
+                    // quoted data — a backtick here must never reach the
+                    // comsub scanner (rubash#153: `case 'a'\''`b`'` ran `b`).
+                    output.push_str(&body);
+                } else {
+                    // parse.y read_token_word: a `'` inside double quotes is
+                    // literal data; tag it so expand_word's quote removal
+                    // does not collapse it (same protection the pattern
+                    // twin applies).
+                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
+                    output.push_str(&expand_word(&body));
+                }
+                index = end + 1;
+                continue;
+            }
+        }
+
+        let mut pending_start = index;
+        while index < chars.len()
+            && chars[index] != '\''
+            && chars[index] != '"'
+            && !(chars[index] == '$' && matches!(chars.get(index + 1), Some('\'' | '"')))
+        {
+            // Quoting inside a substitution belongs to the substitution's
+            // own input (GNU parse_matched_pair), so skip the unit whole.
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                if let Some(close) =
+                    crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                {
+                    index = close.min(chars.len());
+                    continue;
+                }
+            }
+            if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                if let Some(close) = skip_braced_case_pattern_unit(&chars, index + 1) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+            if chars[index] == '`' {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' && index + 1 < chars.len() {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+                continue;
+            }
+            if chars[index] == '\\' && index + 1 < chars.len() {
+                // GNU parse.y:5366-5398 read_token_word: an unquoted
+                // backslash quotes exactly one character, which survives
+                // as a quoted literal (got_escaped_character,
+                // parse.y:5694-5706). Flush the pending expandable run,
+                // then emit the escaped character as data — `case \x in`
+                // must expand the word to `x` and match pattern `x`
+                // (case1.sub ok 9).
+                if pending_start < index {
+                    let segment = chars[pending_start..index].iter().collect::<String>();
+                    output.push_str(&expand_word(&segment));
+                }
+                output.push(chars[index + 1]);
+                index += 2;
+                pending_start = index;
+                continue;
+            }
+            index += 1;
+        }
+        if pending_start < index {
+            let segment = chars[pending_start..index].iter().collect::<String>();
+            output.push_str(&expand_word(&segment));
+        }
+    }
+
+    output
+}
+
 fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> String) -> String {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut output = String::new();
@@ -2528,7 +2662,10 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
 /// Balanced `${...}` skip for the case-pattern segment scanner — braces,
 /// quotes, and escapes inside the expansion are its own (GNU
 /// parse_matched_pair). Returns the index of the closing `}`.
-fn skip_braced_case_pattern_unit(chars: &[char], open: usize) -> Option<usize> {
+pub(in crate::executor) fn skip_braced_case_pattern_unit(
+    chars: &[char],
+    open: usize,
+) -> Option<usize> {
     let mut depth = 0usize;
     let mut index = open;
     let mut single = false;
@@ -2555,7 +2692,11 @@ fn skip_braced_case_pattern_unit(chars: &[char], open: usize) -> Option<usize> {
     None
 }
 
-fn quoted_case_pattern_end(chars: &[char], start: usize, quote: char) -> Option<usize> {
+pub(in crate::executor) fn quoted_case_pattern_end(
+    chars: &[char],
+    start: usize,
+    quote: char,
+) -> Option<usize> {
     let mut index = start;
     let mut escaped = false;
     while index < chars.len() {

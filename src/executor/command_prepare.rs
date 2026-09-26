@@ -7,6 +7,16 @@ fn materialize_expanded_command_word(word: &str) -> String {
     // expansion and must not reach argv (find -name "*.txt" received \x11*
     // and matched nothing).
     let word = word.replace(crate::executor::markers::CTLESC, "");
+    // Decode the quote-data carriers here, at the argv materialization
+    // point — GNU's dequote_word (subst.c:4865, reached from
+    // expand_word_list_internal at subst.c:13219) runs for every word
+    // position, so a `'`/`"`/`$` protected as a carrier (the CTLESC port,
+    // parse.y:5694-5706) becomes the literal character before argv. The
+    // mut-walker's sentinel (embedded_mutations.rs) leaves \x17 encoded for
+    // words that also contain a live `` ` ``; without this decode a
+    // pipeline-word like `printf '%s\n' 'a'\''`b`'` leaked \x17 into the
+    // builtin argv (rubash#153 n26/n27).
+    let word = crate::executor::markers::decode_word_position_carriers(&word);
     decode_command_substitution_payload(&restore_pathname_escape_markers(
         &word
             .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")

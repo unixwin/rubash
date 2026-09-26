@@ -1502,7 +1502,16 @@ impl Executor {
                 .get(index)
                 .map(|metadata| metadata.raw.as_str());
             for expanded in self.expand_command_word(command, index, word, raw) {
-                //  marks a fully quoted word and  a quoted tilde;
+                // Argv materialization for a pipeline stage: GNU runs
+                // dequote_word on every word leaving
+                // expand_word_list_internal (subst.c:13219 -> 4865), so the
+                // quote-data carriers (\x17 et al., the CTLESC port of
+                // parse.y:5694-5706) become literal characters before the
+                // word reaches argv or the glob expander. Without this a
+                // pipeline word mixing an escaped quote with a live
+                // backtick leaked \x17 (rubash#153 n26/n27).
+                let expanded = crate::executor::markers::decode_word_position_carriers(&expanded);
+                //  marks a fully quoted word and  a quoted tilde;
                 // both stay literal, exactly as command_prepare does.
                 if expanded.starts_with(STORAGE_WORD_PREFIX)
                     || expanded.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)

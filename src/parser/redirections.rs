@@ -306,7 +306,12 @@ pub(super) fn assign_here_string_redirect_raw(
             gather_line: None,
         });
     } else {
-        command.here_string = Some(encode_stdin_body_enq(target));
+        // GNU redir.c:373 (r_reading_string) expands the redirectee word —
+        // with '...' spans as literal data (subst.c:11882-11886) — so the
+        // stdin mirror must carry the RAW word with span boundaries intact.
+        // The lexer's quote-stripped value loses them and the comsub walker
+        // then executes a backtick inside a span (rubash#153 n20).
+        command.here_string = Some(encode_stdin_body_enq(raw_target));
     }
 }
 
