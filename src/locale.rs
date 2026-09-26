@@ -526,10 +526,26 @@ fn collate_locale_name() -> String {
 
 /// Strip the codeset and modifier suffixes and map to a host locale name:
 /// "en_US.UTF-8" -> "en-US" (Windows BCP-47) / "en_US.UTF-8" (POSIX).
-/// Returns None for the C/POSIX locale, where collation is plain strcmp.
+/// Returns None for the C/POSIX locale (and every `C.<codeset>` /
+/// `POSIX.<codeset>` form), where collation is plain strcmp — glibc defines
+/// the C.UTF-8 family as code-point order (verified against WSL GNU Bash
+/// 5.3.0: with `LANG=C.UTF-8`, `[[ ".a" < "a" ]]` and `[[ "B" < "a" ]]`
+/// are both true and `sort` yields pure byte order). Without this mapping
+/// every C.UTF-8 comparison took the host-collation call; on Windows that
+/// is CompareStringEx with NORM_IGNORESYMBOLS, measured at 55ms to sort a
+/// single 1500-entry glob result (98% of the glob expansion cost,
+/// rubash#157).
 fn host_collate_name(name: &str) -> Option<String> {
-    let lower = name.to_lowercase();
-    if lower.is_empty() || lower == "c" || lower == "posix" {
+    // C-family detection without the to_lowercase allocation: ASCII case
+    // fold is all POSIX locale names use.
+    let bytes = name.as_bytes();
+    let is_c = |b: &[u8]| b.eq_ignore_ascii_case(b"c");
+    let is_posix = |b: &[u8]| b.eq_ignore_ascii_case(b"posix");
+    let c_family = is_c(bytes)
+        || is_posix(bytes)
+        || (bytes.len() > 1 && (bytes[0] == b'c' || bytes[0] == b'C') && bytes[1] == b'.')
+        || (bytes.len() > 6 && name[..6].eq_ignore_ascii_case("posix."));
+    if name.is_empty() || c_family {
         return None;
     }
     let base = name.split(['.', '@']).next().unwrap_or(name);
