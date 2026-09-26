@@ -134,10 +134,20 @@ impl Executor {
         } else {
             subshell.execute_command(command)
         };
+        // GNU execute_cmd.c:1761-1763 (execute_in_subshell): a pipeline
+        // element is a forked subshell whose exit — implicit after the body
+        // as much as via `exit` — runs the subshell's EXIT trap
+        // (subshell_exit -> run_exit_trap; trap4.sub's group without a
+        // trailing `exit` still prints its "in trap EXIT"). The trap table
+        // was reset at entry (reset_for_subshell above), so only traps the
+        // body itself installed can fire; the explicit-`exit` case already
+        // consumed the action through the exit builtin, and take_exit_trap
+        // leaves nothing for this second run.
+        let body_status = subshell.last_exit_code();
+        let trap_result = subshell.run_exit_trap_for_status(body_status);
         let mut thread_output = crate::executor::shell_options::take_stdout_capture();
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         let stderr = subshell.stderr_capture.take().unwrap_or_default();
-        let status = subshell.last_exit_code();
 
         crate::executor::shell_options::restore_stdout_capture(saved_capture);
         output.append(&mut thread_output);
@@ -145,10 +155,11 @@ impl Executor {
         if let Some(saved_dir) = saved_dir {
             let _ = env::set_current_dir(saved_dir);
         }
-        let status = match result {
-            Ok(()) => status,
-            Err(ExecuteError::ExitCode(code)) | Err(ExecuteError::ExpansionFailure(code)) => code,
-            Err(error) => return Err(error),
+        let status = match (result, trap_result) {
+            (Ok(()), Ok(trap_status)) => trap_status,
+            (Err(ExecuteError::ExitCode(code)), Ok(_)) => code,
+            (Err(ExecuteError::ExpansionFailure(code)), Ok(_)) => code,
+            (_, Err(error)) | (Err(error), _) => return Err(error),
         };
         // The subshell's FUNCTION_STDIN cursor is the element's fd-0
         // consumption within `input`; report it for the driver writeback.
