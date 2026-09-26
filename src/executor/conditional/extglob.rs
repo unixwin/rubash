@@ -1,6 +1,6 @@
 use super::pattern::{extglob_match_literal, extglob_match_literal_nocase};
 
-pub(in crate::executor) fn extglob_case_pattern_matches(pattern: &str, word: &str) -> bool {
+pub(crate) fn extglob_case_pattern_matches(pattern: &str, word: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
     extglob_matches_at(&pattern, 0, &word, 0)

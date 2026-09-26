@@ -2453,6 +2453,15 @@ fn quote_aware_case_pattern(raw: &str, mut expand_word: impl FnMut(&str) -> Stri
                 let literal = if quote == '\'' {
                     body
                 } else {
+                    // parse.y read_token_word's double-quote scanner never
+                    // opens single-quote state: a `'` inside the body is
+                    // literal data (GNU case patterns keep it, so
+                    // `case $s in "''")` matches the two quote characters).
+                    // A bare `'` pair fed to expand_word_mut collapses to
+                    // the empty string via quote removal, so tag each one
+                    // with the lexer's decoded-quote marker first — the
+                    // same protection escape_decoded_ansi_c_quotes applies.
+                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
                     expand_word(&body)
                 };
                 output.push_str(&escape_case_pattern_literal(&literal));

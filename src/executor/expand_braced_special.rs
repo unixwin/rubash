@@ -292,6 +292,23 @@ impl Executor {
         }
 
         // GNU parameter_brace_expand_word (subst.c:7955) re-expands the
+        // indirect target as a full parameter reference: a target value that
+        // is a number designates the positional parameter with that index
+        // (`i=3; ${!i}` -> $3). bash-completion's _comp_get_words walks its
+        // name operands through exactly this form (`case ${!OPTIND} ...`).
+        if let Ok(index) = target_name.parse::<usize>() {
+            if !target_name.starts_with('0') || target_name == "0" {
+                return Some(
+                    self.shell_state
+                        .positional_params
+                        .get(index.saturating_sub(1))
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+        }
+
+        // GNU parameter_brace_expand_word (subst.c:7955) re-expands the
         // target as a parameter: a value ending in `[@]`/`[*]` joins its
         // elements in scalar context (array_value AV_ALLOWALL branch,
         // arrayfunc.c:1513-1564), a bare array name reads element [0], and

@@ -136,6 +136,46 @@ impl Executor {
             || (unquoted_indirect_name_list && field_split_would_change_word)
     }
 
+    /// `${arr[@]+"${arr[@]}"}` (and the `${arr+"${arr[@]}"}` spelling
+    /// bash-completion's _comp_get_words uses) whole-word guard — GNU
+    /// subst.c `+` operator: a set array's alternative expands as the
+    /// quoted array expansion, one word per element. Only the exact
+    /// self-referential idiom is claimed; everything else falls through to
+    /// the general expander.
+    pub(in crate::executor) fn guarded_quoted_array_guard_values(
+        &self,
+        raw: Option<&str>,
+    ) -> Option<Vec<String>> {
+        let raw = raw?;
+        let inner = raw.strip_prefix("${")?.strip_suffix("}")?;
+        let plus = inner.find('+')?;
+        let (guard_name, alt) = inner.split_at(plus);
+        let alt = &alt[1..];
+        // The alternative must be exactly the quoted array expansion
+        // `"${name[@]}"` (or `[*]`), and the guard's name must be the same
+        // array — with or without the element subscript (GNU checks the
+        // same variable; `${arr+...}` and `${arr[@]+...}` both test
+        // whether the array is set).
+        let array_name = alt
+            .strip_prefix("\"${")
+            .and_then(|rest| rest.strip_suffix("[@]}\""))
+            .or_else(|| {
+                alt.strip_prefix("\"${")
+                    .and_then(|rest| rest.strip_suffix("[*]}\""))
+            })?;
+        if !is_shell_name(array_name) {
+            return None;
+        }
+        let guard_base = guard_name
+            .strip_suffix("[@]")
+            .or_else(|| guard_name.strip_suffix("[*]"))
+            .unwrap_or(guard_name);
+        if guard_base != array_name {
+            return None;
+        }
+        Some(self.array_at_word_values(alt).unwrap_or_default())
+    }
+
     pub(in crate::executor) fn expand_for_word_values_result(
         &mut self,
         word: &str,
@@ -158,6 +198,15 @@ impl Executor {
             || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
         if let Some(values) = self.quoted_positional_at_word_values_with_raw(word, raw, None) {
+            return Ok(values);
+        }
+        // GNU subst.c parameter_brace_expand's `+` arm: the alternative word
+        // expands with full quoting, so the self-referential guard idiom
+        // `${arr[@]+"${arr[@]}"}` (bash-completion's
+        // ${v+"${a[@]}"} pattern, selfref.rubash bucket) yields one quoted
+        // word per element — never IFS-split, never one joined argument.
+        // The single-string operator expander cannot carry that shape.
+        if let Some(values) = self.guarded_quoted_array_guard_values(raw) {
             return Ok(values);
         }
         if let Some(values) = self.array_at_word_values(word) {

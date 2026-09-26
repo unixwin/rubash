@@ -794,6 +794,13 @@ impl Executor {
         // the point where their word is expanded. Applying them to every
         // command word up front changes Bash's left-to-right semantics.
         self.apply_parameter_assignment_expansions_in_word(word);
+        // GNU subst.c parameter_brace_expand's `+` arm: the
+        // self-referential guard `${arr[@]+"${arr[@]}"}` expands to one
+        // word per element (the quoted array expansion inside the
+        // alternative). Same fast path the for-list expander applies.
+        if let Some(values) = self.guarded_quoted_array_guard_values(raw) {
+            return values;
+        }
         // GNU eval arguments expand as NORMAL words (subst.c evalstring:
         // word_list_expand, no W_ASSIGNMENT re-quoting), then eval joins
         // them and re-reads the string as parser input. An assignment-shaped

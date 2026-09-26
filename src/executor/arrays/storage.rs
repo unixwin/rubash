@@ -130,6 +130,27 @@ pub(in crate::executor) fn store_indexed_array(
     mark_env_name(env_vars, ARRAY_VARS, name);
 }
 
+/// GNU subst.c:4807 dequote_string: strip every CTLESC carrier pair, keeping
+/// the protected character (CTLESC + CTLESC yields a literal CTLESC byte,
+/// matching GNU). A trailing lone CTLESC contributes nothing.
+pub(in crate::executor) fn dequote_ctlesc_pairs(value: &str) -> String {
+    if !value.contains(crate::executor::markers::CTLESC) {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == crate::executor::markers::CTLESC {
+            if let Some(data) = chars.next() {
+                output.push(data);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 pub(in crate::executor) fn quote_array_value(value: &str) -> String {
     // The element value reaching storage may still carry the lexer's
     // data-quote markers for $'...'-decoded quotes (U+E010/U+E011, the
@@ -147,6 +168,18 @@ pub(in crate::executor) fn quote_array_value(value: &str) -> String {
     let value = value
         .replace(crate::lexer::ANSI_C_QUOTE_MARKER_STR, "'")
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"");
+    // GNU expand_string_assignment (subst.c:4345-4353) ends every expanded
+    // assignment RHS word with dequote_list -> dequote_string
+    // (subst.c:4807), stripping the CTLESC carrier pairs that the walker
+    // left on quoted glob characters before the value is bound. Testing
+    // ansic_shouldquote on the transport text instead octal-escaped the
+    // carriers themselves, so `local o=(-f -X "$x")` with x='!*.*' stored
+    // $'\021!\021*...' and the carrier bytes resurfaced as data at every
+    // later display of the element (rubash#145 `_filedir md` panic).
+    // Strip the pairs at this same boundary. Genuine control-byte data
+    // travels as U+E000 raw-byte marker pairs, never as a bare \x11, so
+    // this pass cannot touch it.
+    let value = dequote_ctlesc_pairs(&value);
     let value = value.as_str();
     // GNU array.c array_to_assign (947-989) / array_to_kvpair (895-945):
     // every element value goes through ansic_quote when it holds a

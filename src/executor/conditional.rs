@@ -27,9 +27,9 @@ use args::{
 };
 
 pub(super) use args::simple_grep_pattern_matches;
-pub(in crate::executor) use extglob::{
-    extglob_case_pattern_matches, extglob_case_pattern_matches_nocase,
-};
+pub(crate) use extglob::extglob_case_pattern_matches;
+#[allow(unused_imports)]
+pub(in crate::executor) use extglob::extglob_case_pattern_matches_nocase;
 pub(in crate::executor) use pattern::{
     case_bracket_expression_matches_with_case, case_pattern_matches, case_pattern_matches_nocase,
 };
@@ -464,7 +464,19 @@ impl Executor {
             let value = match kind {
                 QuoteKind::Single | QuoteKind::Backslash => body,
                 QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                QuoteKind::Double | QuoteKind::Locale => self.expand_word_mut(&body),
+                QuoteKind::Double | QuoteKind::Locale => {
+                    // parse.y read_token_word's double-quote scanner never
+                    // opens single-quote state, so a `'` inside the body is
+                    // literal data (GNU cond_expand_word keeps it). Feeding
+                    // a bare `'` to expand_word_mut makes quote removal
+                    // treat it as an unclosed single-quote span and drop
+                    // it, collapsing `[[ "''" == "''" ]]`'s pattern to the
+                    // empty string. Tag it with the lexer's decoded-quote
+                    // marker (the same protection escape_decoded_ansi_c_
+                    // quotes applies) so it survives as data.
+                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
+                    self.expand_word_mut(&body)
+                }
             };
             append_literal_glob_text(&mut output, &value);
             index = end + 1;

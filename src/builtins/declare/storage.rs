@@ -150,6 +150,19 @@ pub(super) fn quote_declare_value(value: &str) -> String {
 /// characters (ansic_shouldquote), sh_double_quote otherwise. Indexed
 /// array element renders follow array.c, not the scalar setattr.def rule.
 pub(super) fn quote_array_element_value(value: &str) -> String {
+    // Genuine control bytes ride in storage as U+E000 raw-byte marker pairs
+    // (e.g. `local arr=($'\021!')`). Decoding them to visible text first
+    // would materialize raw C0 bytes — including \x11, which the output
+    // boundary's golden carrier assert treats as a CTLESC leak — before
+    // gnu_ansic_quote re-escapes them. Quote straight from the byte view
+    // instead (the same boundary executor/arrays/storage.rs ansic_quote
+    // uses for storage rendering), so the element renders as $'\021!'
+    // exactly like GNU array_to_assign.
+    let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
+        .expect("raw-byte sentinel is a valid char");
+    if value.contains(sentinel) {
+        return crate::executor::ansic_quote(value);
+    }
     let visible = display_text(value);
     if gnu_ansic_shouldquote(&visible) {
         return gnu_ansic_quote(&visible);
