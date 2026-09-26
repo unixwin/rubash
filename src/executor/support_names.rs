@@ -98,17 +98,25 @@ pub(in crate::executor) fn ostype_value() -> String {
     }
 }
 
-pub(in crate::executor) fn machtype_value() -> String {
+/// GNU bash's configure-time MACHTYPE host triple. version.c:90
+/// show_shell_version() prints it in the --version banner, variables.c
+/// binds the same value to $MACHTYPE / $BASH_VERSINFO[5]. Configure
+/// derives it from the build host (config.guess), so the Rust port
+/// reassembles it from compile-time ARCH/OS: `x86_64-pc-linux-gnu`
+/// (linux), `aarch64-apple-darwin` (macOS). Windows keeps the
+/// `{arch}-pc-msys` product identity.
+pub fn machtype_value() -> String {
     if cfg!(windows) {
         format!("{}-pc-msys", std::env::consts::ARCH)
+    } else if cfg!(target_os = "macos") {
+        format!("{}-apple-darwin", std::env::consts::ARCH)
     } else if cfg!(target_env = "gnu") {
         format!("{}-pc-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
     } else {
         format!(
-            "{}-pc-{}-{}",
+            "{}-unknown-{}",
             std::env::consts::ARCH,
-            std::env::consts::OS,
-            std::env::consts::FAMILY
+            std::env::consts::OS
         )
     }
 }

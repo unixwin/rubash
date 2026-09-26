@@ -11,11 +11,19 @@ impl Executor {
         if name.starts_with('/') {
             return Some(name.to_string());
         }
-        if matches!(name, "mv") {
-            return Some("/usr/bin/mv".to_string());
-        }
-        if matches!(name, "cat" | "ls") {
-            return Some(format!("/bin/{name}"));
+        // Windows suite bridge: GNU test replays expect mv/cat/ls to
+        // describe even on hosts whose PATH never holds them (type.tests:39
+        // `type -t mv`), so the /bin-namespace display paths stay. Unix
+        // must NOT fake them: GNU describe_command (type.def:379) prints
+        // the real find_user_command hit below (WSL: `mv is /usr/bin/mv`).
+        #[cfg(windows)]
+        {
+            if matches!(name, "mv") {
+                return Some("/usr/bin/mv".to_string());
+            }
+            if matches!(name, "cat" | "ls") {
+                return Some(format!("/bin/{name}"));
+            }
         }
         // GNU findcmd.c:266 path_value + builtins/type.def:390 describe_command:
         // an unset PATH makes find_user_command return NAME unchanged, which
@@ -88,11 +96,17 @@ impl Executor {
             paths.push(name.to_string());
             return paths;
         }
-        if matches!(name, "mv") {
-            paths.push("/usr/bin/mv".to_string());
-        }
-        if matches!(name, "cat" | "ls") {
-            paths.push(format!("/bin/{name}"));
+        // Same Windows/unix split as command_path above: the /bin-namespace
+        // display paths are a Windows suite bridge; unix enumerates only the
+        // real PATH matches, per GNU user_command_matches (findcmd.c:437).
+        #[cfg(windows)]
+        {
+            if matches!(name, "mv") {
+                paths.push("/usr/bin/mv".to_string());
+            }
+            if matches!(name, "cat" | "ls") {
+                paths.push(format!("/bin/{name}"));
+            }
         }
         // GNU findcmd.c:437 user_command_matches iterates path_value("PATH"):
         // an empty PATH normalizes to "." and contributes "./name", while an

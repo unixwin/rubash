@@ -3,9 +3,10 @@
 //! GNU Bash source ownership:
 //! - builtins/command.def (`command_builtin`)
 
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -207,43 +208,19 @@ fn is_shell_builtin(name: &str) -> bool {
 }
 
 fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
-    let candidate = Path::new(name);
-    if candidate.components().count() > 1 {
-        return candidate.is_file().then(|| candidate.to_path_buf());
+    // GNU builtins/type.def:371-379 describe_command(): `command -p`
+    // (CDESC_STDPATH) walks conf_standard_path(); every other mode calls
+    // find_user_command (findcmd.c:247) — the same FS_EXEC_PREFERRED +
+    // file_to_lose_on walk the executor uses to run commands. Delegating
+    // to crate::executor::path keeps describe and execute on one lookup.
+    let mut env_vars: HashMap<String, String> = env::vars().collect();
+    if use_standard_path {
+        env_vars.insert(
+            "PATH".to_string(),
+            crate::executor::path::standard_path(&env_vars),
+        );
     }
-
-    let path_value = if use_standard_path {
-        default_standard_path().to_string()
-    } else {
-        env::var("PATH").unwrap_or_default()
-    };
-
-    for dir in env::split_paths(&path_value) {
-        let path = dir.join(name);
-        if path.is_file() {
-            return Some(path);
-        }
-
-        #[cfg(windows)]
-        {
-            for ext in ["exe", "cmd", "bat"] {
-                let path = dir.join(format!("{name}.{ext}"));
-                if path.is_file() {
-                    return Some(path);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn default_standard_path() -> &'static str {
-    if cfg!(windows) {
-        r"C:\Windows\System32;C:\Windows"
-    } else {
-        "/usr/local/bin:/usr/bin:/bin"
-    }
+    crate::executor::path::find_user_command(name, &env_vars)
 }
 
 #[cfg(test)]

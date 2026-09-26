@@ -214,24 +214,24 @@ fn unescape_remaining_shell_escapes_inner(value: &str) -> String {
 }
 
 /// Command-substitution capture: strips the line terminator(s) GNU bash
-/// removes from a substitution's output, treating a Windows CRLF pair as a
-/// single terminator.
+/// removes from a substitution's output.
 ///
 /// GNU (subst.c command_substitute) deletes every trailing newline and keeps
-/// any other trailing byte, so on Unix `o=$(printf 'a\r\n')` is `a\r`. That is
-/// fine when the tools in the pipe are GNU tools, but niubash runs
-/// Windows-native tools whose CRT text mode turns every `\n` into `\r\n`
-/// (measured: gawk, GoAWK's awk, ugrep, python, jq, xz, curl, 7z), and a native
-/// shell reads those pipes without the MSYS text-mode translation that turns
-/// `\r\n` back into `\n`. The stray `\r` therefore survives into `$o` and breaks
+/// any other trailing byte, so on Unix `o=$(printf 'a\r\n')` is `a\r`
+/// (WSL 5.3.0 baseline confirms: od prints `a \r`). Windows additionally
+/// treats a CRLF pair as one terminator: niubash runs Windows-native tools
+/// whose CRT text mode turns every `\n` into `\r\n` (measured: gawk, GoAWK's
+/// awk, ugrep, python, jq, xz, curl, 7z), and a native shell reads those
+/// pipes without the MSYS text-mode translation that turns `\r\n` back into
+/// `\n`. The stray `\r` therefore survives into `$o` and breaks
 /// `[ "$o" = x ]`, `case` labels, array keys and concatenated paths with an
 /// invisible byte (niubash #120).
 ///
-/// Rule: a `\r` that immediately precedes a stripped `\n` is part of the
-/// terminator and is stripped with it; a lone trailing `\r` not followed by
-/// `\n` is preserved, so the GNU-fidelity case is intact. This is the same
-/// policy the lexer applies to CRLF script lines (niubash #106) and the same
-/// one `read` already applies to its input.
+/// Rule: strip every trailing `\n`; on Windows also a `\r` that immediately
+/// precedes a stripped `\n` (part of the CRLF terminator). A lone trailing
+/// `\r` not followed by `\n` is preserved everywhere, so the GNU-fidelity
+/// case is intact. This is the same policy the lexer applies to CRLF script
+/// lines (niubash #106) and the same one `read` applies to its input.
 pub(in crate::executor) trait CaptureTerminator {
     fn trim_capture_terminator(&self) -> &str;
 }
@@ -242,7 +242,7 @@ impl CaptureTerminator for str {
         let mut end = bytes.len();
         while end > 0 && bytes[end - 1] == b'\n' {
             end -= 1;
-            if end > 0 && bytes[end - 1] == b'\r' {
+            if cfg!(windows) && end > 0 && bytes[end - 1] == b'\r' {
                 end -= 1;
             }
         }
@@ -255,7 +255,7 @@ impl CaptureTerminator for str {
 pub(in crate::executor) fn trim_capture_terminator_bytes(bytes: &mut Vec<u8>) {
     while bytes.last() == Some(&b'\n') {
         bytes.pop();
-        if bytes.last() == Some(&b'\r') {
+        if cfg!(windows) && bytes.last() == Some(&b'\r') {
             bytes.pop();
         }
     }

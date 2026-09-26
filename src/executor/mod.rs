@@ -293,6 +293,11 @@ use self::path::{
     find_user_command, shell_path_to_process, shell_path_to_windows, standard_path,
 };
 
+// version.c:90 show_shell_version(): the --version banner prints the same
+// configure-time MACHTYPE triple the executor binds to $MACHTYPE; the bin
+// crate reuses it (main.rs --version, builtins/help.rs help listing).
+pub use self::support_names::machtype_value;
+
 // NOTE: The executor's shared constants (env-var markers, fd-table key
 // prefixes, etc.) live in `types.rs` and are re-exported via
 // `pub(crate) use types::*;` above. Do not redeclare them here.

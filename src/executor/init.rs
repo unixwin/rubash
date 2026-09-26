@@ -346,14 +346,16 @@ impl Executor {
                 .unwrap_or_else(|| "/".to_string()),
         };
         env_vars.insert("PWD".to_string(), pwd);
-        // Suites write $TMPDIR into generated scripts unquoted
-        // (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`); an inherited
-        // Windows backslash path is escape syntax to the shell reader and
-        // corrupts to `D:repo...`. $HOME has the same problem in pattern
-        // position (exp.tests: `${x#$HOME}` — `\U`/`\A` become pattern
-        // escapes so the prefix never strips). Windows filesystem APIs
-        // accept forward slashes, so normalize inherited values to the
-        // shell-safe form.
+        // Windows-only: suites write $TMPDIR/$HOME into generated scripts
+        // unquoted (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`; exp.tests
+        // `${x#$HOME}`), and an inherited Windows backslash path is escape
+        // syntax to the shell reader (`D:\repo` corrupts to `D:repo`). Windows
+        // filesystem APIs accept forward slashes, so normalize to the
+        // shell-safe form. Unix never rewrites inherited values: `\` is a
+        // legal filename byte there and GNU bash imports the environment
+        // verbatim (variables.c initialize_shell_variables) — a HOME of
+        // /home/a\b must survive as-is.
+        #[cfg(windows)]
         for name in ["TMPDIR", "HOME"] {
             if let Some(value) = env_vars.get_mut(name) {
                 if value.contains('\\') {
@@ -361,10 +363,18 @@ impl Executor {
                 }
             }
         }
-        env_vars
-            .entry("TMPDIR".to_string())
-            .or_insert_with(safe_temp_dir_string);
-        crate::executor::path::ensure_var_tmp_dir(env_vars);
+        // GNU variables.c initialize_shell_variables only imports TMPDIR from
+        // the environment — it never invents a value (WSL probe: `env -i
+        // bash -c 'echo ${TMPDIR-UNSET}'` prints UNSET). The injection below
+        // is the Windows fixture: suites write unquoted `$TMPDIR/...` paths
+        // and /tmp resolution needs a backing directory, so keep it there.
+        #[cfg(windows)]
+        {
+            env_vars
+                .entry("TMPDIR".to_string())
+                .or_insert_with(safe_temp_dir_string);
+            crate::executor::path::ensure_var_tmp_dir(env_vars);
+        }
         env_vars
             .entry("SHELL".to_string())
             .or_insert_with(shell_path_value);

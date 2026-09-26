@@ -244,6 +244,12 @@ impl Executor {
             for (name, value) in local_export_env_values(&self.shell_state.env_vars) {
                 env_vars.insert(name, value);
             }
+            // Windows child processes need the session variables (SystemRoot
+            // for crypto/socket setup, WINDIR/ComSpec for subprocess spawning)
+            // even when the exporting shell state does not carry them. Unix
+            // has no such hidden requirement — GNU env passes only what it is
+            // given (builtins/../coreutils env semantics).
+            #[cfg(windows)]
             for name in ["SystemRoot", "WINDIR", "ComSpec"] {
                 if let Some(value) = self
                     .shell_state

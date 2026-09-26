@@ -496,13 +496,22 @@ fn parse_long_options(
                 return (index, Some(0));
             }
             "version" => {
-                // GNU show_shell_version (shell.c) prints the same banner
-                // shape; rubash reports its own BASH_VERSION cell.
+                // GNU show_shell_version (version.c:88-90):
+                //   printf ("GNU bash, version %s (%s)\n",
+                //           shell_version_string (), MACHTYPE);
+                // shell_version_string() is "5.3.0(1)-release" (the
+                // -release suffix is part of $BASH_VERSION) and MACHTYPE is
+                // the configure host triple, so the banner carries exactly
+                // one "-release". WSL baseline:
+                //   GNU bash, version 5.3.0(1)-release (x86_64-pc-linux-gnu)
                 let version = executor
                     .get_env("BASH_VERSION")
-                    .unwrap_or("5.3.0(1)")
+                    .unwrap_or("5.3.0(1)-release")
                     .to_string();
-                println!("GNU bash, version {version}-release-(x86_64-pc-msys)");
+                println!(
+                    "GNU bash, version {version} ({})",
+                    rubash::executor::machtype_value()
+                );
                 return (index, Some(0));
             }
             "login" => {

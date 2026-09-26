@@ -249,11 +249,21 @@ fn cached_path_still_valid(path: &Path) -> bool {
 
 fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     if has_path_separator(name) {
+        // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
+        // file (execve semantics). The substitute chain below (explicit
+        // compatible-shell env, winuxsh, then a PATH search for `bash`)
+        // is the Windows fixture: hosts without /bin need SOME bash to
+        // satisfy suite shebangs. On unix the chain would invert lookup
+        // priority — e.g. on macOS a homebrew bash at the front of PATH
+        // would shadow the real /bin/bash that the word names — so unix
+        // takes the literal probe directly (GNU findcmd.c:383-385:
+        // absolute_program => savestring(pathname), no PATH walk; WSL
+        // probe: PATH=<fakebash>:$PATH /bin/bash runs the real shell).
+        #[cfg(windows)]
         if is_standard_unix_bash_path(name) {
             if let Some(found) = configured_compatible_shell(env_vars) {
                 return Some(found);
             }
-            #[cfg(windows)]
             if let Some(found) = configured_shell_root_winuxsh(env_vars) {
                 return Some(found);
             }
@@ -278,6 +288,12 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
         // semantics instead of "command not found". Names that must stay
         // unresolvable (zsh/ksh/csh, /bin/qux, /etc/...) simply miss on
         // PATH as well, preserving the 127 result.
+        //
+        // Unix gate (E6): GNU findcmd.c:383-385 makes a slash-bearing name
+        // an absolute_program — `command = savestring (pathname)` with no
+        // PATH walk — so a missing /bin/X must stay not-found (127), never
+        // re-resolved by basename.
+        #[cfg(windows)]
         if let Some(base) = unix_bin_basename(name) {
             if let Some(found) = find_user_command(base, env_vars) {
                 return Some(found);
@@ -360,7 +376,49 @@ pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
             .join(";");
     }
 
+    // GNU general.c:1414 conf_standard_path(): try confstr(_CS_PATH) — the
+    // POSIX.2 value "guaranteed to find all of the standard utilities"
+    // (WSL glibc: /bin:/usr/bin, so `command -p -v ls` finds /bin/ls) —
+    // and fall back to STANDARD_UTILS_PATH from config-top.h:70-73 when
+    // confstr reports nothing. findcmd.c:391 feeds exactly this string to
+    // find_user_command_in_path for CMDSRCH_STDPATH lookups.
+    #[cfg(unix)]
+    {
+        if let Some(path) = confstr_cs_path() {
+            return path;
+        }
+        "/bin:/usr/bin:/sbin:/usr/sbin".to_string()
+    }
+
+    // Non-windows, non-unix target of last resort (none today).
+    #[cfg(not(unix))]
     "/usr/local/bin:/usr/bin:/bin".to_string()
+}
+
+/// confstr(_CS_PATH) ported from general.c:1419-1430 conf_standard_path():
+/// first call sizes the buffer, second fills it (NUL included in the
+/// returned length). len == 0 means "no value" and selects the
+/// STANDARD_UTILS_PATH fallback, matching GNU's `len > 0` guard.
+#[cfg(unix)]
+fn confstr_cs_path() -> Option<String> {
+    unsafe {
+        let len = libc::confstr(libc::_CS_PATH, std::ptr::null_mut(), 0);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; len as usize];
+        let written = libc::confstr(libc::_CS_PATH, buf.as_mut_ptr().cast(), buf.len());
+        if written == 0 {
+            return None;
+        }
+        // confstr NUL-terminates the buffer; take bytes up to the NUL.
+        let value = buf
+            .split(|&byte| byte == 0)
+            .next()
+            .unwrap_or_default();
+        let value = String::from_utf8_lossy(value);
+        (!value.is_empty()).then(|| value.into_owned())
+    }
 }
 
 pub fn find_shell(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
@@ -654,7 +712,15 @@ pub(crate) fn shell_path_to_process(path: &str, env_vars: &HashMap<String, Strin
     shell_path_entries(path)
         .into_iter()
         .flat_map(|entry| shell_path_process_entries(&entry, env_vars))
-        .map(|entry| entry.to_string_lossy().replace('/', "\\"))
+        // The `/`-to-`\` rewrite is the Windows native-child spelling; a
+        // unix child must receive PATH entries verbatim.
+        .map(|entry| {
+            if cfg!(windows) {
+                entry.to_string_lossy().replace('/', "\\")
+            } else {
+                entry.to_string_lossy().into_owned()
+            }
+        })
         .collect::<Vec<_>>()
         .join(&separator.to_string())
 }
@@ -1049,7 +1115,15 @@ fn find_standard_unix_shell() -> Option<PathBuf> {
 }
 
 fn has_path_separator(name: &str) -> bool {
-    name.contains('/') || name.contains('\\')
+    // GNU general.c:843 absolute_program(): only `/` makes a name absolute,
+    // except under __MSYS__ where `\\` counts too — exactly the Windows /
+    // unix split below. On unix `foo\bar` is an ordinary filename looked up
+    // in PATH, not a path-bearing name.
+    if cfg!(windows) {
+        name.contains('/') || name.contains('\\')
+    } else {
+        name.contains('/')
+    }
 }
 
 fn is_standard_unix_bash_path(name: &str) -> bool {
@@ -1062,6 +1136,7 @@ fn is_standard_unix_bash_path(name: &str) -> bool {
 /// Basename of a single-component `/bin/X` or `/usr/bin/X` absolute path.
 /// Deeper paths (`/bin/foo/bar`) return None: they are real filesystem
 /// locations, not entries in the system tool namespace.
+#[cfg(windows)]
 fn unix_bin_basename(name: &str) -> Option<&str> {
     let normalized = name.replace('\\', "/");
     let base = normalized

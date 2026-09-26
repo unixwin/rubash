@@ -400,18 +400,28 @@ pub(in crate::executor) fn trim_read_input(
     exact_char_limit: bool,
 ) -> String {
     if !exact_char_limit {
+        // GNU builtins/read.def read_builtin: only the delimiter itself is
+        // removed from the line — WSL 5.3.0 baseline: `printf 'a\r\n' | read x`
+        // yields "a\r" and `printf 'a\r' | read x` yields "a\r" too. The '\r'
+        // stripping is the Windows CRT-text-mode compensation (native tools
+        // emit CRLF); on unix it would eat legal filename bytes.
         if let Some((before, _)) = input.split_once(&read_delimiter_needle(delimiter)) {
-            input = before.trim_end_matches('\r').to_string();
+            input = if cfg!(windows) {
+                before.trim_end_matches('\r').to_string()
+            } else {
+                before.to_string()
+            };
         } else if delimiter == '\n' {
-            // NOTE: this also drops a lone trailing '\r' that is real data
-            // (`printf 'a\r' | read x` gives "a" where GNU keeps "a\r"). The
-            // permissive pop is load-bearing: the pty/pipe readers stop at the
-            // delimiter and hand the line over without its '\n', so a CRLF
-            // terminator arrives here as a bare trailing '\r' and can only be
-            // recognised by this pop. Tightening it needs those readers to
-            // report whether the delimiter they consumed was preceded by a
-            // '\r'; until then the CRLF case wins over the lone-CR case.
-            while input.ends_with('\n') || input.ends_with('\r') {
+            // NOTE (Windows): this also drops a lone trailing '\r' that is
+            // real data. The permissive pop is load-bearing there: the
+            // pty/pipe readers stop at the delimiter and hand the line over
+            // without its '\n', so a CRLF terminator arrives here as a bare
+            // trailing '\r' and can only be recognised by this pop.
+            // Tightening it needs those readers to report whether the
+            // delimiter they consumed was preceded by a '\r'; until then the
+            // CRLF case wins over the lone-CR case (wave-2). Unix strips the
+            // '\n' delimiters only, per the GNU baseline above.
+            while input.ends_with('\n') || (cfg!(windows) && input.ends_with('\r')) {
                 input.pop();
             }
         }

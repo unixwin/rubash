@@ -64,12 +64,65 @@ fn expand_user_tilde_word(word: &str, env_vars: &HashMap<String, String>) -> Opt
     })
 }
 
+/// Resolve a `~user` prefix to the user's home directory.
+///
+/// GNU lib/tilde/tilde.c:329 tilde_expand_word(): after the `~`/`~/`
+/// fast path, isolate_tilde_prefix extracts the name and tilde.c:379
+/// `getpwnam (username)` supplies pw_dir (tilde.c:403 glues it to the
+/// rest of the word). No passwd entry -> the expansion fails and the
+/// caller keeps the word verbatim (tilde.c:398 savestring(filename)).
+///
+/// Unix uses the real passwd database via getpwnam_r (the thread-safe
+/// spelling of getpwnam). Non-unix/embedded builds keep the winuxcmd
+/// `/etc/passwd` file convention below.
+#[cfg(unix)]
+pub fn passwd_home_for_user(user: &str, _env_vars: &HashMap<String, String>) -> Option<String> {
+    use std::ffi::{CStr, CString};
+
+    // A name with an embedded NUL cannot exist in the passwd database.
+    let name = CString::new(user).ok()?;
+
+    // getpwnam_r needs a caller buffer; sysconf(_SC_GETPW_R_SIZE_MAX)
+    // sizes it, doubling on ERANGE covers hosts reporting -1/undersized.
+    let mut buf_len = unsafe { libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) };
+    if buf_len < 1024 {
+        buf_len = 1024;
+    }
+
+    for _ in 0..8 {
+        let mut buf = vec![0u8; buf_len as usize];
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let status = unsafe {
+            libc::getpwnam_r(
+                name.as_ptr(),
+                &mut pwd,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if status == libc::ERANGE {
+            buf_len = buf_len.saturating_mul(2);
+            continue;
+        }
+        if status != 0 || result.is_null() {
+            // Unknown user: no expansion (GNU failure path keeps the word).
+            return None;
+        }
+        let dir = unsafe { CStr::from_ptr(pwd.pw_dir) };
+        return Some(dir.to_string_lossy().into_owned());
+    }
+    None
+}
+
 /// Windows has no system passwd database, so `~user` reads the winuxcmd
 /// `/etc/passwd` convention: the file resolves through the same
 /// shell_path_to_windows mapping the cd builtin uses, which means
 /// `__RUBASH_SHELL_ROOT` / `WINUXSH_ROOT` / `RUBASH_ROOT` decide where
 /// `/etc` lives. No passwd file ships with the repository — tests create
 /// their own fixture under a temporary root and delete it afterwards.
+#[cfg(not(unix))]
 pub fn passwd_home_for_user(user: &str, env_vars: &HashMap<String, String>) -> Option<String> {
     let path = crate::executor::path::shell_path_to_windows("/etc/passwd", env_vars);
     let content = std::fs::read_to_string(path).ok()?;

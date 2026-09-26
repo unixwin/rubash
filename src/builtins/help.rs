@@ -293,9 +293,12 @@ where
 {
     // GNU help.def prints the shell version banner as the first line of the
     // bare help listing (builtins10.sub pipes through "sed 1d" to strip it).
+    // version.c:90 show_shell_version(): one "-release" (it is part of the
+    // version string) followed by the configure-time MACHTYPE in parens.
     writeln!(
         stdout,
-        "GNU bash, version 5.3.0(1)-release-(x86_64-pc-msys)"
+        "GNU bash, version 5.3.0(1)-release ({})",
+        crate::executor::machtype_value()
     )?;
     // TODO(builtins/help.def/builtins/gen-helpfiles.c): Generate this from the
     // builtin table. The current list matches the upstream builtins10.sub

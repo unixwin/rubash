@@ -16,8 +16,10 @@ fn timed_read_value(input: &TimedPipelineInput, start: f64, timeout: f64) -> (St
         if let Some(newline) = value.find('\n') {
             value.truncate(newline);
             // CRLF input (`read -t`): the '\r' that precedes the newline is
-            // part of the terminator, matching `read`'s non-timed path.
-            if value.ends_with('\r') {
+            // part of the terminator on Windows, matching `read`'s non-timed
+            // path. Unix keeps the '\r' — GNU read removes only the '\n'
+            // delimiter (WSL baseline: `printf 'a\r\n' | read x` -> "a\r").
+            if cfg!(windows) && value.ends_with('\r') {
                 value.pop();
             }
             return (value, 0);
