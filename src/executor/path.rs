@@ -764,17 +764,20 @@ pub fn external_command_for_named_program(
     }
 
     if should_run_with_shell(program) {
-        if let Some(shell) = find_shell(env_vars) {
-            let mut command = Command::new(shell);
-            command.arg(program);
-            push_external_args(&mut command, &native_args);
-            return (command, true);
-        }
-        if let Some(shell) = current_shell_processor() {
-            let mut command = Command::new(shell);
-            command.arg(program);
-            push_external_args(&mut command, &native_args);
-            return (command, true);
+        // GNU findcmd.c:395-397 (search_for_command) + execute_cmd.c:
+        // 5927-5931 (execute_disk_command): the word handed to
+        // shell_execve keeps "the same format that the user used to type
+        // it in" when it carries a slash, and a PATH-resolved word is the
+        // joined path entry. execute_cmd.c:6252 then passes that word to
+        // the ENOEXEC re-entry as the new script's name, so it becomes
+        // the child shell's $0 (shell.c:1613 dollar_vars[0]). Recover it
+        // from the typed word; the resolved Windows PathBuf would leak a
+        // backslash path as $0 instead.
+        let zero_word = script_zero_word(program, command_name);
+        if let Some((command, used_shell)) =
+            shell_wrapped_command(program, &zero_word, &native_args, env_vars)
+        {
+            return (command, used_shell);
         }
     }
 
@@ -805,6 +808,53 @@ pub fn external_command_for_named_program(
         }
     }
     (command, false)
+}
+
+/// The script argument a shell-wrapped child reports as `$0`.
+///
+/// GNU search_for_command (findcmd.c:395-397) returns a slash-bearing word
+/// verbatim (`savestring (pathname)`), and execute_disk_command
+/// (execute_cmd.c:5927-5931) leaves args[0] "in the same format that the
+/// user used to type it in"; a PATH-resolved word is the joined path entry
+/// (findcmd.c find_user_file_in_path). The ENOEXEC re-entry passes that
+/// word as the new script name (execute_cmd.c:6252 `args[1] = command`).
+pub fn script_zero_word(program: &Path, command_name: Option<&str>) -> String {
+    match command_name {
+        Some(word) if word.contains('/') || word.contains('\\') => word.to_string(),
+        // PATH join: GNU concatenates path entry + "/" + word; the resolved
+        // PathBuf carries the same join in Windows form, so display it with
+        // forward slashes to keep the $0 shape GNU-identical.
+        _ => program.to_string_lossy().replace('\\', "/"),
+    }
+}
+
+/// Build the shell-wrapper invocation for a file the OS cannot exec
+/// natively (`should_run_with_shell`). ZERO_WORD is the argument the child
+/// shell takes as its script name ($0). Returns `None` when no shell
+/// processor is available and the caller must fall through to a direct
+/// spawn.
+pub fn shell_wrapped_command(
+    program: &Path,
+    zero_word: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<(Command, bool)> {
+    if !should_run_with_shell(program) {
+        return None;
+    }
+    if let Some(shell) = find_shell(env_vars) {
+        let mut command = Command::new(shell);
+        command.arg(zero_word);
+        push_external_args(&mut command, args);
+        return Some((command, true));
+    }
+    if let Some(shell) = current_shell_processor() {
+        let mut command = Command::new(shell);
+        command.arg(zero_word);
+        push_external_args(&mut command, args);
+        return Some((command, true));
+    }
+    None
 }
 
 /// Whether the host requested shell-native (Windows-style) PWD display.
@@ -2521,9 +2571,12 @@ mod tests {
             PathBuf::from(command.get_program()),
             std::env::current_exe().unwrap()
         );
+        // The wrapper's script argument is the child shell's $0
+        // (findcmd.c:395 + execute_cmd.c:6252), carried in forward-slash
+        // form — not the resolved Windows backslash path.
         assert_eq!(
             args,
-            vec![script.to_string_lossy().to_string(), ".".to_string()]
+            vec![script.to_string_lossy().replace('\\', "/"), ".".into()]
         );
 
         let _ = fs::remove_dir_all(bin_dir);

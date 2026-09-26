@@ -99,6 +99,9 @@ impl Executor {
             || env_vars.contains_key("__RUBASH_SHELL_PID");
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
+            // dollar_vars[0] slot reset at script entry (shell.c:1613) —
+            // see main.rs; the snapshot rides the process env otherwise.
+            env_vars.remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
         env_vars.remove("__RUBASH_SHELL_NAME");
         env_vars.remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
@@ -106,6 +109,7 @@ impl Executor {
         env::remove_var("__RUBASH_IN_SOURCE");
         if !internal_respawn {
             env::remove_var("__RUBASH_SCRIPT_NAME");
+            env::remove_var("__RUBASH_ARGV0_AFTER_UNSET");
         }
         env::remove_var("__RUBASH_SHELL_NAME");
         env::remove_var(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);

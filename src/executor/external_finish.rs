@@ -472,6 +472,26 @@ impl Executor {
         // monitor `wait` (trap.tests: a fourth "caught a child death").
         let saved_sigchld_notifications = self.sigchld_notifications_pending.replace(0);
         self.set_env("__RUBASH_SCRIPT_NAME", script);
+        // GNU shell.c:1613-1614 (open_shell_script): dollar_vars[0] =
+        // exec_argv0 ? exec_argv0 : script_name — every script the shell
+        // enters rebinds $0 to the word it was invoked with, never the
+        // parent's. BASH_ARGV0 is rubash's dollar_vars[0] mirror
+        // (variables.c:1520 get_bash_argv0); the parent's values return
+        // with restore_shell_env(saved_env) below. A stale assignment
+        // snapshot from before the boundary dies the same way.
+        self.remove_env("__RUBASH_ARGV0_AFTER_UNSET");
+        // ... except an exported BASH_ARGV0: GNU variables.c:1547-1555
+        // (set_argv0) imports an exported BASH_ARGV0 into the new shell as
+        // dollar_vars[0], so a user's exported assignment outranks the
+        // script word exactly like exec_argv0 outranks script_name at
+        // shell.c:1613.
+        if !is_marked_var(
+            &self.shell_state.env_vars,
+            crate::executor::types::EXPORTED_VARS,
+            "BASH_ARGV0",
+        ) {
+            self.set_env("BASH_ARGV0", script);
+        }
         // When this_shell_invocation is true, cmd.words[0] is the shell
         // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
         // positional params start at cmd.words[2]. Otherwise cmd.words[0]

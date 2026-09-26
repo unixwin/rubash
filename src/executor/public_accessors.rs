@@ -326,7 +326,7 @@ impl Executor {
         crate::builtins::enable::set_disabled(&mut self.shell_state.env_vars, name, disabled);
     }
 
-    pub(crate) fn remove_env(&mut self, name: &str) {
+    pub fn remove_env(&mut self, name: &str) {
         self.shell_state.env_vars.remove(name);
         env::remove_var(name);
     }

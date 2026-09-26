@@ -44,7 +44,15 @@ impl Executor {
             "BASHPID" => Some(self.bashpid_value().to_string()),
             "BASH_SUBSHELL" => Some(self.shell_state.subshell_depth.get().to_string()),
             "BASH_ARGV0" => Some(self.script_name_value()),
-            "FUNCNAME" => Some(self.funcname_stack().first().cloned().unwrap_or_default()),
+            // GNU FUNCNAME carries att_invisible and only becomes visible
+            // while a function is executing (variables.c:1812
+            // make_funcname_visible, set from execute_cmd.c:5257 on entry
+            // and cleared at 5167 on unwind). The "source" frame pushed by
+            // evalfile.c:257 does NOT flip visibility, so at the top level
+            // (even mid-source) $FUNCNAME reads as unset.
+            "FUNCNAME" if self.shell_state.function_depth > 0 => {
+                Some(self.funcname_stack().first().cloned().unwrap_or_default())
+            }
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
                 self.shell_state
@@ -162,6 +170,13 @@ impl Executor {
         match name {
             "PIPESTATUS" => return Some(format_indexed_array_values(self.pipestatus_values())),
             "FUNCNAME" => {
+                // Same att_invisibility as the scalar read above
+                // (variables.c:1812 make_funcname_visible): outside any
+                // function the whole array reads as unset, including the
+                // evalfile.c:257 "source" frame at the top level.
+                if self.shell_state.function_depth == 0 {
+                    return Some(String::new());
+                }
                 let mut stack = self.shell_state.function_name_stack.clone();
                 // Bash exposes the script's top-level frame as `main`, but
                 // `bash -c` reports only real function frames.
@@ -327,6 +342,11 @@ impl Executor {
         self.shell_state
             .env_vars
             .get("BASH_ARGV0")
+            // GNU variables.c:1528-1545: assign_bash_argv0 rebinds
+            // dollar_vars[0], which survives `unset BASH_ARGV0` — the
+            // dedicated snapshot slot models that (cleared at every script
+            // entry, where shell.c:1613 rebinds the slot to script_name).
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_ARGV0_AFTER_UNSET"))
             .or_else(|| self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME"))
             .or_else(|| self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"))
             // Embedded hosts provide their public shell identity here. Keep

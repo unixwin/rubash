@@ -866,6 +866,10 @@ fn run_script_file_with_init(
 
     executor.set_env("__RUBASH_SCRIPT_NAME", script);
     executor.set_env("BASH_ARGV0", script);
+    // shell.c:1613 rebinds dollar_vars[0] to script_name at every script
+    // entry, so a parent's BASH_ARGV0 assignment snapshot must not survive
+    // the boundary (the __RUBASH_* keys ride the process env).
+    executor.remove_env("__RUBASH_ARGV0_AFTER_UNSET");
     executor.inherit_process_stdin();
     executor.set_positional_params(args.to_vec());
     if let Some(init_file) = init_file {

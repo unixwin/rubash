@@ -545,6 +545,19 @@ impl Executor {
         if result && base == "BASH_XTRACEFD" {
             self.apply_xtracefd_assignment();
         }
+        // GNU variables.c:1528-1545 assign_bash_argv0: assigning BASH_ARGV0
+        // rebinds dollar_vars[0] itself, so `unset BASH_ARGV0` afterwards
+        // leaves $0 at the last assigned value (the dynamic var dies, the
+        // dollar_vars slot does not). Snapshot into a dedicated slot that
+        // only the post-unset fallback reads — deliberately NOT
+        // __RUBASH_TOP_LEVEL_NAME, which also gates the bashdb source-path
+        // bridges in public_accessors.rs (bashdb-generated rebinds
+        // BASH_ARGV0 to the debugged script, a legitimate assign).
+        if result && base == "BASH_ARGV0" {
+            if let Some(value) = self.shell_state.env_vars.get("BASH_ARGV0").cloned() {
+                self.set_env("__RUBASH_ARGV0_AFTER_UNSET", &value);
+            }
+        }
         result
     }
 
