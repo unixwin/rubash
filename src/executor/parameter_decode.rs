@@ -514,11 +514,16 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
                     // Inside `"..."`, `\` quotes only `$`, `` ` ``, `"`,
                     // `\`, and newline (GNU subst.c
                     // string_extract_double_quoted); every other `\X` is
-                    // literal backslash + X. Feed the expander an escaped
-                    // form for each literal char so `\'` stays `\'` and
-                    // `\a` stays `\a` instead of collapsing to `a`.
+                    // literal backslash + X. The embedded expander PRESERVES
+                    // backslash sequences verbatim (it does not collapse
+                    // `\\`), so pushing the doubled form doubled the final
+                    // marker output and the pattern failed to match
+                    // (`${v#"C:\Users"}` — rubash#127): emit exactly one
+                    // backslash per source backslash; the post-expansion
+                    // marking turns it into the proven single-literal form.
+                    // A `\\` pair is likewise ONE literal backslash.
                     match next {
-                        '$' | '`' | '"' | '\\' => {
+                        '$' | '`' | '"' => {
                             content.push(inner);
                             content.push(next);
                         }
@@ -528,10 +533,12 @@ pub(in crate::executor) fn mask_quoted_pattern_spans(
                             content.push('\\');
                             content.push(next);
                         }
-                        other => {
+                        '\\' => {
                             content.push('\\');
+                        }
+                        _ => {
                             content.push('\\');
-                            content.push(other);
+                            content.push(next);
                         }
                     }
                     j += 2;

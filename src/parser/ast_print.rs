@@ -413,7 +413,22 @@ impl Printer {
         let mut parts: Vec<String> = cmd
             .assignments
             .iter()
-            .map(|(name, value)| format!("{name}={}", render_assignment_value(value)))
+            .map(|(name, value)| {
+                // `a+=(...)` compounds ride the COMPOUND_ASSIGNMENT_MARKER
+                // with the parenthesized source text verbatim (parser
+                // token_actions.rs); the name already carries the `+`.
+                // print_cmd.c reprints assignments as source-level text
+                // only (xtrace_print_assignment, print_cmd.c:514), so the
+                // transport marker must never survive into declare -f
+                // output (rubash#126).
+                if let Some(source) =
+                    value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+                {
+                    format!("{name}={source}")
+                } else {
+                    format!("{name}={}", render_assignment_value(value))
+                }
+            })
             .collect();
         // `{name}` words consumed as fd-variable redirect prefixes
         // (`exec {v}>>file`) belong to the redirection, not the word list.

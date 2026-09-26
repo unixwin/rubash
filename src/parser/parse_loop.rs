@@ -77,12 +77,15 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
                 crate::lexer::unclosed_command_substitution_depth(&tokens[i].raw);
         }
         if state.pending_comsub > 0
-            && matches!(tokens[i].value.as_str(), ")" | ";;" | ";&" | ";;;&")
+            && [")", ";;", ";&", ";;;&"]
+                .iter()
+                .any(|op| super::is_unquoted_operator(&tokens[i], op))
         {
             // Still inside an unfolded `$(` body: `)` is its closer and
             // case terminators belong to the body's own case syntax —
-            // neither is a top-level stray.
-            if tokens[i].value == ")" {
+            // neither is a top-level stray. A quoted `')'` is word text
+            // (rubash#128), never a closer.
+            if super::is_unquoted_operator(&tokens[i], ")") {
                 state.pending_comsub -= 1;
             }
             i += 1;
@@ -101,7 +104,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // stray at command position, where a `;;` terminator has no open
         // clause.
         if options.stray_close_is_error
-            && ((tokens[i].value == ")" && !state.in_subshell)
+            && ((super::is_unquoted_operator(&tokens[i], ")") && !state.in_subshell)
                 || (command_is_empty(&state.current_cmd)
                     && matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&")))
         {
@@ -765,13 +768,15 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let mut close = open;
             for j in open..tokens.len() {
                 let t = &tokens[j];
-                if t.value == "(("
-                    || (t.value == "(" && tokens.get(j + 1).is_some_and(|n| n.value == "("))
-                {
+                let op = |v: &str| super::is_unquoted_operator(t, v);
+                let next_op = |v: &str| {
+                    tokens
+                        .get(j + 1)
+                        .is_some_and(|n| super::is_unquoted_operator(n, v))
+                };
+                if op("((") || (op("(") && next_op("(")) {
                     depth += 1;
-                } else if t.value == "))"
-                    || (t.value == ")" && tokens.get(j + 1).is_some_and(|n| n.value == ")"))
-                {
+                } else if op("))") || (op(")") && next_op(")")) {
                     if depth == 0 {
                         close = j;
                         break;
@@ -2059,8 +2064,12 @@ fn time_prefixed_shell_command_starts_with_compound(tokens: &[Token], index: usi
 
     tokens.get(index).is_some_and(|token| {
         token.kind == TokenKind::Word
-            && tokens.get(index + 1).is_some_and(|next| next.value == "(")
-            && tokens.get(index + 2).is_some_and(|next| next.value == ")")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| super::is_unquoted_operator(next, "("))
+            && tokens
+                .get(index + 2)
+                .is_some_and(|next| super::is_unquoted_operator(next, ")"))
     })
 }
 
