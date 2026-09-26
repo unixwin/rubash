@@ -1914,9 +1914,15 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(status);
             }
-            if parsed.operands.is_empty() && parsed.opt_given {
-                // complete.def:460-464: options but no names and no
-                // -p/-r/-D/-E/-I print usage and fail with EX_USAGE.
+            if parsed.operands.is_empty() && parsed.opt_given && pseudo.is_none() {
+                // complete.def:460-464 `if (wl == 0 && list == 0 && opt_given)`:
+                // options but no names and no -p/-r/-D/-E/-I print usage and
+                // fail with EX_USAGE. The -D/-E/-I word list (wl, built at
+                // complete.def:417-424 from DEFAULTCMD/EMPTYCMD/INITIALWORD)
+                // counts as a name, so `complete -D -F fn` registers the
+                // default-command compspec silently with status 0 —
+                // bash_completion:3617's dynamic loader depends on it
+                // (rubash#133).
                 crate::builtins::complete::write_usage(builtin, &mut stderr)?;
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(2); // EX_USAGE
