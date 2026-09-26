@@ -137,20 +137,24 @@ pub(super) fn dparen_lexically_arithmetic(tokens: &[Token], start: usize) -> boo
     let mut depth = 1usize;
     let mut i = if combined_open { start + 1 } else { start + 2 };
     while i < tokens.len() {
-        match tokens[i].value.as_str() {
-            "(" => depth += 1,
-            ")" => {
-                depth -= 1;
-                if depth == 0 {
-                    return tokens.get(i + 1).is_some_and(|token| token.value == ")");
+        if super::is_unquoted_operator(&tokens[i], "(") {
+            depth += 1;
+        } else if super::is_unquoted_operator(&tokens[i], ")") {
+            depth -= 1;
+            if depth == 0 {
+                return tokens
+                    .get(i + 1)
+                    .is_some_and(|token| super::is_unquoted_operator(token, ")"));
+            }
+        } else {
+            match tokens[i].value.as_str() {
+                "))" if depth == 1 => {
+                    // The token closes this group and the following `)` is the
+                    // next character: arithmetic, like GNU reading `))` here.
+                    return true;
                 }
+                _ => {}
             }
-            "))" if depth == 1 => {
-                // The token closes this group and the following `)` is the
-                // next character: arithmetic, like GNU reading `))` here.
-                return true;
-            }
-            _ => {}
         }
         i += 1;
     }

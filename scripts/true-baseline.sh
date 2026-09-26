@@ -114,9 +114,22 @@ ensure_test_helpers() {
     fi
   done
   if command -v rustc >/dev/null 2>&1; then
+    RUSTC_BUILD=rustc
+  elif command -v rustc.exe >/dev/null 2>&1; then
+    # WSL side reaching the Windows toolchain through interop; Windows
+    # rustc needs Windows paths, so route operands through wslpath -w.
+    RUSTC_BUILD=rustc.exe
+  else
+    RUSTC_BUILD=
+  fi
+  if [ -n "$RUSTC_BUILD" ]; then
     for h in recho zecho; do
       if [ ! -f "$BASE/$h.exe" ] && [ -f "$REPO/scripts/test-helpers/$h.rs" ]; then
-        rustc -O -o "$BASE/$h.exe" "$REPO/scripts/test-helpers/$h.rs" 2>/dev/null || true
+        if [ "$RUSTC_BUILD" = rustc.exe ]; then
+          "$RUSTC_BUILD" -O -o "$(wslpath -w "$BASE/$h.exe")" "$(wslpath -w "$REPO/scripts/test-helpers/$h.rs")" 2>/dev/null || true
+        else
+          "$RUSTC_BUILD" -O -o "$BASE/$h.exe" "$REPO/scripts/test-helpers/$h.rs" 2>/dev/null || true
+        fi
       fi
     done
   fi
@@ -167,6 +180,19 @@ export MSYS=winsymlinks:nativestrict
 # the .sub bodies run against GNU's empty output (~115 phantom diff lines —
 # verified identical on a HEAD build under the same WSLENV).
 export WSLENV="__RUBASH_NO_UPSTREAM_SCRIPTS/w:TMPDIR/p:LC_ALL/w:LC_COLLATE/w:LANG/w:MSYS/w:OLDPWD/wp"
+
+# The rubash side runs as a Windows process: the WSL PATH never reaches it
+# (WSLENV is opt-in per variable). Forward a CONTROLLED PATH via PATH/p
+# translation — bash-tests-rw first (the recho/zecho.exe Windows helpers),
+# then the real Windows PATH in /mnt form so the toolset resolution matches
+# what interop would have passed. /usr/bin entries are deliberately NOT
+# forwarded: \\wsl$ UNC paths would shadow the Windows toolset and change
+# od/expr formats mid-ledger.
+WINPATH_AS_WSL=$(/mnt/c/Windows/System32/cmd.exe /c 'echo %PATH%' 2>/dev/null \
+  | tr -d '\r' | tr ';' '\n' \
+  | sed -e 's|\\|/|g' -e 's|^\([A-Za-z]\):|/mnt/\L\1|' \
+  | grep -v '^$' | paste -sd:)
+RUBSIDE_PATH="${RUBSIDE_PATH:-$BASE:$WINPATH_AS_WSL}"
 
 mkdir -p "$OUT"
 : > "$LOG"
@@ -222,9 +248,10 @@ for name in $SUITES; do
       THIS_SH="$GNU_BASH" timeout --foreground -k 5 "$tmo" "$GNU_BASH" "./$name.tests" \
       > "$w/gnu.out" 2> "$w/gnu.err" ) < /dev/null
   echo $? > "$w/gnu.rc"
-  ( cd "$BASE" && PATH="$RB_PATH:$BASE:/usr/bin:/bin" TMPDIR="$w/tmp" \
+  ( cd "$BASE" && env PATH="$RUBSIDE_PATH" TMPDIR="$w/tmp" \
+      WSLENV="$WSLENV:PATH/p" \
       __RUBASH_NO_UPSTREAM_SCRIPTS=1 \
-      timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
+      /usr/bin/timeout --foreground -k 5 "$tmo" "$RUB" "./$name.tests" \
       > "$w/rb.out" 2> "$w/rb.err" ) < /dev/null
   echo $? > "$w/rb.rc"
   read -r n envn <<EOF

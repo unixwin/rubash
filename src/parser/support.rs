@@ -97,6 +97,17 @@ pub(super) fn is_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
         .is_some_and(|token| token.kind == TokenKind::Keyword && token.value == value)
 }
 
+/// Whether `token` IS the operator/terminator spelled `value` in the source —
+/// not merely a word whose quote removal produced that text. GNU read_token
+/// (parse.y:5305 read_token_word) consumes a quoted or escaped `)` / `;;` /
+/// `)` as WORD TEXT that never becomes an operator token, so
+/// `echo ')'` must print `)`. An operator token's raw spelling is exactly its
+/// own text; any quoting (`')'`, `"')"`, `\;`) or other word content makes
+/// raw differ from the de-quoted value. Fixes rubash#128.
+pub(super) fn is_unquoted_operator(token: &Token, value: &str) -> bool {
+    token.value == value && token.raw == value
+}
+
 pub(super) fn is_case_end_keyword(tokens: &[Token], index: usize) -> bool {
     is_keyword(tokens, index, "esac") && !case_pattern_starts_with_esac(tokens, index)
 }
