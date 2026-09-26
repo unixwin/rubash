@@ -459,6 +459,16 @@ impl Executor {
         } else {
             Vec::new()
         };
+        // GNU's queued child-death notifications are process state: the
+        // child's queue dies with it (jobs.c waitchld runs in the child's
+        // own image) and the parent's counter must be exactly what it was.
+        // sigchld_notifications_pending is an Executor cell shared by the
+        // in-process emulation, so a reap that lands while the child runs a
+        // signal-trap action (trap9.sub: the `{ sleep 1; kill -USR1 $$; } &`
+        // job dies during the USR1 trap) would otherwise leave a leftover
+        // count that re-fires the parent's SIGCHLD trap once during the
+        // monitor `wait` (trap.tests: a fourth "caught a child death").
+        let saved_sigchld_notifications = self.sigchld_notifications_pending.replace(0);
         self.set_env("__RUBASH_SCRIPT_NAME", script);
         // When this_shell_invocation is true, cmd.words[0] is the shell
         // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
@@ -557,6 +567,11 @@ impl Executor {
             let _ = crate::builtins::kill::take_pending_signals_now(std::process::id());
             crate::builtins::kill::requeue_pending_signals(saved_pending_signals);
         }
+        // Restore the parent's child-death notification count (the child's
+        // leftover was already zeroed at entry; see
+        // saved_sigchld_notifications above).
+        self.sigchld_notifications_pending
+            .set(saved_sigchld_notifications);
         self.parse_error_occurred = saved_parse_error;
         self.exit_jump_pending.set(saved_exit_jump_pending);
         self.last_command_substitution_parse_error

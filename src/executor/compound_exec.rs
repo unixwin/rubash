@@ -359,14 +359,16 @@ impl Executor {
         // SIG_IGN dispositions DO cross the fork boundary (trap.c
         // original_signals -> SIG_HARD_IGNORE), so __RUBASH_TRAP_ORIG_IGN is
         // forwarded above and must survive this reset filter.
-        for key in self
-            .shell_state
-            .env_vars
-            .keys()
-            .filter(|key| key.starts_with("__RUBASH_TRAP") && *key != "__RUBASH_TRAP_ORIG_IGN")
-        {
-            env_map.remove(key);
-        }
+        // Strip by the KEYS PRESENT IN env_map, not the live trap table:
+        // stale OS-env copies of removed traps (the std::env mirror writes
+        // through setattr apply.rs but is not cleaned on trap removal) ride
+        // into env_map via std::env::vars() above, and a strip driven by
+        // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
+        // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
+        // children after `trap - HUP`/`trap - USR2` had cleared the table).
+        env_map.retain(|key, _| {
+            !(key.starts_with("__RUBASH_TRAP") && key != "__RUBASH_TRAP_ORIG_IGN")
+        });
         env_map.insert("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string());
         // GNU execute_cmd.c:1761 (execute_in_subshell): a forked async
         // subshell keeps the parent's $0 and line number, so diagnostics

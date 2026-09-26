@@ -321,6 +321,14 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
+    // The spec's env IS the child environment (the caller composes it from
+    // std::env::vars() plus the shell's exported state, then strips what a
+    // subshell must not inherit — e.g. the __RUBASH_TRAP* keys, POSIX
+    // 2.11: caught traps reset in a subshell). Merging with this process's
+    // environment instead would resurrect every stripped key as a stale
+    // OS-env copy (trap.tests: background `rubash -c` children ran the
+    // parent's inherited EXIT trap at exit — three spurious "exiting").
+    cmd.env_clear();
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
