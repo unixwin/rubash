@@ -14,7 +14,20 @@
 /// through unchanged.
 pub fn message(err: &std::io::Error) -> String {
     match err.raw_os_error() {
-        Some(code) => os_error_message(code).to_string(),
+        Some(code) => {
+            let mapped = os_error_message(code);
+            if mapped == "Unknown error" {
+                // The static table only covers codes the suite has met.
+                // `io::Error::to_string` runs FormatMessageW on Windows
+                // (strerror on Unix), giving the real OS text plus the
+                // numeric code — "Unknown error" discarded both, which hid
+                // the actual CreateProcess failure behind spawn errors
+                // like `sort: Unknown error` (niubash#141).
+                err.to_string()
+            } else {
+                mapped.to_string()
+            }
+        }
         None => err.to_string(),
     }
 }
@@ -148,6 +161,16 @@ mod tests {
     fn synthesized_payloads_pass_through() {
         let err = std::io::Error::new(std::io::ErrorKind::Other, "pipeline stderr reader panicked");
         assert_eq!(message(&err), "pipeline stderr reader panicked");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unmapped_windows_code_keeps_os_text_and_number() {
+        // niubash#141: an unmapped CreateProcess failure must surface the
+        // OS message and the raw code, not collapse to "Unknown error".
+        let text = message(&std::io::Error::from_raw_os_error(9999));
+        assert!(text.contains("9999"), "raw code must survive, got {text:?}");
+        assert_ne!(text, "Unknown error");
     }
 
     #[test]

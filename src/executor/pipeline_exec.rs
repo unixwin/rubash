@@ -1059,7 +1059,22 @@ impl Executor {
                 process.stderr(Stdio::piped());
             }
 
-            let mut child = process.spawn().map_err(ExecuteError::IoError)?;
+            // niubash#141: keep the failed stage's resolved program in the
+            // diagnostic — a bare `line 1: Unknown error` hid which stage's
+            // CreateProcess failed (and with which binary).
+            let mut child = process.spawn().map_err(|error| {
+                ExecuteError::IoError(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {}",
+                        program
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("external"),
+                        crate::posix_errors::message(&error)
+                    ),
+                ))
+            })?;
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
                     intermediate_stderr.push(std::thread::spawn(move || {
@@ -1297,7 +1312,19 @@ impl Executor {
                 process.stderr(Stdio::piped());
             }
 
-            let mut child = process.spawn().map_err(ExecuteError::IoError)?;
+            let mut child = process.spawn().map_err(|error| {
+                ExecuteError::IoError(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {}",
+                        program
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("external"),
+                        crate::posix_errors::message(&error)
+                    ),
+                ))
+            })?;
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
                     intermediate_stderr.push(std::thread::spawn(move || {
