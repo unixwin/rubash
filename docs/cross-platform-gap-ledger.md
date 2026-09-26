@@ -82,7 +82,7 @@ aarch64-apple-darwin 干净；5 条 WSL GNU Bash 5.3.0 基线对齐。
   Linux 文件名合法含 `\`（`/home/a\b` 被改写）。状态：已派 A2 追加（cfg!(windows) 门）。
 - **E20 ⚪→发布层🔴 bash shim 无平台门**（`src/bin/bash.rs` + Cargo.toml
   `[[bin]] name="bash"`）：unix 构建产出 `bash` 二进制且 `locate_shell` 只探
-  `niu.exe`/`winuxsh.exe` → 必 127；`cargo install`/unix tarball 会遮蔽系统 bash
+  `niu.exe`/`winuxsh.exe`（遗留探测名）→ 必 127；`cargo install`/unix tarball 会遮蔽系统 bash
   （Windows 侧 package-release.ps1:47-109 依赖该 bin 产 bash.exe，不能删）。
   修法：`locate_shell` 平台分叉候选名（unix 裸 `niu`）+ unix 发布不装 shim。归 C2 批次。
 - **E21 ✅ 引擎 ctrlc 死依赖已删**（959961a9）。
