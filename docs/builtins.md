@@ -184,6 +184,17 @@ winuxcmd（176 个外部命令）与 rubash 内置/保留字重叠的命令共 1
 行为（选项、转义、格式化、信号、jobspec、TIMEFORMAT）完成逐项比对，结论：
 对齐。详细判定见工作区审计报告。
 
+**命令替换内的 builtin 遮蔽（防回归不变量）**：`$(builtin …)` 的外部命令
+解析在 PATH 查找**之前**先按名字判 `is_shell_builtin_name`，并尊重
+`enable -n`（禁用后才落到同名 .exe）。该守卫在
+`src/executor/command_substitution_values.rs`（`run_external_command_substitution`
+内的名字前置检查）与 `pipeline_exec.rs` / `pipeline_stages.rs` 的各 pipeline
+stage 入口；是**基于名字而非 PATH 顺序**的判定，PATH 前置 system32 也无法
+绕过。2026-09 期审计确认：Windows PATH 上与 builtin 同名真 .exe 共 11 个
+（fc/echo/printf/true/false/test/[/env/pwd/kill/help，含 system32 的
+fc.exe/help.exe），全部经 `$(...)` 实测走 builtin；回归覆盖
+`tests/c_stub_regressions.rs`。
+
 ## 五、维护清单（改这里之前先看）
 
 新增/修改 builtin 或 fast-path 时：

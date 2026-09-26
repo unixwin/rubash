@@ -1,7 +1,9 @@
 # Rubash ↔ GNU Bash 兼容性权威状态（单一事实来源）
 
-> 最后核对日期：2026-09-20（合并后全量 true-baseline 重跑，83 套件，GNU 5.3.0 契约，
-> 分支 `fix/array6-patsub-quotes`；逐套件台账见 `target/issue-suites/results/postmerge-baseline-ledger.txt`）
+> 最后核对日期：2026-09-25（master `71c933eb`，env 归零口径 **82 零差 / 1 残余 / 83 套件**，
+> 台账条目见下文 2026-09-25 段；受影响切片 2026-09-26 复核后口径更新见
+> "假货清除后的口径更新"段。此前 2026-09-20 合并后全量 true-baseline 重跑的
+> 逐套件台账在 `target/issue-suites/results/postmerge-baseline-ledger.txt`）
 > 核对方法：用 `./target/debug/rubash.exe` 直接跑 GNU 官方测试文件
 > `third_party/bash/tests/<name>.tests`，对比 GNU bash 的真实输出。
 > 基线约定（2026-09-09 起生效）：语义比对一律用 WSL GNU Bash 5.3.0
@@ -63,7 +65,7 @@
 >
 > **上一台账（2026-09-22 深夜，master `44a56d1c`，无桩 + niu-sh 夹具）：58 零差 / 25 有 DIFF / 总 407 原始行**
 > （台账 `target/issue-suites/results/true-baseline-ledger.log`；逐行审计
-> `docs/diff-audit-20260922.md`。本轮为**首份无桩引擎级台账**：
+> 见当时的行级 diff 审计报告（2026-09-26 文档清理删除，git 历史可查）。本轮为**首份无桩引擎级台账**：
 > `__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 首次真实跨 WSL→Win32 边界
 > （此前从未到达 rubash.exe，全部历史台账均带 canned upstream 回放）；
 > `/bin/sh|/usr/bin/sh` 经 PATH 解析为挂载本工作树 rubash 的 niubash
@@ -219,8 +221,8 @@ rubash 输出 141 行 vs bash 104 行，差异集中在 `braces.rs` / `expand_ra
   rubash 反而正确执行——这不是 rubash 的 bug。
 - **超时规则不同**：6 个测试双方超时计数不同，属平台差异。
 - **rubash 优于 bash**：`builtins`、`comsub2`、`histexp`、`complete -p` 计数等无需修。
-  （**勘误 2026-09-22**：`histexp`"无需修"结论已被
-  `docs/harness-attribution-20260922.md` 推翻——真账约 74 行 `!!` 透传缺失属真实语义差，
+  （**勘误 2026-09-22**：`histexp`"无需修"结论已被行级归因清扫推翻——真账约 74 行
+  `!!` 透传缺失属真实语义差，
   非噪声；本条其余归属维持。）
 
 ## 六、建议的下一步优先级
@@ -298,8 +300,9 @@ run-83.sh 已改为两侧 `< /dev/null`。剩余 `ifs-posix` 是性能（6856 �
 
 ## 九、2026-09-01 多智能体复现与源码一致修复检查点
 
-6 个根因族由只读调查子智能体复现并对照 GNU C 源码分析，报告位于
-`docs/investigation/{posixexp2,heredoc,ifs-posix,procsub,declare-array,deep-expansion}-investigation.md`。
+6 个根因族由只读调查子智能体复现并对照 GNU C 源码分析（posixexp2/heredoc/
+ifs-posix/procsub/declare-array/deep-expansion 六份调查报告已于 2026-09-26
+文档清理删除，git 历史可查；结论均已沉淀到本节与下文各台账）。
 船长按 AGENTS.md 流程逐族验证后落盘的源码一致修复如下。
 
 ### 已落地并验证（WSL GNU 5.2.21 探针 + run-83 A/B 回归）
@@ -425,8 +428,8 @@ heredoc 135，quote/quotearray 166，posixexp 93（sed 解析簇 + UTF-8 载体�
 40/40 行数相等；vredir → 差 5；comsub 基线纠正为 79/85（旧 98 行基线系毒化期产物；
 gen 期 run-83.sh:90 强制 `THIS_SH=bash`）。
 
-并行轨道 A–E 已分配（文件领地互不相交；明细见
-`docs/83-TEST-FULL-ANALYSIS.md` 第九节）：A globstar（glob.rs）/ B fd 模型族
+并行轨道 A–E 已分配（文件领地互不相交；明细见当时删除的 83 全量分析文档
+第九节）：A globstar（glob.rs）/ B fd 模型族
 （execution_misc/redir）/ C 族H 深层展开（parameter_words/read_split）/
 D iquote-quote lane（quotes/embedded_parameters，captain）/ E ifs-posix LLDB。
 平台/环境伪影负面清单（env 形态 118v18、stdio 交错、/tmp 映射）见

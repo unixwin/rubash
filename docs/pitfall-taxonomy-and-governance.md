@@ -100,7 +100,12 @@ rubash 用带内哨兵（C0 字节 \x11–\x1f、PUA 码点 E000–E317、命名
   - Batch 5: CTLESC（U+0011）金标断言
   - Batch 6: 命名字符串标记（__RUBASH_HD1__/CSB1__/CA1__）金标断言
   - 全部批次验证：cargo test 418 passed + 83 套件 true-baseline 无回归
-  - 详细文档：docs/typed-carrier-migration-plan.md
+  - 迁移计划文档已完成使命并于 2026-09-26 清理删除（git 历史可查）。
+    **治理裁决（收尾口径）**：剩余标记族（C0 族除 CTLESC 外的 14 个、PUA 族
+    6 个、C0 执行标记 4 个）**保留带内协议**，由 markers.rs 注册表 + 金标断言
+    治理，不再做全量 typed-carrier 重构——CTLESC 全迁移需重造整个引号状态
+    追踪（对齐 parse.y:5694-5706 / subst.c:4692 / subst.c:4807 的成本远超收益），
+    函数本地标记本就无泄漏面。新增标记仍按 3.1 禁令一律禁止。
 
 ### 3.2 解码收口
 

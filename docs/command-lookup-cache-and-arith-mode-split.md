@@ -71,9 +71,9 @@ agents independently measured different results because they used
 different invocation modes. The split was confirmed with `env -i` clean
 environment runs.
 
-### Rubash fix (commit pending)
+### Rubash fix (commit 7666a550)
 
-Rubash tags `-c` invocations with `__RUBASH_IS_C=1` (main.rs:253).
+Rubash tags `-c` invocations with `__RUBASH_IS_C=1` (main.rs).
 `arithmetic_error_message` now takes `env_vars` and uses
 `command_context = !is_c_mode` so:
 - `-c` mode `$(( ))` -> `syntax error` (matches GNU `-c`)

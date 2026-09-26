@@ -21,7 +21,7 @@ This checkpoint separates compatibility families by semantic owner; aggregate DI
 
 ### Evidence artifacts
 
-- docs/investigation/heredoc-investigation.md
+- heredoc 调查报告（原 investigation/ 目录，2026-09-26 文档清理删除；git 历史可查）
 - target/issue-suites/results/check/heredoc.diff
 - target/issue-suites/results/casemod-probe-new.sh
 - target/issue-suites/results/casemod-gnu-new.out

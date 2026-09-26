@@ -1,5 +1,10 @@
 # 词级准入守卫全仓审计（#117 未完成部分）
 
+> **状态（2026-09-26 更新）**：C 类八桩（C1-C8）已全部清除并核销
+> （2026-09-25，指纹 grep 归零；回归覆盖 `tests/c_stub_regressions.rs`）。
+> B 类九族中 B4/B6/B8 已落地；**B1/B2/B3/B5/B7 仍是 TASKBOARD Q1 的活跃
+> 工作计划，本文 B 节清单是其依据，保留为活文档。**
+
 日期：2026-09-22。基线：master `a2e14bff`（任务书写的 bfa3ce43 已不是 HEAD，按现状审计）。
 范围：`src/executor/`、`src/builtins/` 全部 `contains(` / `starts_with(` 命中共 **1123 行**
 （原始清单：`target/issue-suites/results/admit-audit-lines.txt`，带上下文转储：

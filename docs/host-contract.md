@@ -11,7 +11,7 @@
    **零 GPL 字眼**；残留只在 3 处项目面向文案——Cargo.toml 顶部注释、README.md /
    README.zh-CN.md 的 badge 与许可声明——已全部改为 MIT。
    保留不动的两类：`third_party/bash/**` 是 vendored 上游 GNU Bash（其本体即 GPL），
-   5 个含 GPL 的文件是上游授权事实；CHANGELOG.md / HANDOFF-20260829.md /
+   5 个含 GPL 的文件是上游授权事实；CHANGELOG.md /
    bash-upstream-tests.md 里的是历史与上游事实记录（改写历史记录不诚实）。
    2026-09-10 起 harness 全脚本补 MIT 头（原先无任何许可声明）。
 2. **品牌命名空间 = NIU_\***（正名）；WINUXSH_\* = 遗留兜底别名；
@@ -71,9 +71,12 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
 - init.rs 与 cd/paths.rs 的 PWD 风格双实现合并为单一所有权（T2）。
 - Cargo features：windows-host / test-support 门控（NIU-4 Phase 1）。
 - `bash` bin 在非 Windows 上必须是真 shell（现为 winuxsh shim，127）。
-- 跨平台：CI 装 x86_64-unknown-linux-gnu + aarch64-apple-darwin 跑
-  `cargo check --target`（本机无该 target，真实错误清单待采集）；
-  嵌入 API 面：Shell facade / ShellIo trait / 信号注入 / env 隔离构造器；
+- 跨平台：✅ 已落地（2026-09-23，Q12，c144a0c9/d9486c1d）：fd 层双平台分发器
+  （windows_impl + unix.rs POSIX 实现），x86_64-unknown-linux-gnu /
+  aarch64-apple-darwin / Windows 三 target `cargo check --tests` 全零错；
+  CI 已有 cross-target-check 门禁（.github/workflows/ci.yml，linux/darwin
+  check）与 macOS 原生测试 job（`Rust tests (macOS)`，darwin 首次真实执行）。
+- 嵌入 API 面：Shell facade / ShellIo trait / 信号注入 / env 隔离构造器；
   __RUBASH_* env-IPC（537+ 处/~180 名）最终替换为结构化 API（NIU-4 Phase 4）。
 
 ## 4. 证据源
