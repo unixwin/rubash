@@ -170,9 +170,6 @@ impl Executor {
                 return Ok(());
             }
         }
-        if self.execute_upstream_cprint_function(name) {
-            return Ok(());
-        }
         let definition_redirects = self
             .shell_state
             .function_definition_redirects

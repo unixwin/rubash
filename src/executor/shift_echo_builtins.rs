@@ -1,47 +1,6 @@
 use super::*;
 
 impl Executor {
-    pub(in crate::executor) fn execute_recho_command(
-        &mut self,
-        cmd: &CommandNode,
-    ) -> Result<(), ExecuteError> {
-        let output = self.recho_output(&cmd.words[1..]);
-        self.write_buffered_builtin_output(cmd, output.as_bytes(), &[])?;
-        self.exit_code = 0;
-        Ok(())
-    }
-
-    pub(in crate::executor) fn recho_output(&self, args: &[String]) -> String {
-        let mut output = String::new();
-        for (index, arg) in args.iter().enumerate() {
-            output.push_str(&format!(
-                "argv[{}] = <{}>\n",
-                index + 1,
-                recho_display_arg(arg)
-            ));
-        }
-        output
-    }
-
-    // support/zecho.c main(): bare-bones echo used by the upstream test
-    // suite -- print the arguments separated by single spaces with one
-    // trailing newline, no option or escape processing.
-    pub(in crate::executor) fn execute_zecho_command(
-        &mut self,
-        cmd: &CommandNode,
-    ) -> Result<(), ExecuteError> {
-        let output = self.zecho_output(&cmd.words[1..]);
-        self.write_buffered_builtin_output(cmd, output.as_bytes(), &[])?;
-        self.exit_code = 0;
-        Ok(())
-    }
-
-    pub(in crate::executor) fn zecho_output(&self, args: &[String]) -> String {
-        let mut output = args.join(" ");
-        output.push('\n');
-        output
-    }
-
     pub(in crate::executor) fn execute_shift_command(
         &mut self,
         cmd: &CommandNode,
@@ -225,61 +184,4 @@ impl Executor {
         self.exit_code = 0;
         Ok(())
     }
-}
-
-fn recho_display_arg(arg: &str) -> String {
-    // GNU support/recho.c strprint iterates over raw bytes: bytes < 0x20
-    // become ^X, 0x7f becomes ^?, and all other bytes (including >= 0x80)
-    // pass through verbatim. Rubash words carry bytes >= 0x80 and certain
-    // C0 control bytes as U+E000 raw-byte marker pairs; iterate over the
-    // original string so marker pairs are decoded to their byte values
-    // without String::from_utf8_lossy replacing lone high bytes with
-    // U+FFFD (nquote4.tests $'ab\x{cd}e' → ab<0xCD>e, not ab<FFFD>e).
-    // High bytes are re-encoded as marker pairs so the output String stays
-    // valid UTF-8 and write_buffered_builtin_output decodes them back to
-    // raw bytes at the output boundary.
-    use crate::executor::substitution_metadata::{
-        encode_raw_byte_marker, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
-    };
-    let mut output = String::new();
-    let mut chars = arg.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
-            let peeked = chars.peek().copied();
-            match peeked {
-                Some(next_ch) if next_ch as u32 == RAW_BYTE_MARKER_ESCAPE => {
-                    // Doubled sentinel: literal U+E000 in payload text.
-                    chars.next();
-                    output.push(ch);
-                }
-                Some(next_ch)
-                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST)
-                        .contains(&(next_ch as u32)) =>
-                {
-                    chars.next();
-                    let byte = (next_ch as u32 - RAW_BYTE_MARKER_FIRST) as u8;
-                    if byte < 0x20 {
-                        output.push('^');
-                        output.push((byte + 0x40) as char);
-                    } else if byte == 0x7f {
-                        output.push_str("^?");
-                    } else {
-                        // Re-encode high byte for write_buffered_builtin_output.
-                        output.push_str(&encode_raw_byte_marker(byte));
-                    }
-                }
-                _ => {
-                    output.push(ch);
-                }
-            }
-        } else if ch == '\x7f' {
-            output.push_str("^?");
-        } else if ch.is_ascii_control() {
-            output.push('^');
-            output.push(((ch as u8) + 0x40) as char);
-        } else {
-            output.push(ch);
-        }
-    }
-    output
 }

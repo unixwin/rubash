@@ -2310,8 +2310,6 @@ fn is_specialized_command_substitution_word(words: &[String]) -> bool {
         words.first().map(String::as_str),
         Some(
             "echo"
-                | "recho"
-                | "zecho"
                 | "printf"
                 | "cat"
                 | "basename"

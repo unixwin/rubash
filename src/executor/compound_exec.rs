@@ -49,7 +49,6 @@ fn rubash_spawn_inherited_state(key: &str) -> bool {
         "__RUBASH_COMPATIBLE_SHELL_PATH",
         "__RUBASH_SHELL_ROOT",
         "__RUBASH_TEMP_PATH",
-        "__RUBASH_NO_UPSTREAM_SCRIPTS",
     ];
     key.starts_with("__RUBASH_SETOPT_") || KEYS.contains(&key)
 }

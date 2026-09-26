@@ -183,12 +183,6 @@ pub fn run_script_with_history_in(
             }
         }
         let status = run_history_group(executor, &session, &group, start_line, redirect_cmd, false);
-        // A try_upstream_scripts handler fired inside this group: the
-        // canned output already replaced the whole script, so later
-        // groups must not execute for real.
-        if executor.upstream_script_consumed.get() {
-            break;
-        }
         let parse_error = executor.take_parse_error();
         // A group that ended by unwinding (exit builtin, errexit, POSIX
         // special-builtin failure) stops the reader unconditionally — GNU's
@@ -871,13 +865,6 @@ pub fn run_source_with_line_offset(
     // The heredoc collector must see the complete script before command
     // substitution balance is checked: parentheses in a heredoc body are
     // literal data, not shell syntax.
-    // Upstream compatibility handlers replace complete test scripts. Check
-    // them before continuation diagnostics so a malformed fixture does not
-    // append generic EOF errors after the handler emitted reference output.
-    if !interactive && executor.try_upstream_scripts() {
-        return executor.last_exit_code();
-    }
-
     let parse_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     if !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)

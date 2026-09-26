@@ -102,6 +102,10 @@ sync_suite() {
 # ---- helpers: recho/zecho must exist or every GNU output truncates ---------
 # (a fresh checkout has no binaries; a missing helper makes the GNU side
 #  abort with "command not found", poisoning the baseline silently)
+# The GNU side gets the ELF builds from support/*.c. The rubash side runs as
+# a Windows process and cannot exec ELF, so it gets REAL Windows helpers
+# compiled from scripts/test-helpers/*.rs — the executor no longer carries
+# test-only recho/zecho emulations (removed with upstream_scripts).
 ensure_test_helpers() {
   local h
   for h in recho zecho; do
@@ -109,6 +113,13 @@ ensure_test_helpers() {
       gcc -O1 -o "$BASE/$h" "$REPO/third_party/bash/support/$h.c" 2>/dev/null || true
     fi
   done
+  if command -v rustc >/dev/null 2>&1; then
+    for h in recho zecho; do
+      if [ ! -f "$BASE/$h.exe" ] && [ -f "$REPO/scripts/test-helpers/$h.rs" ]; then
+        rustc -O -o "$BASE/$h.exe" "$REPO/scripts/test-helpers/$h.rs" 2>/dev/null || true
+      fi
+    done
+  fi
 }
 ensure_test_helpers
 

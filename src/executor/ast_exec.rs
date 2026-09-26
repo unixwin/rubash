@@ -69,13 +69,6 @@ impl Executor {
     }
 
     fn execute_ast_inner_body(&mut self, ast: &Ast) -> Result<(), ExecuteError> {
-        {
-            let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_UPSTREAM);
-            if self.try_upstream_scripts() {
-                return Ok(());
-            }
-        }
-
         let mut index = 0;
         // GNU execute_cmd.c:1576 execute_in_subshell: the forked child's
         // whole mutable state is a copy of the parent's. The flat `( )`

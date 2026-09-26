@@ -250,22 +250,6 @@ impl Executor {
             return echo_command_substitution_output(&expanded_args);
         }
 
-        if words.first().map(String::as_str) == Some("recho") {
-            let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
-            return self
-                .recho_output(&expanded_args)
-                .trim_capture_terminator()
-                .to_string();
-        }
-
-        if words.first().map(String::as_str) == Some("zecho") {
-            let expanded_args = self.brace_expanded_substitution_args(&words, &word_parts);
-            return self
-                .zecho_output(&expanded_args)
-                .trim_capture_terminator()
-                .to_string();
-        }
-
         if words.first().map(String::as_str) == Some("printf") {
             let expanded_args: Vec<String> = words[1..]
                 .iter()
@@ -805,7 +789,6 @@ impl Executor {
             last_command_substitution_parse_error: Cell::new(false),
             last_command_inverted: Cell::new(false),
             exit_jump_pending: Cell::new(false),
-            upstream_script_consumed: Cell::new(false),
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),

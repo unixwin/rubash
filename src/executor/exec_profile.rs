@@ -18,7 +18,6 @@ pub static P_MATCMD: AtomicU64 = AtomicU64::new(0); // execute_materialized_comm
 pub static P_FOR_TEST: AtomicU64 = AtomicU64::new(0); // arith-for condition eval
 pub static P_FOR_BODY: AtomicU64 = AtomicU64::new(0); // arith-for body
 pub static P_FOR_UPDATE: AtomicU64 = AtomicU64::new(0); // arith-for update eval
-pub static P_UPSTREAM: AtomicU64 = AtomicU64::new(0); // try_upstream_scripts per ast
 pub static P_JOBS: AtomicU64 = AtomicU64::new(0); // coproc scan + job refresh + signal traps per command
 pub static P_CHAIN: AtomicU64 = AtomicU64::new(0); // alias/time/if/pipe matcher chain per command
 pub static P_TOTAL: AtomicU64 = AtomicU64::new(0); // whole execute_command
@@ -73,12 +72,11 @@ pub fn print_summary() {
     let for_test = P_FOR_TEST.load(Ordering::Relaxed);
     let for_body = P_FOR_BODY.load(Ordering::Relaxed);
     let for_update = P_FOR_UPDATE.load(Ordering::Relaxed);
-    let upstream = P_UPSTREAM.load(Ordering::Relaxed);
     let jobs = P_JOBS.load(Ordering::Relaxed);
     let chain = P_CHAIN.load(Ordering::Relaxed);
     let f = |ns: u64| format!("{:.1}ms", ns as f64 / 1_000_000.0);
     eprintln!(
-        "[exec-profile] commands={count} total={} linecmd={} heredoc={} scans={} dispatch={} empty={} expand={} matcmd={} for_test={} for_body={} for_update={} upstream={} jobs={} chain={}",
+        "[exec-profile] commands={count} total={} linecmd={} heredoc={} scans={} dispatch={} empty={} expand={} matcmd={} for_test={} for_body={} for_update={} jobs={} chain={}",
         f(total),
         f(linecmd),
         f(heredoc),
@@ -90,7 +88,6 @@ pub fn print_summary() {
         f(for_test),
         f(for_body),
         f(for_update),
-        f(upstream),
         f(jobs),
         f(chain)
     );
