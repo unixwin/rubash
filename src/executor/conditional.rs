@@ -1357,6 +1357,22 @@ fn translate_bracket_expression(chars: &[char], start: usize) -> Option<(usize, 
                 index = next;
                 continue;
             }
+            // A plain literal `[` member (POSIX: `[` has no special meaning
+            // inside a bracket expression) must be escaped for the regex
+            // crate — `[\][a-z]` is an "unclosed character class" parse
+            // error there because the class only closes at the final `]`
+            // while the crate re-scans the inner `[`. GNU's own ERE
+            // pipeline produces exactly this shape for a class with a
+            // quoted leading `]` member (pathexp.c:257 quote_string_for_
+            // globbing drops the backslash of a quoted `]` since `]` is
+            // not an ere_char, so `[[ =~ [\]\[a-z]+ ]]` reaches regcomp as
+            // `[][a-z]+`); glibc regcomp accepts the POSIX form, the regex
+            // crate does not (bash-completion tar.bash line 142,
+            // rubash#153).
+            out.push('\\');
+            out.push('[');
+            index += 1;
+            continue;
         }
         out.push(c);
         index += 1;
