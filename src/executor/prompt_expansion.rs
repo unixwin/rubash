@@ -654,7 +654,45 @@ impl Executor {
             .get("PS4")
             .cloned()
             .unwrap_or_else(|| "+ ".to_string());
-        self.expand_embedded_parameters(&ps4)
+        let expanded = self.expand_embedded_parameters(&ps4);
+        // GNU print_cmd.c:445-510 indirection_level_string: expand PS4
+        // (decode_prompt_string), then repeat its FIRST CHARACTER once per
+        // indirection_level and append the rest of the string. The base
+        // reader level renders the PS4 unchanged (level 0 keeps the string;
+        // level 1 rebuilds it identically), so each stacked
+        // parse_and_execute-style list (trap.c:496 trap actions) adds one
+        // repetition — `set -x` + an ERR trap traces the action as `++...`
+        // (trap3.sub: `++[8] echo trap: 8`).
+        let level = self.shell_state.xtrace_indirection_level.get();
+        if level == 0 || expanded.is_empty() {
+            return expanded;
+        }
+        let mut first = String::new();
+        let rest_start = match expanded.chars().next() {
+            Some(firstc) => {
+                first.push(firstc);
+                first.push_str(&firstc.to_string().repeat(level));
+                firstc.len_utf8()
+            }
+            None => return expanded,
+        };
+        first.push_str(&expanded[rest_start..]);
+        first
+    }
+
+    /// Run a parse_and_execute-style nested command list (GNU eval.c:63-70
+    /// increments indirection_level around its reader loop; trap.c:496/1071
+    /// route every trap action through it) with the xtrace indirection
+    /// level raised by one, restoring the previous level on the way out.
+    pub(in crate::executor) fn with_xtrace_indirection<R>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let saved = self.shell_state.xtrace_indirection_level.get();
+        self.shell_state.xtrace_indirection_level.set(saved + 1);
+        let result = body(self);
+        self.shell_state.xtrace_indirection_level.set(saved);
+        result
     }
 
     /// Rendered command text for xtrace: prefix assignments followed by words.

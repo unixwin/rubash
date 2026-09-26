@@ -138,8 +138,8 @@ impl Executor {
     /// variables and functions are gone) while kernel-preserved SIG_IGN
     /// dispositions survive and become SIG_HARD_IGNORE
     /// (trap.c set_signal). It is not /bin/sh. `used_shell` callers and the
-    /// Windows mailbox keep the find_shell spawn path.
-    #[cfg(unix)]
+    /// Windows mailbox keep the find_shell spawn path (runtime cfg!(unix)
+    /// gate at the call site).
     pub(in crate::executor) fn execute_enoexec_shell_script(
         &mut self,
         cmd: &CommandNode,

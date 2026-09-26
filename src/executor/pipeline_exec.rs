@@ -1754,6 +1754,25 @@ impl Executor {
             return Ok(Some((String::new(), String::new(), 0)));
         }
 
+        // GNU execute_cmd.c:4649 (execute_simple_command): every pipeline
+        // element is a simple command in its own forked subshell, and its
+        // xtrace line (indirection_level_string + expanded words) prints
+        // right before dispatch — `false | false | false` under `set -x`
+        // traces each `false` at its own line (trap3.sub). The in-process
+        // stage fast path below bypasses the full command path, so trace
+        // here once for every simple stage.
+        if self.xtrace_enabled() {
+            let prefix = self.xtrace_prefix();
+            let text = self.xtrace_command_text(command);
+            self.xtrace_write(
+                format!(
+                    "{prefix}{text}
+"
+                )
+                .as_bytes(),
+            );
+        }
+
         match name {
             "true" | ":" => Ok(Some((String::new(), String::new(), 0))),
             "false" => Ok(Some((String::new(), String::new(), 1))),

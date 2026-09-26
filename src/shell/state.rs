@@ -80,6 +80,14 @@ pub struct ShellState {
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
     pub(crate) in_command_substitution: Cell<bool>,
+    /// print_cmd.c:445 indirection_level_string / shell.c:186
+    /// indirection_level: how many parse_and_execute-style command lists
+    /// are stacked ABOVE the shell's base reader (eval.c:63-70). The xtrace
+    /// prefix repeats PS4's first character once per level, so a trap
+    /// action (trap.c:496 parse_and_execute) traces as `++...` under
+    /// `set -x`. rubash's base is 0 (indistinguishable from GNU's 1: both
+    /// render the PS4 unchanged); each nested trap action adds one.
+    pub(crate) xtrace_indirection_level: Cell<usize>,
     /// execute_cmd.c:199 stdin_redir — the global recording whether the
     /// currently executing control structure redirected fd 0
     /// (execute_cmd.c:828 sets it from stdin_redirects, redir.c:1435).
@@ -277,6 +285,7 @@ impl Clone for ShellState {
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
+            xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
             stdin_redir: Cell::new(self.stdin_redir.get()),
             job_table: self.job_table.clone(),

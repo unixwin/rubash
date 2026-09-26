@@ -368,7 +368,7 @@ impl Executor {
         // output rides the same open file description as the body — no
         // re-binding here, which would re-open `>file` and truncate what
         // the body already wrote.
-        let result = self.execute_ast(&ast);
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         match result {
@@ -417,7 +417,7 @@ impl Executor {
             }
         }
         let saved_alias_streamed = self.mark_alias_streamed();
-        let result = self.execute_ast(&ast);
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = None;
         self.debug_trap_running = false;
@@ -462,7 +462,7 @@ impl Executor {
                 command.line = Some(call_line);
             }
         }
-        let result = self.execute_ast(&ast);
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.return_trap_running = false;
         result
     }
@@ -608,7 +608,9 @@ impl Executor {
             }
             let tokens = crate::lexer::tokenize(&action);
             let ast = crate::parser::parse(&tokens);
-            let result = self.execute_ast(&ast);
+            // trap.c:496 runs the action through parse_and_execute: the
+            // xtrace indirection level rises by one for the action.
+            let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             if !bash_trapsig_was_exported {
                 unmark_env_name(
                     &mut self.shell_state.env_vars,
@@ -735,7 +737,7 @@ impl Executor {
             }
         }
         let saved_alias_streamed = self.mark_alias_streamed();
-        let _ = self.execute_ast(&ast);
+        let _ = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.error_trap_running = false;
@@ -776,7 +778,7 @@ impl Executor {
         loop {
             let tokens = crate::lexer::tokenize(&action);
             let ast = crate::parser::parse(&tokens);
-            result = self.execute_ast(&ast);
+            result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
             if result.is_err() {
                 break;
             }
