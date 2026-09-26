@@ -736,7 +736,21 @@ pub(super) fn append_array_value(
         // [subscript]=value words W_NOGLOB, so pathname expansion applies
         // only to ordinary element words (niubash #121).
         if !token_is_subscript_assignment(&token) {
-            match pathname_expand_array_token(&token, env_vars) {
+            // GNU expand_compound_array_assignment (arrayfunc.c:574+610)
+            // re-parses the element text, so its quote characters are
+            // operators: quoted spans protect their own characters while
+            // an unquoted glob segment still expands
+            // (`arr=("dir"/*.txt)` stores the matches). Field-split and
+            // storage-marked products carry quotes as DATA — they keep the
+            // plain globber input.
+            let glob_word = if token.starts_with(ARRAY_FIELD_SPLIT_MARKER)
+                || token.starts_with(STORAGE_WORD_PREFIX)
+            {
+                token.clone()
+            } else {
+                crate::executor::glob::compound_element_glob_pattern(&token)
+            };
+            match crate::executor::glob::pathname_expand_word(&glob_word, env_vars) {
                 crate::executor::glob::PathnameExpansion::Matches(matches) => {
                     for value in matches {
                         entries.insert(next_index, value);
@@ -802,7 +816,10 @@ pub(super) fn append_array_value(
                     }
                 }
                 crate::executor::glob::PathnameExpansion::NoMatch => {
-                    entries.insert(next_index, token);
+                    entries.insert(
+                        next_index,
+                        crate::executor::markers::dequote_ctlesc_pairs(&token),
+                    );
                     next_index += 1;
                 }
                 crate::executor::glob::PathnameExpansion::Fail(pattern) => {
@@ -836,6 +853,11 @@ pub(super) fn append_array_value(
             token
         };
         let token = unquote_storage_value(&token);
+        // GNU dequote_string (subst.c:4807) strips the CTLESC pairs from
+        // every word pathname expansion did not consume, so a stored
+        // element keeps the quoted `*` as plain data (`("p"/"*z")` stores
+        // `p/*z`, not a \x11 carrier pair).
+        let token = crate::executor::markers::dequote_ctlesc_pairs(&token);
         if let Some(expanded_array) = token.strip_prefix(STORAGE_WORD_PREFIX) {
             for value in field_split_values_with_ifs(expanded_array, ifs) {
                 match pathname_expand_array_token(&value, env_vars) {
@@ -846,7 +868,10 @@ pub(super) fn append_array_value(
                         }
                     }
                     crate::executor::glob::PathnameExpansion::NoMatch => {
-                        entries.insert(next_index, value.to_string());
+                        entries.insert(
+                            next_index,
+                            crate::executor::markers::dequote_ctlesc_pairs(&value),
+                        );
                         next_index += 1;
                     }
                     crate::executor::glob::PathnameExpansion::Fail(pattern) => {
@@ -858,7 +883,10 @@ pub(super) fn append_array_value(
         }
         if split_needed {
             for value in field_split_values_with_ifs(&token, ifs) {
-                entries.insert(next_index, value.to_string());
+                entries.insert(
+                    next_index,
+                    crate::executor::markers::dequote_ctlesc_pairs(&value),
+                );
                 next_index += 1;
             }
             continue;
@@ -920,9 +948,14 @@ fn dequote_compound_element_rhs(rhs: &str) -> String {
         && !(rhs.starts_with("$'") && rhs.ends_with('\''))
         && !rhs.starts_with(STORAGE_WORD_PREFIX)
     {
-        restore_quote_carriers(&remove_shell_quotes(rhs))
+        // The trailing dequote drops the lexer's CTLESC sentinels before
+        // quoted glob metacharacters (`[0]="*y"` stores `*y`, GNU
+        // dequote_string:4807 strips the pairs after globbing passes).
+        crate::executor::markers::dequote_ctlesc_pairs(&restore_quote_carriers(
+            &remove_shell_quotes(rhs),
+        ))
     } else {
-        rhs.to_string()
+        crate::executor::markers::dequote_ctlesc_pairs(rhs)
     }
 }
 

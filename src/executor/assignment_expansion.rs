@@ -20,6 +20,33 @@ pub(in crate::executor) struct AssignmentExpansionResult {
     pub(in crate::executor) arithmetic_nonfatal_error: bool,
 }
 
+/// One parsed element operator of a quoted `"${a[@]#pat}"` /
+/// `"${a[@]^}"` word inside a compound array assignment — the forms GNU
+/// maps over every element (subst.c:5777 array_remove_pattern, array.c:449
+/// array_modcase), so each element becomes one compound-assignment word
+/// instead of the generic expander's single joined string.
+enum QuotedAtOperator<'a> {
+    PatternRemoval {
+        var_name: &'a str,
+        pattern: String,
+        operation: PatternRemoval,
+    },
+    CaseMod {
+        var_name: &'a str,
+        operation: CaseMod,
+        pattern: String,
+    },
+}
+
+impl QuotedAtOperator<'_> {
+    fn var_name(&self) -> &str {
+        match self {
+            QuotedAtOperator::PatternRemoval { var_name, .. }
+            | QuotedAtOperator::CaseMod { var_name, .. } => var_name,
+        }
+    }
+}
+
 /// Hoist raw `"` quote DATA to `marker` before assignment expansion, but
 /// leave the quotes inside a `${...}` body alone: those are quoting
 /// operators owned by the parameter-expansion pipeline downstream (the
@@ -1404,6 +1431,133 @@ impl Executor {
                         }
                     }
                 }
+            } else if let Some(quoted_at_operator) = {
+                // GNU subst.c parameter_brace_expand: `${a[@]#pat}` /
+                // `${a[@]%,pat}` / `${a[@]^}` with a `@` subscript map the
+                // operator over EVERY element (subst.c:5777
+                // array_remove_pattern / array.c:449 array_modcase through
+                // string_list_pos_params '@'), so a quoted element list
+                // stays one word per element inside the compound assignment
+                // — the generic word expander would join it into one
+                // string and collapse the array. This fan-out exists for
+                // patsub and slices just above; extend it to pattern
+                // removal and case modification. Only the QUOTED element
+                // form is claimed here: the unquoted form already fans out
+                // through expand_unquoted_parameter_compound_assignment's
+                // field-split path (probed 2026-09-26: `h=(${f[@]#x})` is
+                // correct there, `h=("${f[@]#x}")` collapsed).
+                let core = token_raw.trim_matches('\u{E302}');
+                let element_quoted = token_raw.starts_with('\u{E302}')
+                    || core.starts_with("\\\"")
+                    || core.starts_with('"');
+                if !element_quoted {
+                    None
+                } else {
+                    let core = core
+                        .strip_prefix("\\\"")
+                        .and_then(|inner| inner.strip_suffix("\\\""))
+                        .or_else(|| {
+                            core.strip_prefix('"')
+                                .and_then(|inner| inner.strip_suffix('"'))
+                        })
+                        .unwrap_or(core);
+                    whole_word_braced_parameter_body(core).and_then(|body| {
+                        let array_target = |var_name: &str| {
+                            var_name.ends_with("[@]")
+                                || var_name.ends_with("[*]")
+                                || var_name == "@"
+                                || var_name == "*"
+                        };
+                        if let Some((var_name, pattern, operation)) =
+                            parse_indirect_pattern_removal(body)
+                        {
+                            array_target(var_name).then(|| QuotedAtOperator::PatternRemoval {
+                                var_name,
+                                pattern: pattern.to_string(),
+                                operation,
+                            })
+                        } else {
+                            parse_parameter_case_mod(body).and_then(
+                                |(var_name, operation, pattern)| {
+                                    array_target(var_name).then(|| QuotedAtOperator::CaseMod {
+                                        var_name,
+                                        operation,
+                                        pattern: pattern.to_string(),
+                                    })
+                                },
+                            )
+                        }
+                    })
+                }
+            } {
+                let storage_name = quoted_at_operator
+                    .var_name()
+                    .strip_suffix("[@]")
+                    .or_else(|| quoted_at_operator.var_name().strip_suffix("[*]"))
+                    .unwrap_or(quoted_at_operator.var_name());
+                let element_values: Vec<String> = if quoted_at_operator.var_name() == "@"
+                    || quoted_at_operator.var_name() == "*"
+                {
+                    self.shell_state.positional_params.clone()
+                } else {
+                    match self.parameter_array_storage(storage_name) {
+                        Some(storage) => array_values(&storage),
+                        None => Vec::new(),
+                    }
+                };
+                if element_values.is_empty()
+                    && quoted_at_operator.var_name() != "@"
+                    && quoted_at_operator.var_name() != "*"
+                {
+                    values.push(store!(&token, token_raw));
+                } else {
+                    changed = true;
+                    let starred = quoted_at_operator.var_name().ends_with("[*]")
+                        || quoted_at_operator.var_name() == "*";
+                    match &quoted_at_operator {
+                        QuotedAtOperator::PatternRemoval {
+                            pattern, operation, ..
+                        } => {
+                            let pattern = self.expand_parameter_pattern_word(pattern);
+                            let modified: Vec<String> = element_values
+                                .iter()
+                                .map(|value| {
+                                    remove_parameter_pattern(
+                                        value,
+                                        &pattern,
+                                        *operation,
+                                        self.extglob_enabled(),
+                                    )
+                                })
+                                .collect();
+                            if starred {
+                                values
+                                    .push(store!(&modified.join(&self.ifs_first_char_separator())));
+                            } else {
+                                for value in &modified {
+                                    values.push(store!(value));
+                                }
+                            }
+                        }
+                        QuotedAtOperator::CaseMod {
+                            operation, pattern, ..
+                        } => {
+                            let pattern = self.expand_embedded_parameters(pattern);
+                            let modified: Vec<String> = element_values
+                                .iter()
+                                .map(|value| apply_parameter_case_mod(value, *operation, &pattern))
+                                .collect();
+                            if starred {
+                                values
+                                    .push(store!(&modified.join(&self.ifs_first_char_separator())));
+                            } else {
+                                for value in &modified {
+                                    values.push(store!(value));
+                                }
+                            }
+                        }
+                    }
+                }
             } else if let Some(name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
@@ -2096,21 +2250,7 @@ fn normalize_dollar_double_quotes(value: &str) -> std::borrow::Cow<'_, str> {
 /// metacharacters (*?[!@+). Mirrors glob.rs `dequote_pathname`: the \x11
 /// is a marker, the following character is the data it protects.
 fn dequote_ctlesc(value: &str) -> String {
-    if !value.contains(crate::executor::markers::CTLESC) {
-        return value.to_string();
-    }
-    let mut output = String::with_capacity(value.len());
-    let mut chars = value.chars();
-    while let Some(ch) = chars.next() {
-        if ch == crate::executor::markers::CTLESC {
-            if let Some(next) = chars.next() {
-                output.push(next);
-            }
-        } else {
-            output.push(ch);
-        }
-    }
-    output
+    crate::executor::markers::dequote_ctlesc_pairs(value)
 }
 
 /// True when `word` still carries quote syntax at the WORD level. Raw

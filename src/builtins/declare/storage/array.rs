@@ -69,9 +69,18 @@ pub(in crate::builtins) fn append_array_value(
         // pathname expansion on every element word that is not an
         // assignment word (W_NOGLOB): nullglob removes unmatched words,
         // failglob aborts the assignment, slash-bearing patterns match
-        // path components (niubash #121).
+        // path components (niubash #121). The element text was re-parsed
+        // (arrayfunc.c:574), so raw parse tokens get their quote operators
+        // re-encoded into the glob engine's escape model before globbing
+        // (`declare -a x=("dir"/*.txt)` stores the matches); field-split
+        // products carry quotes as DATA and skip the re-encoding.
         if from_field_split || !token_is_subscript_assignment(&unquoted_token) {
-            match pathname_expand_word(&token, env_vars) {
+            let glob_word = if from_field_split {
+                token.to_string()
+            } else {
+                crate::executor::glob::compound_element_glob_pattern(token)
+            };
+            match pathname_expand_word(&glob_word, env_vars) {
                 PathnameExpansion::Matches(matches) => {
                     for value in matches {
                         entries.insert(next_index, value);
@@ -104,7 +113,11 @@ pub(in crate::builtins) fn append_array_value(
 
             if let Some((left, rhs)) = unquoted_token.split_once('=') {
                 if let Some(index) = array_assignment_index(left, &entries) {
-                    let stored = unquote_storage_value(rhs);
+                    // GNU dequote_string (subst.c:4807) strips the CTLESC
+                    // sentinels before quoted glob metacharacters after
+                    // globbing passes: `declare -a x=([0]="*y")` stores `*y`.
+                    let stored =
+                        crate::executor::markers::dequote_ctlesc_pairs(&unquote_storage_value(rhs));
                     entries.insert(index, stored);
                     next_index = index + 1;
                     continue;
@@ -123,6 +136,9 @@ pub(in crate::builtins) fn append_array_value(
         let token = unquoted_token;
         let unquoted_command_substitution = token.starts_with(STORAGE_WORD_PREFIX);
         let token = token.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(&token);
+        // Same dequote_string strip for plain elements: quoted glob
+        // metacharacters keep their data, never the \x11 sentinel.
+        let token = crate::executor::markers::dequote_ctlesc_pairs(token);
         if token.contains(char::is_whitespace) && (!quoted_token || unquoted_command_substitution) {
             for value in token.split_whitespace() {
                 entries.insert(next_index, value.to_string());

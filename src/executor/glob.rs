@@ -10,6 +10,93 @@ pub(crate) enum PathnameExpansion {
     Fail(String),
 }
 
+/// Re-encode a compound array assignment element token (quotes still
+/// inline) into the glob engine's escape model.
+///
+/// GNU re-parses the element text of `arr=( ... )` with the real parser
+/// (arrayfunc.c:574 `parse_string_to_word_list`) and hands the resulting
+/// words to pathname expansion via arrayfunc.c:610
+/// `expand_words_no_vars` -> subst.c:12602 `glob_expand_word_list`. By then
+/// each word has been through expand_word_internal's quote processing: the
+/// quote characters themselves are gone (subst.c:11883 `string_extract_
+/// single_quoted` / subst.c:11719 `string_extract_double_quoted`) and every
+/// character that came from inside a quoted span is CTLESC-protected
+/// (subst.c:4773 `quote_string` via the `add_quoted_string` label). Quoting
+/// therefore protects only the characters it covers — a quoted segment
+/// followed by an unquoted glob still pathname-expands
+/// (`arr=("dir"/*.txt)` stores the matches, not the pattern), and the
+/// pattern decision at pathexp.c:66 `unquoted_glob_pattern_p` skips the
+/// CTLESC-protected characters instead of bailing on the whole word.
+///
+/// Rubash's compound-assignment tokens reach the globber with the quote
+/// characters still inline, so this performs the same reduction: quote
+/// characters are dropped, every character of a quoted span is
+/// CTLESC-protected (the exact `quote_string` form), and unquoted text —
+/// including unquoted backslash escapes, which the engine already treats
+/// as hiding the next character — stays verbatim.
+///
+/// Only the compound-assignment call sites may use this: quote characters
+/// in command-substitution output or field-split products are DATA (GNU
+/// never re-parses that text), and re-encoding them as operators would
+/// corrupt those patterns.
+pub(crate) fn compound_element_glob_pattern(token: &str) -> String {
+    // Fast path: no quote operators, nothing to re-encode (also keeps
+    // tokens whose quote characters are data untouched by construction).
+    if !token.contains(['\'', '"']) {
+        return token.to_string();
+    }
+    let mut out = String::with_capacity(token.len());
+    let mut chars = token.chars().peekable();
+    // Mirror the single/double quote state of read_token_word: inside `'`
+    // everything is literal; inside `"` a backslash only escapes `"`, `\`,
+    // `$`, `` ` `` and newline (subst.c skip_double_quoted), otherwise the
+    // backslash itself stays as data.
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' => {
+                for quoted in chars.by_ref() {
+                    if quoted == '\'' {
+                        break;
+                    }
+                    out.push(crate::executor::markers::CTLESC);
+                    out.push(quoted);
+                }
+            }
+            '"' => {
+                while let Some(quoted) = chars.next() {
+                    if quoted == '"' {
+                        break;
+                    }
+                    if quoted == '\\' && matches!(chars.peek(), Some('"' | '\\' | '$' | '`' | '\n'))
+                    {
+                        // The escape is consumed by the quote processing;
+                        // only the escaped character survives as data.
+                        if let Some(escaped) = chars.next() {
+                            out.push(crate::executor::markers::CTLESC);
+                            out.push(escaped);
+                        }
+                        continue;
+                    }
+                    out.push(crate::executor::markers::CTLESC);
+                    out.push(quoted);
+                }
+            }
+            // An unquoted backslash keeps both characters in the word at
+            // glob time (GNU keeps the pair; quote removal is deferred),
+            // and unquoted_glob_pattern_p plus dequote_pathname already
+            // treat the pair as a protected literal.
+            '\\' => {
+                out.push('\\');
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Check if a shopt option is enabled.
 fn shopt_enabled(env_vars: &std::collections::HashMap<String, String>, name: &str) -> bool {
     crate::builtins::shopt::option_enabled(env_vars, name)
@@ -898,7 +985,13 @@ fn collect_multi_globstar(
 
 fn unmatched_expansion(word: &str, nullglob: bool, failglob: bool) -> PathnameExpansion {
     if failglob {
-        PathnameExpansion::Fail(word.to_string())
+        // GNU prints the failglob diagnostic with the word after quote
+        // processing (the CTLESC-protected characters decoded, unquoted
+        // backslash escapes removed): `arr=("dir"/zzz*)` under failglob
+        // reports `no match: dir/zzz*`, not the raw quoting. dequote_
+        // pathname performs that same reduction, so the Fail payload that
+        // callers print never leaks CTLESC carriers.
+        PathnameExpansion::Fail(dequote_pathname(word))
     } else if nullglob {
         PathnameExpansion::Matches(Vec::new())
     } else {
@@ -1911,6 +2004,42 @@ fn numeric_value(s: &str) -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The rubash#148 re-encoding: quoted spans collapse to CTLESC-protected
+    /// characters (GNU subst.c:4773 quote_string), unquoted text (including
+    /// backslash escapes) stays verbatim, quote characters are dropped.
+    #[test]
+    fn compound_element_glob_pattern_reencodes_quoting() {
+        let c = crate::executor::markers::CTLESC;
+        // Fast path: no quote operators.
+        assert_eq!(compound_element_glob_pattern("dir/*.txt"), "dir/*.txt");
+        // Quoted prefix: every quoted char protected, glob suffix active.
+        assert_eq!(
+            compound_element_glob_pattern("\"dir\"/*.txt"),
+            format!("{c}d{c}i{c}r/*.txt")
+        );
+        // Single quotes protect their span the same way.
+        assert_eq!(
+            compound_element_glob_pattern("'dir'/*.txt"),
+            format!("{c}d{c}i{c}r/*.txt")
+        );
+        // A quoted metacharacter is inert; an unquoted one stays active.
+        assert_eq!(
+            compound_element_glob_pattern("\"p\"/\"*\""),
+            format!("{c}p/{c}*")
+        );
+        // Inside double quotes only `"\$` and backquote/newline consume the
+        // backslash (subst.c skip_double_quoted); `\*` keeps both chars.
+        assert_eq!(
+            compound_element_glob_pattern("\"a\\*b\"/x?y"),
+            format!("{c}a{c}\\{c}*{c}b/x?y")
+        );
+        // An unquoted backslash keeps both characters for the engine's own
+        // escape handling.
+        assert_eq!(compound_element_glob_pattern("dir/\\*.txt"), "dir/\\*.txt");
+    }
+
     #[cfg(windows)]
     use super::{component_matches, pathname_expand_word, DotMode, PathnameExpansion};
     #[cfg(windows)]

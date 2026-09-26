@@ -656,6 +656,30 @@ pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
     output.push(data);
 }
 
+/// Remove CTLESC (\x11) sentinels the lexer inserts before quoted glob
+/// metacharacters: the \x11 is a marker, the following character is the
+/// data it protects. This is the storage-side half of GNU dequote_string
+/// (subst.c:4807), which strips the CTLESC pairs after pathname expansion
+/// decided not to consume the word — a stored element like `"p"/"*z"`
+/// keeps the quoted `*` as data, never the sentinel.
+pub(crate) fn dequote_ctlesc_pairs(value: &str) -> String {
+    if !value.contains(CTLESC) {
+        return value.to_string();
+    }
+    let mut output = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(ch) = chars.next() {
+        if ch == CTLESC {
+            if let Some(next) = chars.next() {
+                output.push(next);
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
+}
+
 // ==========================================================================
 // Literal-char escape — user-supplied chars that collide with the registry
 // zone are E400-prefixed at entry (the same rule as user bytes vs C0
