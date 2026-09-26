@@ -1951,17 +1951,91 @@ impl Executor {
             .filter(|job| job.background)
             .map(|job| job.command.clone())
             .collect();
-        let status = crate::builtins::complete::execute_with_io(
+        // compgen's dynamic inputs — complete.def:669 compgen_builtin drives
+        // pcomplete.c:1251 gen_compspec_completions, which runs the -F
+        // completion function with COMP_* bound (pcomplete.c:1046
+        // gen_shell_function_matches + pcomplete.c:929
+        // bind_compfunc_variables; compgen passes an empty line so
+        // COMP_CWORD is cw-1 = -1), runs the -C command with $0..$3 set
+        // (pcomplete.c:1140 gen_command_matches), and expands -W through
+        // the full word expander (pcomplete.c:863 gen_wordlist_matches →
+        // split_at_delims + expand_words_shellexp). All three need the
+        // shell engine, so resolve them here before the builtin generates
+        // candidates from the static actions.
+        let mut dynamic: Option<crate::builtins::complete::CompgenDynamic> = None;
+        if matches!(
             builtin,
-            &cmd.words[1..],
-            &self.shell_state.env_vars,
-            &self.shell_state.aliases,
-            &function_names,
-            &job_names,
-            &diagnostic_prefix,
-            &mut stdout,
-            &mut stderr,
-        )?;
+            crate::builtins::complete::CompletionBuiltin::Compgen
+        ) {
+            match crate::builtins::complete::parse_completion_options(
+                builtin,
+                &cmd.words[1..],
+                &diagnostic_prefix,
+                &mut stderr,
+            )? {
+                Err(status) => {
+                    // execute_compgen would re-parse and re-emit the same
+                    // usage diagnostics; report once and stop here.
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(status);
+                }
+                Ok(parsed) => {
+                    if parsed.funcname.is_some() || parsed.command.is_some() {
+                        // complete.def:693-696: builtin_error warning, no
+                        // usage line.
+                        let which = if parsed.funcname.is_some() { 'F' } else { 'C' };
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}compgen: warning: -{which} option may not work as you expect"
+                        )?;
+                    }
+                    let word = parsed.word().to_string();
+                    let mut resolved = crate::builtins::complete::CompgenDynamic::default();
+                    if let Some(funcname) = parsed.funcname.as_deref() {
+                        resolved.function_candidates =
+                            self.run_compgen_completion_function(funcname, "compgen", &word);
+                    }
+                    if let Some(command) = parsed.command.as_deref() {
+                        resolved.command_candidates =
+                            self.run_compgen_completion_command(command, "compgen", &word);
+                    }
+                    if parsed.words.is_some() {
+                        resolved.expanded_wordlist = Some(
+                            self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")),
+                        );
+                    }
+                    dynamic = Some(resolved);
+                }
+            }
+        }
+        let status = if matches!(
+            builtin,
+            crate::builtins::complete::CompletionBuiltin::Compgen
+        ) {
+            crate::builtins::complete::execute_compgen_with_dynamic(
+                &cmd.words[1..],
+                &self.shell_state.env_vars,
+                &self.shell_state.aliases,
+                &function_names,
+                &job_names,
+                &diagnostic_prefix,
+                dynamic,
+                &mut stdout,
+                &mut stderr,
+            )?
+        } else {
+            crate::builtins::complete::execute_with_io(
+                builtin,
+                &cmd.words[1..],
+                &self.shell_state.env_vars,
+                &self.shell_state.aliases,
+                &function_names,
+                &job_names,
+                &diagnostic_prefix,
+                &mut stdout,
+                &mut stderr,
+            )?
+        };
         if matches!(
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
@@ -1982,6 +2056,164 @@ impl Executor {
         }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
+    }
+
+    /// pcomplete.c:1046 gen_shell_function_matches specialized to compgen:
+    /// bind the COMP_* variables the completion function expects
+    /// (pcomplete.c:929 bind_compfunc_variables — compgen passes an empty
+    /// line and `pcomp_ind - start == 0`, so `command_line_to_word_list`
+    /// yields nw=cw=0 and COMP_CWORD is bound to cw-1 = -1), run the
+    /// function with build_arg_list's argument shape (pcomplete.c:1004:
+    /// $1 = command name, $2 = word being completed, $3 = previous word —
+    /// empty here because the word list is empty), then return COMPREPLY
+    /// and unbind COMP_* and COMPREPLY (pcomplete.c:985, 976-989
+    /// unbind_compfunc_variables + unbind_variable_noref("COMPREPLY")).
+    fn run_compgen_completion_function(
+        &mut self,
+        funcname: &str,
+        cmd: &str,
+        word: &str,
+    ) -> Vec<String> {
+        if !self.has_function(funcname) {
+            // pcomplete.c:1058-1066: internal_error, no candidates.
+            eprintln!(
+                "{}completion: function `{funcname}' not found",
+                self.diagnostic_prefix()
+            );
+            return Vec::new();
+        }
+        self.bind_compfunc_variables("", 0, &[], -1);
+        let args = [cmd.to_string(), word.to_string(), String::new()];
+        let _ = self.call_function(funcname, args);
+        let reply = self
+            .array_at_word_values("${COMPREPLY[@]}")
+            .unwrap_or_default();
+        self.unbind_compfunc_variables();
+        reply
+    }
+
+    /// pcomplete.c:1140 gen_command_matches: the -C command string runs
+    /// with $0 = the command itself and $1/$2/$3 = command name, word being
+    /// completed, previous word (all sh_single_quoted and appended), under
+    /// command substitution with the COMP_* variables exported
+    /// (bind_compfunc_variables' exported=1 arm); the output splits at
+    /// newlines with backslash-newline continuation (pcomplete.c:1226-1234).
+    fn run_compgen_completion_command(
+        &mut self,
+        command: &str,
+        cmd: &str,
+        word: &str,
+    ) -> Vec<String> {
+        self.bind_compfunc_variables("", 0, &[], 0);
+        let quoted = [cmd, word, ""]
+            .iter()
+            .map(|arg| {
+                // lib/sh/shquote.c sh_single_quote: wrap in single quotes,
+                // rendering each embedded quote as '\''.
+                let mut quoted = String::with_capacity(arg.len() + 2);
+                quoted.push('\'');
+                for ch in arg.chars() {
+                    if ch == '\'' {
+                        quoted.push_str("'\\''");
+                    } else {
+                        quoted.push(ch);
+                    }
+                }
+                quoted.push('\'');
+                quoted
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command_line = format!("{command} {quoted}");
+        let output = self
+            .expand_command_substitution_mut_typed_with_context(
+                command_line.as_str(),
+                crate::executor::substitution_metadata::SubstitutionQuoteContext::Unquoted,
+            )
+            .assignment_text();
+        self.unbind_compfunc_variables();
+        if output.is_empty() {
+            return Vec::new();
+        }
+        let mut words = Vec::new();
+        let mut current = String::new();
+        let mut chars = output.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' && chars.peek() == Some(&'\n') {
+                chars.next();
+                continue;
+            }
+            if ch == '\n' {
+                words.push(std::mem::take(&mut current));
+            } else {
+                current.push(ch);
+            }
+        }
+        words.push(current);
+        words
+    }
+
+    /// pcomplete.c:863 gen_wordlist_matches: split the -W wordlist at shell
+    /// delimiters (quotes group and are removed — the splitter's
+    /// GNU-parse.y-compatible pass in alias_helpers), then expand each word
+    /// with the shellexp rules: a quoted word keeps one field per array
+    /// element and never glob-splits; an unquoted word goes through the
+    /// for-list expander (parameter expansion, field splitting, pathname
+    /// expansion).
+    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Vec<String> {
+        let mut values = Vec::new();
+        for (word, quoted) in split_shell_words_with_quote_info(wordlist) {
+            if quoted {
+                // expand_words_shellexp keeps W_QUOTED words whole; a word
+                // that IS an array reference yields one field per element
+                // ("${toks[@]}" — pcomplete.c:877-880 comment).
+                if let Some(elements) = self.array_at_word_values(&word) {
+                    values.extend(elements);
+                } else {
+                    values.push(self.expand_word(&word));
+                }
+            } else {
+                values.extend(
+                    self.expand_for_word_values_result(&word, None, None)
+                        .unwrap_or_default(),
+                );
+            }
+        }
+        values
+    }
+
+    /// pcomplete.c:929 bind_compfunc_variables with the compgen shape: an
+    /// empty line and a zero index (COMP_LINE "", COMP_POINT 0,
+    /// COMP_TYPE 0, COMP_KEY 0 — readline is not completing here), the
+    /// COMP_WORDS array, and COMP_CWORD (cw - 1 for functions,
+    /// pcomplete.c:1073-1074).
+    fn bind_compfunc_variables(&mut self, line: &str, point: usize, words: &[String], cword: i64) {
+        self.set_env("COMP_LINE", line);
+        self.set_env("COMP_POINT", &point.to_string());
+        self.set_env("COMP_TYPE", "0");
+        self.set_env("COMP_KEY", "0");
+        store_indexed_array(&mut self.shell_state.env_vars, "COMP_WORDS", words.to_vec());
+        self.shell_state.variables.remove("COMP_WORDS");
+        self.set_env("COMP_CWORD", &cword.to_string());
+    }
+
+    /// pcomplete.c:976-989 unbind_compfunc_variables + the COMPREPLY
+    /// unbind at pcomplete.c:1133-1136: all six COMP_* variables and
+    /// COMPREPLY are removed outright.
+    fn unbind_compfunc_variables(&mut self) {
+        for name in [
+            "COMP_WORDS",
+            "COMP_CWORD",
+            "COMP_LINE",
+            "COMP_POINT",
+            "COMP_TYPE",
+            "COMP_KEY",
+            "COMPREPLY",
+        ] {
+            self.shell_state.env_vars.remove(name);
+            self.shell_state.variables.remove(name);
+            env::remove_var(name);
+        }
     }
 }
 

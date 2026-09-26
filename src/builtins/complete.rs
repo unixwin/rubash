@@ -681,11 +681,101 @@ where
             function_names,
             job_names,
             diagnostic_prefix,
+            None,
             stdout,
             stderr,
         ),
         CompletionBuiltin::Compopt => execute_compopt(args, diagnostic_prefix, stderr),
     }
+}
+
+/// Executor-driven compgen entry: identical to execute_with_io's Compgen arm
+/// but carries the pre-resolved dynamic candidates (-F function COMPREPLY,
+/// -C command output, -W expanded wordlist) that only the shell engine can
+/// produce (pcomplete.c:1251 gen_compspec_completions).
+pub(crate) fn execute_compgen_with_dynamic<E>(
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[String],
+    diagnostic_prefix: &str,
+    dynamic: Option<CompgenDynamic>,
+    stdout: &mut E,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    E: Write,
+{
+    execute_compgen(
+        args,
+        env_vars,
+        aliases,
+        function_names,
+        job_names,
+        diagnostic_prefix,
+        dynamic,
+        stdout,
+        stderr,
+    )
+}
+
+/// Dynamic compgen inputs the executor pre-resolves because they need the
+/// shell engine: the -F completion function's COMPREPLY (pcomplete.c:1046
+/// gen_shell_function_matches), the -C command's output (pcomplete.c:1140
+/// gen_command_matches), and the -W wordlist after the full shell word
+/// expansion (pcomplete.c:863 gen_wordlist_matches → split_at_delims +
+/// expand_words_shellexp).
+#[derive(Default)]
+pub(crate) struct CompgenDynamic {
+    /// COMPREPLY elements captured after the -F function ran.
+    pub(crate) function_candidates: Vec<String>,
+    /// Command-substitution output words after the -C command ran.
+    pub(crate) command_candidates: Vec<String>,
+    /// The expanded -W wordlist, when -W was given.
+    pub(crate) expanded_wordlist: Option<Vec<String>>,
+}
+
+/// pcomplete.c:285-297 filter_matches: with extglob disabled a leading `!`
+/// inverts the filter (only matches survive); with extglob enabled a `!(`
+/// opens an extglob group instead, so the `!` is pattern text. The pattern
+/// itself is matched with the extglob-capable strmatch (FNMATCH_EXTFLAG).
+pub(crate) fn completion_filter_excludes(pattern: &str, candidate: &str, extglob: bool) -> bool {
+    let not = pattern.starts_with('!') && (!extglob || !pattern[1..].starts_with('('));
+    let effective = if pattern.starts_with('!') && not {
+        &pattern[1..]
+    } else {
+        pattern
+    };
+    let matched = if extglob && pattern_uses_extglob(effective) {
+        crate::executor::conditional::extglob_case_pattern_matches(effective, candidate)
+    } else {
+        crate::executor::conditional::shell_pattern_matches(effective, candidate)
+    };
+    // The caller keeps candidates for which this predicate is false
+    // (retain(|c| !keep(c))): a `!` filter drops non-matches, a plain filter
+    // drops matches.
+    if not {
+        !matched
+    } else {
+        matched
+    }
+}
+
+/// True when the pattern contains an extglob group introducer (`@(`, `*(`,
+/// `+(`, `!(`, `?(`) — smatch.c strmatch parses these whenever
+/// extended_glob is on.
+fn pattern_uses_extglob(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    for index in 0..bytes.len().saturating_sub(1) {
+        if bytes[index + 1] == b'('
+            && matches!(bytes[index], b'@' | b'*' | b'+' | b'!' | b'?')
+            && (index == 0 || bytes[index - 1] != b'\\')
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// compgen_builtin (complete.def:669): with no arguments, success and no
@@ -841,14 +931,12 @@ pub(crate) fn complete_line_candidates(
         (None, None, None)
     };
     if let Some(filter) = filterpat.as_deref() {
-        let keep = |candidate: &str| -> bool {
-            if let Some(pattern) = filter.strip_prefix('!') {
-                !crate::executor::conditional::shell_pattern_matches(pattern, candidate)
-            } else {
-                crate::executor::conditional::shell_pattern_matches(filter, candidate)
-            }
-        };
-        candidates.retain(|c| !keep(c));
+        // pcomplete.c:285-297 filter_matches (extglob-aware, `!` prefix
+        // inversion) — see completion_filter_excludes.
+        let extglob = crate::builtins::shopt::option_enabled(env_vars, "extglob");
+        let keep_out =
+            |candidate: &str| -> bool { completion_filter_excludes(filter, candidate, extglob) };
+        candidates.retain(|c| !keep_out(c));
     }
     candidates.retain(|c| c.starts_with(&cur_word));
     if let (Some(p), Some(s)) = (prefix, suffix) {
@@ -873,6 +961,7 @@ fn execute_compgen<E>(
     function_names: &[String],
     job_names: &[String],
     diagnostic_prefix: &str,
+    dynamic: Option<CompgenDynamic>,
     stdout: &mut E,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -893,6 +982,10 @@ where
         Ok(parsed) => parsed,
     };
 
+    // pcomplete.c:287: FNMATCH_EXTFLAG is only compiled into the pattern
+    // matcher when the extglob shell option is on.
+    let extglob = crate::builtins::shopt::option_enabled(env_vars, "extglob");
+
     let mut candidates = apply_completion_actions(
         parsed.actions,
         parsed.word(),
@@ -910,11 +1003,71 @@ where
         }
     }
 
-    if let Some(wordlist) = parsed.words.as_deref() {
+    // pcomplete.c:1300 gen_wordlist_matches: the -W wordlist goes through
+    // split_at_delims + expand_words_shellexp — the full shell word
+    // expander — before candidates are produced. The executor supplies the
+    // expansion (CompgenDynamic::expanded_wordlist); the whitespace split
+    // below is the no-engine fallback for direct execute_with_io callers.
+    if let Some(wordlist) = dynamic
+        .as_ref()
+        .and_then(|dynamic| dynamic.expanded_wordlist.as_ref())
+    {
+        candidates.extend(wordlist.iter().cloned());
+    } else if let Some(wordlist) = parsed.words.as_deref() {
         candidates.extend(wordlist.split_whitespace().map(str::to_string));
     }
 
-    write_compgen_matches(candidates.iter().map(String::as_str), &parsed, stdout)
+    // gen_compspec_completions: the word-prefix filter lives INSIDE each
+    // static generator (gen_action_completions, gen_wordlist_matches and
+    // gen_globpat_matches all STREQN against the dequoted word), while
+    // gen_shell_function_matches (pcomplete.c:1129-1132 "XXX - should we
+    // filter...? Right now, we do not") and gen_command_matches return the
+    // function's COMPREPLY / command's output unfiltered. Prefix-filter the
+    // static set only, append the dynamic candidates, then run the -X
+    // filter over the whole list (pcomplete.c:1402-1407).
+    let word = parsed.word();
+    let mut selected = candidates
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(word))
+        .collect::<Vec<_>>();
+    if let Some(dynamic) = dynamic.as_ref() {
+        selected.extend(dynamic.function_candidates.iter().cloned());
+        selected.extend(dynamic.command_candidates.iter().cloned());
+    }
+    selected.retain(|candidate| !completion_filter_matches_out(&parsed, candidate, extglob));
+    // pcomplete.c:1431-1450: dirnames replaces an empty result and plusdirs
+    // appends directory completions (word-filtered like the CA_DIRECTORY
+    // action, never -X filtered, never -P/-S wrapped).
+    if selected.is_empty() && parsed.options & COPT_DIRNAMES != 0 {
+        selected = directory_candidates_matching(word, env_vars);
+    } else if parsed.options & COPT_PLUSDIRS != 0 {
+        selected.extend(directory_candidates_matching(word, env_vars));
+    }
+
+    write_compgen_matches(selected.iter().map(String::as_str), &parsed, stdout)
+}
+
+/// pcomplete.c:1431-1450: gen_action_completions(CA_DIRECTORY, word) —
+/// directory entries under the word's directory prefix, filtered by the
+/// word prefix the way the file/directory actions filter.
+fn directory_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
+    path_completion_candidates(word, PathCompletionKind::Directory, env_vars)
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(word))
+        .collect()
+}
+
+/// The -X filter decision for one candidate, delegating to
+/// completion_filter_excludes (pcomplete.c filter_matches).
+fn completion_filter_matches_out(
+    parsed: &ParsedCompletionOptions,
+    candidate: &str,
+    extglob: bool,
+) -> bool {
+    let Some(filter_pattern) = parsed.filterpat.as_deref() else {
+        return false;
+    };
+    completion_filter_excludes(filter_pattern, candidate, extglob)
 }
 
 /// The -V varname of a compgen invocation, derived with the same option scan
@@ -1168,22 +1321,19 @@ where
     I: IntoIterator<Item = &'a str>,
     E: Write,
 {
-    let word = parsed.word();
+    // Selection (word prefix, -X filter, dirnames/plusdirs) already ran in
+    // execute_compgen following gen_compspec_completions' order; this is the
+    // print stage: strlist_prefix_suffix wrapping plus one line per match.
     let mut kept = 0usize;
     for candidate in candidates {
-        if candidate.starts_with(word) {
-            if parsed.filter_excludes(candidate) {
-                continue;
-            }
-            kept += 1;
-            writeln!(
-                stdout,
-                "{}{}{}",
-                parsed.prefix.as_deref().unwrap_or_default(),
-                candidate,
-                parsed.suffix.as_deref().unwrap_or_default()
-            )?;
-        }
+        kept += 1;
+        writeln!(
+            stdout,
+            "{}{}{}",
+            parsed.prefix.as_deref().unwrap_or_default(),
+            candidate,
+            parsed.suffix.as_deref().unwrap_or_default()
+        )?;
     }
     // compgen_builtin: rval is EXECUTION_SUCCESS only when the final list is
     // non-empty (complete.def:762-777).
@@ -1388,22 +1538,11 @@ pub(crate) struct ParsedCompletionOptions {
 }
 
 impl ParsedCompletionOptions {
-    fn word(&self) -> &str {
+    pub(crate) fn word(&self) -> &str {
         self.operands
             .first()
             .map(String::as_str)
             .unwrap_or_default()
-    }
-
-    fn filter_excludes(&self, candidate: &str) -> bool {
-        let Some(filter_pattern) = self.filterpat.as_deref() else {
-            return false;
-        };
-        if let Some(pattern) = filter_pattern.strip_prefix('!') {
-            !crate::executor::conditional::shell_pattern_matches(pattern, candidate)
-        } else {
-            crate::executor::conditional::shell_pattern_matches(filter_pattern, candidate)
-        }
     }
 }
 
