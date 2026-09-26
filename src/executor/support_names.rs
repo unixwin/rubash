@@ -155,6 +155,75 @@ fn parent_process_id() -> Option<u32> {
 
 #[cfg(windows)]
 fn windows_parent_process_id() -> Option<u32> {
+    // GNU binds $PPID once at startup via getppid(2) (variables.c:700
+    // initialize_shell_variables: `set_ppid ();`). The previous
+    // implementation walked a CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS)
+    // process-table snapshot — a ~14ms system-wide operation measured on
+    // EVERY shell start (rubash#158: it alone was over a third of the
+    // ~40ms `-c` startup). NtQueryInformationProcess(ProcessBasicInformati
+    // on).InheritedFromUniqueProcessId returns the same recorded creator
+    // PID that the snapshot's th32_parent_process_id field reports (both
+    // come from the kernel's recorded parent), without building the
+    // snapshot. The snapshot walk remains as the fallback if the ntdll
+    // call is unavailable.
+    nt_parent_process_id().or_else(snapshot_parent_process_id)
+}
+
+/// Parent PID via ntdll NtQueryInformationProcess on the current
+/// pseudo-handle. `InheritedFromUniqueProcessId` is the PID recorded at
+/// process creation — the same field CreateToolhelp32Snapshot surfaces as
+/// th32_parent_process_id.
+#[cfg(windows)]
+fn nt_parent_process_id() -> Option<u32> {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessBasicInformation {
+        ExitStatus: *mut c_void,
+        PebBaseAddress: *mut c_void,
+        AffinityMask: [*mut c_void; 2],
+        UniqueProcessId: usize,
+        InheritedFromUniqueProcessId: usize,
+    }
+
+    extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn NtQueryInformationProcess(
+            process: *mut c_void,
+            process_information_class: u32,
+            process_information: *mut c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    const PROCESS_BASIC_INFORMATION: u32 = 0;
+    let (mut info, mut returned) = unsafe {
+        (
+            std::mem::zeroed::<ProcessBasicInformation>(),
+            std::mem::zeroed::<u32>(),
+        )
+    };
+    let status = unsafe {
+        NtQueryInformationProcess(
+            GetCurrentProcess(),
+            PROCESS_BASIC_INFORMATION,
+            &mut info as *mut _ as *mut c_void,
+            std::mem::size_of::<ProcessBasicInformation>() as u32,
+            &mut returned,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    u32::try_from(info.InheritedFromUniqueProcessId)
+        .ok()
+        .filter(|pid| *pid != 0)
+}
+
+#[cfg(windows)]
+fn snapshot_parent_process_id() -> Option<u32> {
     use std::ffi::c_void;
 
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
