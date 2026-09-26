@@ -809,6 +809,9 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
 }
 
 fn run_repl(executor: &mut Executor) {
+    // shell.c:787-790: an interactive shell with no script operand reads its
+    // commands from stdin, so GNU sets read_from_stdin and `$-` gains `s`.
+    executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
     println!("Rubash - A Rust implementation of GNU Bash");
     println!("Type 'exit' to quit.\n");
 
@@ -837,6 +840,11 @@ fn run_repl(executor: &mut Executor) {
 }
 
 fn run_stdin_script(executor: &mut Executor) -> i32 {
+    // shell.c:780-786: a non-interactive shell with no script operand reads
+    // commands from stdin (pipe/redirect), so GNU sets read_from_stdin and
+    // `$-` gains `s` (`bash < file`, `bash -s < file`). This driver is the
+    // common path for all such invocations, so set the marker once here.
+    executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
     // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
     // prompting, while commands launched from that stream inherit the same
     // input. Keep ordinary input line-oriented, but gather obvious compound

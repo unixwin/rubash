@@ -683,3 +683,80 @@ mod unit_tests {
         assert_eq!(executor.last_exit_code(), 0);
     }
 }
+
+mod dollar_flags_tests {
+    use crate::executor::Executor;
+    use crate::script_driver::READ_STDIN_MARKER;
+
+    // rubash#149: `$-` must carry the invocation-only letters `i` and `s` in
+    // their GNU positions. flags.c:165 shell_flags[] places `i` between `h`
+    // and `k` (it maps to forced_interactive, flags.c:174, turned on for
+    // every interactive shell by shell.c:672), and flags.c:294
+    // which_set_flags appends `c` (want_pending_command) then `s`
+    // (read_from_stdin, shell.c:301, set at shell.c:928/785/790) after the
+    // option letters.
+
+    #[test]
+    fn dollar_flags_script_and_c_modes_unchanged() {
+        // `bash file` — no markers: exactly hB. Regression line for
+        // rubash#149: the script-file mode must not gain i or s.
+        let executor = Executor::new();
+        assert_eq!(executor.shell_option_flags(), "hB");
+    }
+
+    #[test]
+    fn dollar_flags_c_mode_appends_c_only() {
+        // `bash -c` — BASH_EXECUTION_STRING present, no stdin marker: hBc.
+        let mut executor = Executor::new();
+        executor.set_env("BASH_EXECUTION_STRING", "echo hi");
+        assert_eq!(executor.shell_option_flags(), "hBc");
+    }
+
+    #[test]
+    fn dollar_flags_interactive_letter_between_h_and_brace() {
+        // `bash -i -c` shape: i renders in its flags.c table position
+        // between h and B (GNU himBHc; rubash's m/H gaps in this mode are
+        // tracked as a separate follow-up), c stays after the table.
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_env("BASH_EXECUTION_STRING", "echo hi");
+        let flags = executor.shell_option_flags();
+        assert_eq!(flags, "hiBc");
+        assert!(flags.find('i').unwrap() < flags.find('B').unwrap());
+    }
+
+    #[test]
+    fn dollar_flags_stdin_letter_appended_last() {
+        // `bash -s < file` shape: s is the final letter (flags.c:306-307).
+        let mut executor = Executor::new();
+        executor.set_env(READ_STDIN_MARKER, "1");
+        assert_eq!(executor.shell_option_flags(), "hBs");
+    }
+
+    #[test]
+    fn dollar_flags_interactive_stdin_matches_gnu_except_monitor() {
+        // `bash -i < file` shape, including the histexpand default that
+        // script_driver initialize_interactive_history turns on for
+        // interactive sessions: GNU prints himBHs; rubash's remaining `m`
+        // gap is a separate follow-up, this pins the i/s positions.
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_env(READ_STDIN_MARKER, "1");
+        executor.set_shell_option("histexpand", true);
+        assert_eq!(executor.shell_option_flags(), "hiBHs");
+    }
+
+    #[test]
+    fn dollar_flags_option_letters_keep_table_order_around_i() {
+        // `set -e -u -x` under -i + stdin: the option letters keep the
+        // flags.c table order e h i u x B H, then the appended s.
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_INTERACTIVE", "1");
+        executor.set_env(READ_STDIN_MARKER, "1");
+        executor.set_shell_option("histexpand", true);
+        executor.set_shell_option("errexit", true);
+        executor.set_shell_option("nounset", true);
+        executor.set_shell_option("xtrace", true);
+        assert_eq!(executor.shell_option_flags(), "ehiuxBHs");
+    }
+}

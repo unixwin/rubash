@@ -1072,6 +1072,16 @@ struct ISearchState {
     match_index: Option<usize>,
 }
 
+/// flags.c:294 which_set_flags appends `s` to `$-` while GNU's
+/// `read_from_stdin` (shell.c:301) is set: explicit `-s` at startup
+/// (shell.c:928), a non-interactive shell reading commands from a
+/// piped/redirected stdin (shell.c:780-786), or an interactive shell with
+/// no script operand (shell.c:787-790). This marker is rubash's
+/// process-local equivalent, set by the stdin command drivers; like the C
+/// global it never reaches child processes (the `__RUBASH_` env filter,
+/// compound_exec.rs rubash_spawn_inherited_state, keeps it internal).
+pub const READ_STDIN_MARKER: &str = "__RUBASH_READ_STDIN";
+
 /// bash -i reading commands from a non-tty stdin. GNU still drives readline
 /// here (parse.y yy_readline_get -> bashline.c bash_readline): the prompt is
 /// written to stderr, the input line is echoed, and editing keystrokes in
@@ -1080,6 +1090,7 @@ struct ISearchState {
 /// rl_operate_and_get_next) executes the current line and replaces the
 /// buffer with the next history entry.
 pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
+    executor.set_env(READ_STDIN_MARKER, "1");
     executor.inherit_process_stdin();
     let mut pending = String::new();
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();

@@ -459,33 +459,50 @@ impl Executor {
 
     pub(in crate::executor) fn shell_option_flags(&self) -> String {
         let mut flags = String::new();
-        // Order matches GNU Bash flags.c shell_flags[] so `$-` output agrees
-        // (`set -e -h -B` prints `ehB`, set-e3.sub `echo $-`).
+        // Order matches GNU Bash flags.c:165 shell_flags[] so `$-` output
+        // agrees (`set -e -h -B` prints `ehB`, set-e3.sub `echo $-`). `i` is
+        // the one table letter with no `set -o` name — flags.c:174 maps it
+        // to `forced_interactive`, which shell.c:672 turns on for every
+        // interactive shell (`-i` forced, or tty-detected at
+        // shell.c:540-547) — so it renders from the interactive marker in
+        // its table position between `h` and `k`.
         for (flag, option) in [
-            ('a', "allexport"),
-            ('b', "notify"),
-            ('e', "errexit"),
-            ('f', "noglob"),
-            ('h', "hashall"),
-            ('k', "keyword"),
-            ('n', "noexec"),
-            ('p', "privileged"),
-            ('r', "restricted"),
-            ('t', "onecmd"),
-            ('u', "nounset"),
-            ('v', "verbose"),
-            ('x', "xtrace"),
-            ('B', "braceexpand"),
-            ('C', "noclobber"),
-            ('E', "errtrace"),
-            ('H', "histexpand"),
-            ('P', "physical"),
-            ('T', "functrace"),
+            ('a', Some("allexport")),
+            ('b', Some("notify")),
+            ('e', Some("errexit")),
+            ('f', Some("noglob")),
+            ('h', Some("hashall")),
+            ('i', None),
+            ('k', Some("keyword")),
+            ('n', Some("noexec")),
+            ('p', Some("privileged")),
+            ('r', Some("restricted")),
+            ('t', Some("onecmd")),
+            ('u', Some("nounset")),
+            ('v', Some("verbose")),
+            ('x', Some("xtrace")),
+            ('B', Some("braceexpand")),
+            ('C', Some("noclobber")),
+            ('E', Some("errtrace")),
+            ('H', Some("histexpand")),
+            ('P', Some("physical")),
+            ('T', Some("functrace")),
         ] {
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option) {
+            let on = match option {
+                Some(option) => {
+                    crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option)
+                }
+                None => self
+                    .shell_state
+                    .env_vars
+                    .contains_key("__RUBASH_INTERACTIVE"),
+            };
+            if on {
                 flags.push(flag);
             }
         }
+        // flags.c:304-307 which_set_flags appends the invocation-only letters
+        // after the option table, in this order.
         // Bash exposes `c` in `$-` while executing a command string passed
         // with `-c`; script-file and stdin execution do not set it.
         if self
@@ -494,6 +511,22 @@ impl Executor {
             .contains_key("BASH_EXECUTION_STRING")
         {
             flags.push('c');
+        }
+        // `s` shows while the shell reads commands from stdin: explicit `-s`
+        // (shell.c:928), a non-interactive shell with no script operand
+        // (shell.c:780-786), or an interactive shell with no operand
+        // (shell.c:787-790) — GNU's `read_from_stdin` (shell.c:301). The
+        // marker is set by the stdin drivers (run_stdin_script,
+        // run_interactive_stdin, run_repl) and, like the C global, is not
+        // exported to child processes.
+        if self
+            .shell_state
+            .env_vars
+            .get(crate::script_driver::READ_STDIN_MARKER)
+            .map(String::as_str)
+            == Some("1")
+        {
+            flags.push('s');
         }
         flags
     }
