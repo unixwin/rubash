@@ -1227,6 +1227,19 @@ impl Executor {
                 } else {
                     values.push(store!(""));
                 }
+            } else if let Some(mut expanded) = self.compound_guard_list_values(&token_raw, bare) {
+                // GNU parameter_brace_expand (subst.c:10345-10444) +
+                // parameter_brace_expand_rhs (subst.c:7966): the guard
+                // `${var+"${arr[@]}"}` with var set expands the rhs, and a
+                // quoted `[@]` rhs is a multi-word list — subst.c:8023-8027
+                // sets *qdollaratp for it, so even inside the compound
+                // element the list keeps one word per array member
+                // (arrayfunc.c:557 expand_compound_array_assignment expands
+                // each word; bash_completion's
+                // `cfg=("${cfg[@]}" ${cfg[@]+"${cfg[@]}"})` idiom, rubash#147).
+                // The String path joins the members into one element.
+                changed = true;
+                values.append(&mut expanded);
             } else if let Some(indirect_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
@@ -1443,7 +1456,7 @@ impl Executor {
                         }
                     }
                 }
-                values.push(token_raw.clone());
+                values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
             } else {
                 // GNU expand_words_no_vars -> shell_expand_word_list expands
                 // simple $0, $1, ... $N positional parameters in compound
@@ -1514,10 +1527,141 @@ impl Executor {
                         continue;
                     }
                 }
-                values.push(token_raw.clone());
+                values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
             }
         }
         changed.then(|| format!("({})", values.join(" ")))
+    }
+
+    /// A guard token `${var<op>LIST}` whose used side is a quoted whole-list
+    /// `"${arr[@]}"` / `"$@"`, expanded to one storage value per list member
+    /// (GNU parameter_brace_expand_rhs sets *qdollaratp at subst.c:8023-8027
+    /// when the rhs expands to a list, so the members keep their word
+    /// boundaries in the compound element). `None` leaves the token on the
+    /// general element paths.
+    fn compound_guard_list_values(&self, token_raw: &str, bare: bool) -> Option<Vec<String>> {
+        if bare {
+            // The eval-argument flatten keeps element text verbatim for its
+            // reparse; only the storage-form path re-quotes members.
+            return None;
+        }
+        let core = token_raw.trim_matches('\u{E302}');
+        let body = core.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(core);
+        if !body.starts_with("${") || !body.ends_with('}') {
+            return None;
+        }
+        if !crate::executor::parameter_ops::braced_parameter_spans_whole_word(body) {
+            return None;
+        }
+        let inner = &body[2..body.len() - 1];
+        let (var_name, alternate, use_when_set, require_non_empty) =
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":+")
+            {
+                (var_name, alternate, true, true)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '+')
+            {
+                (var_name, alternate, true, false)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(inner, ":-")
+            {
+                (var_name, alternate, false, true)
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(inner, '-')
+            {
+                (var_name, alternate, false, false)
+            } else {
+                return None;
+            };
+        // Only the quoted whole-list rhs carries the multi-word contract.
+        let quoted = alternate.starts_with('"') && alternate.ends_with('"') && alternate.len() >= 2;
+        let list_body = if quoted {
+            &alternate[1..alternate.len() - 1]
+        } else {
+            alternate
+        };
+        let members: Vec<String> = if list_body == "$@" || list_body == "${@}" {
+            self.shell_state.positional_params.clone()
+        } else if let Some(array_name) = whole_word_braced_parameter_body(list_body)
+            .and_then(|name| name.strip_suffix("[@]"))
+            .filter(|name| is_shell_name(name))
+        {
+            self.parameter_array_storage(array_name)
+                .map(|storage| array_values(&storage))
+                .unwrap_or_default()
+        } else {
+            return None;
+        };
+        let value = self.parameter_operator_value(var_name);
+        let word_used = if use_when_set {
+            value.is_some() && (!require_non_empty || !value.unwrap_or_default().is_empty())
+        } else {
+            value.is_none() || (require_non_empty && value.unwrap_or_default().is_empty())
+        };
+        if word_used {
+            return Some(members.into_iter().map(|m| quote_array_value(&m)).collect());
+        }
+        match (var_name, use_when_set) {
+            // `+`/`:+` with the parameter unset or null: the guard expands
+            // to nothing, so the element contributes zero members.
+            (_, true) => Some(Vec::new()),
+            // `-`/`:-` with the parameter set (non-null for `:-`): the used
+            // side is the parameter itself. A list operand keeps per-member
+            // boundaries (subst.c:9990-9993 list semantics); everything else
+            // stays on the general element path.
+            ("@", false) => Some(
+                self.shell_state
+                    .positional_params
+                    .iter()
+                    .map(|m| quote_array_value(m))
+                    .collect(),
+            ),
+            (name, false)
+                if name.ends_with("[@]")
+                    && name
+                        .strip_suffix("[@]")
+                        .is_some_and(|base| is_shell_name(base)) =>
+            {
+                Some(
+                    self.parameter_array_storage(name.strip_suffix("[@]").unwrap_or(name))
+                        .map(|storage| {
+                            array_values(&storage)
+                                .into_iter()
+                                .map(|m| quote_array_value(&m))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    /// The catch-all element fallback: GNU arrayfunc.c:557
+    /// expand_compound_array_assignment expands EVERY element word through
+    /// the real expander — an element this pass does not specially recognize
+    /// (a guard like `${arr[@]+"${arr[@]}"}` after a quoted element, a
+    /// command substitution, an ordinary `${var:-word}`) must still expand,
+    /// not freeze its raw text into the stored array (rubash#147: the guard
+    /// literal leaked as an element whenever another element had already set
+    /// `changed`). The compound walker's preserve-quotes contract keeps
+    /// literal tokens byte-identical, so routing through it only differs
+    /// where expansion actually applies.
+    fn compound_plain_element_value(
+        &self,
+        token_raw: &str,
+        bare: bool,
+        changed: &mut bool,
+    ) -> String {
+        if bare {
+            return token_raw.to_string();
+        }
+        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        if expanded != token_raw {
+            *changed = true;
+        }
+        expanded
     }
 
     /// Compound-assignment element values for a `"${!ref}"` token (GNU

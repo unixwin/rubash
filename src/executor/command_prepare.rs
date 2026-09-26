@@ -1618,7 +1618,21 @@ impl Executor {
         let positional_at = alternate.contains("$@")
             || alternate.contains("${@")
             || alternate.contains("$*")
-            || alternate.contains("${*");
+            || alternate.contains("${*")
+            // A braced `[@]` list reference in the alternate (`"${a[@]}"`,
+            // `pre"${a[@]}"post`, `${x+"${a[@]}"}`) is a multi-word rhs in
+            // BOTH outer contexts: GNU parameter_brace_expand_rhs
+            // (subst.c:8023-8027) sets *qdollaratp when the rhs expansion
+            // returns a word list, so even a fully-quoted
+            // `"${a[@]+"${a[@]}"}"` keeps one field per array member and the
+            // unquoted guard re-splits the same boundaries (rubash#147,
+            // bash_completion's set -u array-guard idiom). The String path
+            // joins the members with a space and quote-protects it, which
+            // collapses the list to one word. Route the class to the
+            // re-parse path, which expands `"${name[@]}"` through the real
+            // per-element word machinery (array_at_word_values); a literal
+            // `[@]}` that is not a reference only costs the re-parse.
+            || alternate.contains("[@]}");
         let posix_literal_quotes = self.posix_mode_enabled()
             && alternate.starts_with("\"")
             && alternate.ends_with("\"")
