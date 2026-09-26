@@ -310,6 +310,11 @@ mod tests {
         (root, env_vars)
     }
 
+    /// The RUBASH_ROOT /etc/passwd fixture is the non-unix/embedded fallback
+    /// path; on unix `~user` resolves through getpwnam_r instead (E9,
+    /// tilde.c:329 tilde_expand_word -> getpwnam :379) and never consults
+    /// the fixture, so these fixture-value assertions are Windows-only.
+    #[cfg(windows)]
     #[test]
     fn tilde_user_resolves_passwd_home() {
         let (root, env) = fixture_env("niu", "/c/Users/niu-home");
@@ -327,6 +332,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
     #[test]
     fn tilde_user_word_colon_tail_glues_verbatim() {
         let (root, env) = fixture_env("niu", "/c/Users/niu-home");
@@ -338,6 +344,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(windows)]
     #[test]
     fn tilde_user_assignment_segments_expand_and_fall_back() {
         let (root, env) = fixture_env("niu", "/c/Users/niu-home");
@@ -356,5 +363,32 @@ mod tests {
             "a:~missing/x:b"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Unix wiring (E9, GNU tilde.c:329 tilde_expand_word -> getpwnam :379):
+    /// `~root` returns the passwd-database home for THIS host -- computed
+    /// here through the same libc call so the test pins the wiring rather
+    /// than a platform constant (/root on Linux, /var/root on macOS) -- and
+    /// a nonexistent user stays unexpanded.
+    #[cfg(unix)]
+    #[test]
+    fn tilde_user_resolves_via_getpwnam_on_unix() {
+        let expected = unsafe {
+            let entry = libc::getpwnam(b"root\0".as_ptr().cast());
+            assert!(!entry.is_null(), "no passwd entry for root on this host");
+            std::ffi::CStr::from_ptr((*entry).pw_dir)
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(
+            expand_word_prefix("~root", &HashMap::new()),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            expand_word_prefix("~root/sub", &HashMap::new()),
+            Some(format!("{expected}/sub"))
+        );
+        assert_eq!(expand_word_prefix("~nosuchuser", &HashMap::new()), None);
+        assert_eq!(expand_word_prefix("~nosuchuser/x", &HashMap::new()), None);
     }
 }

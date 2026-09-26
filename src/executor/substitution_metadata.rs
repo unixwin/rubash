@@ -927,26 +927,35 @@ mod tests {
 
     /// Windows-native tools write "\r\n" for every "\n". The '\r' of a CRLF
     /// terminator leaves with the '\n' it belongs to; an interior CRLF and a
-    /// lone trailing '\r' are data (niubash #120).
+    /// lone trailing '\r' are data (niubash #120). Unix keeps the GNU
+    /// contract instead (E17): subst.c strips trailing <newline> bytes only,
+    /// so every '\r' survives as data.
     #[test]
     fn readback_strips_crlf_terminators_only() {
+        #[cfg(windows)]
+        let (terminator_want, repeated_want, interior_want): (&[u8], &[u8], &[u8]) =
+            (b"a", b"a", b"a\r\nb");
+        #[cfg(not(windows))]
+        let (terminator_want, repeated_want, interior_want): (&[u8], &[u8], &[u8]) =
+            (b"a\r", b"a\r\n\r", b"a\r\nb\r");
+
         let terminator =
             SubstitutionOutput::readback(b"a\r\n".to_vec(), 0, SubstitutionQuoteContext::Unquoted);
-        assert_eq!(terminator.bytes, b"a");
+        assert_eq!(terminator.bytes, terminator_want);
 
         let repeated = SubstitutionOutput::readback(
             b"a\r\n\r\n".to_vec(),
             0,
             SubstitutionQuoteContext::Unquoted,
         );
-        assert_eq!(repeated.bytes, b"a");
+        assert_eq!(repeated.bytes, repeated_want);
 
         let interior = SubstitutionOutput::readback(
             b"a\r\nb\r\n".to_vec(),
             0,
             SubstitutionQuoteContext::Unquoted,
         );
-        assert_eq!(interior.bytes, b"a\r\nb");
+        assert_eq!(interior.bytes, interior_want);
 
         let lone_cr =
             SubstitutionOutput::readback(b"a\r".to_vec(), 0, SubstitutionQuoteContext::Unquoted);
