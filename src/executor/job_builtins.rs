@@ -531,7 +531,10 @@ impl Executor {
         let mut finished = Vec::new();
         for (pid, child) in &mut self.background_children {
             if let Some(status) = child.try_wait()? {
-                finished.push((*pid, status.code().unwrap_or(1)));
+                finished.push((
+                    *pid,
+                    crate::executor::wait_status::process_exit_status(&status),
+                ));
             }
         }
 
@@ -705,7 +708,7 @@ impl Executor {
         // handle back so the job remains waitable and reportable.
         let status = loop {
             if let Some(done) = child.try_wait()? {
-                break done.code().unwrap_or(1);
+                break crate::executor::wait_status::process_exit_status(&done);
             }
             if let Some(interrupt) = self.wait_pending_signal_status()? {
                 self.background_children.insert(pid, child);
@@ -1641,7 +1644,7 @@ impl Executor {
                     Ok(st) if st.success() => {}
                     Ok(st) => {
                         let _ = std::fs::remove_file(&path);
-                        return Ok(st.code().unwrap_or(1));
+                        return Ok(crate::executor::wait_status::process_exit_status(&st));
                     }
                     Err(err) => {
                         writeln!(

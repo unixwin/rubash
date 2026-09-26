@@ -590,7 +590,7 @@ impl Executor {
         Ok(Some((
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
             crate::executor::substitution_metadata::bytes_to_shell_text(&stderr_bytes),
-            output.status.code().unwrap_or(1),
+            crate::executor::wait_status::process_exit_status(&output.status),
         )))
     }
 

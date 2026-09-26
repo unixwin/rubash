@@ -1114,7 +1114,11 @@ impl Executor {
         // first would deadlock the wait.
         for (index, mut member) in processes.into_iter().enumerate() {
             let status = wait_for_windows_pipeline_member(&mut member)?;
-            results[index] = (String::new(), String::new(), status.code().unwrap_or(1));
+            results[index] = (
+                String::new(),
+                String::new(),
+                crate::executor::wait_status::process_exit_status(&status),
+            );
             self.finish_dev_fd_operands(std::mem::take(&mut stage_dev_ops[index]));
         }
         let output = last.wait_with_output()?;
@@ -1124,7 +1128,7 @@ impl Executor {
         results[last_index] = (
             crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
-            output.status.code().unwrap_or(1),
+            crate::executor::wait_status::process_exit_status(&output.status),
         );
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
@@ -1361,7 +1365,7 @@ impl Executor {
         results.push((
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
-            output.status.code().unwrap_or(1),
+            crate::executor::wait_status::process_exit_status(&output.status),
         ));
         for mut process in processes.into_iter().rev() {
             let status = match process.try_wait()? {
@@ -1371,7 +1375,11 @@ impl Executor {
                     process.wait()?
                 }
             };
-            results.push((String::new(), String::new(), status.code().unwrap_or(1)));
+            results.push((
+                String::new(),
+                String::new(),
+                crate::executor::wait_status::process_exit_status(&status),
+            ));
         }
         results.reverse();
         for reader in intermediate_stderr {

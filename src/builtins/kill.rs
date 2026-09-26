@@ -330,12 +330,39 @@ pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
     signal_process(pid, signal)
 }
 
+/// Install this process's signal-receiving backend.
+///
+/// Windows: a per-process `{pid}.alive` marker in the shared
+/// `%TEMP%\rubash-signals` directory; other rubash processes deliver
+/// cross-process signals as atomic `.part`-rename entries beside it
+/// (deliver_rubash_signal).
+///
+/// Unix: real kernel signal delivery -- GNU sig.c:102 initialize_signals
+/// installs handlers for the terminating-signal set (the table at
+/// sig.c:133). signal_hook owns the async-signal-safe self-pipe; arrivals
+/// are drained by take_pending_signals and dispatched by the shared
+/// trap_exec::run_pending_signal_traps boundary poll. No marker file is
+/// written, so deliver_rubash_signal finds no mailbox and routes rubash
+/// targets through the real kill(2) instead (signal_process).
+#[cfg(unix)]
+pub fn register_signal_mailbox(_pid: u32) -> io::Result<()> {
+    kernel_signals::install()
+}
+
+#[cfg(not(unix))]
 pub fn register_signal_mailbox(pid: u32) -> io::Result<()> {
     let dir = signal_mailbox_dir();
     std::fs::create_dir_all(&dir)?;
     std::fs::write(signal_marker_path(pid), std::process::id().to_string())
 }
 
+/// Unix keeps the kernel dispositions for the whole process lifetime:
+/// nothing to tear down, and caught handlers reset to default in respawned
+/// children on exec anyway (bash subshell semantics for trapped signals).
+#[cfg(unix)]
+pub fn unregister_signal_mailbox(_pid: u32) {}
+
+#[cfg(not(unix))]
 pub fn unregister_signal_mailbox(pid: u32) {
     let _ = std::fs::remove_file(signal_marker_path(pid));
     let _ = std::fs::remove_file(signal_queue_path(pid));
@@ -350,6 +377,7 @@ pub fn unregister_signal_mailbox(pid: u32) {
     }
 }
 
+#[cfg(not(unix))]
 fn parse_signal_lines(content: &str) -> Vec<i32> {
     content
         .lines()
@@ -363,7 +391,19 @@ static SELF_SIGNALS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new
 
 /// Counts polls so the mailbox-file scan (for signals sent by OTHER
 /// processes) runs at a reduced interval instead of twice per command.
+/// Unix has no file mailbox: kernel deliveries drain through
+/// take_all_signals and this throttle does not exist.
+#[cfg(not(unix))]
 static FILE_POLL_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Unix drain: in-process queue (a `kill` to `$$` via queue_self_signal)
+/// plus real kernel deliveries from the signal_hook backend.
+#[cfg(unix)]
+fn take_all_signals() -> Vec<i32> {
+    let mut signals = take_self_signals();
+    signals.extend(kernel_signals::drain());
+    signals
+}
 
 fn queue_self_signal(signal: i32) {
     SELF_SIGNALS
@@ -380,6 +420,13 @@ fn take_self_signals() -> Vec<i32> {
 }
 
 pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
+    // Unix: real kernel deliveries drain through the in-process queue; no
+    // filesystem traffic, and no cross-process file mailbox exists.
+    #[cfg(unix)]
+    {
+        let _ = pid;
+        return Ok(take_all_signals());
+    }
     // In-process deliveries are drained unconditionally (a Mutex op, no
     // filesystem traffic). Signals from OTHER processes arrive via mailbox
     // files; with Windows Defender-style real-time scanning each
@@ -390,12 +437,15 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
     // does not update a directory's LastWriteTime synchronously on entry
     // create/delete (verified 2026-09-12: mtime unchanged 0.5s after a
     // create), so it silently swallowed real deliveries.
-    let mut signals = take_self_signals();
-    let tick = FILE_POLL_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if signals.is_empty() && tick % 64 == 0 {
-        signals = take_file_signals(pid)?;
+    #[cfg(not(unix))]
+    {
+        let mut signals = take_self_signals();
+        let tick = FILE_POLL_TICK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if signals.is_empty() && tick % 64 == 0 {
+            signals = take_file_signals(pid)?;
+        }
+        Ok(signals)
     }
-    Ok(signals)
 }
 
 /// Unthrottled variant of take_pending_signals: always scans the
@@ -403,9 +453,17 @@ pub fn take_pending_signals(pid: u32) -> io::Result<Vec<i32>> {
 /// `wait`'s interruptible poll (wait.def:170-206) and the in-process
 /// ${THIS_SH} child boundary that must drain the emulated child's queue.
 pub fn take_pending_signals_now(pid: u32) -> io::Result<Vec<i32>> {
-    let mut signals = take_self_signals();
-    signals.extend(take_file_signals(pid)?);
-    Ok(signals)
+    #[cfg(unix)]
+    {
+        let _ = pid;
+        return Ok(take_all_signals());
+    }
+    #[cfg(not(unix))]
+    {
+        let mut signals = take_self_signals();
+        signals.extend(take_file_signals(pid)?);
+        Ok(signals)
+    }
 }
 
 /// Push drained signals back to the front of this process's pending queue
@@ -424,6 +482,7 @@ pub fn requeue_pending_signals(signals: Vec<i32>) {
     queue.splice(..0, signals);
 }
 
+#[cfg(not(unix))]
 fn take_file_signals(pid: u32) -> io::Result<Vec<i32>> {
     let dir = signal_mailbox_dir();
     let mut signals = Vec::new();
@@ -658,6 +717,7 @@ fn signal_marker_path(pid: u32) -> std::path::PathBuf {
     signal_mailbox_dir().join(format!("{pid}.alive"))
 }
 
+#[cfg(not(unix))]
 fn signal_queue_path(pid: u32) -> std::path::PathBuf {
     signal_mailbox_dir().join(format!("{pid}.queue"))
 }
@@ -787,5 +847,78 @@ trait KillResultExt {
 impl KillResultExt for Result<(), &'static str> {
     fn is_ok_or_permission_denied(&self) -> bool {
         self.is_ok() || matches!(self, Err(message) if *message == "Permission denied")
+    }
+}
+
+/// Real kernel signal backend (the unix half of the signal-delivery seam).
+///
+/// GNU sig.c:102 initialize_signals installs handlers for the
+/// terminating-signal set (the table at sig.c:133 -- SIGINT, SIGTERM, SIGHUP,
+/// SIGQUIT, ...); each arrival is queued and dispatched at command
+/// boundaries by trap_exec::run_pending_signal_traps. The dispatch side is
+/// platform-shared: this backend and the Windows file mailbox both surface
+/// as the same `Vec<i32>` from take_pending_signals.
+///
+/// Deliberately NOT registered:
+/// - SIGCHLD: the reap-point dispatcher
+///   (Executor::run_sigchld_trap_for_reaped_child) already fires the CHLD
+///   trap exactly once per reaped child; a kernel SIGCHLD here would
+///   double-fire it.
+/// - Stop-class signals (SIGTSTP/SIGTTIN/SIGTTOU): without a
+///   stop-the-shell implementation, catching them would turn a stop into a
+///   spurious 128+N exit at the next boundary. Kernel-default stop is the
+///   closer bash behavior until the terminal/job-control layer exists.
+/// - SIGKILL is uncatchable by design.
+#[cfg(unix)]
+mod kernel_signals {
+    use signal_hook::iterator::Signals;
+    use std::sync::{Mutex, OnceLock};
+
+    static KERNEL_SIGNALS: OnceLock<Mutex<Signals>> = OnceLock::new();
+
+    pub(super) fn install() -> std::io::Result<()> {
+        if KERNEL_SIGNALS.get().is_some() {
+            return Ok(());
+        }
+        let signals = Signals::new([
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+            signal_hook::consts::SIGQUIT,
+            signal_hook::consts::SIGUSR1,
+            signal_hook::consts::SIGUSR2,
+        ])?;
+        let _ = KERNEL_SIGNALS.set(Mutex::new(signals));
+        Ok(())
+    }
+
+    pub(super) fn drain() -> Vec<i32> {
+        let Some(mutex) = KERNEL_SIGNALS.get() else {
+            return Vec::new();
+        };
+        let Ok(mut signals) = mutex.lock() else {
+            return Vec::new();
+        };
+        signals.pending().collect()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod kernel_signal_tests {
+    #[test]
+    fn kernel_signal_reaches_pending_queue() {
+        super::register_signal_mailbox(std::process::id()).unwrap();
+        unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGUSR1) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if super::take_pending_signals(std::process::id())
+                .unwrap()
+                .contains(&libc::SIGUSR1)
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("SIGUSR1 did not reach the pending-signal queue");
     }
 }

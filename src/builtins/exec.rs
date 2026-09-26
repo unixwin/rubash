@@ -246,7 +246,7 @@ where
         Ok(output) => {
             stdout.write_all(&output.stdout)?;
             stderr.write_all(&output.stderr)?;
-            Ok(output.status.code().unwrap_or(1))
+            Ok(crate::executor::wait_status::process_exit_status(&output.status))
         }
         Err(error) => {
             writeln!(
@@ -277,7 +277,7 @@ where
     process.stdout(child_stdout).stderr(child_stderr);
 
     match process.status() {
-        Ok(status) => Ok(status.code().unwrap_or(1)),
+        Ok(status) => Ok(crate::executor::wait_status::process_exit_status(&status)),
         Err(error) => {
             writeln!(
                 stderr,

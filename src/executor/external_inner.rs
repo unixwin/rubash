@@ -670,7 +670,9 @@ impl Executor {
                                 &output.stderr,
                             )?;
                             if self.exit_code == 0 {
-                                self.exit_code = output.status.code().unwrap_or(1);
+                                self.exit_code = crate::executor::wait_status::process_exit_status(
+                                    &output.status,
+                                );
                             }
                         }
                         Err(error) => self.report_external_spawn_error(cmd, error)?,
@@ -678,7 +680,8 @@ impl Executor {
                 } else {
                     match child.wait() {
                         Ok(status) => {
-                            self.exit_code = status.code().unwrap_or(1);
+                            self.exit_code =
+                                crate::executor::wait_status::process_exit_status(&status);
                             // A reaped foreground child delivers SIGCHLD in
                             // GNU bash; a set trap runs once at this
                             // boundary (trap8.sub).

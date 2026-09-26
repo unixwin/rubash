@@ -6,6 +6,7 @@ pub(crate) mod arithmetic;
 pub(crate) mod glob;
 pub(crate) mod path;
 pub(crate) mod types;
+pub(crate) mod wait_status;
 pub(crate) use types::*;
 mod upstream_scripts;
 use arithmetic::{

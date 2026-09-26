@@ -193,7 +193,7 @@ impl Executor {
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout)
                         .trim_capture_terminator()
                         .to_string(),
-                    output.status.code().unwrap_or(1),
+                    crate::executor::wait_status::process_exit_status(&output.status),
                 ))
             }
         }
@@ -956,7 +956,7 @@ impl Executor {
                     .set(Some((text.len(), Self::function_stdin_fingerprint(text))));
             }
         }
-        let status = output.status.code().unwrap_or(1);
+        let status = crate::executor::wait_status::process_exit_status(&output.status);
         if stdio.expanded_words.first().map(String::as_str) == Some("mktemp")
             && status != 0
             && !stdio.had_redirect

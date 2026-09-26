@@ -127,16 +127,25 @@ pub fn handle_to_file(h: HANDLE) -> std::fs::File {
 
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
-    let got = unsafe { libc::read(h, buf.as_mut_ptr().cast(), buf.len()) };
-    if got < 0 {
+    let got = loop {
+        let got = unsafe { libc::read(h, buf.as_mut_ptr().cast(), buf.len()) };
+        if got >= 0 {
+            break got;
+        }
         let err = std::io::Error::last_os_error();
+        // A caught signal (the kernel-signal backend, builtins/kill.rs) must
+        // not fake EOF or fail the read; retry and let the pending-signal
+        // queue dispatch at the next command boundary.
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
         // Broken pipe on Unix reads as EPIPE -- an EOF-shaped end for the
         // coproc drain loop, matching the Windows ERROR_BROKEN_PIPE mapping.
         if err.raw_os_error() == Some(libc::EPIPE) {
             return Ok(Vec::new());
         }
         return Err(err);
-    }
+    };
     buf.truncate(got as usize);
     Ok(buf)
 }
@@ -313,10 +322,12 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     cmd.stdin(unsafe { Stdio::from_raw_fd(dup_for_child(spec.std_handles[0])?) });
     cmd.stdout(unsafe { Stdio::from_raw_fd(dup_for_child(spec.std_handles[1])?) });
     cmd.stderr(unsafe { Stdio::from_raw_fd(dup_for_child(spec.std_handles[2])?) });
-    // extra_handles: the Windows side maps "handle value == child fd number".
-    // The Unix callers pass fds that should keep their numbers in the child.
-    let extras: Vec<HANDLE> = EXTRA_HANDLES.with(|c| c.borrow().clone());
-    EXTRA_HANDLES.with(|c| c.borrow_mut().clear());
+    // extra_handles: the Windows side maps "handle value == child fd number",
+    // and the __RUBASH_FD_HANDLE_{fd} env keys the child replays its fd table
+    // from carry those numbers, so each extra must arrive AT ITS OWN NUMBER:
+    // dup2(fd, fd) between fork and exec pins the number and clears CLOEXEC
+    // (the inheritable-duplicate effect).
+    let extras = spec.extra_handles.clone();
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(move || {
@@ -331,14 +342,10 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
         });
     }
     let child = cmd.spawn()?;
-    // Parent side: the recorded extras were dup'd into the child by pre_exec;
-    // the parent's originals stay open (callers own them, as on Windows).
-    let _ = extras;
+    // Parent side: the extras were dup2'd onto their own numbers in the
+    // child by pre_exec; the parent's originals stay open (callers own them,
+    // as on Windows).
     Ok(SpawnedChild { inner: child })
-}
-
-thread_local! {
-    static EXTRA_HANDLES: std::cell::RefCell<Vec<HANDLE>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 fn dup_for_child(fd: HANDLE) -> std::io::Result<HANDLE> {
@@ -348,12 +355,6 @@ fn dup_for_child(fd: HANDLE) -> std::io::Result<HANDLE> {
     let n = duplicate_handle(fd)?;
     set_inheritable(n, true)?;
     Ok(n)
-}
-
-/// Record extra handles before spawn_whitelisted (Windows callers build the
-/// whitelist inline; Unix needs the list carried into pre_exec).
-pub fn set_extra_handles(handles: &[HANDLE]) {
-    EXTRA_HANDLES.with(|c| *c.borrow_mut() = handles.to_vec());
 }
 
 #[cfg(test)]
@@ -386,6 +387,37 @@ mod tests {
         let buf = read_some(rfd, 64).unwrap();
         assert!(buf.is_empty());
         close_handle(rfd);
+    }
+
+    #[test]
+    fn spawn_whitelisted_keeps_extra_handles_at_their_numbers() {
+        use std::os::fd::AsRawFd;
+        let dir = std::env::temp_dir();
+        let path = dir.join("rubash-fd-extra-probe");
+        std::fs::write(&path, b"rubash-extra-probe").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let extra = duplicate_handle_inheritable(file.as_raw_fd()).unwrap();
+        // The child must find the SAME fd number open: the
+        // __RUBASH_FD_HANDLE_{fd} env keys replayed in init.rs name these
+        // numbers, so a spawn that renumbers them breaks fd>=3 inheritance.
+        let mut child = spawn_whitelisted(&WhitelistedSpawn {
+            program: "sh".into(),
+            args: vec![
+                "-c".to_string(),
+                // POSIX sh numeric dup rather than /proc/self/fd: macOS has
+                // no /proc, and the fd-number contract is what is under test.
+                format!("exec grep -q rubash-extra-probe <&{extra}"),
+            ],
+            env: Vec::new(),
+            std_handles: [0, 1, 2],
+            extra_handles: vec![extra],
+        })
+        .unwrap();
+        let status = child.wait().unwrap();
+        close_handle(extra);
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        assert!(status.success(), "child could not read extra fd {extra}");
     }
 }
 

@@ -286,11 +286,40 @@ fn find_user_command_uncached(name: &str, env_vars: &HashMap<String, String>) ->
         return None;
     }
 
+    // GNU findcmd.c:623 find_user_command_in_path walks with
+    // FS_EXEC_PREFERRED|FS_NODIRS: an executable regular file returns
+    // immediately (findcmd.c:580-586); an existing-but-not-executable one is
+    // remembered as file_to_lose_on (findcmd.c:591) and returned after the
+    // walk only if no executable ever matched (findcmd.c:695) -- the caller
+    // then attempts the exec and fails with EACCES ("Permission denied",
+    // 126), not not-found (127). Windows has no execute bit, so the
+    // preference tier collapses to the first-existing-file behavior.
+    #[cfg(unix)]
+    let mut file_to_lose_on: Option<PathBuf> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
         let candidate = shell_path_to_windows(&dir, env_vars).join(name);
-        if let Some(found) = executable_candidate(&candidate, env_vars) {
-            return Some(found);
+        #[cfg(unix)]
+        {
+            if !candidate.is_file() {
+                continue;
+            }
+            if file_is_executable(&candidate) {
+                return Some(candidate);
+            }
+            if file_to_lose_on.is_none() {
+                file_to_lose_on = Some(candidate);
+            }
         }
+        #[cfg(not(unix))]
+        {
+            if let Some(found) = executable_candidate(&candidate, env_vars) {
+                return Some(found);
+            }
+        }
+    }
+    #[cfg(unix)]
+    if let Some(fallback) = file_to_lose_on {
+        return Some(fallback);
     }
 
     // A workspace may expose WinuxCmd as one dispatcher executable instead of
@@ -935,6 +964,18 @@ fn windows_drive_and_home_path(path: &str) -> Option<(String, String)> {
     Some((drive, format!("\\{}", rest.replace('/', "\\"))))
 }
 
+/// GNU findcmd.c:113 file_status: FS_EXECABLE requires eaccess(name, X_OK)
+/// == 0 (the access() fallback branch at findcmd.c:156-157). Real-uid
+/// access matches that fallback; the effective-uid variant only differs for
+/// setuid shells.
+#[cfg(unix)]
+fn file_is_executable(path: &Path) -> bool {
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    unsafe { libc::access(cpath.as_ptr(), libc::X_OK) == 0 }
+}
+
 fn executable_candidate(path: &Path, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Extensionless names probe every PATHEXT candidate before the bare file
     // (native wrappers like `code.cmd` win over an extensionless `code`).
@@ -1496,6 +1537,43 @@ mod tests {
     use std::collections::HashSet;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn path_walk_prefers_executable_and_falls_back_to_existing() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join("rubash-execbit-walk");
+        let dir_a = base.join("a");
+        let dir_b = base.join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let non_exec = dir_a.join("rubash-execwalk");
+        std::fs::write(&non_exec, b"#!/bin/sh\n").unwrap();
+        let mut env = HashMap::new();
+        env.insert(
+            "PATH".to_string(),
+            format!("{}:{}", dir_a.display(), dir_b.display()),
+        );
+        // file_to_lose_on (findcmd.c:591/695): no executable anywhere -> the
+        // first existing non-executable regular file is the command; the
+        // exec then fails with EACCES (126), not 127.
+        assert_eq!(
+            find_user_command_uncached("rubash-execwalk", &env),
+            Some(non_exec)
+        );
+        // FS_EXEC_PREFERRED (findcmd.c:580): an executable in a LATER PATH
+        // dir beats the earlier non-executable candidate.
+        let exec = dir_b.join("rubash-execwalk");
+        std::fs::write(&exec, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&exec).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&exec, perms).unwrap();
+        assert_eq!(
+            find_user_command_uncached("rubash-execwalk", &env),
+            Some(exec)
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[cfg(not(windows))]
     #[test]
