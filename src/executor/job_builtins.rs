@@ -1942,6 +1942,89 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
         }
+        if matches!(
+            builtin,
+            crate::builtins::complete::CompletionBuiltin::Compopt
+        ) {
+            // compopt_builtin (complete.def:817-917). The NAME forms need
+            // the completion registry, so the executor arm owns them; the
+            // registry-free bare form lives in complete.rs execute_compopt.
+            let args = &cmd.words[1..];
+            let parsed = match crate::builtins::complete::parse_compopt_options(
+                args,
+                &diagnostic_prefix,
+                &mut stderr,
+            )? {
+                Err(status) => {
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(status);
+                }
+                Ok(parsed) => parsed,
+            };
+            // complete.def:852-861: -D wins over -E wins over -I (the
+            // if/else chain builds exactly one pseudo word). GNU's word is
+            // the pcomplete.h:109-111 magic name; rubash's registry keys the
+            // pseudo specs as "-D"/"-E"/"-I" (see the complete arm above), so
+            // the lookup key and the reported name differ by design.
+            let pseudo: Option<(&str, &str)> = if parsed.dflag {
+                Some(("_DefaultCmD_", "-D"))
+            } else if parsed.eflag {
+                Some(("_EmptycmD_", "-E"))
+            } else if parsed.iflag {
+                Some(("_InitialWorD_", "-I"))
+            } else {
+                None
+            };
+            // complete.def:862-869: `list == 0 && wl == 0` is the
+            // completion-state form (RL_STATE_COMPLETING is never set
+            // outside readline completion, so it always errors here).
+            if parsed.operands.is_empty() && pseudo.is_none() {
+                writeln!(
+                    stderr,
+                    "{diagnostic_prefix}compopt: not currently executing completion function"
+                )?;
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                return Ok(1); // EXECUTION_FAILURE
+            }
+            // complete.def:893-911: `for (l = wl ? wl : list; ...)` — the
+            // pseudo word replaces the operand list when present.
+            let mut status = 0;
+            let operand_refs: Vec<(&str, &str)> = parsed
+                .operands
+                .iter()
+                .map(|name| (name.as_str(), name.as_str()))
+                .collect();
+            for (report_name, key) in pseudo.into_iter().chain(operand_refs) {
+                match self.shell_state.completion_specs.get_mut(key) {
+                    None => {
+                        // complete.def:896-898 progcomp_search miss.
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}compopt: {report_name}: no completion specification"
+                        )?;
+                        status = 1;
+                    }
+                    Some(cs) => {
+                        if parsed.on_options == 0 && parsed.off_options == 0 {
+                            // complete.def:870-874 print_compopts(cmd, cs, 1)
+                            // writes to stdout.
+                            crate::builtins::complete::print_compopts_line(
+                                report_name,
+                                cs,
+                                &mut stdout,
+                            )?;
+                        } else {
+                            // complete.def:901-909: set the -o bits and clear
+                            // the +o bits on the existing compspec.
+                            cs.options |= parsed.on_options;
+                            cs.options &= !parsed.off_options;
+                        }
+                    }
+                }
+            }
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(status);
+        }
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         let job_names: Vec<String> = self
             .shell_state

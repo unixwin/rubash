@@ -784,6 +784,25 @@ impl Executor {
             .collect()
     }
 
+    /// GNU error.c get_name_for_error's interactive branch: `base_pathname
+    /// (shell_name)` — the basename of the name the shell was invoked under
+    /// ("/usr/local/bin/bash" -> "bash"), never the full path. shell_name
+    /// comes from argv[0] (shell.c set_shell_name) unless BASH_ARGV0
+    /// replaced it (variables.c:1547 set_argv0), which is why
+    /// __RUBASH_SHELL_NAME (argv[0], main.rs) is consulted before the
+    /// BASH_ARGV0 fallback. rubash#162 N6: this prolog used to print the
+    /// full executable path.
+    fn interactive_shell_basename(env_vars: &HashMap<String, String>) -> String {
+        let name = env_vars
+            .get("__RUBASH_SHELL_NAME")
+            .or_else(|| env_vars.get("BASH_ARGV0"))
+            .map(String::as_str)
+            .unwrap_or("bash");
+        // base_pathname: text after the last path separator (both separators,
+        // since a Windows argv[0] may use either).
+        name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+    }
+
     pub fn diagnostic_prefix(&self) -> String {
         // GNU error.c:75-86 (report_prolog): runtime errors (command not
         // found, file not found, etc.) use only get_name_for_error() —
@@ -801,10 +820,10 @@ impl Executor {
             // Interactive mode: report only the shell name, no line segment.
             // GNU error.c:88-120 (get_name_for_error) for interactive shells
             // returns base_pathname(shell_name) with no line number.
-            if let Some(shell_name) = self.shell_state.env_vars.get("__RUBASH_SHELL_NAME") {
-                return format!("{shell_name}: ");
-            }
-            return "bash: ".to_string();
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
         }
 
         // Script/-c mode: line segment present
@@ -873,14 +892,12 @@ impl Executor {
             .env_vars
             .contains_key("__RUBASH_INTERACTIVE")
         {
-            // parser_error's interactive branch prints only the shell name.
-            let name = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_SHELL_NAME")
-                .cloned()
-                .unwrap_or_else(|| "bash".to_string());
-            return format!("{name}: ");
+            // parser_error's interactive branch prints only the shell name
+            // (base_pathname(shell_name), same rule as get_name_for_error).
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
         }
         let name = self
             .shell_state

@@ -642,6 +642,19 @@ impl CompletionRegistry {
             .map(|(_, v)| v)
     }
 
+    /// Mutable progcomp_search (pcomplib.c:266) for compopt's in-place
+    /// option updates (complete.def:901-909 pcomp_set_compspec_options).
+    pub(crate) fn get_mut(&mut self, name: &str) -> Option<&mut Compspec> {
+        if !self.created {
+            return None;
+        }
+        let b = Self::bucket_of(name, self.buckets.len());
+        self.buckets[b]
+            .iter_mut()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v)
+    }
+
     /// hashlib.c hash_walk order: bucket index ascending, chain head first.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &Compspec)> {
         self.buckets.iter().flatten().map(|(k, v)| (k, v))
@@ -1348,11 +1361,13 @@ fn execute_compopt<E>(args: &[String], diagnostic_prefix: &str, stderr: &mut E) 
 where
     E: Write,
 {
-    let status = parse_compopt_options(args, diagnostic_prefix, stderr)?;
-    if status != EXECUTION_SUCCESS {
+    if let Err(status) = parse_compopt_options(args, diagnostic_prefix, stderr)? {
         return Ok(status);
     }
-
+    // Only the bare form reaches this builtin-level entry (no loptend words,
+    // no -D/-E/-I): complete.def:862-869 reports the completion-state error.
+    // The NAME forms need the completion registry and run in the executor
+    // arm (job_builtins execute_completion_builtin).
     writeln!(
         stderr,
         "{diagnostic_prefix}compopt: not currently executing completion function"
@@ -1546,90 +1561,100 @@ impl ParsedCompletionOptions {
     }
 }
 
-fn parse_compopt_options<E>(
+/// compopt_builtin's parsed state (complete.def:817-861): the -o/+o option
+/// bits, the -D/-E/-I pseudo-target flags, and loptend (the trailing words).
+#[derive(Default)]
+pub(crate) struct ParsedCompopt {
+    /// compopts[] bits requested with `-o name` (list_opttype '-').
+    pub(crate) on_options: u64,
+    /// compopts[] bits requested with `+o name` (list_opttype '+').
+    pub(crate) off_options: u64,
+    pub(crate) dflag: bool,
+    pub(crate) eflag: bool,
+    pub(crate) iflag: bool,
+    /// loptend: operand words after the options.
+    pub(crate) operands: Vec<String>,
+}
+
+/// compopt option parser: internal_getopt("+o:DEI") over complete.def:826-857.
+/// Ok(parsed) on success; Err(status) with diagnostics already written on the
+/// EX_USAGE paths (invalid option letter / unknown -o name / missing value).
+pub(crate) fn parse_compopt_options<E>(
     args: &[String],
     diagnostic_prefix: &str,
     stderr: &mut E,
-) -> io::Result<i32>
+) -> io::Result<Result<ParsedCompopt, i32>>
 where
     E: Write,
 {
-    let mut index = 0;
+    let mut parsed = ParsedCompopt::default();
+    let mut index = 0usize;
     while let Some(arg) = args.get(index) {
+        // `--` ends option processing (and is skipped); a bare `-` or any
+        // word without a leading -/+ is the first loptend operand — bash's
+        // internal_getopt does not permute, so parsing stops there.
         if arg == "--" {
-            break;
-        }
-        if !arg.starts_with('-') && !arg.starts_with("+o") || arg == "-" {
-            break;
-        }
-
-        if let Some(rest) = arg.strip_prefix("+o") {
-            if rest.is_empty() {
-                index += 1;
-                if args.get(index).is_none() {
-                    writeln!(
-                        stderr,
-                        "{diagnostic_prefix}compopt: +o: option requires an argument"
-                    )?;
-                    write_usage(CompletionBuiltin::Compopt, stderr)?;
-                    return Ok(EX_USAGE);
-                }
-            }
             index += 1;
-            continue;
-        }
-
-        let mut chars = arg[1..].chars().peekable();
-        while let Some(option) = chars.next() {
-            match option {
-                'D' | 'E' | 'I' => {}
-                'o' => {
-                    if chars.peek().is_none() {
-                        index += 1;
-                        let Some(option_name) = args.get(index) else {
-                            writeln!(
-                                stderr,
-                                "{diagnostic_prefix}compopt: -o: option requires an argument"
-                            )?;
-                            write_usage(CompletionBuiltin::Compopt, stderr)?;
-                            return Ok(EX_USAGE);
+            break;
+        } else if arg == "-" || !(arg.starts_with('-') || arg.starts_with('+')) {
+            break;
+        } else {
+            let sign = &arg[..1];
+            let on = sign == "-";
+            let mut chars = arg[1..].chars().peekable();
+            while let Some(option) = chars.next() {
+                match option {
+                    'D' => parsed.dflag = true,
+                    'E' => parsed.eflag = true,
+                    'I' => parsed.iflag = true,
+                    'o' => {
+                        let option_name = if chars.peek().is_some() {
+                            chars.by_ref().collect::<String>()
+                        } else {
+                            index += 1;
+                            let Some(option_name) = args.get(index) else {
+                                writeln!(
+                                    stderr,
+                                    "{diagnostic_prefix}compopt: {sign}o: option requires an argument"
+                                )?;
+                                write_usage(CompletionBuiltin::Compopt, stderr)?;
+                                return Ok(Err(EX_USAGE));
+                            };
+                            option_name.clone()
                         };
-                        // Validate option name (GNU complete.def compopts[])
-                        if !matches!(
-                            option_name.as_str(),
-                            "bashdefault"
-                                | "default"
-                                | "dirnames"
-                                | "filenames"
-                                | "fullquote"
-                                | "noquote"
-                                | "nosort"
-                                | "nospace"
-                                | "plusdirs"
-                        ) {
+                        // find_compopt (complete.def:833-839): the name must
+                        // be one of compopts[].
+                        let Some(&(_, bit)) =
+                            COMPOPTS.iter().find(|(name, _)| *name == option_name)
+                        else {
+                            // sh_invalidoptname: "compopt: name: invalid option name"
                             writeln!(
                                 stderr,
                                 "{diagnostic_prefix}compopt: {option_name}: invalid option name"
                             )?;
-                            return Ok(EX_USAGE);
+                            return Ok(Err(EX_USAGE));
+                        };
+                        if on {
+                            parsed.on_options |= bit;
+                        } else {
+                            parsed.off_options |= bit;
                         }
                     }
-                    break;
-                }
-                other => {
-                    writeln!(
-                        stderr,
-                        "{diagnostic_prefix}compopt: -{other}: invalid option"
-                    )?;
-                    write_usage(CompletionBuiltin::Compopt, stderr)?;
-                    return Ok(EX_USAGE);
+                    other => {
+                        writeln!(
+                            stderr,
+                            "{diagnostic_prefix}compopt: {sign}{other}: invalid option"
+                        )?;
+                        write_usage(CompletionBuiltin::Compopt, stderr)?;
+                        return Ok(Err(EX_USAGE));
+                    }
                 }
             }
         }
         index += 1;
     }
-
-    Ok(EXECUTION_SUCCESS)
+    parsed.operands = args[index..].to_vec();
+    Ok(Ok(parsed))
 }
 
 impl CompletionBuiltin {
@@ -1700,6 +1725,25 @@ where
     print_arg(cs.command.as_deref(), "-C", true, out)?;
     if let Some(funcname) = cs.funcname.as_deref() {
         print_arg(Some(funcname), "-F", sh_contains_shell_metas(funcname), out)?;
+    }
+    write!(out, "{}", print_cmd_name(name))?;
+    writeln!(out)
+}
+
+/// print_compopts (complete.def:602-610) with print_compoptions full=1
+/// (:554-565): "compopt " then every compopts[] entry as `-o name ` when its
+/// bit is set or `+o name ` when clear, then the command name.
+pub(crate) fn print_compopts_line<E>(name: &str, cs: &Compspec, out: &mut E) -> io::Result<()>
+where
+    E: Write,
+{
+    write!(out, "compopt ")?;
+    for &(optname, bit) in COMPOPTS {
+        if cs.options & bit != 0 {
+            write!(out, "-o {optname} ")?;
+        } else {
+            write!(out, "+o {optname} ")?;
+        }
     }
     write!(out, "{}", print_cmd_name(name))?;
     writeln!(out)
