@@ -47,6 +47,17 @@
 > intl 4（locale）、coproc 4（/etc/passwd 等）、ifs-posix 1（超时）；
 > 真差 —— glob 29（主体 NTFS 非法文件名，env 分类器无法全识别）、
 > errors 2（comsub 诊断措辞族）、nameref 1 / trap 1（时序抖动）。
+>
+> **假货清除后的口径更新（2026-09-26 晚，99cbc138/defafd2e/cc31e05b）**：
+> `upstream_scripts` 罐头输出子系统（2508 行）与执行器内 recho/zecho 模拟
+> 已整体删除（owner 指令：不得为过测试造假）。harness 改为给 rubash 侧
+> 真实编译 Windows 版 recho/zecho.exe（scripts/test-helpers/*.rs），并经
+> `WSLENV PATH/p` 转发受控 PATH（WSL PATH 本不过界）。由此浮出的**平台
+> 边界残余**（与 NTFS 非法文件名同类，非语义 bug）：array 8 / nquote4 14 /
+> exp 4 —— 非 UTF-8 孤立高字节经 CreateProcessW 的 UTF-16 argv 无法字节
+> 保真（合法 UTF-8 无损，见 issue #141）；new-exp 4 / nquote +2 —— 盘符
+> 路径形状 + od 列宽 + 一处 ESC 字节丢失（#141 附带）。此前这些行为被
+> 内建 recho 携带引擎内部 raw-byte 标记所掩盖；现为诚实的进程边界。
 > 沿用无桩 harness：`__RUBASH_NO_UPSTREAM_SCRIPTS` 经 `WSLENV /w` 跨边界，
 > `/bin/sh|/usr/bin/sh` 经 PATH 解析为 niubash 夹具，TMPDIR 逐套件隔离。）
 >
