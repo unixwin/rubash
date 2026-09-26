@@ -122,8 +122,13 @@ niubash 层：
   linux tarball 已有）。修法：release matrix 加 aarch64/x86_64-apple-darwin。
 - **C3 🔴 f12aa756 未 push**：niubash 以 `rubash = { git, branch=master }` 消费，
   引擎 unix 接线对 niubash 不可见，直到 push（captain 决策）。
-- **C4 🟡 83 套件从未在任何 unix 真二进制上跑过**。修法：CI 加 linux
-  （先 ubuntu 自举编译）smoke slice，diff 账本进 `target/issue-suites/results/`。
+- **C4 🟡→首账本已立（2026-09-26）**：linux 真二进制首跑 smoke 完成——10 个零
+  helper 套件 **8/10 stdout 逐字节零差**，唯 trap（信号子系统）23 行（ERRTRAP
+  触发计数 / func=7vs0 / EXIT+CHLD 多触发 4 行 / trap -p 选项拒绝，画像见
+  `target/issue-suites/results/linux-smoke/LEDGER.md`）。**方法学硬教训**：
+  `.tests` 不在 eol=lf 属性内，WSL 侧 GNU 会被 CR 全灭——比较前必须 LF 化。
+  副产物：E17-lexer 站点（CRLF 容忍）被实证为 Linux 真实可观察偏差，优先级上调。
+  下一步：trap 差异最小化归因（wave-2）+ 扩大 smoke 集到全 83。
 
 ## niubash 产品层缺口（跨平台升级）
 
