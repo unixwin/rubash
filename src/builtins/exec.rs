@@ -299,12 +299,27 @@ fn external_exec_process(
     env_vars: &HashMap<String, String>,
     clean_env: bool,
 ) -> Command {
-    let (mut process, _) = crate::executor::path::external_command_for_named_program(
+    // GNU builtins/exec.def (exec_builtin): `com2 = full_pathname (command)`
+    // rebinds the exec target to its absolute path before shell_execve, so
+    // a script run through `exec` reports the absolute path as its $0 (the
+    // ENOEXEC re-entry at execute_cmd.c:6252 passes `command` as the new
+    // script name). Non-script targets keep the dispatcher word form.
+    let mut process = if let Some((command, _)) = crate::executor::path::shell_wrapped_command(
         program,
-        program.file_stem().and_then(|stem| stem.to_str()),
+        &full_pathname_word(program),
         operands,
         env_vars,
-    );
+    ) {
+        command
+    } else {
+        let (command, _) = crate::executor::path::external_command_for_named_program(
+            program,
+            program.file_stem().and_then(|stem| stem.to_str()),
+            operands,
+            env_vars,
+        );
+        command
+    };
 
     process.env_clear();
     if !clean_env {
@@ -312,6 +327,32 @@ fn external_exec_process(
         crate::executor::path::apply_required_windows_child_environment(&mut process, env_vars);
     }
     process
+}
+
+/// GNU general.c:909-922 full_pathname: a word that is already absolute is
+/// returned as-is; anything else gets the current working directory
+/// prepended and `.` path components removed (sh_makepath MP_DOCWD|MP_RMDOT
+/// — no symlink resolution). Applied to the slash form so the child shell
+/// sees a forward-slash absolute script name.
+fn full_pathname_word(program: &std::path::Path) -> String {
+    let display = program.to_string_lossy().replace('\\', "/");
+    let bytes = display.as_bytes();
+    let absolute =
+        display.starts_with('/') || (bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
+    if absolute {
+        return display;
+    }
+    let cwd = std::env::current_dir()
+        .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let joined = format!("{cwd}/{display}");
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        if !part.is_empty() && part != "." {
+            parts.push(part);
+        }
+    }
+    parts.join("/")
 }
 
 fn apply_exported_environment(process: &mut Command, env_vars: &HashMap<String, String>) {
