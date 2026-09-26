@@ -1,6 +1,38 @@
 use super::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 use super::token::{Token, TokenKind};
 
+/// Whether the just-tokenized logical line still awaits a `}' from a later
+/// line. GNU parse.y has no logical lines: read_token reads a `{` group
+/// across newlines, and only the RESERVED-WORD `{` (CHECK_FOR_RESERVED_WORD,
+/// parse.y:3168-3175, gated by reserved_word_acceptable at parse.y:5899 and
+/// suppressed in case patterns by PST_CASEPAT, parser.h:29) opens a group at
+/// all. The Lexer encodes exactly that: an unclosed group fold emits a
+/// standalone `Keyword "{"` token, while pattern/word-text braces come out as
+/// Word/BraceExpand and never join. Text-level `contains("... {")` admission
+/// here used to count `case x in {)`'s pattern brace as a group opener and
+/// swallow the rest of the file into one logical line (rubash#117 family).
+///
+/// The join admission mirrors that pre-token-signal text check exactly — a
+/// group `{` at the start of the line or right after `;' / `&&' / `||' — but
+/// computed from tokens. A `{' after `)' (the `name() {' function-body shape)
+/// stays OUT: the parser pairs it with a later `}' (matching_brace_group_end)
+/// and that path keeps per-line LINENO attribution for the definition (the
+/// dbg-support DEBUG-trap linenos regressed when this brace joined).
+pub(super) fn tokens_open_unclosed_brace_group(line_tokens: &[Token]) -> bool {
+    line_tokens.iter().enumerate().any(|(index, token)| {
+        if token.kind != TokenKind::Keyword || token.value != "{" {
+            return false;
+        }
+        match index {
+            0 => true,
+            _ => matches!(
+                line_tokens[index - 1].kind,
+                TokenKind::Semicolon | TokenKind::And | TokenKind::Or
+            ),
+        }
+    })
+}
+
 pub(super) fn has_unclosed_brace_group(input: &str) -> bool {
     let trimmed = input.trim_start();
     let has_group = trimmed.starts_with('{')
@@ -11,7 +43,7 @@ pub(super) fn has_unclosed_brace_group(input: &str) -> bool {
     (has_group && unquoted_brace_group_depth(input) > 0) || has_unclosed_parameter_expansion(input)
 }
 
-fn has_unclosed_parameter_expansion(input: &str) -> bool {
+pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
     let chars = input.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     // GNU parse.y consumes a shell comment in the lexer (read_token hands a

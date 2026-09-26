@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{STORAGE_WORD_PREFIX};
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 #[test]
 fn test_parameter_pattern_quotes_stay_in_one_word() {

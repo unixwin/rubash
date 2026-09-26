@@ -119,6 +119,32 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                 current_raw_pattern.clear();
                 break;
             }
+            // parse.y:1225-1236 pattern_list: `newline_list' is legal only
+            // before a clause's first pattern and after a bodyless clause's
+            // `)'. Inside the pattern itself — between `|' alternatives, or
+            // between the pattern word and its `)' — the grammar admits no
+            // `;' or newline, and yacc reports `syntax error near unexpected
+            // token `newline'' (`` `;' '' for a real semicolon) at that
+            // line (`case a in a;b) ...', `case a in a|<newline> b) ...').
+            if in_extglob == 0 && tokens[i].kind == TokenKind::Semicolon {
+                let token_text = if tokens[i].line_break { "newline" } else { ";" };
+                let mut command = CommandNode::new();
+                command.line = tokens.get(start).map(|token| token.position);
+                command.insert_assignment(
+                    "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                    format!(
+                        "{}{}{}",
+                        token_text,
+                        crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                        tokens[i].position
+                    ),
+                );
+                command.insert_assignment(
+                    "__RUBASH_PARSE_SOURCE__".to_string(),
+                    pattern_error_line_text(tokens, i),
+                );
+                return Some(finish_compound_command(command, tokens, tokens.len()));
+            }
             if tokens[i].kind != TokenKind::Pipe {
                 current_pattern_has_token = true;
             }
@@ -285,6 +311,36 @@ pub(super) fn case_parse_error_message(_tokens: &[Token], _start: usize) -> &'st
 
 fn is_case_clause_terminator_token(token: &Token) -> bool {
     token.kind == TokenKind::Word && matches!(token.raw.as_str(), ";;" | ";&" | ";;&")
+}
+
+/// Physical input line of `tokens[index]` for a pattern-position error echo,
+/// reconstructed from same-line token raws. Synthetic line-break separators
+/// carry no source text and are skipped (GNU y.error echoes the line as
+/// read, e.g. `y|' — not `y|;').
+fn pattern_error_line_text(tokens: &[Token], index: usize) -> String {
+    let line = tokens[index].position;
+    let mut start = index;
+    while start > 0 && tokens[start - 1].position == line {
+        start -= 1;
+    }
+    let mut text = String::new();
+    let mut prev_end: Option<usize> = None;
+    for token in &tokens[start..] {
+        if token.position != line {
+            break;
+        }
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            continue;
+        }
+        if let Some(end) = prev_end {
+            if token.column > end {
+                text.push(' ');
+            }
+        }
+        text.push_str(&token.raw);
+        prev_end = Some(token.column + token.raw.len());
+    }
+    text
 }
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {

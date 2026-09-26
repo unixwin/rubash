@@ -20,7 +20,10 @@ mod word;
 #[cfg(test)]
 mod tests;
 
-use brace_scan::{has_unclosed_brace_group, opens_function_body_after_previous_signature};
+use brace_scan::{
+    has_unclosed_parameter_expansion, opens_function_body_after_previous_signature,
+    tokens_open_unclosed_brace_group,
+};
 use continuation::{
     ends_with_unquoted_backslash, has_unclosed_compound_assignment, has_unclosed_quotes,
 };
@@ -30,7 +33,7 @@ pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
 use heredoc::heredoc_delimiters;
-use scanner::Lexer;
+use scanner::{Lexer, LexerParseState};
 pub(crate) use skip::skip_parenthesized_unit_corrected;
 
 use crate::executor::markers::DATA_DOLLAR;
@@ -194,6 +197,12 @@ fn tokenize_with_heredocs(
     // heredoc (make_cmd.c:602-611).
     let mut comsub_heredocs: Vec<ComsubHeredocHeader> = Vec::new();
     let mut header_scan_from = 0usize;
+    // GNU parse.y keeps one parser_state for the whole input: PST_CASEPAT,
+    // last_read_token and expecting_in_command persist across physical
+    // lines. Carry the same state between the per-logical-line Lexer
+    // instances so `{` in a case pattern on its own line is still word
+    // text, not a group opener.
+    let mut lexer_parse_state = LexerParseState::default();
 
     while let Some(raw_line) = lines.next() {
         // niubash #106: a '\r' immediately before the '\n' belongs to the
@@ -247,14 +256,11 @@ fn tokenize_with_heredocs(
                     // the whole logical line could land on the pushed-back
                     // `)` itself (delim `)`) or on a `)` from an earlier line.
                     let line_start = logical_line.len() - line.len();
-                    let delim_end = line_start
-                        + (line.len() - comparable.len())
-                        + front.delimiter.len();
+                    let delim_end =
+                        line_start + (line.len() - comparable.len()) + front.delimiter.len();
                     if let Some(rel_pos) = logical_line[delim_end..].find(')') {
-                        logical_line.insert(
-                            delim_end + rel_pos,
-                            crate::executor::markers::IFS_GLUE,
-                        );
+                        logical_line
+                            .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
                     }
                 }
             }
@@ -330,7 +336,19 @@ fn tokenize_with_heredocs(
         if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
             logical_line = rotated;
         }
-        let mut line_tokens = tokenize_plain(&logical_line, parse_posix);
+        // GNU reads tokens sequentially (parse.y read_token): the reader
+        // state feeding reserved_word_acceptable (parse.y:5899) is the state
+        // after the tokens BEFORE this logical line — newlines are just
+        // whitespace between them. The join loop below re-tokenizes the
+        // whole accumulated logical line after each joined physical line,
+        // so every retry must replay from the SAME line-start state; the
+        // end state of a partial tokenization describes the end of the
+        // partial text, not the start of the longer one. Feeding it back
+        // made `{)\t: brace ;;` fold after `esac` joined (the previous
+        // partial ended with last=esac, so `{` sat in reserved-word
+        // position) and swallowed the rest of the function body.
+        let mut line_lex_state = lexer_parse_state.clone();
+        let mut line_tokens = tokenize_plain(&logical_line, parse_posix, &mut line_lex_state);
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             parse_posix = updated;
         }
@@ -355,7 +373,13 @@ fn tokenize_with_heredocs(
                 .min(logical_line.len());
         }
         let has_heredoc = !heredoc_delimiters(&line_tokens, &logical_line, in_comsub).is_empty();
-        if has_unclosed_brace_group(&logical_line)
+        // Join forward only on signals the tokens themselves prove: an
+        // unclosed reserved-word `{` group (see tokens_open_unclosed_brace_group)
+        // or an unterminated `${...}` parameter expansion. The old text-level
+        // has_unclosed_brace_group counted `case x in {)`'s pattern brace as a
+        // group opener, joining the pattern line to far-away text.
+        if (tokens_open_unclosed_brace_group(&line_tokens)
+            || has_unclosed_parameter_expansion(&logical_line))
             && !opens_function_body_after_previous_signature(&logical_line, &output)
             && !has_heredoc
         {
@@ -381,6 +405,10 @@ fn tokenize_with_heredocs(
             break;
         }
         output.append(&mut line_tokens);
+        // Commit only when the logical line is accepted: `continue` above
+        // discards the partial state so the next, longer retry replays from
+        // the same line-start state (see the comment at tokenize_plain).
+        lexer_parse_state = line_lex_state;
         logical_line.clear();
         header_scan_from = 0;
 
@@ -503,6 +531,11 @@ fn tokenize_with_heredocs(
         let mut separator = Token::new(TokenKind::Semicolon, ";", logical_start_line);
         separator.line_break = true;
         output.push(separator);
+        // GNU read_token reads this line break as a '\n' token before the
+        // next line's first token (reserved_word_acceptable, parse.y:5902);
+        // the separator above is emitted downstream of the Lexer, so the
+        // carried reader state must record the break itself.
+        lexer_parse_state.note_line_break();
     }
 
     if !logical_line.is_empty() {
@@ -516,7 +549,7 @@ fn tokenize_with_heredocs(
         if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
             logical_line = rotated;
         }
-        let mut line_tokens = tokenize_plain(&logical_line, parse_posix);
+        let mut line_tokens = tokenize_plain(&logical_line, parse_posix, &mut lexer_parse_state);
         for token in &mut line_tokens {
             token.position = logical_start_line;
         }
@@ -543,7 +576,9 @@ pub(crate) struct ComsubHeredocHeader {
 /// byte offset: an incomplete delimiter (one whose raw spelling ends with an
 /// unquoted backslash, completed by the next physical line) leaves the scan
 /// point at its `<<` so it is re-read after the join.
-pub(crate) fn scan_line_for_comsub_heredoc_headers(line: &str) -> (Vec<ComsubHeredocHeader>, usize) {
+pub(crate) fn scan_line_for_comsub_heredoc_headers(
+    line: &str,
+) -> (Vec<ComsubHeredocHeader>, usize) {
     let bytes = line.as_bytes();
     let mut headers = Vec::new();
     let mut consumed = 0usize;
@@ -777,15 +812,19 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
     None
 }
 
-fn tokenize_plain(input: &str, posix: bool) -> Vec<Token> {
-    let lexer = Lexer::new(input, posix);
+fn tokenize_plain(input: &str, posix: bool, parse_state: &mut LexerParseState) -> Vec<Token> {
+    let mut lexer = Lexer::new(input, posix);
+    // parse.y keeps a single parser_state for the whole input — resume the
+    // PST_CASEPAT / last_read_token state left by the previous logical line.
+    lexer.restore_parse_state(parse_state.clone());
     let mut tokens = Vec::new();
-    for token in lexer {
+    for token in &mut lexer {
         if token.kind == TokenKind::Eof {
             break;
         }
         tokens.push(token);
     }
+    *parse_state = lexer.take_parse_state();
     tokens
 }
 

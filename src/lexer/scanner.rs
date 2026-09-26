@@ -2,12 +2,62 @@ use super::classification::{is_brace_expansion, is_word_delimiter};
 use super::quotes::normalize_backtick_command_substitution;
 use super::token::{Token, TokenKind};
 
+/// GNU reader state that survives across logical lines: parse.y keeps a
+/// single parser_state for the whole input, so last_read_token and
+/// PST_CASEPAT naturally span physical/logical line boundaries. Rubash
+/// re-lexes each logical line, so the state is carried explicitly.
+#[derive(Clone, Default)]
+pub(super) struct LexerParseState {
+    /// GNU parse.y last_read_token / token_before_that, kept as
+    /// (kind, value) so `reserved_word_position` can reproduce
+    /// reserved_word_acceptable (parse.y:5899) for the `{` fold decision.
+    last_token: Option<(TokenKind, String)>,
+    token_before_that: Option<(TokenKind, String)>,
+    /// GNU PST_CASEPAT (parser.h:29): inside a case pattern list reserved
+    /// words are ordinary word text (parse.y:3177 suppresses every reserved
+    /// word except a pattern-position esac), so `{` is a pattern character,
+    /// not a group opener.
+    case_pattern: bool,
+    /// Depth of open `case` statements so `;;`/`;&`/`;;&` re-enter pattern
+    /// state for the next clause (parse.y:3710/3759 set PST_CASEPAT).
+    case_stmt_depth: usize,
+    /// `case` just read: the grammar expects the operand word next
+    /// (parse.y expecting_in_command == CASE).
+    case_expect_word: bool,
+    /// `case WORD` read: an `in` (or newline then `in`) enters pattern state
+    /// (parse.y:3370-3396).
+    case_expect_in: bool,
+    /// GNU lexes `-p' directly after `time' as TIMEOPT and `--' after
+    /// `time'/`time -p' as TIMEIGN (parse.y:3470-3479); both are in
+    /// reserved_word_acceptable's list (parse.y:5929-5930), so
+    /// `time -p { echo; }' keeps `{' a group opener. True when last_token
+    /// was such an option word.
+    last_was_time_option: bool,
+}
+
+impl LexerParseState {
+    /// GNU read_token reads the newline that ends a logical line as a real
+    /// '\n' token, so the first token of the next line is lexed with
+    /// last_read_token == '\n' — which reserved_word_acceptable
+    /// (parse.y:5902) accepts: `{ echo; }` after a complete command on the
+    /// previous line is a group. The per-line tokenizer's synthetic `;`
+    /// separator is emitted downstream of the Lexer, so the line break must
+    /// be folded into the carried state explicitly; without it the state
+    /// kept the previous line's last word and `{` degraded to word text.
+    pub(super) fn note_line_break(&mut self) {
+        let previous = self.last_token.take();
+        self.token_before_that = previous;
+        self.last_token = Some((TokenKind::Semicolon, ";".to_string()));
+    }
+}
+
 pub(super) struct Lexer<'a> {
     pub(super) input: &'a str,
     pub(super) position: usize,
     /// POSIX parse mode (Austin Group Interp 221): single quotes inside a
     /// double-quoted `${...}` are literal, so `}` closes the expansion.
     pub(super) posix: bool,
+    parse_state: LexerParseState,
 }
 
 impl<'a> Lexer<'a> {
@@ -16,7 +66,150 @@ impl<'a> Lexer<'a> {
             input,
             position: 0,
             posix,
+            parse_state: LexerParseState::default(),
         }
+    }
+
+    /// Carry the GNU reader state in from a previous logical line
+    /// (parse.y keeps one parser_state for the whole input).
+    pub(super) fn restore_parse_state(&mut self, state: LexerParseState) {
+        self.parse_state = state;
+    }
+
+    /// Export the GNU reader state after this logical line so the next
+    /// logical line resumes where the parser would have (PST_CASEPAT,
+    /// last_read_token, expecting_in_command).
+    pub(super) fn take_parse_state(&mut self) -> LexerParseState {
+        self.parse_state.clone()
+    }
+
+    /// GNU parse.y:5899 reserved_word_acceptable: whether a reserved word
+    /// (here `{`) may appear after the previously emitted token.
+    fn reserved_word_position(&self) -> bool {
+        let Some((kind, value)) = &self.parse_state.last_token else {
+            return true;
+        };
+        match kind {
+            TokenKind::Semicolon
+            | TokenKind::Pipe
+            | TokenKind::PipeErr
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Background
+            // DOLPAREN / DOLBRACE in the GNU list.
+            | TokenKind::CommandSubst
+            | TokenKind::Variable => true,
+            TokenKind::Keyword => matches!(
+                value.as_str(),
+                "(" | ")"
+                    | "{"
+                    | "}"
+                    | "!"
+                    | "do"
+                    | "done"
+                    | "elif"
+                    | "else"
+                    | "esac"
+                    | "fi"
+                    | "if"
+                    | "then"
+                    | "time"
+                    | "while"
+                    | "until"
+                    | "coproc"
+            ),
+            // `;;`, `;&`, `;;&` tokenize as Word (SEMI_SEMI family are in the
+            // GNU list); a word after `function`/`coproc` also qualifies;
+            // TIMEOPT/TIMEIGN (`time -p' / `time --') are in the GNU list
+            // too (parse.y:5929-5930).
+            TokenKind::Word => {
+                matches!(value.as_str(), ";;" | ";&" | ";;&")
+                    || self.parse_state.last_was_time_option
+                    || matches!(&self.parse_state.token_before_that,
+                        Some((TokenKind::Keyword, v)) if v == "function" || v == "coproc")
+            }
+            _ => false,
+        }
+    }
+
+    /// Track the GNU reader state that affects `{` handling:
+    /// reserved-word acceptability (last two tokens) and PST_CASEPAT.
+    fn record_token(&mut self, token: &Token) {
+        let keyword_is = |v: &str| token.kind == TokenKind::Keyword && token.value == v;
+        let word_is = |v: &str| token.kind == TokenKind::Word && token.value == v;
+        let is_case_operand = matches!(
+            token.kind,
+            TokenKind::Word
+                | TokenKind::Variable
+                | TokenKind::CommandSubst
+                | TokenKind::Assignment
+                | TokenKind::BraceExpand
+        ) && !word_is(";;")
+            && !word_is(";&")
+            && !word_is(";;&");
+
+        // `case` is a reserved word only in command position; counting it
+        // unconditionally would turn `echo case x in {)` into pattern state.
+        if self.reserved_word_position() && keyword_is("case") {
+            self.parse_state.case_stmt_depth += 1;
+            self.parse_state.case_expect_word = true;
+        } else if self.parse_state.case_expect_word {
+            // GNU expecting_in_command == CASE: the operand must be a word
+            // token (parse.y:3370 token_before_that == CASE && "in").
+            self.parse_state.case_expect_word = false;
+            if is_case_operand {
+                self.parse_state.case_expect_in = true;
+            }
+        } else if self.parse_state.case_expect_in {
+            // parse.y:3390: `in` is also recognized after a newline
+            // following the case word.
+            if keyword_is("in") || word_is("in") {
+                self.parse_state.case_pattern = true;
+                self.parse_state.case_expect_in = false;
+            } else if token.kind != TokenKind::Semicolon {
+                self.parse_state.case_expect_in = false;
+            }
+        }
+        if self.parse_state.case_pattern && keyword_is(")") {
+            // parse.y:3787-3788: the `)` ending a pattern list leaves
+            // PST_CASEPAT; `;;`/family below re-enter it for the next clause.
+            self.parse_state.case_pattern = false;
+        }
+        if self.parse_state.case_stmt_depth > 0
+            && (word_is(";;") || word_is(";&") || word_is(";;&"))
+        {
+            self.parse_state.case_pattern = true;
+        }
+        if self.parse_state.case_stmt_depth > 0 && (keyword_is("esac") || word_is("esac")) {
+            self.parse_state.case_stmt_depth -= 1;
+            self.parse_state.case_pattern = false;
+            self.parse_state.case_expect_in = false;
+        }
+
+        // TIMEOPT/TIMEIGN recognition (parse.y:3470-3479): `-p' after the
+        // `time' keyword and `--' after `time'/`time -p' are dedicated
+        // tokens, not plain words — computed against the PREVIOUS token
+        // before last_token shifts.
+        self.parse_state.last_was_time_option = token.kind == TokenKind::Word
+            && matches!(
+                (token.value.as_str(), &self.parse_state.last_token),
+                ("-p", Some((TokenKind::Keyword, kw))) if kw == "time"
+            )
+            || token.kind == TokenKind::Word
+                && token.value == "--"
+                && matches!(
+                    &self.parse_state.last_token,
+                    Some((TokenKind::Keyword, kw)) if kw == "time"
+                )
+            || token.kind == TokenKind::Word
+                && token.value == "--"
+                && matches!(
+                    &self.parse_state.last_token,
+                    Some((TokenKind::Word, prev)) if prev == "-p"
+                );
+
+        self.parse_state.token_before_that = self.parse_state.last_token.take();
+        self.parse_state.last_token = Some((token.kind.clone(), token.value.clone()));
     }
 
     #[inline]
@@ -335,6 +528,23 @@ impl<'a> Lexer<'a> {
                 if self.brace_group_contains_heredoc_operator() {
                     return Some(Token::new(TokenKind::Keyword, "{", start));
                 }
+                // GNU parse.y: `{` is the group reserved word only where
+                // reserved_word_acceptable (parse.y:5899) and outside a
+                // case pattern list (PST_CASEPAT, parse.y:3177). Everywhere
+                // else `{` is an ordinary word character (read_token_word):
+                // `case x in {)` keeps `{` as the pattern instead of
+                // folding `{...}` across the enclosing function's `}` and
+                // silently dropping every definition in between (the
+                // git-completion.bash `__git_aliased_command` clause).
+                if self.parse_state.case_pattern || !self.reserved_word_position() {
+                    let mut token = self.finish_word_token(start, false);
+                    // `{a,b}`-family words still brace-expand anywhere
+                    // (expansion is orthogonal to reserved-word status).
+                    if token.kind == TokenKind::Word && is_brace_expansion(&token.raw) {
+                        token.kind = TokenKind::BraceExpand;
+                    }
+                    return Some(token);
+                }
                 let scan = self.skip_brace();
                 if !scan.closed {
                     // GNU parse.y read_token: `{` is an ordinary word
@@ -510,6 +720,15 @@ fn is_simple_parameter_tail(value: &str) -> bool {
 impl<'a> Iterator for Lexer<'a> {
     type Item = Token;
     fn next(&mut self) -> Option<Self::Item> {
-        self.next_token()
+        let token = self.next_token();
+        if let Some(token) = &token {
+            // Eof is not a real GNU token: last_read_token stays the last
+            // real token, which the next logical line's reserved-word
+            // decisions must see (the `{` fold checks it).
+            if token.kind != TokenKind::Eof {
+                self.record_token(token);
+            }
+        }
+        token
     }
 }
