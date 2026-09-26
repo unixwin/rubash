@@ -41,5 +41,6 @@ pub mod trap;
 pub mod r#type;
 pub mod ulimit;
 pub mod umask;
+pub mod uname;
 pub mod wait;
 pub mod zsh_options;

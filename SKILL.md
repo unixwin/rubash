@@ -38,3 +38,24 @@ The current high-value globstar evidence is `target/multi-gnu.out`, `target/mult
 ## Casemod handoff
 
 For bare associative expansions such as `AA1^^` and `([FOO]=BAR)`, compare against the matching GNU `subst.c` path and a minimal WSL script before changing expansion routing. Treat environment-sized `declare -p` differences as harness artifacts unless a constrained environment reproduces them.
+
+## Identity persona disclosure (rubash#154)
+
+The engine answers `uname`/`arch` itself (hidden fast-path builtins — full
+coreutils option parsing; `type` still reports them like external commands).
+Identity is a **persona**, selected by `RUBASH_IDENTITY`:
+
+- default (no variable / any value other than `native`): **MSYS2-compatible**
+  — `uname -s` = `MSYS_NT-<winver>` (prefix follows `MSYSTEM`:
+  `MINGW64_NT-`/`UCRT64_NT-`/…), `uname -m`/`arch` = build arch,
+  `uname -r` = Windows version (`10.0-19044`), `uname -o` = `Msys`,
+  `OSTYPE=msys`, `MACHTYPE=<arch>-pc-msys`. This is a compatibility mask
+  for the MSYS/Cygwin script ecosystem, not a claim of being an MSYS2 port.
+- `RUBASH_IDENTITY=native`: honest-native — `uname -s` = `Windows_NT`,
+  `uname -o` = `Windows`, `OSTYPE=windows`, `MACHTYPE=<arch>-pc-windows`.
+
+Query the active persona and effective values with `rubash --identity`;
+`rubash --help` carries the same disclosure. Agents diffing output against
+WSL GNU Bash must remember the WSL baseline reports `linux-gnu`/`Linux` —
+identity-driven lines (uname, OSTYPE, MACHTYPE) are persona-owned, not
+engine bugs.

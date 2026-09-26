@@ -88,6 +88,7 @@ mod fd_table;
 mod function_calls;
 mod function_locals;
 mod getopts_enable;
+pub mod identity;
 mod init;
 mod job_builtins;
 mod limit_builtins;
@@ -296,6 +297,11 @@ use self::path::{
 // configure-time MACHTYPE triple the executor binds to $MACHTYPE; the bin
 // crate reuses it (main.rs --version, builtins/help.rs help listing).
 pub use self::support_names::machtype_value;
+
+// Identity persona (rubash#154): persona-aware OSTYPE/MACHTYPE/uname
+// values behind the RUBASH_IDENTITY switch; main.rs --identity, the
+// --help disclosure and the uname/arch builtins consume these via
+// `crate::executor::identity`.
 
 // NOTE: The executor's shared constants (env-var markers, fd-table key
 // prefixes, etc.) live in `types.rs` and are re-exported via

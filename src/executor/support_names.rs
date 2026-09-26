@@ -91,35 +91,25 @@ pub(in crate::executor) fn hostname_value() -> String {
 }
 
 pub(in crate::executor) fn ostype_value() -> String {
-    if cfg!(windows) {
-        "windows".to_string()
-    } else {
-        std::env::consts::OS.to_string()
-    }
+    // Persona-aware (rubash#154): `msys` under the default MSYS-compatible
+    // persona, `windows` under RUBASH_IDENTITY=native. GNU binds the
+    // configure-time constant with set_if_not (variables.c:724); the
+    // persona picks which constant the port was "configured" with.
+    super::identity::ostype()
 }
 
 /// GNU bash's configure-time MACHTYPE host triple. version.c:90
-/// show_shell_version() prints it in the --version banner, variables.c
+/// show_shell_version() prints it in the --version banner, variables.c:725
 /// binds the same value to $MACHTYPE / $BASH_VERSINFO[5]. Configure
 /// derives it from the build host (config.guess), so the Rust port
 /// reassembles it from compile-time ARCH/OS: `x86_64-pc-linux-gnu`
-/// (linux), `aarch64-apple-darwin` (macOS). Windows is a native
-/// product, not an MSYS2 port — it reports `{arch}-pc-windows`
-/// (owner directive 2026-09-26: never label the shell `msys`).
+/// (linux), `aarch64-apple-darwin` (macOS). The Windows triple is persona
+/// — owned (rubash#154): the default MSYS-compatible persona reports
+/// `{arch}-pc-msys` (the MSYS2 bash configure triple, keeping the shell
+/// inside the MSYS/Cygwin script ecosystem), while RUBASH_IDENTITY=native
+/// reports the honest-native `{arch}-pc-windows`.
 pub fn machtype_value() -> String {
-    if cfg!(windows) {
-        format!("{}-pc-windows", std::env::consts::ARCH)
-    } else if cfg!(target_os = "macos") {
-        format!("{}-apple-darwin", std::env::consts::ARCH)
-    } else if cfg!(target_env = "gnu") {
-        format!("{}-pc-{}-gnu", std::env::consts::ARCH, std::env::consts::OS)
-    } else {
-        format!(
-            "{}-unknown-{}",
-            std::env::consts::ARCH,
-            std::env::consts::OS
-        )
-    }
+    super::identity::machtype()
 }
 
 pub(in crate::executor) fn uid_value() -> String {

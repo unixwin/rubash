@@ -3345,6 +3345,27 @@ fn cli_exec_mode_reports_compound_eof_diagnostic() {
 }
 
 #[test]
+fn uname_builtin_yields_to_shell_function_but_command_bypasses() {
+    // rubash#154: in GNU bash uname/arch are external commands, so a shell
+    // function named `uname` must win over the engine builtin; `command
+    // uname` bypasses functions by definition and reaches the builtin.
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("uname() { echo user-fn; }; uname; command uname -o")
+        .output()
+        .expect("run rubash");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout,
+        "user-fn
+Msys
+"
+    );
+}
+
+#[test]
 fn command_string_sets_c_shell_flag() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")

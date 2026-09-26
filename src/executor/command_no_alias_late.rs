@@ -118,6 +118,14 @@ impl Executor {
                     self.execute_external(cmd)
                 }
             }
+            "uname" => {
+                self.exit_code = self.execute_identity_tool(cmd, "uname");
+                Ok(())
+            }
+            "arch" => {
+                self.exit_code = self.execute_identity_tool(cmd, "arch");
+                Ok(())
+            }
             _ => self.execute_external(cmd),
         }
     }

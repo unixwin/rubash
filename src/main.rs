@@ -42,6 +42,14 @@ fn run_main() -> i32 {
     {
         run_internal_pipeline_utility(name, &args[2..]);
     }
+    // rubash#154 identity disclosure: engine-specific meta flag, handled
+    // before the GNU option parser (like --internal-*), so the GNU
+    // long-option contract (LONG_OPTIONS table / show_shell_usage byte
+    // parity with bash 5.3) stays untouched.
+    if args.get(1).map(String::as_str) == Some("--identity") {
+        print_identity_report();
+        return 0;
+    }
     let mut executor = Executor::new();
     if let Ok(path) = env::current_exe() {
         let path = path.to_string_lossy().replace('\\', "/");
@@ -83,6 +91,47 @@ fn run_main() -> i32 {
 
 fn print_usage() {
     println!("Usage: rubash [-c command] [script]");
+    print_identity_disclosure();
+}
+
+/// Identity disclosure block shared by `--help` and `--identity`
+/// (rubash#154): the user must always be able to see which persona is
+/// active and how to switch.
+fn print_identity_disclosure() {
+    let identity = rubash::executor::identity::persona_name();
+    println!();
+    println!("Identity:");
+    if identity == "msys" {
+        println!("  persona: msys (default; MSYS2-compatible)");
+        println!("  switch:  export RUBASH_IDENTITY=native for the honest-native persona");
+    } else {
+        println!("  persona: native (honest-native; RUBASH_IDENTITY=native)");
+        println!("  switch:  unset RUBASH_IDENTITY (or set any other value) to return to msys");
+    }
+    println!("  query:   rubash --identity prints the persona and effective values");
+}
+
+/// `rubash --identity` (rubash#154): print the active persona and every
+/// effective identity value in one place.
+fn print_identity_report() {
+    use rubash::executor::identity;
+    println!(
+        "identity:    {} ({})",
+        identity::persona_name(),
+        if identity::current_identity() == identity::ShellIdentity::Msys {
+            "default; MSYS2-compatible"
+        } else {
+            "RUBASH_IDENTITY=native; honest-native"
+        }
+    );
+    println!("uname -s:    {}", identity::sysname());
+    println!("uname -m:    {}", identity::machine());
+    println!("arch:        {}", identity::machine());
+    println!("uname -r:    {}", identity::release());
+    println!("uname -o:    {}", identity::operating_system());
+    println!("OSTYPE:      {}", identity::ostype());
+    println!("MACHTYPE:    {}", identity::machtype());
+    println!("switch:     export RUBASH_IDENTITY=native (native) / unset it (msys default)");
 }
 
 fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {

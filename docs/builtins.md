@@ -121,6 +121,8 @@ wait
 sleep
 dirname
 basename
+uname
+arch
 -->
 
 | 命令 | fast-path 实现位置 | 回退行为 | 备注 |
@@ -128,6 +130,8 @@ basename
 | `sleep` | `builtins/sleep.rs`（`can_execute_fast_path`） | `execute_external` | 支持小数秒（f64） |
 | `dirname` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `dirname`） | 非平凡路径回退 |
 | `basename` | `executor/printf_path_builtins.rs` | `execute_external`（winuxcmd `basename`） | 同上 |
+| `uname` | `builtins/uname.rs`（身份人设字段取自 `executor/identity.rs`） | 无（内置完整选项解析） | rubash#154：身份不外包给 PATH |
+| `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
 
 `env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
 builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进

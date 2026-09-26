@@ -240,6 +240,19 @@ impl Executor {
             _ if self.shell_state.functions.contains_key(word) => {
                 self.execute_function(word, &cmd.words[1..], cmd)
             }
+            // uname/arch sit AFTER the function guard on purpose (rubash#154):
+            // in GNU bash they are external commands, so a shell function
+            // named `uname`/`arch` must keep winning over the engine
+            // builtin. The `command`-builtin path (command_no_alias_late)
+            // bypasses functions by definition and dispatches directly.
+            "uname" => {
+                self.exit_code = self.execute_identity_tool(cmd, "uname");
+                Ok(())
+            }
+            "arch" => {
+                self.exit_code = self.execute_identity_tool(cmd, "arch");
+                Ok(())
+            }
             _ => self.execute_external(cmd),
         }
     }

@@ -1845,6 +1845,74 @@ mod completion_hook_tests {
         );
     }
 
+    fn wordlist_compspec(words: &str) -> Compspec {
+        Compspec {
+            actions: 0,
+            options: 0,
+            globpat: None,
+            words: Some(words.to_string()),
+            prefix: None,
+            suffix: None,
+            filterpat: None,
+            command: None,
+            funcname: None,
+        }
+    }
+
+    /// rubash#154 ordering guarantee (owner decision in the issue thread):
+    /// the engine registration table owns completion once a compspec is
+    /// registered; the host's native completion layers (builtin-name table,
+    /// PATH scan, `native:<name>` CommandDef fallback) must never
+    /// reverse-override it. `cd` is a real builtin — exactly the name a
+    /// host-native builtin-completion layer would offer — so a registered
+    /// compspec on it proves the layering: registry first, native fallback
+    /// only for commands with no registration.
+    #[test]
+    fn registered_compspec_wins_over_native_builtin_name_fallback() {
+        let (env, aliases, fns, jobs) = empty_context();
+
+        // Before registration: `cd c` completes nothing from a registry, so
+        // the generic fallback (file completion) applies — the host native
+        // layer would own this word.
+        let unregistered = CompletionRegistry::new();
+        let before =
+            complete_line_candidates("cd c", 4, &unregistered, &env, &aliases, &fns, &jobs);
+        assert!(
+            !before.iter().any(|c| c == "cdfoo" || c == "cdbar"),
+            "no compspec registered yet, wordlist must not appear: {before:?}"
+        );
+
+        // After registration the engine registry owns `cd`'s second word:
+        // candidates come from the compspec wordlist, not from builtin
+        // names or files.
+        let mut specs = CompletionRegistry::new();
+        specs.insert("cd", wordlist_compspec("cdfoo cdbar"));
+        assert!(specs.get("cd").is_some(), "registration must be visible");
+        let after = complete_line_candidates("cd c", 4, &specs, &env, &aliases, &fns, &jobs);
+        assert_eq!(
+            after,
+            vec!["cdbar".to_string(), "cdfoo".to_string()],
+            "registered compspec must win over native fallbacks: {after:?}"
+        );
+    }
+
+    /// Same guarantee across re-registration order (bash-completion loads
+    /// late, after any host warm-up): the LAST registration is what the
+    /// engine serves, and it still beats the fallback layers.
+    #[test]
+    fn reregistration_order_last_write_wins_and_still_beats_fallback() {
+        let (env, aliases, fns, jobs) = empty_context();
+        let mut specs = CompletionRegistry::new();
+        specs.insert("git", wordlist_compspec("staged stash"));
+        specs.insert("git", wordlist_compspec("checkout cherry-pick"));
+        let out = complete_line_candidates("git ch", 5, &specs, &env, &aliases, &fns, &jobs);
+        assert_eq!(
+            out,
+            vec!["checkout".to_string(), "cherry-pick".to_string()],
+            "last registration must be served: {out:?}"
+        );
+    }
+
     #[test]
     fn compspec_file_action_lists_root() {
         let (env, aliases, fns, jobs) = empty_context();

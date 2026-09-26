@@ -22,6 +22,45 @@ Rubash itself is not a shell product. It ships with a reference CLI used by the 
 
 **Platform status**: Windows is the current focus and the only platform with the full stack today. macOS and Linux adaptation is planned but has not started. The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same 83-suite ledger is designed to travel to other platforms.
 
+## Identity and Compatibility (rubash#154)
+
+The engine presents a **selectable platform identity** instead of outsourcing
+it to whatever `uname.exe` happens to sit on PATH. `uname` and `arch` are
+engine builtins (full option parsing, coreutils/MSYS2 output shapes), and
+`OSTYPE`/`MACHTYPE`/`HOSTTYPE` follow the same persona.
+
+- **Default persona: MSYS2-compatible** (disclosed everywhere — this is a
+  compatibility mask, not a claim of being an MSYS2 port):
+  - `uname -s` → `MSYS_NT-<ver>` — or `MINGW64_NT-` / `UCRT64_NT-` /
+    `CLANG64_NT-` … when `MSYSTEM` is set, mapping the value the same way
+    the MSYS2 runtime does;
+  - `uname -m` / `arch` → `x86_64` / `aarch64` (build arch);
+  - `uname -r` → the Windows version string (`10.0-19044`, same string that
+    finishes `uname -s`);
+  - `uname -o` → `Msys`; `uname -a` → `sysname nodename release version
+    machine Msys` (the Git Bash shape);
+  - `OSTYPE=msys`, `MACHTYPE=<arch>-pc-msys` (bound `set_if_not`-style, as
+    GNU variables.c:723-725 does — an inherited value wins).
+  Ecosystem scripts that branch on `case "$(uname -s)" in MINGW*|MSYS*|
+  CYGWIN*)` or `$OSTYPE` ∈ {msys, cygwin} take their best-tested path.
+- **`RUBASH_IDENTITY=native` switches to the honest-native persona**:
+  `uname -s` → `Windows_NT` (the native `%OS%` value), `uname -o` →
+  `Windows`, `OSTYPE=windows`, `MACHTYPE=<arch>-pc-windows`. Tests and
+  native-first users select this; unset the variable (or set any other
+  value) to return to the default.
+
+**Disclosure surfaces** (the persona must never be silent):
+
+- `rubash --help` prints an Identity section (current persona + how to switch);
+- `rubash --identity` prints the persona and every effective value
+  (`uname -s/-m/-r/-o`, `arch`, `OSTYPE`, `MACHTYPE`);
+- this README section and the repo-root `SKILL.md` disclosure section
+  (so AI agents consuming the repo also know the persona semantics).
+
+`uname`/`arch` are *hidden* fast-path builtins (like `sleep`/`dirname`):
+`type`/`enable`/`compgen -b` keep reporting them as external commands, and
+they work even when PATH carries no `uname.exe` at all.
+
 ## Compatibility at a Glance
 
 ```

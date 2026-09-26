@@ -181,6 +181,33 @@ impl Executor {
         0
     }
 
+    /// `uname` / `arch` engine builtins (rubash#154). Identity is strategic
+    /// information: the engine answers these itself — persona-valued fields
+    /// come from `crate::executor::identity` — instead of spawning whatever
+    /// `uname.exe` happens to sit on PATH (which also removes the spawn
+    /// cost, #130). Unlike the dirname/basename fast paths there is no
+    /// external fallback: full option parsing is handled in
+    /// `builtins/uname.rs`, so PATH never decides availability.
+    pub(in crate::executor) fn execute_identity_tool(
+        &mut self,
+        cmd: &CommandNode,
+        tool: &str,
+    ) -> i32 {
+        // cmd.words are already expanded by expand_command_words (see
+        // external_inner.rs), same contract as the sleep fast path.
+        let output = match tool {
+            "arch" => crate::builtins::uname::execute_arch(&cmd.words[1..]),
+            _ => crate::builtins::uname::execute_uname(&cmd.words[1..]),
+        };
+        if self
+            .write_buffered_builtin_output(cmd, &output.stdout, &output.stderr)
+            .is_err()
+        {
+            return 1;
+        }
+        output.status
+    }
+
     pub(in crate::executor) fn execute_cd(
         &mut self,
         cmd: &CommandNode,
