@@ -412,10 +412,7 @@ fn confstr_cs_path() -> Option<String> {
             return None;
         }
         // confstr NUL-terminates the buffer; take bytes up to the NUL.
-        let value = buf
-            .split(|&byte| byte == 0)
-            .next()
-            .unwrap_or_default();
+        let value = buf.split(|&byte| byte == 0).next().unwrap_or_default();
         let value = String::from_utf8_lossy(value);
         (!value.is_empty()).then(|| value.into_owned())
     }

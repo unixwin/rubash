@@ -160,7 +160,18 @@ niubash 层：
 
 ## 建议顺序
 
-> **Wave-1 已派发（2026-09-26，并行子代理，worktree 隔离）**：
+> **Wave-1 落地记录（2026-09-26，并行子代理 + captain 合入）**：
+> f12aa756 已 push；C1/C2 落地（2f4d9b4e）；ctrlc 死依赖删除（959961a9）。
+> **A2 已合入 master（3b93b867）**：E2-E9 全部 + E3a（release-release 双后缀既有
+> bug 修复，banner 与 WSL 基线同形）+ E18 + E19 + E17×3（comsub/read/read -t 的
+> CRLF 剥除 cfg 门控；lexer 第 4 处留 wave-2）——四重验证绿，E5 顺带修掉
+> `command -p -v ls` 答 /usr/bin/ls 而非 /bin/ls 的真实差异。
+> **A1 在途**（E1 信号表，worktree wt/e1-signal-tables）。
+> niubash 本地四提交：90e400e（lock bump 2f4d9b4e）、bafa735（A5 ctrl_c 契约）、
+> 352c3d4（A4 宿主门控 + CI cross-check）、b54a346（A6 补全/WT 门控）。
+> N1（spawn 委托，需引擎公共 API）与 unix https 通道留 wave-2。
+>
+> 原派发映射：
 > f12aa756 已 push（origin/master，经 `http.version=HTTP/1.1` 绕过 HTTP/2 TLS 故障）；
 > C1/C2 由 captain 直接落地；A1=E1（worktree rubash-wt-e1，kill/trap/trap_exec/
 > job_builtins 信号常量化）；A2=E2-E9（worktree rubash-wt-e2，机械门控）；
