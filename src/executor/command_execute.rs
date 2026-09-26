@@ -57,211 +57,10 @@ impl Executor {
             return Ok(());
         }
         drop(_t_heredoc);
-        let _t_scans = PhaseTimer::new(&super::exec_profile::P_SCANS);
-
-        if let Some(message) = cmd.get_assignment("__RUBASH_COMPOUND_SYNTAX_ERROR__") {
-            let message = bash_style_unexpected_token_message(message);
-            eprintln!(
-                "{}syntax error near {message}",
-                self.parser_diagnostic_prefix()
-            );
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                eprintln!(
-                    "{}`{}'",
-                    self.parser_diagnostic_prefix(),
-                    parse_error_source_display(source)
-                );
-            }
-            self.exit_code = 1;
+        if self.command_parse_diagnostics(cmd)? {
             return Ok(());
         }
 
-        if let Some(message) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_PAREN__") {
-            // parse.y: an unclosed `name=(` compound assignment reports the
-            // bare EOF diagnostic with status 1 and no source echo.
-            self.mark_parse_error();
-            eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
-            self.exit_code = 1;
-            return Err(ExecuteError::ExitCode(1));
-        }
-
-        if let Some(spec) = cmd
-            .get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__")
-            .map(|value| format!("({PARSE_ERROR_FIELD_SEP}{value}"))
-            .or_else(|| {
-                cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
-                    .cloned()
-            })
-        {
-            // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed compound
-            // reports "unexpected end of file from `X' command on line N"
-            // naming the innermost open compound (compoundcmd_lineno stack
-            // top). Heredocs still pending inside the region issued their
-            // gather warnings during the parse (make_cmd.c:626), so emit
-            // them first.
-            self.mark_parse_error();
-            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
-            let compound_name = fields.next().unwrap_or("(");
-            let open_line = fields
-                .next()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            let eof_line = fields
-                .next()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            for index in 0usize.. {
-                let key = format!("__RUBASH_PARSE_ERROR_HD_WARN_{index}__");
-                let Some(warn) = cmd.get_assignment(&key) else {
-                    break;
-                };
-                let mut parts = warn.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
-                let delimiter = parts.next().unwrap_or("");
-                let at_line = parts
-                    .next()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(1);
-                let warn_line = parts
-                    .next()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(1);
-                eprintln!(
-                    "{}warning: here-document at line {at_line} delimited by end-of-file (wanted `{delimiter}')",
-                    self.diagnostic_prefix_for_line(warn_line)
-                );
-            }
-            eprintln!(
-                "{}syntax error: unexpected end of file from `{compound_name}' command on line {open_line}",
-                self.parser_diagnostic_prefix_for_line(eof_line)
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
-        }
-
-        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
-            // GNU parse.y conditional diagnostics: each parser_error message
-            // first, then report_syntax_error — either `syntax error near
-            // `X'` plus the offending source line, or at EOF the
-            // `unexpected end of file from `[[' command on line N' tail.
-            self.mark_parse_error();
-            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
-            let shape = fields.next().unwrap_or("near");
-            let aux_a = fields.next().unwrap_or_default();
-            let aux_b = fields
-                .next()
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(1);
-            for field in fields {
-                let (line, message) = field
-                    .split_once('\u{1}')
-                    .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg))
-                    .unwrap_or((1, field));
-                eprintln!(
-                    "{}{}",
-                    self.parser_diagnostic_prefix_for_line(line),
-                    message
-                );
-            }
-            if shape == "eof" {
-                eprintln!(
-                    "{}syntax error: unexpected end of file from `[[' command on line {aux_a}",
-                    self.parser_diagnostic_prefix_for_line(aux_b)
-                );
-            } else {
-                eprintln!(
-                    "{}syntax error near `{aux_a}'",
-                    self.parser_diagnostic_prefix_for_line(aux_b)
-                );
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    eprintln!(
-                        "{}`{}'",
-                        self.parser_diagnostic_prefix_for_line(aux_b),
-                        parse_error_source_display(source)
-                    );
-                }
-            }
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
-        }
-
-        if cmd.has_assignment("__RUBASH_PARSE_ERROR__") {
-            self.mark_parse_error();
-            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                if !source.contains("<<") {
-                    if let Some(reparsed) = self.reparse_reserved_word_aliases(source) {
-                        let tokens = crate::lexer::tokenize(&reparsed);
-                        let ast = crate::parser::parse(&tokens);
-                        return self.execute_ast(&ast);
-                    }
-                }
-            }
-            self.report_command_parse_error(cmd);
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
-        }
-
-        {
-            // GNU make_cmd.c gather_here_documents + parse.y:6883: warn on
-            // any heredoc header the unclosed comsub swallowed, then report
-            // `unexpected EOF` at the line after the last input line — not
-            // the command's start line.
-            let mut base_line = cmd.line.unwrap_or(1);
-            let mut reported = false;
-            for raw in cmd
-                .assignment_values()
-                .map(|v| v.as_str())
-                .chain(cmd.word_metadata.iter().map(|m| m.raw.as_str()))
-            {
-                if crate::lexer::has_unclosed_command_substitution(raw) {
-                    self.mark_parse_error();
-                    self.report_unclosed_comsub_eof(raw, base_line);
-                    reported = true;
-                    break;
-                }
-                base_line += raw.matches('\n').count();
-            }
-            if reported {
-                self.exit_code = 2;
-                return Err(ExecuteError::ExitCode(2));
-            }
-        }
-
-        if cmd.function_command.is_none()
-            && cmd
-                .word_metadata
-                .iter()
-                .any(|metadata| unterminated_extglob(&metadata.raw))
-        {
-            self.mark_parse_error();
-            eprintln!(
-                "{}syntax error near unexpected token `('",
-                self.parser_diagnostic_prefix()
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
-        }
-
-        // Bash must parse extglob syntax while the extglob option is
-        // enabled.  A pathname such as `@(name)` in a simple command is
-        // therefore a syntax error when the option is off; treating it as a
-        // literal silently accepts malformed scripts.  Conditional RHS
-        // patterns are handled separately and intentionally remain eligible
-        // for Bash's conditional-pattern semantics.
-        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
-            && !cmd.extglob_patterns.is_empty()
-            && cmd.conditional_command.is_none()
-            && cmd.case_command.is_none()
-        {
-            self.mark_parse_error();
-            eprintln!(
-                "{}syntax error near unexpected token `('",
-                self.parser_diagnostic_prefix()
-            );
-            self.exit_code = 2;
-            return Err(ExecuteError::ExitCode(2));
-        }
-
-        drop(_t_scans);
         let _t_dispatch = PhaseTimer::new(&super::exec_profile::P_DISPATCH);
         if let Some(result) = self.execute_initial_command_node(cmd) {
             // Compound commands run through execute_initial_command_node and
@@ -457,6 +256,279 @@ impl Executor {
         let (materialized_cmd, process_substitution_files) =
             self.command_with_process_substitution_files(&cmd)?;
         self.execute_materialized_command(&materialized_cmd, process_substitution_files)
+    }
+
+    /// GNU shell.c reader_loop under `-n`/`set -n` (noexec): the reader
+    /// still parses every command, so all parse-time diagnostics —
+    /// `syntax error near ...`, unclosed-compound/cond `unexpected end of
+    /// file`, unterminated comsub/extglob — fire exactly as the
+    /// execute_command preamble reports them; only execution is skipped.
+    /// Returns Ok(true) when a diagnostic already reported (and set the
+    /// status or re-executed a repaired parse); Ok(false) lets the caller
+    /// continue to the real dispatch.
+    pub(in crate::executor) fn command_parse_diagnostics(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        let _t_scans = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_SCANS);
+
+        // GNU alias_expand_token during parse (parse.y): a reserved-word
+        // alias such as `f=fi` can close a compound the first parse missed.
+        // Nodes that parked their whole source span get one alias-expanded
+        // retry before their diagnostic fires.
+        if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE_SPAN__") {
+            if !source.contains("<<") {
+                if let Some(reparsed) = self.reparse_reserved_word_aliases(source) {
+                    let tokens = crate::lexer::tokenize(&reparsed);
+                    let ast = crate::parser::parse(&tokens);
+                    return self.execute_ast(&ast).map(|_| true);
+                }
+            }
+        }
+
+        if let Some(message) = cmd.get_assignment("__RUBASH_COMPOUND_SYNTAX_ERROR__") {
+            let message = bash_style_unexpected_token_message(message);
+            eprintln!(
+                "{}syntax error near {message}",
+                self.parser_diagnostic_prefix()
+            );
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!(
+                    "{}`{}'",
+                    self.parser_diagnostic_prefix(),
+                    parse_error_source_display(source)
+                );
+            }
+            self.exit_code = 1;
+            return Ok(true);
+        }
+
+        if let Some(message) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_PAREN__") {
+            // parse.y: an unclosed `name=(` compound assignment reports the
+            // bare EOF diagnostic with status 1 and no source echo.
+            self.mark_parse_error();
+            eprintln!("{}{}", self.parser_diagnostic_prefix(), message);
+            self.exit_code = 1;
+            return Err(ExecuteError::ExitCode(1));
+        }
+
+        if let Some(spec) = cmd
+            .get_assignment("__RUBASH_PARSE_ERROR_EOF_SUBSHELL__")
+            .map(|value| format!("({PARSE_ERROR_FIELD_SEP}{value}"))
+            .or_else(|| {
+                cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
+                    .cloned()
+            })
+        {
+            // GNU parse.y:6890-6901 (yyerror EOF path): an unclosed compound
+            // reports "unexpected end of file from `X' command on line N"
+            // naming the innermost open compound (compoundcmd_lineno stack
+            // top). Heredocs still pending inside the region issued their
+            // gather warnings during the parse (make_cmd.c:626), so emit
+            // them first.
+            self.mark_parse_error();
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let compound_name = fields.next().unwrap_or("(");
+            let open_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let eof_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            for index in 0usize.. {
+                let key = format!("__RUBASH_PARSE_ERROR_HD_WARN_{index}__");
+                let Some(warn) = cmd.get_assignment(&key) else {
+                    break;
+                };
+                let mut parts = warn.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+                let delimiter = parts.next().unwrap_or("");
+                let at_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                let warn_line = parts
+                    .next()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1);
+                eprintln!(
+                    "{}warning: here-document at line {at_line} delimited by end-of-file (wanted `{delimiter}')",
+                    self.diagnostic_prefix_for_line(warn_line)
+                );
+            }
+            eprintln!(
+                "{}syntax error: unexpected end of file from `{compound_name}' command on line {open_line}",
+                self.parser_diagnostic_prefix_for_line(eof_line)
+            );
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
+            // GNU parse.y conditional diagnostics: each parser_error message
+            // first, then report_syntax_error — either `syntax error near
+            // `X'` plus the offending source line, or at EOF the
+            // `unexpected end of file from `[[' command on line N' tail.
+            self.mark_parse_error();
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let shape = fields.next().unwrap_or("near");
+            let aux_a = fields.next().unwrap_or_default();
+            let aux_b = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            for field in fields {
+                let (line, message) = field
+                    .split_once('\u{1}')
+                    .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg))
+                    .unwrap_or((1, field));
+                eprintln!(
+                    "{}{}",
+                    self.parser_diagnostic_prefix_for_line(line),
+                    message
+                );
+            }
+            if shape == "eof" {
+                eprintln!(
+                    "{}syntax error: unexpected end of file from `[[' command on line {aux_a}",
+                    self.parser_diagnostic_prefix_for_line(aux_b)
+                );
+            } else {
+                eprintln!(
+                    "{}syntax error near `{aux_a}'",
+                    self.parser_diagnostic_prefix_for_line(aux_b)
+                );
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    eprintln!(
+                        "{}`{}'",
+                        self.parser_diagnostic_prefix_for_line(aux_b),
+                        parse_error_source_display(source)
+                    );
+                }
+            }
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+            // GNU parse.y yyerror: `syntax error near unexpected token 'X'`
+            // reported at the line of the offending token, with that input
+            // line echoed (mismatched closer inside a compound command).
+            self.mark_parse_error();
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let token = fields.next().unwrap_or_default();
+            let line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            eprintln!(
+                "{}syntax error near unexpected token `{token}'",
+                self.parser_diagnostic_prefix_for_line(line)
+            );
+            // The producer stores the verbatim physical line (parse.y
+            // y.error echoes it as read); parse_error_source_display would
+            // trim GNU's leading whitespace.
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!("{}`{}'", self.parser_diagnostic_prefix_for_line(line), source);
+            }
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
+            // GNU parse.y yyerror: input ended where a command was
+            // expected (`x |` EOF) — "syntax error: unexpected end of
+            // file" at the end-of-input line, with no token echo.
+            self.mark_parse_error();
+            let eof_line = cmd.line.map(|line| line + 1).unwrap_or(1);
+            eprintln!(
+                "{}syntax error: unexpected end of file",
+                self.parser_diagnostic_prefix_for_line(eof_line)
+            );
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        if cmd.has_assignment("__RUBASH_PARSE_ERROR__") {
+            self.mark_parse_error();
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                if !source.contains("<<") {
+                    if let Some(reparsed) = self.reparse_reserved_word_aliases(source) {
+                        let tokens = crate::lexer::tokenize(&reparsed);
+                        let ast = crate::parser::parse(&tokens);
+                        return self.execute_ast(&ast).map(|_| true);
+                    }
+                }
+            }
+            self.report_command_parse_error(cmd);
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        {
+            // GNU make_cmd.c gather_here_documents + parse.y:6883: warn on
+            // any heredoc header the unclosed comsub swallowed, then report
+            // `unexpected EOF` at the line after the last input line — not
+            // the command's start line.
+            let mut base_line = cmd.line.unwrap_or(1);
+            let mut reported = false;
+            for raw in cmd
+                .assignment_values()
+                .map(|v| v.as_str())
+                .chain(cmd.word_metadata.iter().map(|m| m.raw.as_str()))
+            {
+                if crate::lexer::has_unclosed_command_substitution(raw) {
+                    self.mark_parse_error();
+                    self.report_unclosed_comsub_eof(raw, base_line);
+                    reported = true;
+                    break;
+                }
+                base_line += raw.matches('\n').count();
+            }
+            if reported {
+                self.exit_code = 2;
+                return Err(ExecuteError::ExitCode(2));
+            }
+        }
+
+        if cmd.function_command.is_none()
+            && cmd
+                .word_metadata
+                .iter()
+                .any(|metadata| unterminated_extglob(&metadata.raw))
+        {
+            self.mark_parse_error();
+            eprintln!(
+                "{}syntax error near unexpected token `('",
+                self.parser_diagnostic_prefix()
+            );
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+        // Bash must parse extglob syntax while the extglob option is
+        // enabled.  A pathname such as `@(name)` in a simple command is
+        // therefore a syntax error when the option is off; treating it as a
+        // literal silently accepts malformed scripts.  Conditional RHS
+        // patterns are handled separately and intentionally remain eligible
+        // for Bash's conditional-pattern semantics.
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
+            && !cmd.extglob_patterns.is_empty()
+            && cmd.conditional_command.is_none()
+            && cmd.case_command.is_none()
+        {
+            self.mark_parse_error();
+            eprintln!(
+                "{}syntax error near unexpected token `('",
+                self.parser_diagnostic_prefix()
+            );
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
+
+
+        Ok(false)
     }
 
     /// `set -k` harvest, mirroring GNU subst.c:12479-12535. The parser only

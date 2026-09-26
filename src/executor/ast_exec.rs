@@ -282,7 +282,16 @@ impl Executor {
             }
             self.set_current_line(command);
             if self.noexec_enabled() {
-                self.exit_code = 0;
+                // GNU shell.c/parse.y: `-n` (noexec) skips execution but the
+                // reader still parses each command — parse-time diagnostics
+                // (heredoc EOF warnings, syntax errors, unclosed compounds)
+                // fire exactly as execute_command's preamble reports them.
+                // Skipping them left `bash -n` silently accepting malformed
+                // scripts (unclosed `if`/`case`/`{` reported nothing, rc 0).
+                self.report_command_heredoc_errors(command)?;
+                if !self.command_parse_diagnostics(command)? {
+                    self.exit_code = 0;
+                }
                 if command.subshell_end {
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state, subshell_cwd.take());

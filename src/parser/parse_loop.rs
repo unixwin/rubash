@@ -34,6 +34,11 @@ pub(super) struct ParseState {
     /// top-level token; while this is > 0 a `)` is consumed as that
     /// closer instead of being reported as a stray.
     pub(super) pending_comsub: usize,
+    /// Original input text (options.diagnostic_text falling back to
+    /// source_text) so a `syntax error near unexpected token 'X'` node can
+    /// echo the physical offending line the way parse.y y.error does —
+    /// token reconstruction cannot recover the original whitespace.
+    pub(super) diagnostic_text: Option<String>,
 }
 
 /// Parse tokens into an AST
@@ -54,6 +59,10 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         current_cmd: CommandNode::new(),
         in_subshell: false,
         pending_comsub: 0,
+        diagnostic_text: options
+            .diagnostic_text
+            .clone()
+            .or_else(|| options.source_text.clone()),
     };
 
     let mut i = 0;
@@ -377,10 +386,12 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
                     .into_iter()
                     .next()
                     .expect("pipeline has a first stage");
-                command.insert_assignment(
-                    "__RUBASH_PARSE_ERROR__".to_string(),
-                    "unexpected token `|'".to_string(),
-                );
+                // GNU parse.y yyerror: a `|`/`|&` with no right-hand stage
+                // because input ended reports "syntax error: unexpected
+                // end of file" — not `near unexpected token `|'' (that
+                // wording belongs to `|` mid-list).
+                command
+                    .insert_assignment("__RUBASH_PARSE_ERROR_EOF__".to_string(), "1".to_string());
                 folded.push(command);
                 continue;
             }
@@ -639,64 +650,43 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "if"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((if_cmd, next_i)) = parse_if_command(tokens, i) {
+        if let Some((if_cmd, next_i)) =
+            parse_if_command(tokens, i, state.diagnostic_text.as_deref())
+        {
             push_compound_command(state, if_cmd);
             return Some(next_i);
         }
 
-        // Alias expansion can introduce `then`/`elif`/`else`/`fi` after the
-        // first parse attempt. Leave those non-empty conditions available to
-        // the existing alias reparse path; only reject an actually empty
-        // condition here.
-        let condition_is_empty = tokens
-            .get(i + 1)
-            .map(|next| next.value == "then" || next.kind == TokenKind::Semicolon)
-            .unwrap_or(true);
-        let has_then_without_fi = tokens[i + 1..]
-            .iter()
-            .any(|candidate| candidate.value == "then")
-            && !tokens[i + 1..]
-                .iter()
-                .any(|candidate| candidate.value == "fi");
-        if !condition_is_empty && !has_then_without_fi {
-            return None;
-        }
-
-        // A malformed `if` must remain a syntax error instead of falling
-        // through to the simple-command parser (`if then; fi` used to be
-        // accepted and silently ran the following commands).
-        state.current_cmd.insert_assignment(
-            "__RUBASH_PARSE_ERROR__".to_string(),
-            if has_then_without_fi {
-                "unexpected end of file while looking for `fi'".to_string()
-            } else {
-                "unexpected token `then'".to_string()
-            },
-        );
+        // GNU parse.y if-compound grammar: the offender is the first
+        // keyword the grammar rejects at its position (`if then; fi` →
+        // `then`, `if x; fi` → `fi`, `if x; then y; done` → `done`); absent
+        // that, input ended inside the command ("from `if' command on
+        // line N").
+        let mut command = match if_frame_offender(&tokens[i + 1..]) {
+            Some(rel) => {
+                mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
+            }
+            None => unclosed_keyword_eof_node(tokens, i, "if"),
+        };
         // Keep the original token stream available to the executor.  Bash
-        // expands aliases while parsing, so an alias such as `f=fi` can close
-        // this compound command even though the first parse did not see `fi`.
-        // The parse-error marker still makes genuinely malformed input fail.
-        state.current_cmd.insert_assignment(
-            "__RUBASH_PARSE_SOURCE__".to_string(),
+        // expands aliases while parsing, so an alias such as `f=fi` can
+        // close this compound command even though the first parse did not
+        // see `fi`. The parse-error node still makes genuinely malformed
+        // input fail after the alias reparse misses.
+        command.insert_assignment(
+            "__RUBASH_PARSE_SOURCE_SPAN__".to_string(),
             tokens[i..]
                 .iter()
                 .map(|token| token.raw.as_str())
                 .collect::<Vec<_>>()
                 .join(" "),
         );
-        let mut next_i = i + 1;
-        while tokens.get(next_i).is_some() {
-            next_i += 1;
-            if is_keyword(tokens, next_i - 1, "fi") {
-                break;
-            }
-        }
+        state.current_cmd = command;
         state
             .ast
             .commands
             .push(std::mem::take(&mut state.current_cmd));
-        return Some(next_i);
+        return Some(tokens.len());
     }
 
     if token.kind == TokenKind::Keyword
@@ -706,6 +696,32 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((loop_cmd, next_i)) = parse_loop_command(tokens, i) {
             push_compound_command(state, loop_cmd);
             return Some(next_i);
+        }
+
+        let opener: &'static str = if token.value == "while" {
+            "while"
+        } else {
+            "until"
+        };
+        // No `done` anywhere in the remaining stream: input either ended
+        // inside the loop ("from `while' command on line N") or a foreign
+        // closer aborted it ("near unexpected token `X'").
+        if !tokens[i + 1..]
+            .iter()
+            .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
+        {
+            let command = match first_mismatched_closer(&tokens[i + 1..], opener) {
+                None => unclosed_keyword_eof_node(tokens, i, opener),
+                Some(rel) => {
+                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
+                }
+            };
+            state.current_cmd = command;
+            state
+                .ast
+                .commands
+                .push(std::mem::take(&mut state.current_cmd));
+            return Some(tokens.len());
         }
 
         state.current_cmd.insert_assignment(
@@ -804,6 +820,27 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 .push(std::mem::take(&mut state.current_cmd));
             return Some(i + 1);
         }
+
+        // No `done` in the remaining stream: input either ended inside
+        // the `for` body ("from `for' command on line N") or a foreign
+        // closer aborted it ("near unexpected token `X'").
+        if !tokens[i + 1..]
+            .iter()
+            .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
+        {
+            let command = match first_mismatched_closer(&tokens[i + 1..], "for") {
+                None => unclosed_keyword_eof_node(tokens, i, "for"),
+                Some(rel) => {
+                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
+                }
+            };
+            state.current_cmd = command;
+            state
+                .ast
+                .commands
+                .push(std::mem::take(&mut state.current_cmd));
+            return Some(tokens.len());
+        }
     }
 
     if ((token.kind == TokenKind::Word)
@@ -826,6 +863,91 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             push_compound_command(state, case_cmd);
             return Some(next_i);
         }
+        // GNU parse.y case grammar: when `esac` never arrives the failure
+        // splits by WHERE the token stream stopped. Input ending inside a
+        // clause list (`case x in a) q;;`, or the empty list `case x in`)
+        // reports "unexpected end of file from `case' command on line N".
+        // A word that starts a pattern but is followed by something that
+        // is not `)` reports that token (`case x in a b` -> `b`), or
+        // `newline` when the line ends inside the pattern (`case x in a`).
+        let rest = &tokens[i + 1..];
+        let esac_absent = !rest
+            .iter()
+            .any(|t| t.kind == TokenKind::Keyword && t.value == "esac");
+        if esac_absent {
+            let tail_start = rest
+                .iter()
+                .position(|t| t.value == "in")
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            // A line break after `in` is legal case syntax (GNU's
+            // linebreak production) — the lexer emits it as a Semicolon,
+            // which is not a clause-position error.
+            let semicolons = rest[tail_start..]
+                .iter()
+                .take_while(|t| t.kind == TokenKind::Semicolon)
+                .count();
+            let tail_start = tail_start + semicolons;
+            let tail = &rest[tail_start..];
+            let clause_prefix = tail
+                .iter()
+                .any(|t| matches!(t.value.as_str(), ")" | ";;" | ";&" | ";;&"));
+            let command = match tail.first() {
+                // `case x in` + EOF: the empty clause list is legal - only
+                // `esac` is missing.
+                None => Some(unclosed_keyword_eof_node(tokens, i, "case")),
+                Some(first) if first.kind == TokenKind::Word && !clause_prefix => {
+                    match tail.get(1) {
+                        // `case x in a` EOF - GNU blames the virtual
+                        // `newline` token where `)` was expected.
+                        None => {
+                            let mut command = CommandNode::new();
+                            command.line = Some(first.position);
+                            command.insert_assignment(
+                                "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                                format!("newline{PARSE_ERROR_FIELD_SEP}{}", first.position),
+                            );
+                            command.insert_assignment(
+                                "__RUBASH_PARSE_SOURCE__".to_string(),
+                                offending_line_text(
+                                    tokens,
+                                    i + 1 + tail_start,
+                                    state.diagnostic_text.as_deref(),
+                                ),
+                            );
+                            Some(command)
+                        }
+                        // `a |` continues the pattern - still inside the
+                        // clause list at EOF.
+                        Some(next) if next.value == "|" => {
+                            Some(unclosed_keyword_eof_node(tokens, i, "case"))
+                        }
+                        Some(_) => Some(mismatched_closer_node(
+                            tokens,
+                            i + 1 + tail_start + 1,
+                            state.diagnostic_text.as_deref(),
+                        )),
+                    }
+                }
+                Some(_) if clause_prefix => Some(match first_mismatched_closer(rest, "case") {
+                    None => unclosed_keyword_eof_node(tokens, i, "case"),
+                    Some(rel) => mismatched_closer_node(
+                        tokens,
+                        i + 1 + rel,
+                        state.diagnostic_text.as_deref(),
+                    ),
+                }),
+                _ => None,
+            };
+            if let Some(command) = command {
+                state.current_cmd = command;
+                state
+                    .ast
+                    .commands
+                    .push(std::mem::take(&mut state.current_cmd));
+                return Some(tokens.len());
+            }
+        }
         return Some(push_parse_error_until(
             state,
             tokens,
@@ -842,6 +964,26 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         if let Some((select_cmd, next_i)) = parse_select_command(tokens, i) {
             push_compound_command(state, select_cmd);
             return Some(next_i);
+        }
+
+        // Same unclosed-at-EOF rule as `for`: no `done` remaining means
+        // input ended inside the `select` body or a foreign closer ended it.
+        if !tokens[i + 1..]
+            .iter()
+            .any(|t| t.kind == TokenKind::Keyword && t.value == "done")
+        {
+            let command = match first_mismatched_closer(&tokens[i + 1..], "select") {
+                None => unclosed_keyword_eof_node(tokens, i, "select"),
+                Some(rel) => {
+                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
+                }
+            };
+            state.current_cmd = command;
+            state
+                .ast
+                .commands
+                .push(std::mem::take(&mut state.current_cmd));
+            return Some(tokens.len());
         }
     }
 
@@ -1100,7 +1242,9 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
         state.current_cmd.insert_assignment(
             format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
-            format!("{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"),
+            format!(
+                "{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"
+            ),
         );
     }
     state
@@ -1256,6 +1400,332 @@ fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
     last_line + 1 + usize::from(continuation)
 }
 
+/// `if`/`while`/`until`/`for`/`select`/`case` opener whose closer never
+/// arrives before end of input. GNU parse.y (yyerror EOF path,
+/// parse.y:6890-6901) reports the innermost open compound via
+/// compoundcmd_lineno: "unexpected end of file from `X' command on line N".
+/// Callers have already confirmed the matching closer is absent from the
+/// remaining stream, so `opener` is the outermost unclosed frame and
+/// `region` still exposes any deeper nested opener.
+pub(super) fn unclosed_keyword_eof_node(
+    tokens: &[Token],
+    opener_index: usize,
+    opener: &'static str,
+) -> CommandNode {
+    let opener_line = tokens[opener_index].position;
+    let region = &tokens[opener_index + 1..];
+    let last_line = region
+        .iter()
+        .map(|token| token.position)
+        .max()
+        .unwrap_or(opener_line);
+    compound_eof_error_node(
+        opener,
+        opener_line,
+        region,
+        last_line,
+        eof_line_extra(last_line, false),
+    )
+}
+
+/// GNU parse.y reserved-word grammar: while a keyword compound frame is
+/// open, the only legal closer is that frame's own terminator. A
+/// `fi`/`done`/`esac`/`}`/`)`/`;;`-family token arriving for a different
+/// frame is a `syntax error near unexpected token 'X'` at that token, not
+/// an EOF diagnostic (`if x; then y; done` reports `done`, not a missing
+/// `fi`). Seeded with the opener being reported; returns the first
+/// mismatched closer in `region`, or None when input truly ran out.
+fn first_mismatched_closer(region: &[Token], opener: &'static str) -> Option<usize> {
+    let mut stack: Vec<&'static str> = vec![opener];
+    for (region_index, token) in region.iter().enumerate() {
+        if token.kind != TokenKind::Keyword {
+            continue;
+        }
+        let value = token.value.trim_end();
+        // Same collapsed-`{` rule as innermost_unclosed_compound.
+        if value.starts_with('{') {
+            if !value.ends_with('}') {
+                stack.push("{");
+            }
+            continue;
+        }
+        match value {
+            "(" => stack.push("("),
+            "if" => stack.push("if"),
+            "for" | "while" | "until" | "select" => stack.push(match value {
+                "for" => "for",
+                "while" => "while",
+                "until" => "until",
+                _ => "select",
+            }),
+            "case" => stack.push("case"),
+            ")" => {
+                if matches!(stack.last(), Some(&"(")) {
+                    stack.pop();
+                } else if !matches!(stack.last(), Some(&"case")) {
+                    // Inside `case`, `)` is legal pattern syntax.
+                    return Some(region_index);
+                }
+            }
+            "fi" => {
+                if matches!(stack.last(), Some(&"if")) {
+                    stack.pop();
+                } else {
+                    return Some(region_index);
+                }
+            }
+            "done" => {
+                if matches!(stack.last(), Some(&"for" | &"while" | &"until" | &"select")) {
+                    stack.pop();
+                } else {
+                    return Some(region_index);
+                }
+            }
+            "esac" => {
+                if matches!(stack.last(), Some(&"case")) {
+                    stack.pop();
+                } else {
+                    return Some(region_index);
+                }
+            }
+            "}" => {
+                if matches!(stack.last(), Some(&"{")) {
+                    stack.pop();
+                } else {
+                    return Some(region_index);
+                }
+            }
+            ";;" | ";&" | ";;&" => {
+                if !matches!(stack.last(), Some(&"case")) {
+                    return Some(region_index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// GNU parse.y if-compound grammar over a *failed* `if` parse: tracks the
+/// `if` frame's position and returns the region index of the first token
+/// the grammar rejects at its position (`if then; fi` → `then`, `if x; fi`
+/// → `fi`, `if x; then y; done` → `done`), skipping nested compound
+/// interiors. Phase keywords (`then`/`elif`/`else`/`fi`) are legal only
+/// after a `;` separator and only when the current phase already saw a
+/// command — that is exactly the condition GNU's list/term rules require.
+/// None ⇒ input truly ended inside the `if` (an EOF error).
+fn if_frame_offender(region: &[Token]) -> Option<usize> {
+    let mut stack: Vec<&'static str> = vec!["if"];
+    let mut in_condition = true;
+    let mut expect_command = true;
+    let mut phase_has_command = false;
+    for (index, token) in region.iter().enumerate() {
+        if stack.len() == 1 && token.kind == TokenKind::Semicolon {
+            if expect_command {
+                return Some(index); // `if ;`, `if x; ;`, `if x; then ;`
+            }
+            expect_command = true;
+            continue;
+        }
+        if token.kind == TokenKind::Keyword {
+            let value = token.value.trim_end();
+            // A compound command opener at our own frame level starts a
+            // command (`if (x); fi` ⇒ the missing `then` blames `fi`).
+            if stack.len() == 1 {
+                match value {
+                    "(" | "if" | "for" | "while" | "until" | "select" | "case" => {
+                        expect_command = false;
+                        phase_has_command = true;
+                    }
+                    _ => {}
+                }
+            }
+            if value.starts_with('{') {
+                if stack.len() == 1 {
+                    expect_command = false;
+                    phase_has_command = true;
+                }
+                if !value.ends_with('}') {
+                    stack.push("{");
+                }
+                continue;
+            }
+            match value {
+                "(" => {
+                    stack.push("(");
+                    continue;
+                }
+                "if" => {
+                    stack.push("if");
+                    continue;
+                }
+                "for" | "while" | "until" | "select" => {
+                    stack.push(match value {
+                        "for" => "for",
+                        "while" => "while",
+                        "until" => "until",
+                        _ => "select",
+                    });
+                    continue;
+                }
+                "case" => {
+                    stack.push("case");
+                    continue;
+                }
+                _ => {}
+            }
+            // Closers pop matching nested frames; our own `fi` is itself
+            // the offender because this parse already failed (GNU rejects
+            // the `fi` that arrives while the structure is still broken).
+            match value {
+                ")" => {
+                    if matches!(stack.last(), Some(&"(")) {
+                        stack.pop();
+                    } else if !matches!(stack.last(), Some(&"case")) {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                "fi" => {
+                    if stack.len() > 1 && matches!(stack.last(), Some(&"if")) {
+                        stack.pop();
+                    } else {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                "done" => {
+                    if matches!(stack.last(), Some(&"for" | &"while" | &"until" | &"select")) {
+                        stack.pop();
+                    } else {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                "esac" => {
+                    if matches!(stack.last(), Some(&"case")) {
+                        stack.pop();
+                    } else {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                "}" => {
+                    if matches!(stack.last(), Some(&"{")) {
+                        stack.pop();
+                    } else {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                ";;" | ";&" | ";;&" => {
+                    if !matches!(stack.last(), Some(&"case")) {
+                        return Some(index);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            if stack.len() != 1 {
+                continue;
+            }
+            // Command-position modifiers GNU accepts before a command word.
+            if matches!(value, "time" | "!") {
+                expect_command = false;
+                phase_has_command = true;
+                continue;
+            }
+            if expect_command {
+                // A phase keyword is legal after `;` only when the phase
+                // already contains a command; every other keyword here is
+                // the offender.
+                let legal = match value {
+                    "then" => in_condition && phase_has_command,
+                    "elif" | "else" => !in_condition && phase_has_command,
+                    _ => false,
+                };
+                if !legal {
+                    return Some(index);
+                }
+            } else {
+                // Mid-command: any keyword is out of place (`if x then` →
+                // GNU reports `then`).
+                return Some(index);
+            }
+            match value {
+                "then" => in_condition = false,
+                "elif" => in_condition = true,
+                _ => {}
+            }
+            expect_command = true;
+            phase_has_command = false;
+            continue;
+        }
+        if stack.len() == 1 {
+            expect_command = false;
+            phase_has_command = true;
+        }
+    }
+    None
+}
+
+/// Physical input line containing `tokens[index]` — verbatim from the
+/// original source when available (GNU parse.y y.error echoes the line as
+/// read), else reconstructed from same-line token raws.
+fn offending_line_text(tokens: &[Token], index: usize, source: Option<&str>) -> String {
+    if let Some(text) = source {
+        if let Some(line) = text.lines().nth(tokens[index].position.saturating_sub(1)) {
+            return line.to_string();
+        }
+    }
+    let line = tokens[index].position;
+    let mut start = index;
+    while start > 0 && tokens[start - 1].position == line {
+        start -= 1;
+    }
+    let mut text = tokens[start].raw.clone();
+    let mut prev_end = tokens[start].column + tokens[start].raw.len();
+    for token in &tokens[start + 1..] {
+        if token.position != line {
+            break;
+        }
+        if token.column > prev_end {
+            text.push(' ');
+        }
+        text.push_str(&token.raw);
+        prev_end = token.column + token.raw.len();
+    }
+    text
+}
+
+/// `syntax error near unexpected token 'X'` reported AT the line of X
+/// with that physical input line echoed — the shape GNU's yyerror produces
+/// when a closer arrives inside the wrong compound frame (`if x; then y;
+/// done` reports `done` at done's line).
+pub(super) fn mismatched_closer_node(
+    tokens: &[Token],
+    bad_index: usize,
+    diagnostic_text: Option<&str>,
+) -> CommandNode {
+    let bad = &tokens[bad_index];
+    let mut command = CommandNode::new();
+    command.line = Some(bad.position);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            bad.value.trim_end(),
+            PARSE_ERROR_FIELD_SEP,
+            bad.position
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        offending_line_text(tokens, bad_index, diagnostic_text),
+    );
+    command
+}
+
 fn compound_eof_error_node(
     opener: &str,
     open_line: usize,
@@ -1325,7 +1795,9 @@ fn compound_eof_error_node(
     for (warn_index, (delimiter, at_line, warn_line)) in warned.iter().enumerate() {
         command.insert_assignment(
             format!("__RUBASH_PARSE_ERROR_HD_WARN_{warn_index}__"),
-            format!("{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"),
+            format!(
+                "{delimiter}{PARSE_ERROR_FIELD_SEP}{at_line}{PARSE_ERROR_FIELD_SEP}{warn_line}"
+            ),
         );
     }
     command
@@ -1380,7 +1852,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     let (mut command, next_i) = if is_keyword(tokens, i, "for") {
         parse_for_command(tokens, i)?
     } else if is_keyword(tokens, i, "if") {
-        parse_if_command(tokens, i)?
+        parse_if_command(tokens, i, None)?
     } else if tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))

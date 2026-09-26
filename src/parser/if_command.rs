@@ -1,7 +1,12 @@
+use super::parse_loop::{mismatched_closer_node, unclosed_keyword_eof_node};
 use super::*;
 use crate::lexer::Token;
 
-pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+pub(super) fn parse_if_command(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+) -> Option<(CommandNode, usize)> {
     if !is_keyword(tokens, start, "if") {
         return None;
     }
@@ -19,6 +24,10 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     let mut index = then_index + 1;
 
     let (then_body, boundary) = parse_if_section(tokens, index)?;
+    // GNU parse.y: `then`/`elif`/`else` bodies are non-empty command lists.
+    if then_body.is_empty() {
+        return None;
+    }
     index = boundary;
 
     let mut elif_branches = Vec::new();
@@ -32,6 +41,9 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         let condition_terminator = condition_terminator_before(tokens, elif_then);
         let condition_terminator_metadata = condition_terminator_metadata_before(tokens, elif_then);
         let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
+        if body.is_empty() {
+            return None;
+        }
         elif_branches.push(ElifBranch {
             keyword: elif_keyword,
             keyword_metadata: elif_keyword_metadata,
@@ -49,6 +61,9 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
         let else_keyword = tokens[index].value.clone();
         let else_keyword_metadata = build_keyword_metadata(&tokens[index]);
         let (body, next_boundary) = parse_if_section(tokens, index + 1)?;
+        if body.is_empty() {
+            return None;
+        }
         index = next_boundary;
         (Some(else_keyword), Some(else_keyword_metadata), Some(body))
     } else {
@@ -56,12 +71,16 @@ pub(super) fn parse_if_command(tokens: &[Token], start: usize) -> Option<(Comman
     };
 
     if !is_keyword(tokens, index, "fi") {
-        let mut command = CommandNode::new();
-        command.line = tokens.get(start).map(|token| token.position);
-        command.insert_assignment(
-            "__RUBASH_PARSE_ERROR__".to_string(),
-            "unexpected token `)`".to_string(),
-        );
+        if index >= tokens.len() {
+            // GNU parse.y yyerror EOF path: `fi` never arrived —
+            // "unexpected end of file from `if' command on line N".
+            let command = unclosed_keyword_eof_node(tokens, start, "if");
+            return Some((command, tokens.len()));
+        }
+        // GNU reports the token that actually arrived where `fi` was
+        // expected, at that token's line (`if x; then y; done` →
+        // `near unexpected token `done'` at done's line).
+        let command = mismatched_closer_node(tokens, index, source);
         return Some((command, tokens.len()));
     }
 

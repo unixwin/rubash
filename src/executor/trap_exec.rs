@@ -166,7 +166,7 @@ impl Executor {
                 // this probe like the script driver does.
                 if !source.contains("<<") {
                     let eval_posix = self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                    if let Some((close, open_line, eof_line, report_open)) =
+                    if let Some((close, open_line, eof_line, report_open, _command, _array)) =
                         crate::lexer::unclosed_input_close_char_posix(&source, eval_posix)
                     {
                         // GNU eval continues the caller's line numbering:

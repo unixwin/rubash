@@ -356,7 +356,7 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
         "time" => parse_time_prefixed_shell_command(tokens, start)
             .or_else(|| parse_time_prefixed_compound_command(tokens, start)),
         "for" => parse_for_command(tokens, start),
-        "if" => parse_if_command(tokens, start),
+        "if" => parse_if_command(tokens, start, None),
         "while" | "until" => parse_loop_command(tokens, start),
         "case" => parse_case_command(tokens, start),
         "select" => parse_select_command(tokens, start),

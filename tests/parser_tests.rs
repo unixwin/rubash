@@ -1097,13 +1097,16 @@ mod command_body_kind_tests {
     }
 
     #[test]
-    fn test_case_rejects_newline_for_header_at_do_boundary() {
+    fn test_case_allows_newline_for_header_inside_clause() {
+        // GNU 5.3 parses `for x\nin x\ndo ...` inside a case clause like
+        // the top level does — no syntax error, the loop runs.
         let input = "case x in x)\nfor x\nin x\ndo echo x; done\nesac";
         let ast = parse(&tokenize(input));
         assert!(ast
             .commands
             .iter()
-            .any(|command| { command.get_assignment("__RUBASH_PARSE_ERROR__").is_some() }));
+            .all(|command| command.get_assignment("__RUBASH_PARSE_ERROR__").is_none()));
+        assert!(ast.commands[0].case_command.is_some());
     }
 
     #[test]

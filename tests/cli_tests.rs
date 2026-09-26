@@ -1332,23 +1332,29 @@ fn unterminated_complete_command_strings_are_syntax_errors() {
             .expect("run rubash");
         assert_eq!(output.status.code(), Some(2), "command: {command}");
         assert!(output.stdout.is_empty(), "command: {command}");
-        assert!(String::from_utf8_lossy(&output.stderr).contains("syntax error"));
+        // GNU parse_matched_pair reports the EOF diagnostic for an
+        // unterminated `$("`/`"`/`` ` ``/`$((` construct, e.g.
+        // "unexpected EOF while looking for matching `)'".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("unexpected EOF while looking for matching"),
+            "command: {command} stderr: {stderr}"
+        );
     }
 }
 
 #[test]
-fn newline_for_header_inside_case_is_a_syntax_error() {
+fn newline_for_header_inside_case_is_accepted() {
+    // GNU 5.3 accepts `for x\nin x` newline headers inside a case clause
+    // (the loop runs) — the input is not a syntax error.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg("case x in x)\nfor x\nin x\ndo echo bad; done\nesac")
         .output()
         .expect("run rubash");
 
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stdout).is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("syntax error near unexpected token `do'")
-    );
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "bad\n");
 }
 
 #[test]
@@ -3101,6 +3107,188 @@ fn cli_noexec_flag_parses_script_file_without_executing() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert!(!output_path.exists());
     let _ = fs::remove_file(script_path);
+}
+
+fn run_noexec_script(script_name: &str, body: &str) -> (String, String, i32) {
+    let script_path = Path::new("target").join(script_name);
+    fs::write(&script_path, body).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-n")
+        .arg(&script_path)
+        .output()
+        .expect("run rubash -n");
+    let _ = fs::remove_file(&script_path);
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+/// GNU shell.c `-n` (noexec) still runs the reader/parser fully and only
+/// skips execution: malformed compound input must produce the same syntax
+/// diagnostics and exit status as a normal parse (parse.y yyerror).
+#[test]
+fn cli_noexec_reports_unclosed_if_eof() {
+    let (stdout, stderr, code) = run_noexec_script("rubash-noexec-if.sh", "if x; then y
+");
+    assert_eq!(stdout, "");
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("syntax error: unexpected end of file from `if' command on line 1"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_noexec_reports_unclosed_compound_kinds() {
+    for (body, name) in [
+        ("while x; do y
+", "while"),
+        ("until x; do y
+", "until"),
+        ("for x in a; do y
+", "for"),
+        ("select x in a; do y
+", "select"),
+        ("case x in
+", "case"),
+        ("(echo a
+", "("),
+        ("foo() {
+", "{"),
+    ] {
+        let (_stdout, stderr, code) = run_noexec_script("rubash-noexec-compound.sh", body);
+        assert_eq!(code, 2, "{body:?} stderr: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "syntax error: unexpected end of file from `{name}' command on line 1"
+            )),
+            "{body:?} stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn cli_noexec_reports_mismatched_closer_with_line_echo() {
+    let (stdout, stderr, code) =
+        run_noexec_script("rubash-noexec-done.sh", "if x; then y; done
+");
+    assert_eq!(stdout, "");
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("syntax error near unexpected token `done'"),
+        "stderr: {stderr}"
+    );
+    // GNU echoes the offending input line verbatim.
+    assert!(stderr.contains("`if x; then y; done'"), "stderr: {stderr}");
+}
+
+#[test]
+fn cli_noexec_reports_if_grammar_offender() {
+    for (body, token) in [("if then; fi
+", "then"), ("if x; fi
+", "fi")] {
+        let (_stdout, stderr, code) = run_noexec_script("rubash-noexec-ifo.sh", body);
+        assert_eq!(code, 2, "{body:?} stderr: {stderr}");
+        assert!(
+            stderr.contains(&format!("syntax error near unexpected token `{token}'")),
+            "{body:?} stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn cli_noexec_keeps_heredoc_eof_warning() {
+    let (stdout, stderr, code) =
+        run_noexec_script("rubash-noexec-heredoc.sh", "cat <<EOF
+hi
+");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("warning: here-document at line 1 delimited by end-of-file (wanted `EOF')"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_noexec_reports_unclosed_parameter_expansion() {
+    let (_stdout, stderr, code) =
+        run_noexec_script("rubash-noexec-brace.sh", "echo ${x
+");
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(
+        stderr.contains("unexpected EOF while looking for matching `}'"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn cli_noexec_reports_trailing_pipe_eof() {
+    let (_stdout, stderr, code) =
+        run_noexec_script("rubash-noexec-pipe.sh", "echo a |
+");
+    assert_eq!(code, 2, "stderr: {stderr}");
+    assert!(stderr.contains("syntax error: unexpected end of file"), "stderr: {stderr}");
+}
+
+#[test]
+fn cli_noexec_command_string_reports_syntax_error() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(["-n", "-c", "if x; then y"])
+        .output()
+        .expect("run rubash -n -c");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syntax error: unexpected end of file from `if' command on line 1"),
+        "stderr: {stderr}"
+    );
+}
+
+/// `set -n` executes the commands already parsed before the option, then
+/// still parses (and reports) the malformed tail (shell.c read_command).
+#[test]
+fn cli_set_n_mid_script_still_reports_syntax_errors() {
+    let script_path = Path::new("target").join("rubash-setn-mid.sh");
+    fs::write(&script_path, "echo one
+set -n
+if x; then y
+").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+    let _ = fs::remove_file(&script_path);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "one
+");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syntax error: unexpected end of file from `if' command on line 3"),
+        "stderr: {stderr}"
+    );
+}
+
+/// The same diagnostics must appear under normal execution, not only `-n`.
+#[test]
+fn cli_exec_mode_reports_compound_eof_diagnostic() {
+    let script_path = Path::new("target").join("rubash-exec-unclosed.sh");
+    fs::write(&script_path, "while x; do y
+").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&script_path)
+        .output()
+        .expect("run rubash");
+    let _ = fs::remove_file(&script_path);
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("syntax error: unexpected end of file from `while' command on line 1"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

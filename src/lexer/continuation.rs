@@ -218,6 +218,9 @@ struct UnclosedDelim {
     /// parse_comsub) or a `{ }' command group: `}' only closes at command
     /// position, after a command terminator.
     funsub: bool,
+    /// `name=(` array list: GNU exits 1 on EOF (matched-pair in an
+    /// assignment), not 2 like a syntax error.
+    array_list: bool,
     /// A complete command ended here (subshell `( )' or `{ }' group).
     /// Closing such a construct resumes the enclosing funsub at command
     /// position; expansions like `$(...)'/`${...}' are mid-word and do not.
@@ -265,10 +268,15 @@ fn squote_is_literal_in_posix_braced_dquote(stack: &[UnclosedDelim]) -> bool {
     false
 }
 
+/// Returns `(close_delimiter, open_line, eof_line, report_open, command)`.
+/// `command` marks a `( ...`/`{ ...; }` command-position construct (GNU's
+/// yyerror names it "from `(' command"), as opposed to `$(`/`$((`/quote
+/// matched pairs that take the "matching `X'" wording. `array_list` marks
+/// `name=(` constructs — GNU exits 1 rather than 2 for those.
 pub(crate) fn unclosed_input_close_char_posix(
     input: &str,
     posix: bool,
-) -> Option<(char, usize, usize, bool)> {
+) -> Option<(char, usize, usize, bool, bool, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut stack: Vec<UnclosedDelim> = Vec::new();
     let mut line = 1usize;
@@ -418,6 +426,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    array_list: false,
                 });
             }
             '"' => {
@@ -429,6 +438,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    array_list: false,
                 });
             }
             '`' => {
@@ -440,6 +450,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: false,
                     command: false,
                     term_ready: false,
+                    array_list: false,
                 });
             }
             '$' => {
@@ -456,10 +467,14 @@ pub(crate) fn unclosed_input_close_char_posix(
                             close: '}',
                             open_line: line,
                             escapes: true,
-                            report_open: false,
+                            // `${param` is a parse_matched_pair: EOF names
+                            // the `${` line. The `${ ' funsub variant is a
+                            // command context and reports the EOF line.
+                            report_open: !funsub,
                             funsub,
                             command: false,
                             term_ready: false,
+                            array_list: false,
                         });
                         if funsub {
                             comment_start = true;
@@ -468,14 +483,18 @@ pub(crate) fn unclosed_input_close_char_posix(
                     }
                     Some('(') => {
                         // $( EOF takes the yyerror path: line_number at EOF.
+                        // `$((` is a single arithmetic construct parsed by
+                        // parse_matched_pair instead: EOF names the `$(`
+                        // line even when only the inner `)` was closed.
                         stack.push(UnclosedDelim {
                             close: ')',
                             open_line: line,
                             escapes: true,
-                            report_open: false,
+                            report_open: chars.get(i + 2) == Some(&'('),
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            array_list: false,
                         });
                         // A fresh substitution body starts at a token
                         // boundary: `$(#c` is a comment.
@@ -491,6 +510,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                                 funsub: false,
                                 command: false,
                                 term_ready: false,
+                                array_list: false,
                             });
                             i += 1;
                         }
@@ -506,6 +526,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                             funsub: false,
                             command: false,
                             term_ready: false,
+                            array_list: false,
                         });
                         i += 1;
                     }
@@ -518,14 +539,26 @@ pub(crate) fn unclosed_input_close_char_posix(
                 // continues on the next line). A `(` elsewhere is a parse
                 // error for the parser, not a pending delimiter.
                 if at_command || (cur_word.len() > 1 && cur_word.ends_with('=')) {
+                    let is_subshell = at_command && cur_word.is_empty();
+                    let is_array_list = !is_subshell;
                     stack.push(UnclosedDelim {
                         close: ')',
                         open_line: line,
                         escapes: true,
-                        report_open: false,
+                        // Array lists take parse_matched_pair's start_lineno
+                        // report (`ddd=(aaa` EOF names the `(` line); a
+                        // command-position subshell reports the EOF line.
+                        report_open: !is_subshell,
                         funsub: false,
-                        command: true,
+                        // GNU yyerror "from `(' command" applies only to a
+                        // command-position subshell; `name=(...` is an
+                        // array-list matched pair ("matching `)'"). The
+                        // `at_command` flag is only refreshed at word
+                        // boundaries, so a pending `name=` word means this
+                        // `(` is array text, not a subshell.
+                        command: is_subshell,
                         term_ready: false,
+                        array_list: is_array_list,
                     });
                 }
                 comment_start = true;
@@ -534,15 +567,21 @@ pub(crate) fn unclosed_input_close_char_posix(
             }
             '(' if top.is_some_and(|d| d.close == ')' || (d.close == '}' && d.funsub)) => {
                 // Subshell nested inside `$(...)`/`( ... )`/`${ ...; }`:
-                // the body is command context where `(` is legal.
+                // the body is command context where `(` is legal. An
+                // immediately adjacent `(` (`((x`) is the arithmetic
+                // construct's inner paren — a matched pair, not a command.
                 stack.push(UnclosedDelim {
                     close: ')',
                     open_line: line,
                     escapes: true,
-                    report_open: false,
+                    // `((x` arithmetic takes parse_matched_pair's
+                    // start_lineno report like `$((` does; a real nested
+                    // subshell reports the EOF line (yyerror).
+                    report_open: i > 0 && chars[i - 1] == '(',
                     funsub: false,
-                    command: true,
+                    command: !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
+                    array_list: false,
                 });
                 comment_start = true;
             }
@@ -557,6 +596,7 @@ pub(crate) fn unclosed_input_close_char_posix(
                     funsub: true,
                     command: true,
                     term_ready: false,
+                    array_list: false,
                 });
             }
             _ => {}
@@ -574,7 +614,14 @@ pub(crate) fn unclosed_input_close_char_posix(
     } else {
         line + 1
     };
-    Some((d.close, d.open_line, eof_line, d.report_open))
+    Some((
+        d.close,
+        d.open_line,
+        eof_line,
+        d.report_open,
+        d.command,
+        d.array_list,
+    ))
 }
 
 pub(super) fn has_unclosed_quotes(input: &str) -> bool {

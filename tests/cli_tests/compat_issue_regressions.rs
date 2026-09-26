@@ -169,7 +169,10 @@ fn malformed_script_preserves_valid_prefix_before_status_two() {
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "a\nb\na b\n");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected end of file"));
+    // GNU parse_matched_pair: `line 5: unexpected EOF while looking for
+    // matching `}'`.
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("unexpected EOF while looking for matching `}'"));
 }
 
 #[test]

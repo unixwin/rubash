@@ -889,7 +889,7 @@ pub fn run_source_with_line_offset(
         // line where the unclosed construct opened; that line itself is part
         // of the failed parse and runs nothing.
         let unclosed = crate::lexer::unclosed_input_close_char_posix(input, parse_posix);
-        let cut_line = unclosed.map(|(_, open, _, _)| open);
+        let cut_line = unclosed.map(|(_, open, _, _, _, _)| open);
         let source = input.trim_end_matches('\n');
         let prefix = match cut_line {
             Some(open) if open > 1 => source.lines().take(open - 1).collect::<Vec<_>>().join("\n"),
@@ -915,12 +915,28 @@ pub fn run_source_with_line_offset(
         // matching `}'"); only an unrecognized residue falls back to the
         // generic end-of-file diagnostic.
         match unclosed {
-            Some((close, open_line, eof_line, report_open)) => {
-                let reported = if report_open { open_line } else { eof_line };
-                eprintln!(
-                    "{}unexpected EOF while looking for matching `{close}'",
-                    executor.parser_diagnostic_prefix_for_line(reported)
-                );
+            Some((close, open_line, eof_line, report_open, command, array_list)) => {
+                // GNU parse.y yyerror (parse.y:6890-6901): an unterminated
+                // command-position `(` names the construct — "unexpected
+                // end of file from `(' command on line N" — while
+                // `$(`/`$((`/array/quote matched pairs keep the "matching
+                // `X'" wording.
+                if close == ')' && command {
+                    eprintln!(
+                        "{}syntax error: unexpected end of file from `(' command on line {open_line}",
+                        executor.parser_diagnostic_prefix_for_line(eof_line)
+                    );
+                } else {
+                    let reported = if report_open { open_line } else { eof_line };
+                    eprintln!(
+                        "{}unexpected EOF while looking for matching `{close}'",
+                        executor.parser_diagnostic_prefix_for_line(reported)
+                    );
+                }
+                // GNU exits 1 for an unterminated `name=(` array list.
+                if array_list {
+                    return 1;
+                }
             }
             None => eprintln!("rubash: syntax error: unexpected end of file"),
         }
