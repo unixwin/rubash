@@ -195,9 +195,11 @@ impl Executor {
         // A `${THIS_SH} script 3>&1`-style invocation is a process boundary:
         // the child's fd table is the parent's copy, so the command's
         // numbered output redirections bind real slots for the child's whole
-        // run (redir.c do_redirection_internal) — restored wholesale with
-        // saved_fd_table below.
-        let _bound_output_fds = self.open_compound_output_redirects(cmd)?;
+        // run (redir.c do_redirection_internal) — and, like GNU's forked
+        // child, they are undone when the child exits: see the
+        // restore_compound_output_redirects call after the parent restores
+        // below.
+        let bound_output_fds = self.open_compound_output_redirects(cmd)?;
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
@@ -559,6 +561,19 @@ impl Executor {
         self.shell_state.job_table = saved_job_table;
         self.background_children = saved_background_children;
         self.fd_table = saved_fd_table;
+        // GNU execute_cmd.c:5771 execute_disk_command: the command's
+        // redirections are applied in the FORKED CHILD (do_redirections
+        // with RX_ACTIVE at :5884) and die with that process — the parent
+        // never binds them. The in-process emulation bound them on the
+        // shared Executor (open_compound_output_redirects above), and both
+        // saved_env and saved_fd_table snapshotted AFTER the bind, so
+        // their restores re-installed the child's fd-1 output binding
+        // (fd_output_key(1) env channel + fd table entry) into the parent:
+        // after `$SH p3.sh >o.tmp` every later parent write kept landing in
+        // o.tmp (rubash#164). restore_compound_output_redirects replays the
+        // pre-bind state captured at bind time, after the parent restores,
+        // so the emulation matches the child-process boundary.
+        self.restore_compound_output_redirects(bound_output_fds);
         if fresh_shell {
             // Discard signals that arrived while the emulated child was
             // alive — GNU's real child exits with its queue — then hand the
