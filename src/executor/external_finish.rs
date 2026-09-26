@@ -84,7 +84,7 @@ impl Executor {
                     self.finish_external_error(cmd, &stderr, status)?;
                     return Ok(true);
                 }
-                self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path)?;
+                self.execute_direct_shell_script(cmd, &expanded_command_name, &script_path, false)?;
                 return Ok(true);
             }
         }
@@ -125,8 +125,33 @@ impl Executor {
         if !script_path.is_file() {
             return Ok(false);
         }
-        self.execute_direct_shell_script(cmd, &script, &script_path)?;
+        self.execute_direct_shell_script(cmd, &script, &script_path, false)?;
         Ok(true)
+    }
+
+    /// GNU execute_cmd.c:6237-6260 (shell_execve ENOEXEC tail): a text file
+    /// the kernel refuses to exec is run by the forked child as THIS shell,
+    /// in-process — args[0] = shell_name, then `sh_longjmp
+    /// (subshell_top_level, 1)` lands in shell.c:429-464 where main()
+    /// restarts with `shell_reinitialize()`. The script therefore runs as a
+    /// FRESH shell (only the exported environment carries over; unexported
+    /// variables and functions are gone) while kernel-preserved SIG_IGN
+    /// dispositions survive and become SIG_HARD_IGNORE
+    /// (trap.c set_signal). It is not /bin/sh. `used_shell` callers and the
+    /// Windows mailbox keep the find_shell spawn path.
+    #[cfg(unix)]
+    pub(in crate::executor) fn execute_enoexec_shell_script(
+        &mut self,
+        cmd: &CommandNode,
+        program: &std::path::Path,
+    ) -> Result<(), ExecuteError> {
+        // $0 keeps the invoked spelling (`./trap2.sub`), like
+        // shell.c:720 dollar_vars[0] = shell_script_filename.
+        let Some(command_name) = cmd.words.first() else {
+            return Ok(());
+        };
+        let script = self.expand_word(command_name);
+        self.execute_direct_shell_script(cmd, &script, program, true)
     }
 
     fn execute_direct_shell_script(
@@ -134,6 +159,7 @@ impl Executor {
         cmd: &CommandNode,
         script: &str,
         script_path: &std::path::Path,
+        exec_model_entry: bool,
     ) -> Result<(), ExecuteError> {
         let source = fs::read_to_string(script_path)?;
         // bashhist.c pre_process_line: a fresh `bash script` child expands
@@ -186,9 +212,16 @@ impl Executor {
                         )
                 })
         });
-        // Save parent state BEFORE the this_shell_invocation block clears it.
-        let saved_shell_state =
-            this_shell_invocation.then(|| self.shell_state.clone_for_child_save());
+        // The exec-model child semantics (fresh shell: exported env only,
+        // empty job table, EXIT trap runs at child exit) apply both to
+        // `${THIS_SH} script` invocations and to the ENOEXEC fallback
+        // (execute_enoexec_shell_script). The word shape still differs:
+        // THIS_SH words are [shell, script, params...] while an ENOEXEC
+        // command is [script, params...], so param_start below stays keyed
+        // on this_shell_invocation.
+        let fresh_shell = exec_model_entry || this_shell_invocation;
+        // Save parent state BEFORE the fresh_shell block clears it.
+        let saved_shell_state = fresh_shell.then(|| self.shell_state.clone_for_child_save());
         // GNU execute_cmd.c:6139-6233 / jobs.c: a script child is a separate
         // process, so its job table is process-local — a fresh exec child
         // starts with an empty table, and a fork-model child only inherits a
@@ -213,13 +246,13 @@ impl Executor {
         let saved_tempenv_marks = self.tempenv_marks.clone();
         let saved_tempenv_promoted = self.tempenv_promoted_names.clone();
         let saved_tempenv_previous = self.tempenv_previous.clone();
-        if this_shell_invocation {
+        if fresh_shell {
             self.tempenv_names.clear();
             self.tempenv_marks.clear();
             self.tempenv_promoted_names.clear();
             self.tempenv_previous.clear();
         }
-        if this_shell_invocation {
+        if fresh_shell {
             let mut child_env = self.child_shell_environment();
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
             // shell rebuilds its managed variables (BASH_CMDS/BASH_ALIASES
@@ -264,6 +297,23 @@ impl Executor {
             // added, so `trap` in the child lists it. The in-process child
             // takes the same fresh-shell boundary and must seed identically,
             // or varenv22's last `trap` loses the SIGRTMIN line.
+            // The parent's runtime SIG_IGN dispositions (empty trap
+            // actions) cross this boundary in GNU — execve preserves
+            // ignored dispositions, and the ENOEXEC fork never restores
+            // them — so transport them the same way the real-spawn path
+            // does (readonly_functions.rs apply_external_environment) and
+            // let seed_startup_traps rebuild the `trap -- '' SIG` entries
+            // (trap1.sub: `trap -p USR2` lists the parent's `trap '' USR2`
+            // and refuses to re-trap it). saved_env is the parent's
+            // pre-swap environment: the parent's '' trap keys are already
+            // gone from env_vars at this point.
+            let inherited_ignores = crate::builtins::trap::transport_inherited_ignores(&saved_env);
+            if !inherited_ignores.is_empty() {
+                self.shell_state.env_vars.insert(
+                    crate::builtins::trap::TRAP_ORIG_IGNORES.to_string(),
+                    inherited_ignores,
+                );
+            }
             crate::builtins::trap::seed_startup_traps(&mut self.shell_state.env_vars);
             crate::builtins::trap::mark_startup_ignores(&mut self.shell_state.env_vars);
         }
@@ -388,7 +438,7 @@ impl Executor {
         // child cannot try_wait/reap the parent's processes (a GNU child's
         // wait only covers its own children), and the child's own spawned
         // processes are orphaned on restore like real grandchildren.
-        let saved_job_table = if this_shell_invocation {
+        let saved_job_table = if fresh_shell {
             std::mem::take(&mut self.shell_state.job_table)
         } else {
             self.shell_state.job_table.clone()
@@ -404,7 +454,7 @@ impl Executor {
         // child's pending queue dies with its pid — a signal like
         // jobs9.sub's `kill -USR1 $$` must never leak into the parent and
         // kill it at a later command boundary).
-        let saved_pending_signals = if this_shell_invocation {
+        let saved_pending_signals = if fresh_shell {
             crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default()
         } else {
             Vec::new()
@@ -414,9 +464,9 @@ impl Executor {
         // command (e.g. ${THIS_SH}) and cmd.words[1] is the script path;
         // positional params start at cmd.words[2]. Otherwise cmd.words[0]
         // is the script path and params start at cmd.words[1].
-        let param_start = if this_shell_invocation { 2 } else { 1 };
+        let param_start = if this_shell_invocation { 2 } else { 1 }; // word shape, not child model
         self.set_positional_params(cmd.words[param_start..].to_vec());
-        if this_shell_invocation {
+        if fresh_shell {
             // GNU variables.c:initialize_shell_variables sets OPTIND=1 for
             // every new shell invocation. OPTIND is not exported, so
             // child_shell_environment doesn't carry it over; set it here
@@ -438,7 +488,7 @@ impl Executor {
         // var) leak into the "fresh" child. Any writes the child makes die
         // with the scope, exactly like a real child's env block dying on
         // exit.
-        let saved_process_env: Option<HashMap<String, String>> = if this_shell_invocation {
+        let saved_process_env: Option<HashMap<String, String>> = if fresh_shell {
             let saved: HashMap<String, String> = env::vars().collect();
             for (name, _) in env::vars() {
                 env::remove_var(&name);
@@ -453,7 +503,7 @@ impl Executor {
             None
         };
 
-        let result = if uses_history_driver && this_shell_invocation {
+        let result = if uses_history_driver && fresh_shell {
             // bashhist.c pre_process_line / shell.c reader loop: expand and
             // record history group-by-group so `!!`/`!str` see the entries
             // the child's earlier lines recorded. The child gets a fresh
@@ -468,12 +518,14 @@ impl Executor {
             self.execute_ast(&ast)
         };
         let mut status = self.exit_code;
-        // GNU shell.c exit_shell -> run_exit_trap: a ${THIS_SH} child is a
-        // fresh process, so an EXIT trap the child script installed fires
-        // before the status returns to the parent. The `./x.sh` ENOEXEC
-        // mode is a forked subshell (execute_cmd.c:6139-6233) whose trap
-        // table is reset on entry, so it runs no EXIT trap here.
-        if this_shell_invocation {
+        // GNU shell.c exit_shell -> run_exit_trap: both ${THIS_SH} and
+        // ENOEXEC children are fresh shells (shell.c:429-464
+        // shell_reinitialize; execute_cmd.c:6237-6260), so an EXIT trap the
+        // child script installed fires before the status returns to the
+        // parent (trap9.sub probe: ./p4.sub with its own EXIT trap runs it
+        // at script end). The parent's EXIT trap does not: the fresh-shell
+        // env carries no trap table.
+        if fresh_shell {
             if let Ok(trap_status) = self.run_exit_trap_for_status(status) {
                 status = trap_status;
             }
@@ -497,7 +549,7 @@ impl Executor {
         self.shell_state.job_table = saved_job_table;
         self.background_children = saved_background_children;
         self.fd_table = saved_fd_table;
-        if this_shell_invocation {
+        if fresh_shell {
             // Discard signals that arrived while the emulated child was
             // alive — GNU's real child exits with its queue — then hand the
             // parent's parked queue back so nothing addressed to this

@@ -717,6 +717,20 @@ impl Executor {
                         self.finish_external_error(cmd, &stderr, 126)?;
                         return Ok(());
                     }
+                    // GNU execute_cmd.c:6237-6260: a text file the kernel
+                    // refuses (ENOEXEC) is executed by the forked child as
+                    // THIS shell in-process (args[0] = shell_name,
+                    // sh_longjmp subshell_top_level -> shell.c:429-464
+                    // shell_reinitialize) — a fresh shell with exported-env
+                    // only and kernel-preserved SIG_IGN dispositions, NOT
+                    // /bin/sh (trap2.sub's ERR trap and trap1.sub's
+                    // `trap -p` must run under bash semantics). The Windows
+                    // mailbox keeps the find_shell spawn: it cannot observe
+                    // a real execve refusal for extensionless text files.
+                    if cfg!(unix) {
+                        self.execute_enoexec_shell_script(cmd, program)?;
+                        return Ok(());
+                    }
                     if let Some(shell) = find_shell(&self.shell_state.env_vars) {
                         let mut shell_process = Command::new(shell);
                         shell_process.arg(program);
