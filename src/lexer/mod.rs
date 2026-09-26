@@ -203,6 +203,13 @@ fn tokenize_with_heredocs(
     // instances so `{` in a case pattern on its own line is still word
     // text, not a group opener.
     let mut lexer_parse_state = LexerParseState::default();
+    // rubash#155 / #130: whether the previous physical line was joined by
+    // the token-level brace-group signal (`tokens_open_unclosed_brace_group`
+    // below) with every text-level scan closed at that point. While true, an
+    // appended physical line that provably cannot open or close any
+    // construct takes the fast path below and skips the O(buffer)
+    // re-tokenization and re-scans entirely.
+    let mut brace_join_active = false;
 
     while let Some(raw_line) = lines.next() {
         // niubash #106: a '\r' immediately before the '\n' belongs to the
@@ -211,7 +218,16 @@ fn tokenize_with_heredocs(
         // oh-my-niu bundle is 100% CRLF). The GNU-fidelity rule this loop
         // documents above still applies to a '\r' NOT followed by '\n':
         // `set ""<CR>` with a bare carriage return keeps $1 = "\r".
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        // rubash#140: the tolerance is a Windows product decision
+        // (CRT text-mode compensation, niubash#120 family). GNU on unix
+        // keeps the '\r' as literal word data — a CRLF script there fails
+        // with `$'getopts\r': command not found` (parse.y read_token /
+        // read_secondary_line have no CR stripping) — so gate it.
+        let line = if cfg!(windows) {
+            raw_line.strip_suffix('\r').unwrap_or(raw_line)
+        } else {
+            raw_line
+        };
         // str::lines() drops the trailing empty string that split('\n')
         // produces when the input ends with '\n'. Replicate that here.
         if line.is_empty() && lines.peek().is_none() {
@@ -228,6 +244,53 @@ fn tokenize_with_heredocs(
         position += line.len() + 1;
         let line_had_terminator = position <= input.len();
         line_number += 1;
+
+        // rubash#155 / #130 fast path. GNU reads tokens sequentially
+        // (parse.y:3557 read_token): one pass over the input, with the
+        // reader state carried token to token. The full-buffer
+        // re-tokenization below is this tokenizer's substitute for that
+        // streaming model, and re-running it per appended physical line is
+        // what made a single `{` group spanning N lines O(N^2) (nvm.sh
+        // shape: 4000 lines = 14.3s vs GNU 9.7ms).
+        //
+        // While the only reason the logical line stays open is the
+        // token-level brace-group signal from the previous pass (quotes,
+        // command substitutions and compound assignments were all closed —
+        // reaching the join `continue` below proves that), a physical line
+        // without any quote, escape, expansion, brace, paren, comment,
+        // heredoc or `posix` bytes provably cannot change any of the
+        // decisions this iteration would recompute:
+        //
+        // - has_unclosed_quotes / _command_substitution /
+        //   _compound_assignment / _parameter_expansion: opening any of
+        //   them needs ' " ` $ ( { bytes; closing the already-open `${...}`
+        //   alternative needs `}`.
+        // - tokens_open_unclosed_brace_group: the standalone `{` keyword
+        //   flag persists — the group only folds when skip_brace finds its
+        //   `}`, and `brace_group_contains_heredoc_operator` can only gain
+        //   a `<<` (both need `}` / `<` bytes; even then the `{` stays a
+        //   standalone keyword either way).
+        // - ends_with_unquoted_backslash: needs a `\`; the backslash join
+        //   that popped one cannot have been taken on the previous pass.
+        // - line_posix_mode_change: the `posix` token of `set -o posix`
+        //   requires the contiguous substring once quoting and escaping
+        //   bytes are excluded.
+        // - heredoc_delimiters / relocate_comsub_heredoc_paren / the
+        //   comsub-heredoc header scan: all need `<`, `$` or quote bytes;
+        //   with the command substitution closed, keep header_scan_from
+        //   pacing the accumulated text exactly as the slow path's closed
+        //   branch does.
+        //
+        // Every other intermediate result (token gap capture, heredoc
+        // delimiter line numbers, line_posix_mode_change) is discarded by
+        // the join `continue` and recomputed by the final full pass, which
+        // still runs the unchanged code below — so the accepted token
+        // stream is byte-identical; only the per-line work drops from
+        // O(accumulated buffer) to O(this line).
+        if brace_join_active && brace_join_fast_path_line(line) {
+            header_scan_from = logical_line.len();
+            continue;
+        }
 
         let comsub_open = has_unclosed_command_substitution(&logical_line);
         if !comsub_open {
@@ -289,6 +352,7 @@ fn tokenize_with_heredocs(
         {
             logical_line.pop();
             continued_line = true;
+            brace_join_active = false;
             continue;
         }
         // parse.y:5379-5384: a backslash before EOF is NOT removed — GNU's
@@ -316,14 +380,17 @@ fn tokenize_with_heredocs(
         }
 
         if has_unclosed_quotes(&logical_line) {
+            brace_join_active = false;
             continue;
         }
         if has_unclosed_command_substitution(&logical_line) {
+            brace_join_active = false;
             continue;
         }
         // A `name=(` compound array assignment keeps reading physical lines
         // until its matching `)` (parse.y; ISSUE #78).
         if has_unclosed_compound_assignment(&logical_line) {
+            brace_join_active = false;
             continue;
         }
         // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
@@ -383,6 +450,12 @@ fn tokenize_with_heredocs(
             && !opens_function_body_after_previous_signature(&logical_line, &output)
             && !has_heredoc
         {
+            // Reaching here proves quotes, command substitutions and
+            // compound assignments are all closed: the join stands on the
+            // token-level brace-group flag (and/or an open `${...}`, which
+            // an inert line cannot close either). Arm the rubash#155 fast
+            // path for the next physical line.
+            brace_join_active = true;
             continue;
         }
 
@@ -411,6 +484,7 @@ fn tokenize_with_heredocs(
         lexer_parse_state = line_lex_state;
         logical_line.clear();
         header_scan_from = 0;
+        brace_join_active = false;
 
         for delimiter in delimiters {
             // GNU parse.y:3120-3135 gather_here_documents passes the parser's
@@ -449,10 +523,17 @@ fn tokenize_with_heredocs(
                 // rule — a trailing '\r' is the line terminator, so CRLF
                 // scripts can match their own delimiters and bodies stay
                 // clean. Bare '\r' (no following '\n') is preserved.
-                let body_line = body_line
-                    .strip_suffix('\r')
-                    .unwrap_or(body_line)
-                    .to_string();
+                // rubash#140: Windows-only tolerance; GNU on unix keeps
+                // the '\r' as delimiter/body data (make_here_document
+                // compares the raw line, make_cmd.c).
+                let body_line = if cfg!(windows) {
+                    body_line
+                        .strip_suffix('\r')
+                        .unwrap_or(body_line)
+                        .to_string()
+                } else {
+                    body_line.to_string()
+                };
                 position += body_line.len() + 1;
                 line_number += 1;
                 let mut raw_line = body_line.to_string();
@@ -810,6 +891,39 @@ fn relocate_comsub_heredoc_paren(input: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// rubash#155 / #130: whether a physical line appended to a logical line
+/// whose only open construct is the token-level brace-group join provably
+/// cannot change any lexer decision the join iteration recomputes.
+///
+/// The line must contain no byte that any consumer between the append and
+/// the join `continue` can react to: quote characters (has_unclosed_quotes,
+/// and quoting state inside every scanner), backslash (line continuations,
+/// escapes), `$` (parameter/command/arithmetic substitution openers),
+/// `{`/`}` (brace-group depth: a `}` could fold the group and end the join),
+/// `(`/`)` (compound assignments, subshells), `` ` `` (backtick
+/// substitutions), `#` (comments), `<` (heredoc operators and delimiters).
+/// The `posix` substring check keeps the per-pass `set -o posix` detection
+/// (`line_posix_mode_change`) exact: without quoting or escaping bytes the
+/// `posix` word token implies this contiguous substring in the line, and
+/// with it the slow path runs and computes the real answer.
+///
+/// This is an admission whitelist, not a symptom blacklist (rubash#117
+/// rule): a false negative only costs the O(buffer) slow path that the
+/// unchanged code below already implements; every admitted line is proven
+/// inert for the decisions listed in the fast-path comment in
+/// `tokenize_with_heredocs`.
+fn brace_join_fast_path_line(line: &str) -> bool {
+    if line.bytes().any(|b| {
+        matches!(
+            b,
+            b'\'' | b'"' | b'`' | b'$' | b'{' | b'}' | b'(' | b')' | b'#' | b'<' | b'\\'
+        )
+    }) {
+        return false;
+    }
+    !line.contains("posix")
 }
 
 fn tokenize_plain(input: &str, posix: bool, parse_state: &mut LexerParseState) -> Vec<Token> {

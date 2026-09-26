@@ -376,3 +376,137 @@ fn completion_regex_forms_stay_one_word_with_data_carriers() {
     );
     assert!(assignment.raw.ends_with("]'"));
 }
+
+// ---------------------------------------------------------------------------
+// rubash#155 / #130: brace-group join fast path
+// ---------------------------------------------------------------------------
+
+/// Admission whitelist of the rubash#155 fast path (mod.rs
+/// `brace_join_active`): a line is only admitted when no byte can open or
+/// close any construct the join iteration tracks.
+#[test]
+fn brace_join_fast_path_line_admission() {
+    assert!(brace_join_fast_path_line("x=1"));
+    assert!(brace_join_fast_path_line("echo plain words; and-more.args"));
+    assert!(brace_join_fast_path_line(""));
+    assert!(brace_join_fast_path_line(": route-table/if.cfg"));
+    // Every byte class a consumer between the append and the join
+    // `continue` reacts to disqualifies the line.
+    assert!(!brace_join_fast_path_line("v='q'"));
+    assert!(!brace_join_fast_path_line("v=\"q\""));
+    assert!(!brace_join_fast_path_line("echo ${x}"));
+    assert!(!brace_join_fast_path_line("}"));
+    assert!(!brace_join_fast_path_line("{ nested"));
+    assert!(!brace_join_fast_path_line("cat <<EOF"));
+    assert!(!brace_join_fast_path_line("run & (bg)"));
+    assert!(!brace_join_fast_path_line("x=$(echo hi)"));
+    assert!(!brace_join_fast_path_line("x=`echo hi`"));
+    assert!(!brace_join_fast_path_line("echo a\\"));
+    assert!(!brace_join_fast_path_line("# comment"));
+    assert!(!brace_join_fast_path_line("set -o posix"));
+}
+
+/// nvm.sh shape (rubash#130): one `{` group spanning N physical lines of
+/// inert statements. The fast path skips the per-line full-buffer
+/// re-tokenization; the accepted stream must still be the folded group
+/// keyword attributed to the opening line.
+#[test]
+fn multiline_brace_group_folds_into_one_keyword() {
+    let mut script = String::from("{\n");
+    for i in 0..300 {
+        script.push_str(&format!("x={}\n", i));
+    }
+    script.push_str("}\n");
+    let tokens = tokenize(&script);
+    let group = tokens
+        .iter()
+        .find(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.ends_with('}')
+        })
+        .expect("folded group token");
+    assert!(group.value.contains("x=299"));
+    assert_eq!(group.position, 1, "group attributed to its opening line");
+}
+
+/// Fast-path (inert) and slow-path (reactive) lines interleave inside one
+/// joined group; quotes, `${...}` and `$(...)` on slow lines must not
+/// derail the join, and the closing `}` line still folds everything.
+#[test]
+fn brace_join_mixes_fast_and_slow_lines() {
+    let script =
+        "{\nx=1\ny=2\nv=\"quoted $x tail\"\nw=$(echo sub)\necho ${v:-d}\nz=3\n}\necho after\n";
+    let tokens = tokenize(script);
+    let group = tokens
+        .iter()
+        .find(|token| {
+            token.kind == TokenKind::Keyword
+                && token.value.starts_with('{')
+                && token.value.ends_with('}')
+        })
+        .expect("folded group token");
+    assert!(group.value.contains("quoted $x tail"));
+    assert!(group.value.contains("${v:-d}"));
+    assert!(tokens
+        .iter()
+        .any(|token| token.kind == TokenKind::Word && token.value == "after"));
+}
+
+/// The fast path skips the per-pass `line_posix_mode_change`
+/// recomputation; a `set -o posix` line inside the joined group must still
+/// flip the parse mode for the logical lines that follow the group
+/// (GNU parses lazily — the switch applies to everything read afterwards).
+#[test]
+fn posix_switch_inside_multiline_brace_group_applies_after_close() {
+    let source = "{\nx=1\nset -o posix\nx=2\n}\necho \"${IFS+'}'z}\"\n";
+    let tokens = tokenize_with_initial_posix(source, false);
+    assert!(
+        tokens.iter().any(|token| token.raw == "\"${IFS+'}'z}\""),
+        "posix pairing (first `}}` closes) after an in-group switch: {tokens:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// rubash#140: CRLF line-terminator tolerance is Windows-only
+// ---------------------------------------------------------------------------
+
+/// On Windows the trailing `\r` of a CRLF physical line is the terminator,
+/// not word data (niubash #106 product decision).
+#[cfg(windows)]
+#[test]
+fn crlf_line_terminator_stripped_on_windows() {
+    let tokens = tokenize("x=1\r\n");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    assert!(!assignment.value.contains('\r'), "{tokens:?}");
+    // A CRLF heredoc still terminates on its own delimiter line.
+    let tokens = tokenize("cat <<EOF\r\nbody\r\nEOF\r\n");
+    let body = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::HereDocBody)
+        .map(|token| token.value.as_str());
+    assert_eq!(body, Some("body\n"));
+}
+
+/// On unix GNU keeps the `\r` as literal data (rubash#140): the delimiter
+/// line of a CRLF heredoc reads `EOF\r`, never matches `EOF`, and the
+/// heredoc runs to end of file (make_cmd.c compares the raw line).
+#[cfg(unix)]
+#[test]
+fn crlf_line_terminator_kept_as_data_on_unix() {
+    use crate::executor::markers::DATA_DOLLAR_STR;
+    let tokens = tokenize("cat <<EOF\r\nbody\r\nEOF\r\n");
+    let body = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::HereDocBody)
+        .map(|token| token.value.as_str())
+        .expect("heredoc body token");
+    assert!(
+        body.starts_with(DATA_DOLLAR_STR),
+        "unterminated heredoc keeps the EOF marker: {body:?}"
+    );
+    assert!(body.contains("body\r\n"), "CR stays in the body: {body:?}");
+}
