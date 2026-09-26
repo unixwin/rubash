@@ -271,3 +271,108 @@ fn trailing_unquoted_backslash_keeps_stdin_line_open() {
     // not a continuation.
     assert!(!stdin_source_needs_more("echo a\\\r\n"));
 }
+
+/// rubash#144: a `\'` escaped quote consumes two characters without opening
+/// quote state (parse.y:5366-5398 read_token_word), so the following `'`
+/// re-enters a fresh single-quoted span (parse.y:5419-5437 shellquote
+/// branch). Inside that span every byte is literal data —
+/// subst.c:11882-11886 never consults the command-substitution scanner —
+/// so a backtick there must travel as the DATA_BACKTICK carrier in the
+/// assignment value, or expand_backtick_substitution_typed executes the
+/// body (`x='a'\''`b`'` ran `b` and stored `a'`).
+#[test]
+fn escaped_quote_reenters_single_quotes_with_literal_backticks() {
+    use crate::executor::markers::{DATA_BACKTICK, DATA_DOLLAR, DATA_SQUOTE};
+    let tokens = tokenize("x='a'\\''`b`'");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    // `'a'` -> a, `\'` -> data quote, `` '`b`' `` -> backtick-carrier b
+    // backtick-carrier: value must NOT contain a live backtick for the
+    // assignment expander's comsub fast paths to claim.
+    assert!(assignment.raw.contains("\\''"));
+    let expected = format!("a{DATA_SQUOTE}{DATA_BACKTICK}b{DATA_BACKTICK}");
+    assert!(
+        assignment.value.ends_with(&expected),
+        "value {:?} should end with {:?}",
+        assignment.value,
+        expected
+    );
+    // Lone backtick in the re-entered span stays literal too (c03: fatal EOF).
+    let tokens = tokenize("x='a'\\''b`c'");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    assert!(
+        !assignment.value.contains('`'),
+        "value {:?}",
+        assignment.value
+    );
+    // A `$` in the re-entered span is data (c06 family / `u='a'\''$h'`).
+    let tokens = tokenize("x='a'\\''$h'");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    assert!(
+        assignment.value.contains(DATA_DOLLAR),
+        "value {:?} must carry the protected dollar",
+        assignment.value
+    );
+    assert!(!assignment.value.contains('$'));
+}
+
+/// rubash#144 assignment form mixing a re-entered `'...'` span with a live
+/// `$(...)`: the `$(` branch must protect the span content too
+/// (`x='a'\''`b`'$(echo z)` — GNU keeps `` `b` `` literal and runs only z).
+#[test]
+fn assignment_dollar_paren_branch_protects_reentered_span() {
+    let tokens = tokenize("x='a'\\''`b`'$(echo z)");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    let backticks: &str = &assignment
+        .value
+        .chars()
+        .filter(|ch| *ch == '`')
+        .collect::<String>();
+    assert!(
+        backticks.is_empty(),
+        "assignment value must not carry a live backtick: {:?}",
+        assignment.value
+    );
+    assert!(assignment.value.contains("$(echo z)"));
+}
+
+/// bash_completion:188 (`_comp_dequote__regex_safe_word`) and ssh.bash:457
+/// (`_comp_cmd_scp__path_esc`) forms: the whole RHS is one assignment word
+/// whose re-entered single-quoted spans contain backticks, `"` and `$`.
+#[test]
+fn completion_regex_forms_stay_one_word_with_data_carriers() {
+    let tokens = tokenize("_r='^([^\\'\\''\"`;&|<>()!]|'$rq'|$rp')*$'");
+    let words: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::Assignment)
+        .collect();
+    assert_eq!(words.len(), 1, "one assignment word: {tokens:?}");
+    let value = &words[0].value;
+    assert!(!value.contains('`'), "value {value:?}");
+    assert!(
+        value.contains("$rq"),
+        "unquoted $name expands later: {value:?}"
+    );
+    let tokens = tokenize("_p='[][(){}<>\"'\"'\"'\",:;^&!$=?`\\\\|[:space:]]'");
+    let assignment = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Assignment)
+        .expect("assignment token");
+    assert!(
+        !assignment.value.contains('`'),
+        "value {:?}",
+        assignment.value
+    );
+    assert!(assignment.raw.ends_with("]'"));
+}

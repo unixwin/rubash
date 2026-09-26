@@ -2,7 +2,10 @@ use super::classification::{
     assignment_rhs_is_fully_single_quoted, assignment_value_is_quoted, is_assignment, is_keyword,
     mark_quoted_assignment_value, protect_fully_single_quoted_assignment, quoted_literal_tilde,
 };
-use super::quotes::{remove_shell_quotes_outside_backticks, remove_shell_quotes_with_posix};
+use super::quotes::{
+    remove_shell_quotes_assignment, remove_shell_quotes_outside_backticks,
+    remove_shell_quotes_with_posix,
+};
 use super::scanner::Lexer;
 use super::token::{Token, TokenKind};
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
@@ -42,15 +45,19 @@ impl<'a> Lexer<'a> {
         } else if is_assignment(&raw) && raw.contains("$(") {
             // GNU subst.c preserves quotes inside `$(...)` command
             // substitutions during assignment-word quote removal.
-            // `remove_shell_quotes_with_posix` copies `$(...)` bodies
+            // `remove_shell_quotes_assignment` copies `$(...)` bodies
             // verbatim via `copy_dollar_paren_substitution`, so quotes
             // inside the substitution are preserved while backslash
-            // escapes outside it are converted to internal markers.
+            // escapes outside it are converted to internal markers, and —
+            // unlike the plain word dequote — expansion triggers inside
+            // single-quoted spans travel as data carriers
+            // (`x='a'\''`b`'$(echo z)` must keep `` `b` `` literal,
+            // rubash#144; GNU parse.y:5366-5398 + subst.c:11882-11886).
             // Without this, `eval c=\$\'\\$(printf %o $a)\'` kept literal
             // backslashes that the expansion walker treated as escaping
             // the `$`, suppressing the command substitution (iquote.tests
             // line 69).
-            remove_shell_quotes_with_posix(raw, self.posix)
+            remove_shell_quotes_assignment(raw, self.posix)
         } else if raw.starts_with("$((") {
             // GNU keeps the text of a `$((...))` expansion verbatim at the
             // word level; the arithmetic stage applies its own double-quote

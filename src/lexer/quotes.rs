@@ -64,6 +64,29 @@ fn has_content_outside_single_quotes(raw: &str) -> bool {
 /// quotes are literal), otherwise the de-quoted value keeps quote structure
 /// the expansion stage cannot interpret (posixexp2 case 28).
 pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
+    remove_shell_quotes_inner(raw, posix, false)
+}
+
+/// Assignment-word quote removal: identical to
+/// `remove_shell_quotes_with_posix` except that expansion-trigger characters
+/// inside `'...'` spans travel as the walker's data carriers.
+///
+/// GNU parse.y:5366-5398 read_token_word: a backslash-escaped quote
+/// consumes two characters and never opens quote state, so the `'` right
+/// after `\'` re-enters parse_matched_pair (parse.y:5419-5437) as a fresh
+/// single-quoted span. Inside that span every byte is quoted data —
+/// subst.c:11882-11886 expand_word_internal case '\'' hands the whole span
+/// to add_quoted_string without ever consulting the command-substitution
+/// scanner — and dequote_string (subst.c:4807) later removes only the
+/// delimiters. A `name=value` word whose RHS mixes spans (`x='a'\''`b`'`)
+/// must therefore keep `` `b` `` as literal data, not as a comsub opener the
+/// assignment expander (expand_backtick_substitution_typed /
+/// expand_mixed_command_substitution_assignment) would execute.
+pub(super) fn remove_shell_quotes_assignment(raw: &str, posix: bool) -> String {
+    remove_shell_quotes_inner(raw, posix, true)
+}
+
+fn remove_shell_quotes_inner(raw: &str, posix: bool, assignment: bool) -> String {
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
     // Array-subscript regions keep `\"` as a bare data quote: the subscript
@@ -155,8 +178,12 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                 // segment FIRST, and a position-gated tag dropped its `"`
                 // (the eval then died on an unterminated quote). A fully
                 // single-quoted word keeps the raw `"` — its downstream
-                // fast path restores \x1f only.
-                let protect_dquote = has_content_outside_single_quotes(raw);
+                // fast path restores \x1f only. For assignment words the
+                // `name=` prefix always sits outside the spans, so the
+                // gate is trivially true there; assignments additionally
+                // protect `` ` `` as DATA_BACKTICK (see
+                // remove_shell_quotes_assignment).
+                let protect_dquote = assignment || has_content_outside_single_quotes(raw);
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
                         break;
@@ -165,6 +192,13 @@ pub(crate) fn remove_shell_quotes_with_posix(raw: &str, posix: bool) -> String {
                         // Preserve the existing protected-dollar contract used by
                         // downstream expansion, but do not protect literal globs.
                         out.push(DATA_DOLLAR);
+                    } else if assignment && quoted == '`' {
+                        // Assignment words only (see remove_shell_quotes_assignment):
+                        // the word path leaves a literal backtick in place —
+                        // plain `echo 'a`b'` prints through paths that do not
+                        // decode \x1a (probed 2026-09-26: leaks `a\032b`), so
+                        // the carrier must not leave the assignment pipeline.
+                        out.push(crate::executor::markers::DATA_BACKTICK);
                     } else if protect_dquote && quoted == '"' {
                         out.push(crate::executor::markers::DATA_DQUOTE);
                     } else {
@@ -310,11 +344,27 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                     out.push(PARAM_NAME_END_MARKER);
                 }
                 pending_name = false;
+                // GNU parse.y:5366-5398 read_token_word: `\'` consumes the
+                // escaped quote without opening quote state, so the next `'`
+                // starts a fresh single-quoted span (parse.y:5419-5437), and
+                // inside that span subst.c:11882-11886 never consults the
+                // command-substitution scanner — every byte is quoted data.
+                // Since this function already strips the `'` delimiters, the
+                // expansion-trigger bytes must travel as the walker's data
+                // carriers (the protect_fully_single_quoted_assignment
+                // convention, classification.rs) or the assignment expander
+                // re-reads `x='a'\''`b`'` as `a'` plus a live `` `b` ``
+                // substitution and executes `b` (rubash#144).
                 for quoted in chars.by_ref() {
                     if quoted == '\'' {
                         break;
                     }
-                    out.push(quoted);
+                    match quoted {
+                        '$' => out.push(DATA_DOLLAR),
+                        '`' => out.push(crate::executor::markers::DATA_BACKTICK),
+                        '"' => out.push(crate::executor::markers::DATA_DQUOTE),
+                        _ => out.push(quoted),
+                    }
                 }
             }
             '"' => {

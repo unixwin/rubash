@@ -790,11 +790,19 @@ impl Executor {
                     crate::executor::markers::DATA_SQUOTE,
                     crate::executor::markers::DATA_DQUOTE,
                 ]) {
+                    // No `\'`->`'` collapse here: a source `\'` already
+                    // arrives as the bare \x17 carrier (lexer quotes.rs
+                    // backslash arm), and a `\` sitting in front of the
+                    // carrier is a LITERAL backslash that rode at the end
+                    // of a single-quoted span — GNU parse.y parse_matched_pair
+                    // keeps `\` as data inside '...' and dequote_string
+                    // (subst.c:4807) removes only quote delimiters, so
+                    // `'^([^\''`...` stores `^([^\'` with the backslash
+                    // (rubash#144; collapsing it lost the backslash).
                     restored = restored
                         .replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "'")
                         .replace(crate::executor::markers::DATA_SQUOTE, "'")
-                        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
-                        .replace("\\'", "'");
+                        .replace(crate::executor::markers::DATA_DQUOTE, "\"");
                 }
                 restored
             }
