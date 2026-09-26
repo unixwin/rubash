@@ -940,7 +940,33 @@ impl Executor {
         // prefix would otherwise survive as a literal dollar plus a quoted
         // span (y=$"A$(echo B)C" stored `$"ABC` instead of `ABC`).
         let value = normalize_dollar_double_quotes(value);
-        let spans = scan_substitution_spans(&value);
+        let all_spans = scan_substitution_spans(&value);
+        if all_spans.is_empty() {
+            return None;
+        }
+        // GNU subst.c:10345-10444 parameter_brace_expand: the operator RHS
+        // of `${param:-word}` / `${param-word}` / `${param=word}` /
+        // `${param?word}` is part of the `${...}` expansion unit. When the
+        // parameter is set (non-null for the `:` forms) the RHS is freed
+        // WITHOUT being expanded (subst.c:10385 FREE(value)) — nested
+        // `$(...)`/backticks never execute; when it is used, the RHS is
+        // expanded exactly once inside that unit. This splitter expands
+        // pieces independently, so a span nested inside a top-level
+        // `${...}` body must NOT be split out: running it here executed
+        // skipped default values (side effects ran; output was appended
+        // after the real value as `<value><output>}`, rubash#150) and ran
+        // used `:=` words a second time. Leave the whole braced region to
+        // the embedded-parameter walker, which consumes `${...}` as one
+        // fragment with the operator's lazy semantics.
+        let braced_regions = top_level_braced_parameter_regions(&value, &all_spans);
+        let spans: Vec<_> = all_spans
+            .into_iter()
+            .filter(|span| {
+                !braced_regions
+                    .iter()
+                    .any(|(start, end)| span.start >= *start && span.end <= *end)
+            })
+            .collect();
         if spans.is_empty() {
             return None;
         }
@@ -1684,6 +1710,59 @@ impl Executor {
         let result = self.expand_assignment_value_result(name, value);
         (result.value, result.substitution_status)
     }
+}
+
+/// Byte ranges `[start, end)` of every top-level `${...}` braced-parameter
+/// region in `value` (closing `}` inclusive), skipping single-quoted text and
+/// whole command-substitution bodies — the same `${` + matching_parameter_brace
+/// walk the `:=` pre-scan uses (apply_parameter_assignment_expansions_in_word).
+/// A `${` without a matching `}` is left unrecorded (the walker reports it).
+fn top_level_braced_parameter_regions(
+    value: &str,
+    spans: &[crate::executor::substitution_metadata::SubstitutionSpan],
+) -> Vec<(usize, usize)> {
+    let span_ends_by_start: std::collections::HashMap<usize, usize> =
+        spans.iter().map(|span| (span.start, span.end)).collect();
+    let bytes = value.as_bytes();
+    let mut regions = Vec::new();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'\\' && !single {
+            index += 2;
+            continue;
+        }
+        if ch == b'\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if ch == b'"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if single {
+            index += 1;
+            continue;
+        }
+        if let Some(&span_end) = span_ends_by_start.get(&index) {
+            index = span_end;
+            continue;
+        }
+        if ch == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            let body_start = index + 2;
+            if let Some(end) = matching_parameter_brace(&value[body_start..]) {
+                regions.push((index, body_start + end + 1));
+                index = body_start + end + 1;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    regions
 }
 
 /// Split a compound assignment body into element tokens, treating single
