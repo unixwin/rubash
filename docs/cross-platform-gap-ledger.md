@@ -97,13 +97,17 @@ aarch64-apple-darwin 干净；5 条 WSL GNU Bash 5.3.0 基线对齐。
   （PATHEXT、`;` 切分），唯一调用点已被 cfg!(windows) 包裹——目前良性，建议改名防误用。
 
 niubash 层：
-- **N10 🔴 命令补全只认 Windows 后缀**（`completion/command.rs:154-196`）：PATH 扫描
+- **N10 ✅ 命令补全只认 Windows 后缀**（`completion/command.rs:154-196`）：PATH 扫描
   仅收 .exe/.bat/.cmd/.ps1/.sh/.bash/.zsh/.niubash 且去后缀；unix 无后缀可执行全漏，
-  补全退化为硬编码 Windows 命令表——unix 上第一个用户可感知的功能失效。状态：已派 A6。
-- **N11 ⚪ which_tool 后缀探测无门控**（`completion/external.rs:988-1000`）：unix 上
-  `foo.exe` 抢先于真 `foo`；对照 runtime.rs:282-286 正确写法补 cfg。状态：已派 A6。
-- **N12 ⚪ windows_terminal 模块全平台编译**（`lib.rs:32` 无门）：unix 下
-  `--install-wt-profile` 与 fonts.rs:136 调用仍可达（静默跳过）。状态：已派 A6。
+  补全退化为硬编码 Windows 命令表——unix 上第一个用户可感知的功能失效。
+  已修（niubash b54a346）：unix 按可执行位收录（`metadata()` **跟随符号链接**——与
+  GNU findcmd.c `file_status` 的 stat 语义一致，homebrew/alternatives 目录正确）、
+  不去后缀、常用命令表按平台分叉；Windows 分支字节不变。
+- **N11 ✅ which_tool 后缀探测无门控**（`completion/external.rs:988-1000`）：unix 上
+  `foo.exe` 抢先于真 `foo`。已修（niubash b54a346）：后缀表与 admission cfg 配对。
+- **N12 ✅ windows_terminal 模块全平台编译**（`lib.rs:32` 无门）：已修（niubash
+  b54a346）：模块 `#[cfg(windows)]`；`--install-wt-profile` unix 下明确报
+  Windows-only；fonts/setup_wizard 的 WT 触点 unix no-op 配对。
 - N1 修订：`repl.rs:97` 已漂移为 `spawn_self_update`（原 file:line 失效）；宿主直接
   spawn 全量清单：`completion/runtime.rs:125`、`completion/external.rs:546`、
   `shell.rs:2023/2100/2123/2162/4418/4534`（direnv/zoxide/thefuck/fzf/进程插件，
