@@ -1674,12 +1674,41 @@ impl Executor {
         let saved_exit_code = self.exit_code;
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
+        // GNU subst.c:7306-7313 command_substitute: the substitution child's
+        // stdout is the capture pipe, never the caller's fd 1 — dup2
+        // (fildes[1], 1) replaces whatever binding the parent carried. This
+        // shortcut runs the function on the caller's own executor, so the
+        // same replacement must be bracketed around the call (identical to
+        // the fd-1 rebind in command_list_substitution_output_typed,
+        // niubash shell-quirks Q16). Without it, an enclosing `exec > f` /
+        // `source f > f` fd-1 file binding routes the function's stdout to
+        // the outer file while the capture reads an empty pipe (rubash#161:
+        // bash-it alias reload empty, nvm `nvm ls` missing default aliases).
+        // fd 2 stays inherited — `$()` does not capture stderr (GNU
+        // subst.c:7149).
+        let saved_fd1 = self.fd_table.entries.insert(
+            1,
+            crate::executor::fd_table::FdEntry {
+                read: None,
+                write: Some(FdWriteEndpoint::Stdout),
+                closed: false,
+                dynamic: false,
+            },
+        );
         // Direct-stdout builtins inside the function consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the call its own capture.
         let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
             self.execute_function(name, &args, &call)
         });
+        match saved_fd1 {
+            Some(entry) => {
+                self.fd_table.entries.insert(1, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&1);
+            }
+        }
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;

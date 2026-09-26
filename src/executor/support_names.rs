@@ -366,6 +366,21 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
     redirect: &Redirect,
 ) {
     for command in commands {
+        // GNU execute_cmd.c execute_function (:5322) applies only the
+        // redirects written in the definition text (`f() { ...; } 2>err`) —
+        // an enclosing compound/source fd-1 binding never becomes part of
+        // the function: `{ f() { echo x; }; } >g` leaves g empty and a later
+        // `f` writes to the caller's stdout (the binding lives on the
+        // caller's fd 1 while executing inside the group, and a definition
+        // emits no output). Injecting the group target here would persist it
+        // via define_function's function_definition_redirects and re-apply
+        // it at EVERY call — including calls inside a command substitution,
+        // where it pulls the function's stdout out of the capture pipe and
+        // into the outer file (rubash#161: `source f > file` made `$(_ff)`
+        // return empty and leak FFOUT into the file).
+        if command.function_command.is_some() {
+            continue;
+        }
         // GNU redir.c: a compound command's redirects are opened before the
         // body runs, so an inner `>&N` / `>/dev/fd/N` duplicates fd N as the
         // GROUP left it. A command whose own stdout redirect is an fd alias
