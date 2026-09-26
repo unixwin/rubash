@@ -101,3 +101,44 @@ fn escaped_multibyte_heredoc_delimiter_inside_command_substitution() {
         "hi\n"
     );
 }
+
+// niubash#139 (rubash lexer): `skip_parenthesized_unit_corrected` collected
+// `chars[index..]` into `rest` (a string starting AT the current char) and
+// then sliced `&rest[1..]` — a char boundary only for single-byte chars. A
+// multibyte character inside `$(...)` combined with `${...}` in one word
+// panicked with "start byte index 1 is not a char boundary". The fix steps
+// over `ch.len_utf8()` bytes. GNU oracle (bash 5.3): values concatenate
+// verbatim.
+
+fn rubash_full(script: &str) -> (String, String, i32) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("run rubash");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn multibyte_inside_comsub_next_to_parameter_expansion() {
+    // The exact issue-139 trigger shapes: `${v}` or `${#v}` sharing one
+    // double-quoted word with a `$(...)` whose body is multibyte.
+    for (script, want) in [
+        ("v=hello; echo \"${v}$(echo 中)\"", "hello中\n"),
+        ("v=hello; echo \"${v}$(echo 中文)\"", "hello中文\n"),
+        ("v=he; echo \"${v}$(echo \u{1f680})\"", "he\u{1f680}\n"),
+        ("v=abc; echo \"${#v} $(echo 中文)\"", "3 中文\n"),
+        ("v=abc; echo \"$(echo 中文) ${#v}\"", "中文 3\n"),
+        // Multibyte deeper inside the comsub body, not just the result.
+        ("v=ok; echo \"${v}$(echo a中b)\"", "oka中b\n"),
+        ("v=ok; echo \"x${v}$(echo 中)y\"", "xok中y\n"),
+    ] {
+        let (stdout, stderr, status) = rubash_full(script);
+        assert_eq!(stdout, want, "script: {script}");
+        assert_eq!(status, 0, "stderr: {stderr}");
+    }
+}

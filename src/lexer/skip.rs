@@ -990,7 +990,10 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             &mut case_depth,
             &mut word_boundary,
             &mut current_word_boundary,
-            &rest[1..],
+            // `rest` begins at `ch`: advance by its UTF-8 width, not a fixed
+            // byte — multibyte chars here panicked on the byte slice
+            // (niubash#139 `"${v}$(echo 中)"`).
+            &rest[ch.len_utf8()..],
         );
         match ch {
             '\'' => single = true,
