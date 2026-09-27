@@ -2,6 +2,99 @@ use super::*;
 use crate::executor::markers::DATA_DOLLAR;
 use crate::executor::path::shell_directory_entries;
 
+/// Normalize error-line attribution across a parsed command-substitution
+/// body so diagnostics match GNU's comsub line namespace (rubash#136).
+///
+/// GNU runs comsub bodies through parse_and_execute
+/// (builtins/evalstring.c:319), whose string namespace advances
+/// `line_number` once per bare-newline statement boundary — never for
+/// connector continuations (`;` `&` `&&` `||` `|` ending a line) and never
+/// more than once for a run of blank lines. Verified against WSL GNU Bash
+/// 5.3.0 (2026-09-27, target/p4/shape{1,4,5,7}.sh):
+/// - `$(\nc41 ||\nc42 ||\nc43)` opened at line N reports N,N,N
+///   (pyenv-global #124: GNU prints 42,42,42 where rubash printed
+///   42,43,44);
+/// - `$(\nc41\nc42 ||\nc43)` reports N,N+1,N+1;
+/// - `$(\nc41;\nc42\n)` and `$(\nc41 &\nc42\n)` report N,N;
+/// - `$(\nb41\n\n\nb42\n)` reports N,N+1 (blank lines collapse).
+/// The physical-line counts rubash's reparse produces are remapped onto
+/// that statement index; the seed line itself (first statement) already
+/// matches GNU and is left alone. Top-level script attribution is
+/// physical-line based in GNU (parse.y:5851 simplecmd_lineno) and in
+/// rubash, so this normalization is scoped to comsub bodies only.
+pub(in crate::executor) fn normalize_comsub_body_statement_lines(
+    ast: &mut crate::parser::Ast,
+    tokens: &[crate::lexer::Token],
+) {
+    use crate::lexer::TokenKind;
+
+    // A statement break is a line-break separator whose immediately
+    // preceding token is not itself a connector or another line-break
+    // separator (run collapse). Connectors: |, |&, &&, ||, &, ;.
+    let is_connector = |kind: &TokenKind| {
+        matches!(
+            kind,
+            TokenKind::Pipe
+                | TokenKind::PipeErr
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::Background
+                | TokenKind::Semicolon
+        )
+    };
+    let is_break_separator =
+        |kind: &TokenKind, line_break: bool| kind == &TokenKind::Semicolon && line_break;
+    let mut breaks: Vec<usize> = Vec::new();
+    let mut previous: Option<&crate::lexer::Token> = None;
+    for token in tokens {
+        if is_break_separator(&token.kind, token.line_break)
+            && previous.is_some_and(|prev| {
+                !is_connector(&prev.kind) && !is_break_separator(&prev.kind, prev.line_break)
+            })
+        {
+            breaks.push(token.position);
+        }
+        previous = Some(token);
+    }
+
+    let Some(base) = ast.commands.iter().filter_map(|command| command.line).min() else {
+        return;
+    };
+    let remap = |line: usize| -> usize {
+        base + breaks
+            .iter()
+            .filter(|&&break_line| break_line >= base && break_line < line)
+            .count()
+    };
+    let remap_opt = |line: &mut Option<usize>| {
+        if let Some(value) = *line {
+            *line = Some(remap(value));
+        }
+    };
+
+    for command in &mut ast.commands {
+        remap_opt(&mut command.line);
+        if let Some(list) = &mut command.and_or_list {
+            for member in &mut list.commands {
+                remap_opt(&mut member.line);
+                if let Some(pipeline) = &mut member.pipeline_command {
+                    for stage in &mut pipeline.stages {
+                        remap_opt(&mut stage.line);
+                    }
+                }
+            }
+        }
+        if let Some(pipeline) = &mut command.pipeline_command {
+            for stage in &mut pipeline.stages {
+                remap_opt(&mut stage.line);
+            }
+        }
+        if let Some(background) = &mut command.background_command {
+            remap_opt(&mut background.command.line);
+        }
+    }
+}
+
 impl Executor {
     /// Expands a command-substitution argument word. When the word was
     /// quoted in the source and starts with `~`, prefix the quote-protection
@@ -540,7 +633,8 @@ impl Executor {
             body_start_line,
             true,
         );
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
         if ast.commands.iter().any(command_has_parse_error) {
             // GNU reports the body's syntax error (parse.y yyerror) even

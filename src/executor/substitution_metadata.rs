@@ -337,6 +337,47 @@ pub(crate) fn shell_text_to_raw_bytes(text: &str) -> Vec<u8> {
     output
 }
 
+/// Decode owner-tagged raw-byte marker pairs into byte chars (WTF-8 style:
+/// byte value == code point) for the Windows child-argv boundary.
+///
+/// GNU shell_execve (execute_cmd.c:6139) hands execve the raw word bytes, so
+/// an invalid-UTF-8 byte such as 0xCD in `$'ab\xCD'` reaches the child as
+/// that byte. Windows argv is UTF-16 (CreateProcessW), so raw byte-argv does
+/// not exist; the documented contract here (rubash#141) is that each invalid
+/// byte travels as its own code point (U+00CD for byte 0xCD) instead of the
+/// internal transport marker pair — the previous behavior leaked the PUA
+/// pair (U+E000 U+E0CE) verbatim into the child command line, which ANSI
+/// children then re-encoded through the system codepage as GBK mojibake.
+pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                // E000 E000 is an escaped literal U+E000 in user data.
+                output.push(ch);
+            }
+            Some(next)
+                if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next as u32)) =>
+            {
+                output.push(
+                    char::from_u32(next as u32 - RAW_BYTE_MARKER_FIRST)
+                        .expect("raw-byte marker payload maps to a valid Latin-1 code point"),
+                );
+            }
+            // E000 + <non-payload char> is a stray introducer (recovery;
+            // nothing produces this): keep the payload char.
+            Some(next) => output.push(next),
+            None => output.push(ch),
+        }
+    }
+    output
+}
+
 /// Decode marker characters embedded in an otherwise byte-oriented output.
 ///
 /// Echo can receive shell text from a read record, but it also emits raw

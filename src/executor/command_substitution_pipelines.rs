@@ -256,7 +256,8 @@ impl Executor {
             comsub_start_line,
             true,
         );
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
         let first = ast.commands.first()?;
         let (first, piped_next) = if let Some(pipeline_command) = &first.pipeline_command {
             (
@@ -346,7 +347,8 @@ impl Executor {
             comsub_start_line,
             true,
         );
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
         let first = ast.commands.first()?;
         let (first, piped_next) = if let Some(pipeline_command) = &first.pipeline_command {
             (

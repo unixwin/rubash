@@ -740,6 +740,14 @@ pub fn external_command_for_named_program(
                 external_argument_path(arg, env_vars)
             }
         })
+        // Child-argv byte contract (rubash#141): GNU hands execve the raw
+        // word bytes (execute_cmd.c:6139 shell_execve); Windows argv is
+        // UTF-16, so an invalid-UTF-8 byte travels as its own code point
+        // (WTF-8 style, byte value == code point) instead of the internal
+        // PUA marker pair, which ANSI children re-encoded as GBK mojibake.
+        .map(|arg| {
+            crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(&arg)
+        })
         .collect::<Vec<_>>();
 
     if is_windows_powershell_script(program) {

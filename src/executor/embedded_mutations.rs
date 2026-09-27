@@ -1393,7 +1393,8 @@ impl Executor {
             body_start_line,
             true,
         );
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
         // GNU subst.c function_substitute: a funsub `${ ...; }` redirects the
         // body's stdout to the anonymous capture file (its expansion value);
@@ -1691,7 +1692,8 @@ impl Executor {
             body_start_line,
             true,
         );
-        let ast = crate::parser::parse(&tokens);
+        let mut ast = crate::parser::parse(&tokens);
+        super::command_substitution::normalize_comsub_body_statement_lines(&mut ast, &tokens);
         if !command_substitution_needs_ast_execution(&ast) {
             return None;
         }

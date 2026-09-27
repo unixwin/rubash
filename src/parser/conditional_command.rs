@@ -270,8 +270,11 @@ impl<'a> CondCursor<'a> {
                 );
             }
             let tok = match (value.as_str(), raw == value) {
-                ("!", _) => CondTok::Bang,
+                // `(_, false)` first: any quoted fragment is a WORD — GNU's
+                // bang check (parse.y:5117) reads the parser's raw word
+                // text, where a quoted `"!"` starts with `"` and is a term.
                 (_, false) => CondTok::Word,
+                ("!", _) => CondTok::Bang,
                 ("&&", true) => CondTok::AndAnd,
                 ("||", true) => CondTok::OrOr,
                 ("(", true) => CondTok::LParen,
@@ -390,7 +393,15 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
         CondTok::Bang => cond_term(cursor),
         CondTok::Word => {
             let word = cursor.args[index.unwrap()].0.clone();
-            if is_conditional_unary_operator(&word) && word.len() == 2 {
+            // GNU parse.y:5125 tests the parser's word text, which still
+            // carries quote characters (quote removal is deferred to
+            // expansion, subst.c dequote_string) — a quoted `"-a"` starts
+            // with `"` and never matches a unary operator. Rubash strips
+            // quote markers when collecting args, so gate the unary path on
+            // the raw text being unquoted (rubash#129: `[[ "-a" =~ -a ]]`
+            // mis-took the quoted LHS for unary `-a` and errored).
+            let unquoted = cursor.args[index.unwrap()].1 == word;
+            if is_conditional_unary_operator(&word) && word.len() == 2 && unquoted {
                 let (tok, line, index, anchor) = cursor.next();
                 if tok != CondTok::Word {
                     let text = cond_offending_text(cursor, &tok, index);
@@ -631,6 +642,15 @@ fn merge_pattern_rhs_fragments(arg_parts: Vec<CondArg>) -> Vec<CondArg> {
                     break;
                 }
                 if r == "(" && !regexp && !last_rhs_char_is_pattern_char(&value) {
+                    break;
+                }
+                // Unquoted `<` `>` `;` `&` end the RHS word in GNU
+                // read_token_word — under PST_REGEXP only `(`, `)` (via
+                // parse_matched_pair) and `|` (parse.y:5446 got_character)
+                // are word-safe, so `[[ a =~ ^<a ]]` reports `syntax error
+                // in conditional expression: unexpected token `<'` (rubash
+                // #129 runtime probe). `|` stays joinable for regexps.
+                if matches!(r.as_str(), "<" | ">" | ";" | "&") {
                     break;
                 }
             }
