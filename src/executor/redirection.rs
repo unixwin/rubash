@@ -176,6 +176,62 @@ impl Executor {
         Ok(state.redirect_failed)
     }
 
+    /// GNU redir.c:135 redirection_error, reached from redir.c:260
+    /// do_redirections: the redirection list applies left-to-right, and a
+    /// failed open reports through the fd 2 binding the redirects BEFORE
+    /// the failing one already installed — `cat 2>/dev/null < /missing` is
+    /// silent (fd 2 already points at /dev/null) while the reversed
+    /// `< /missing 2>/dev/null` leaks (the open fails before the `2>`
+    /// applies). `message` is the already-prefixed diagnostic; when its
+    /// `{target}: ` head matches an input-side redirect of `cmd`, the fd
+    /// state resolves only the redirects preceding it, otherwise the full
+    /// ordered state is used (the failing step is not an input open, so
+    /// every redirection is applied by then). Issue #250: rubash used to
+    /// write these diagnostics to the shell default stderr (eprintln /
+    /// write_default_stderr), bypassing an applied `2>/dev/null` /
+    /// `2>file` / comsub-captured fd 2.
+    pub(in crate::executor) fn write_redirect_diagnostic_routed(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+    ) -> Result<(), ExecuteError> {
+        let failed_index = cmd.redirects.iter().position(|redirect| {
+            if !matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::DuplicateInput
+            ) || redirect.fd.is_some_and(|fd| fd != 0)
+            {
+                return false;
+            }
+            let target = self.expand_redirect_target(redirect);
+            if super::execution_misc::is_closed_redirect_target(&target)
+                || redirect_target_fd(&target).is_some()
+            {
+                return false;
+            }
+            let head = format!("{target}: ");
+            let prefix = self.diagnostic_prefix();
+            std::str::from_utf8(message).is_ok_and(|text| {
+                text.strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| rest.starts_with(&head))
+            })
+        });
+        let mut state = self.command_output_fd_state();
+        match failed_index {
+            Some(index) => {
+                // Only the redirects strictly before the failing input open
+                // have taken effect (GNU do_redirections stops at the error).
+                let mut prefix_cmd = cmd.clone();
+                prefix_cmd.redirects.truncate(index);
+                let _ = self.apply_ordered_output_redirects(&prefix_cmd, &mut state)?;
+            }
+            None => {
+                let _ = self.apply_ordered_output_redirects(cmd, &mut state)?;
+            }
+        }
+        state.write_to_fd(self, 2, message)
+    }
+
     pub(in crate::executor) fn write_ordered_command_output(
         &mut self,
         cmd: &CommandNode,

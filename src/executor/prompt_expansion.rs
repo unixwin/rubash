@@ -835,6 +835,60 @@ impl Executor {
     /// whole parenthesized text as a single-quoted scalar `w='([b]=2)'`
     /// (probe 2026-09-27: the tempenv path bypasses the W_COMPASSIGN
     /// branch, so print_cmd.c:514 sh_single_quotes the value).
+    /// Render ONE assignment's xtrace line from the value an apply path
+    /// already computed. GNU subst.c:3565 expands the RHS exactly once inside
+    /// do_assignment_internal and subst.c:3576 hands the COMPUTED value to
+    /// xtrace_print_assignment — the trace never re-runs the expansion (a
+    /// `v=$(cmd)` RHS must not execute twice just because `set -x` is on).
+    /// STANDALONE selects the compound `name=(raw elements)` form; the scalar
+    /// branch renders `expanded` (which may be empty).
+    pub(in crate::executor) fn xtrace_assignment_line_from_expanded(
+        &self,
+        name: &str,
+        raw_value: &str,
+        expanded: &str,
+        standalone: bool,
+    ) -> String {
+        if let Some(raw) =
+            raw_value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+        {
+            if standalone {
+                let interior = raw
+                    .strip_prefix('(')
+                    .and_then(|inner| inner.strip_suffix(')'))
+                    .unwrap_or(raw);
+                let joined = crate::parser::assignment::split_compound_assignment_words(interior)
+                    .iter()
+                    .map(|element| {
+                        crate::locale::decode_to_visible_text(&compound_element_xtrace_text(
+                            element,
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                return format!("{name}=({joined})");
+            }
+            // Command-prefix tempenv form: scalar-quote the whole `(...)`
+            // text like any other shell-meta value.
+            let visible = crate::locale::decode_to_visible_text(raw);
+            return format!("{name}={}", xtrace_single_quote(&visible));
+        }
+        let expanded = expanded
+            .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+            .unwrap_or(expanded);
+        let visible = crate::locale::decode_to_visible_text(expanded);
+        let rendered = if visible.is_empty() {
+            visible
+        } else if super::execution_misc::word_needs_ansic_quote(expanded) {
+            super::execution_misc::ansic_quote_with_markers(expanded)
+        } else if xtrace_contains_shell_metas(&visible) {
+            xtrace_single_quote(&visible)
+        } else {
+            visible
+        };
+        format!("{name}={rendered}")
+    }
+
     pub(in crate::executor) fn xtrace_assignment_text(
         &mut self,
         cmd: &CommandNode,

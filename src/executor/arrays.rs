@@ -683,6 +683,24 @@ fn restore_quote_carriers(value: &str) -> String {
         .replace(crate::lexer::ANSI_C_DQUOTE_MARKER_STR, "\"")
 }
 
+/// Exactly-once decode for a compound element that carries spliced command
+/// substitution output. protect_command_substitution_output (execution_misc)
+/// maps the output's `$` to DATA_DOLLAR, a backtick to DATA_BACKTICK and a
+/// backslash to PROTECTED_BACKSLASH so the walker never re-interprets them;
+/// GNU's equivalent (subst.c:6682 read_comsub + comsub_shouldquote:6643)
+/// protects only CTLESC/CTLNUL because the spliced bytes are never re-run
+/// through parameter expansion. At the storage boundary the carriers must
+/// come back as real characters (variables.c:3536 assign_in_env copies the
+/// word into the value cell verbatim), or the literal `$`/backtick/backslash
+/// bytes vanish from the stored element (issue #249: COMPREPLY=($(compgen -P
+/// "$ "...)) dropped the prefix `$`). Control bytes travel as
+/// `__RUBASH_CSB1_XX;` payload escapes and decode here too.
+fn finalize_comsub_element(value: &str) -> String {
+    crate::executor::execution_misc::decode_command_substitution_payload(
+        &crate::executor::execution_misc::restore_command_substitution_output(value),
+    )
+}
+
 /// GNU assign_compound_array_list (arrayfunc.c:700+): builds the indexed
 /// element map for a compound `( ... )` value. `Err(pattern)` reports a
 /// failglob pathname-expansion failure on one element word — GNU
@@ -753,7 +771,9 @@ pub(super) fn append_array_value(
         if let Some((left, rhs)) = token.split_once("+=") {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
                 let current = entries.get(&index).cloned().unwrap_or_default();
-                let rhs = unquote_storage_value(&dequote_compound_element_rhs(rhs));
+                let rhs = finalize_comsub_element(&unquote_storage_value(
+                    &dequote_compound_element_rhs(rhs),
+                ));
                 let value = if integer {
                     // GNU make_array_variable_value (arrayfunc.c:173-195) with
                     // ASS_APPEND: both operands go through make_variable_value
@@ -775,7 +795,9 @@ pub(super) fn append_array_value(
 
         if let Some((left, rhs)) = token.split_once('=') {
             if let Some(index) = array_assignment_index(left, &entries, env_vars) {
-                let decoded = unquote_storage_value(&dequote_compound_element_rhs(rhs));
+                let decoded = finalize_comsub_element(&unquote_storage_value(
+                    &dequote_compound_element_rhs(rhs),
+                ));
                 entries.insert(index, decoded);
                 next_index = index + 1;
                 continue;
@@ -808,7 +830,9 @@ pub(super) fn append_array_value(
                 crate::executor::glob::PathnameExpansion::NoMatch => {
                     entries.insert(
                         next_index,
-                        crate::executor::markers::dequote_ctlesc_pairs(&token),
+                        finalize_comsub_element(&crate::executor::markers::dequote_ctlesc_pairs(
+                            &token,
+                        )),
                     );
                     next_index += 1;
                 }
@@ -860,7 +884,9 @@ pub(super) fn append_array_value(
                     crate::executor::glob::PathnameExpansion::NoMatch => {
                         entries.insert(
                             next_index,
-                            crate::executor::markers::dequote_ctlesc_pairs(&value),
+                            finalize_comsub_element(
+                                &crate::executor::markers::dequote_ctlesc_pairs(&value),
+                            ),
                         );
                         next_index += 1;
                     }
@@ -875,7 +901,9 @@ pub(super) fn append_array_value(
             for value in field_split_values_with_ifs(&token, ifs) {
                 entries.insert(
                     next_index,
-                    crate::executor::markers::dequote_ctlesc_pairs(&value),
+                    finalize_comsub_element(&crate::executor::markers::dequote_ctlesc_pairs(
+                        &value,
+                    )),
                 );
                 next_index += 1;
             }
@@ -886,11 +914,11 @@ pub(super) fn append_array_value(
             let appended = if integer {
                 (eval_arith_value(&current) + eval_arith_value(&token)).to_string()
             } else {
-                append_scalar_value(&current, &token)
+                append_scalar_value(&current, &finalize_comsub_element(&token))
             };
             entries.insert(0, appended);
         } else {
-            entries.insert(next_index, token);
+            entries.insert(next_index, finalize_comsub_element(&token));
             next_index += 1;
         }
     }

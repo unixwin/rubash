@@ -2501,12 +2501,25 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
 /// visible text; quote DELIMITERS the walker preserved are the caller's to
 /// strip (only a raw-quoted element carries them).
 fn compound_element_expansion_text(expanded: &str) -> String {
-    expanded
+    let text = expanded
         .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
         .replace(crate::executor::markers::DATA_SQUOTE, "'")
         .replace(crate::executor::markers::DATA_DQUOTE, "\"")
         .trim_matches('\u{E302}')
-        .to_string()
+        .to_string();
+    // Command-substitution output spliced by the walker carries its
+    // protection carriers (`$`->\x1f DATA_DOLLAR, backtick->\x1a,
+    // backslash->\x15, control bytes as __RUBASH_CSB1_XX; payload
+    // escapes). At this element-text boundary they must decode to real
+    // characters before quote_array_value serializes them — GNU's spliced
+    // comsub bytes (subst.c:6682 read_comsub output) are plain word data
+    // and are stored verbatim (issue #249: a compgen -P '$' prefix
+    // vanished from COMPREPLY=($(compgen ...))). Genuine control-byte
+    // data travels as U+E000 raw-byte pairs (never bare C0), so the
+    // restore cannot touch it.
+    crate::executor::execution_misc::decode_command_substitution_payload(
+        &crate::executor::execution_misc::restore_command_substitution_output(&text),
+    )
 }
 
 /// Byte ranges `[start, end)` of every top-level `${...}` braced-parameter

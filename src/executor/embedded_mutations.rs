@@ -1990,7 +1990,25 @@ impl Executor {
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the call its own capture.
         let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            self.execute_function(name, &args, &call)
+            // GNU runs `$(f)` through command_substitute → parse_and_execute
+            // → evalstring, whose reader bumps indirection_level
+            // (builtins/evalstring.c:348), so the whole substitution — the
+            // invocation head line and the body's traces alike — renders one
+            // PS4 level deeper (`++ f`, `++ echo ...`). execute_cmd.c:4649
+            // still prints the head before the function dispatch (issue
+            // #247); the fast path bypasses execute_materialized_command, so
+            // trace the head here from the (provably trivial) words.
+            self.with_xtrace_indirection(|executor| {
+                if executor.xtrace_enabled() {
+                    let prefix = executor.xtrace_prefix();
+                    let mut trace = Vec::new();
+                    for line in executor.xtrace_command_lines(&call) {
+                        writeln!(trace, "{prefix}{line}").ok();
+                    }
+                    executor.xtrace_write(&trace);
+                }
+                executor.execute_function(name, &args, &call)
+            })
         });
         match saved_fd1 {
             Some(entry) => {

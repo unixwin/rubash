@@ -18,4 +18,11 @@
 + s+=(['k2']='v2')
 + declare -A s
 + echo v2
-+ echo done
++ f
++ echo body
++ f one 'two three'
++ echo body
++ g
++ f
++ echo body
++ set +x

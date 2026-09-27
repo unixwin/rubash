@@ -54,7 +54,12 @@ impl Executor {
                             self.diagnostic_prefix(),
                             crate::posix_errors::message(&error)
                         );
-                        let _ = self.write_default_stderr(&line);
+                        // GNU redir.c:135 redirection_error via do_redirections
+                        // (redir.c:260): the diagnostic goes through the fd 2
+                        // the command's earlier redirections already bound, so
+                        // `read x 2>/dev/null < /missing` stays silent while
+                        // the reversed order leaks (issue #250).
+                        let _ = self.write_redirect_diagnostic_routed(cmd, &line);
                         return 1;
                     }
                 }

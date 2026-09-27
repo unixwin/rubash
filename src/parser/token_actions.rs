@@ -762,14 +762,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             // GNU parse.y:561 `redirection: ... LESSLESS WORD` — the
             // delimiter is a WORD. Word-shaped reserved words (`esac`,
             // `in`, ...) read as WORDs in target position (GNU probe:
-            // `cat << esac` parses), so keep Keyword delimiters except the
-            // `('/`)' that open subshells. Operator tokens are syntax
-            // errors (`cat << ;;` => near `;;', rubash#220).
-            if *i + 1 < tokens.len()
-                && (is_redirect_target_token(&tokens[*i + 1])
-                    || (tokens[*i + 1].kind == TokenKind::Keyword
-                        && !matches!(tokens[*i + 1].value.as_str(), "(" | ")")))
-            {
+            // `cat << esac` parses), so the shared target predicate admits
+            // them; `('/`)' operator keywords stay rejected. Operator tokens
+            // are syntax errors (`cat << ;;` => near `;;', rubash#220).
+            if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter_token = &tokens[*i + 1];
@@ -817,15 +813,14 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_fd_var_prefix(tokens, *i),
                 );
                 *i = next_i;
-            } else if *i + 1 < tokens.len()
-                && matches!(
-                    tokens[*i + 1].kind,
-                    TokenKind::Word
-                        | TokenKind::Variable
-                        | TokenKind::CommandSubst
-                        | TokenKind::Assignment
-                )
-            {
+            } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
+                // GNU parse.y:664 `redirection: LESS_LESS_LESS WORD` — the
+                // herestring operand is a WORD, so word-shaped reserved words
+                // (`in`, `then`, `{`, ...) are operand text, not keywords
+                // (CHECK_FOR_RESERVED_WORD parse.y:3170 +
+                // reserved_word_acceptable parse.y:5899 — a redirect operator
+                // is not an accepting position). Shared predicate with the
+                // other redirect-target sites (issue #248).
                 assign_here_string_redirect_raw(
                     &mut state.current_cmd,
                     &token.value,

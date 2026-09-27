@@ -295,21 +295,47 @@ impl Executor {
         // continue with the remaining command.
         let cmd = self.strip_invalid_env_assignment_prefixes(&cmd);
 
-        if let Some(result) = self.execute_function_command_invocation(&cmd) {
-            return result;
+        let dispatch_result = if let Some(result) = self.execute_function_command_invocation(&cmd) {
+            result
+        } else if self.execute_assignment_or_comment_command(&cmd) {
+            Ok(())
+        } else if !command_needs_process_substitution_materialization(&cmd) {
+            self.execute_materialized_command(&cmd, ProcessSubstitutionFiles::default())
+        } else {
+            match self.command_with_process_substitution_files(&cmd) {
+                Ok((materialized_cmd, process_substitution_files)) => {
+                    self.execute_materialized_command(&materialized_cmd, process_substitution_files)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        match dispatch_result {
+            // GNU redir.c:135 redirection_error (from redir.c:260
+            // do_redirections) reports a failed redirect open through the fd
+            // 2 binding the command's earlier redirections already applied —
+            // not the shell's default stderr — so `cat 2>/dev/null < /missing`
+            // stays silent in default, posix and comsub contexts alike
+            // (issue #250). Closed-output errors keep propagating for the
+            // pipeline machinery to observe (is_closed_output_io_error).
+            Err(ExecuteError::IoError(error))
+                if !super::ast_exec::is_closed_output_io_error(&error) =>
+            {
+                let mut stderr = Vec::new();
+                writeln!(
+                    &mut stderr,
+                    "{}{}",
+                    self.diagnostic_prefix(),
+                    crate::posix_errors::message(&error)
+                )?;
+                self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
+                self.exit_code = 1;
+                if self.errexit_enabled() && self.errexit_is_active() {
+                    return Err(ExecuteError::ExitCode(1));
+                }
+                Ok(())
+            }
+            other => other,
         }
-
-        if self.execute_assignment_or_comment_command(&cmd) {
-            return Ok(());
-        }
-
-        if !command_needs_process_substitution_materialization(&cmd) {
-            return self.execute_materialized_command(&cmd, ProcessSubstitutionFiles::default());
-        }
-
-        let (materialized_cmd, process_substitution_files) =
-            self.command_with_process_substitution_files(&cmd)?;
-        self.execute_materialized_command(&materialized_cmd, process_substitution_files)
     }
 
     /// GNU shell.c reader_loop under `-n`/`set -n` (noexec): the reader

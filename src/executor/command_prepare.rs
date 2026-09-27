@@ -340,15 +340,8 @@ impl Executor {
             }
             return Err(ExecuteError::ExitCode(status));
         }
-        if self.xtrace_enabled() && cmd.arithmetic_command.is_none() {
-            // Same arithmetic-command exclusion as execute_materialized_command:
-            // `(( ))` traces once via execute_arith_command (GNU
-            // execute_cmd.c:3940), not through the generic simple-command path.
-            let prefix = self.xtrace_prefix();
-            for line in self.xtrace_command_lines(cmd) {
-                self.xtrace_write(format!("{prefix}{line}\n").as_bytes());
-            }
-        }
+        let trace_assignments = self.xtrace_enabled() && cmd.arithmetic_command.is_none();
+        let xtrace_prefix = trace_assignments.then(|| self.xtrace_prefix());
         let mut status = 0;
         // assignment_raws stays index-aligned with assignments when every
         // binding came through insert_assignment_with_raw (the normal
@@ -448,6 +441,16 @@ impl Executor {
             }
             if let Some(substitution_status) = substitution_status {
                 status = substitution_status;
+            }
+            // GNU subst.c do_assignment_internal: expand once (3565), trace
+            // the COMPUTED value (3576 xtrace_print_assignment — one line per
+            // assignment: `a=1 b=2` traces `+ a=1` then `+ b=2`), then bind
+            // (3620+). Tracing from expanded_value keeps a `v=$(cmd)` RHS
+            // from executing a second time just because `set -x` is on.
+            if let Some(prefix) = &xtrace_prefix {
+                let line =
+                    self.xtrace_assignment_line_from_expanded(name, value, &expanded_value, true);
+                self.xtrace_write(format!("{prefix}{line}\n").as_bytes());
             }
             self.pending_scalar_assignment =
                 expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
@@ -2257,6 +2260,33 @@ impl Executor {
                 .map(|(name, _)| assignment_name_and_append(name).0.to_string())
                 .collect(),
         );
+        // GNU execute_cmd.c:4648-4649: the simple-command xtrace head line
+        // (`xtrace_print_word_list (words, 1)`) prints BEFORE builtin/function
+        // lookup (func found at execute_cmd.c:4675) and before
+        // execute_builtin_or_function (execute_cmd.c:4842) applies the call's
+        // redirections around the body — so a function invocation traces its
+        // head (`+ f one 'two three'`) to the pre-redirect stderr, and the
+        // body's own commands trace afterwards at the same level. This fast
+        // path runs instead of execute_materialized_command, whose xtrace
+        // block it must mirror (issue #247; recursion nests one head line per
+        // call, `f | cat` stages already trace via pipeline_exec).
+        if self.xtrace_enabled() && materialized_cmd.arithmetic_command.is_none() {
+            let prefix = self.xtrace_prefix();
+            let mut xtrace_output = Vec::new();
+            for line in self.xtrace_command_lines(&materialized_cmd) {
+                writeln!(xtrace_output, "{prefix}{line}").ok();
+            }
+            if let Some(redirect) = &materialized_cmd.redirect_err_append {
+                let target = self.expand_redirect_target(redirect);
+                if self.has_output_fd_target(&target) {
+                    let _ = self.write_output_fd_redirect(&target, &xtrace_output);
+                } else {
+                    self.xtrace_write(&xtrace_output);
+                }
+            } else {
+                self.xtrace_write(&xtrace_output);
+            }
+        }
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],

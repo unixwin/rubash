@@ -375,6 +375,18 @@ pub(super) fn is_redirect_target_token(token: &Token) -> bool {
         // QUOTED `';;'` word keeps its quotes in raw and stays a target.
         return false;
     }
+    if token.kind == TokenKind::Keyword && !keyword_is_operator(token) {
+        // GNU parse.y:532/664: every redirection operand is a WORD terminal,
+        // and CHECK_FOR_RESERVED_WORD (parse.y:3170) only marks a word
+        // reserved where reserved_word_acceptable (parse.y:5899) holds — a
+        // redirect operator is not in that list, so `cat <<< in` /
+        // `echo > fi` take the reserved-SHAPED word as the operand text.
+        // rubash's lexer stamps reserved-shaped words Keyword independent
+        // of position, so the admission here covers that class. `(`, `)`
+        // and `((...))` are operators (parse.y scanner tokens, never
+        // WORDs) and stay rejected: `cat <<< (` remains a syntax error.
+        return true;
+    }
     matches!(
         token.kind,
         TokenKind::Word
@@ -384,6 +396,13 @@ pub(super) fn is_redirect_target_token(token: &Token) -> bool {
             | TokenKind::BraceExpand
             | TokenKind::HereDocBody
     )
+}
+
+/// A Keyword token that is an OPERATOR, not a reserved-shaped word: the
+/// parentheses family. GNU's grammar has no redirection rule whose operand
+/// is `(`/`)` (parse.y:532-575 all use WORD), so these never admit.
+fn keyword_is_operator(token: &Token) -> bool {
+    token.value.starts_with('(') || token.value == ")"
 }
 
 pub(super) fn take_adjacent_redirect_fd_prefix(

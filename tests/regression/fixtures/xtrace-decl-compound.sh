@@ -19,8 +19,13 @@ declare -a n=(1 2 'x y')
 declare -a d=($'a\tb')
 declare -A s+=( [k2]=v2 )
 echo "${s[k2]}"
-# Known open divergence: GNU also traces the function-invocation line
-# `+ f' before the body (execute_cmd.c traces the function command word);
-# every rubash build checked at codification time (7ddae9e9..9bf2df9e)
-# omits it, so the f-call shape is excluded until that lands.
+# Function-invocation head line (issue #247): execute_cmd.c:4649 traces the
+# command head before function dispatch, so each call prints `+ f' ahead of
+# the body's own traces (recursion nests one head line per call).
+f() { echo body; }
+f
+f one "two three"
+g() { f; }
+g
+set +x
 echo done

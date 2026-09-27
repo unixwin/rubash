@@ -706,7 +706,11 @@ impl Executor {
             .map(|m| m.is_file())
             .unwrap_or(false)
         {
-            let file = FileFd::open_read(path.clone())?;
+            // GNU redir.c redirection_error prints the failing target
+            // (`script: line N: /path: No such file or directory`), so the
+            // open error travels with its target (issue #250 message shape).
+            let file = FileFd::open_read(path.clone())
+                .map_err(|error| crate::posix_errors::path_error(&target, error))?;
             let saved = self.fd_table.entries.get(&0).cloned();
             self.fd_table
                 .open_input(0, FdReadEndpoint::File(file), false);
@@ -716,7 +720,8 @@ impl Executor {
         // file — serve the shared remainder (subst.c:7143).
         let input = match self.procsub_stream_take(&path) {
             Some(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
-            None => fs::read_to_string(&path)?,
+            None => fs::read_to_string(&path)
+                .map_err(|error| crate::posix_errors::path_error(&target, error))?,
         };
         Ok((Some(input), false, None))
     }
