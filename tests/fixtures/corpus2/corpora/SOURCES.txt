@@ -1,0 +1,4 @@
+bash-preexec.sh   url=https://raw.githubusercontent.com/rcaloras/bash-preexec/master/bash-preexec.sh           commit=d866eeefdb8dfce075cbd4e37dc73c4deb4b0bd2
+tldr-client.sh    url=https://raw.githubusercontent.com/raylee/tldr-sh-client/master/tldr                  commit=7d57134c2ab58eb5c906f31bdf695e653f5d128b
+hub-completion.sh url=https://raw.githubusercontent.com/github/hub/master/etc/hub.bash_completion.sh  commit=410e84156ff66133c519afceb7fa93eb01835c01
+ble.sh            url=https://github.com/akinomyoga/ble.sh/releases/download/nightly/ble-nightly.tar.xz nightly-2026-09-27 sha256=4b76374ad5d0bb5325315abc0d714d50b0dea7430108ed872cfcd1954d845808
