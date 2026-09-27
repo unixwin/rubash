@@ -98,38 +98,7 @@ fn remove_shell_quotes_inner(raw: &str, posix: bool, assignment: bool) -> String
             '$' if chars.peek() == Some(&'\'') => {
                 pending_name = false;
                 chars.next();
-                let mut quoted = String::new();
-                let mut escaped = false;
-                for quoted_ch in chars.by_ref() {
-                    if escaped {
-                        quoted.push('\\');
-                        quoted.push(quoted_ch);
-                        escaped = false;
-                        continue;
-                    }
-                    if quoted_ch == '\\' {
-                        escaped = true;
-                        continue;
-                    }
-                    if quoted_ch == '\'' {
-                        break;
-                    }
-                    quoted.push(quoted_ch);
-                }
-                if escaped {
-                    quoted.push('\\');
-                }
-                // GNU subst.c CTLESC-quotes every byte an ANSI-C string decodes
-                // to, so quote characters in the decoded value are data for
-                // every later pass (posixexp7: the escaped-quote ANSI-C word
-                // kept its literal quote; unescaped, the expansion walker
-                // consumed the bare quote as a delimiter). Rubash's walker
-                // expresses that with backslash escapes, so escape the decode
-                // output with that convention, keeping backslash-prefixed
-                // runs verbatim.
-                out.push_str(&escape_decoded_ansi_c_quotes(&decode_ansi_c_quoted(
-                    &quoted,
-                )));
+                out.push_str(&decode_ansi_c_span(&mut chars));
             }
             '$' if chars.peek() == Some(&'"') => {
                 pending_name = false;
@@ -335,6 +304,23 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
             '$' if chars.peek() == Some(&'{') => {
                 pending_name = false;
                 copy_braced_parameter_unquoted(&mut out, &mut chars);
+            }
+            '$' if chars.peek() == Some(&'\'') => {
+                pending_name = false;
+                chars.next();
+                // GNU parse.y:5546-5558 read_token_word: `$'` hands the span
+                // to parse_matched_pair (parse.y:3877) with P_ALLOWESC, so
+                // `\'` does not close the string and a backtick inside the
+                // span is an ordinary character — never a command-substitution
+                // opener. Without this arm the `'` after `$` fell into the
+                // plain single-quote case below, which does not honor the
+                // escape: `\'` closed the span early, the surviving raw
+                // backtick then tripped the executor's unclosed-`$(` gate
+                // ("unexpected EOF while looking for matching `)' —
+                // rubash#215) and, without a backtick, left a live `$` that
+                // the assignment expander read as a parameter name
+                // (`x=$'a`b'` stored `b`).
+                out.push_str(&decode_ansi_c_span(&mut chars));
             }
             '\'' => {
                 if pending_name {
@@ -567,16 +553,64 @@ fn copy_ansi_c_single_quoted_raw(
     }
 }
 
+/// Gather and decode one `$'...'` ANSI-C span. `chars` is positioned just
+/// after the opening `'`; the closing `'` is consumed. GNU
+/// parse.y:5546-5558 read_token_word → parse_matched_pair (parse.y:3877)
+/// with P_ALLOWESC: a `\` escapes the next byte (so `\'` never closes the
+/// string) and everything inside — including backticks, which the grouping
+/// arms of parse_matched_pair only nest when `open != close` — is string
+/// data, never substitution syntax. The decoded bytes leave here through
+/// `escape_decoded_ansi_c_quotes`, i.e. tagged with the walker's data
+/// carriers so no later pass re-reads a quote, dollar, or backtick in the
+/// value as live syntax (the CTLESC equivalent of GNU's ansiexpand +
+/// sh_single_quote re-encoding at parse.y:5560-5575).
+pub(super) fn decode_ansi_c_span(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut quoted = String::new();
+    let mut escaped = false;
+    for quoted_ch in chars.by_ref() {
+        if escaped {
+            quoted.push('\\');
+            quoted.push(quoted_ch);
+            escaped = false;
+            continue;
+        }
+        if quoted_ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if quoted_ch == '\'' {
+            break;
+        }
+        quoted.push(quoted_ch);
+    }
+    if escaped {
+        quoted.push('\\');
+    }
+    // GNU subst.c CTLESC-quotes every byte an ANSI-C string decodes to, so
+    // quote characters in the decoded value are data for every later pass
+    // (posixexp7: the escaped-quote ANSI-C word kept its literal quote;
+    // unescaped, the expansion walker consumed the bare quote as a
+    // delimiter). Rubash's walker expresses that with backslash escapes, so
+    // escape the decode output with that convention, keeping
+    // backslash-prefixed runs verbatim.
+    escape_decoded_ansi_c_quotes(&decode_ansi_c_quoted(&quoted))
+}
+
 /// Mark quote characters in a decoded ANSI-C string with the walker's
 /// data-quote markers so later expansion passes treat them as data (the
 /// CTLESC equivalent; see the call site). The markers are the same ones the
 /// lexer emits for backslash-escaped quotes in source words, so every
-/// consumer already restores them.
+/// consumer already restores them. A decoded backtick additionally travels
+/// as DATA_BACKTICK — the same carrier the single-quote arm uses — so
+/// re-scans of assignment shell text (the executor's unclosed-`$(` gate,
+/// has_unclosed_command_substitution) cannot mistake it for a live
+/// command-substitution opener (rubash#215: `x=$'a`b$(echo z)'`).
 pub(crate) fn escape_decoded_ansi_c_quotes(decoded: &str) -> String {
     decoded
         .replace('\'', &ANSI_C_QUOTE_MARKER.to_string())
         .replace('"', &ANSI_C_DQUOTE_MARKER.to_string())
         .replace('$', DATA_DOLLAR_STR)
+        .replace('`', crate::executor::markers::DATA_BACKTICK_STR)
 }
 
 fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {

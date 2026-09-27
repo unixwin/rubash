@@ -508,3 +508,41 @@ fn crlf_line_terminator_kept_as_data_on_unix() {
     // content line — GNU semantics: CR is literal data (make_cmd.c).
     assert!(body.contains("body\r\n"), "CR stays in the body: {body:?}");
 }
+
+/// rubash#215: an escaped quote plus a backtick inside one ANSI-C string
+/// (`$'a\'b`c'`) must lex as ONE assignment word whose value carries the
+/// decoded data via the walker's carriers. GNU parse.y:5546-5558
+/// read_token_word → parse_matched_pair (parse.y:3877) with P_ALLOWESC: `\'`
+/// never closes the span and the backtick inside it is string data, so no
+/// downstream re-scan may see a live backtick (the executor's
+/// unclosed-`$(` gate used to kill the whole script with "unexpected EOF
+/// while looking for matching `)'").
+#[test]
+fn ansi_c_escaped_quote_with_backtick_stays_one_assignment_word() {
+    let input = "x=$'a\\'b`c'\ny=1\n";
+    assert!(!has_unclosed_quotes(input));
+    assert!(!has_unclosed_input_syntax_posix(input, false));
+    assert!(unclosed_input_close_char_posix(input, false).is_none());
+    let tokens = tokenize(input);
+    assert_eq!(tokens[0].kind, TokenKind::Assignment);
+    // \u{1c} is the quoted-RHS prefix (mark_quoted_assignment_value),
+    // \u{e010} the decoded `'` data marker, \u{1a} the decoded backtick.
+    assert_eq!(tokens[0].value, "x=\u{1c}a\u{e010}b\u{1a}c");
+    // The decoded backtick travels as the DATA_BACKTICK carrier, so the
+    // executor gate (has_unclosed_command_substitution) cannot mistake it
+    // for an open command substitution.
+    assert!(!crate::lexer::has_unclosed_command_substitution(
+        &tokens[0].value
+    ));
+}
+
+/// rubash#215 follow-on: a backtick in a trailing COMMENT after an
+/// assignment whose ANSI-C body contains `\'` must not hold the line open.
+/// GNU parse.y:3992 P_ALLOWESC/LEX_PASSNEXT keeps `\'` inside the span; the
+/// comment's backtick is comment text (parse.y:3630 comment scan).
+#[test]
+fn ansi_c_assignment_with_backtick_comment_closes_cleanly() {
+    let input = "w=$'a\\'b`c' # bug `>\necho ok\n";
+    assert!(!has_unclosed_quotes(input));
+    assert!(!has_unclosed_input_syntax_posix(input, false));
+}
