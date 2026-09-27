@@ -28,6 +28,24 @@ impl Executor {
         if let Some(path_val) = env_vars.remove("Path") {
             env_vars.entry("PATH".to_string()).or_insert(path_val);
         }
+        // rubash#175: a script's $PATH must be the `:`-separated shell
+        // semantic form (drive entries as /c/...), the way GNU shell.c
+        // imports environ verbatim into a POSIX variable space. The Windows
+        // process PATH is `;`-separated drive-letter text; importing it
+        // verbatim leaves `${PATH%%:*}` sliced at the `C:` colon and
+        // `PATH=/usr/bin:$PATH` glued to a `;`-list (ltmain func_path_progs,
+        // rbenv-commands). Normalize once at this import boundary; native
+        // children get the reverse conversion at materialization
+        // (child_env_value -> shell_path_to_process). The process
+        // environment itself keeps its Windows spelling for OS spawns that
+        // inherit it unchanged.
+        #[cfg(windows)]
+        if let Some(path_val) = env_vars.remove("PATH") {
+            env_vars.insert(
+                "PATH".to_string(),
+                crate::executor::path::process_path_to_shell(&path_val),
+            );
+        }
 
         // Pin the host's POSIX toolset directory before scripts can
         // overwrite PATH: `PATH=/bin:/usr/bin` (invocation.tests) and

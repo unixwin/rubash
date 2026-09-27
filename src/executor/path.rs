@@ -973,6 +973,56 @@ pub(crate) fn shell_path_process_entries(
     vec![physical]
 }
 
+/// Normalize an inherited process PATH into the shell's `:`-separated
+/// semantic form (rubash#175).
+///
+/// GNU shell.c/variables.c have no Windows concept: every environ entry is
+/// imported verbatim, so a script's `$PATH` is always one `:`-separated
+/// string and `${PATH%%:*}`, `PATH=/usr/bin:$PATH`, and ltmain's
+/// func_path_progs slicing all work. Rubash's Windows process environment
+/// instead carries a `;`-separated drive-letter PATH; importing that
+/// verbatim breaks every POSIX colon operation on the first `C:` colon.
+/// This is the import-boundary normalization only: entries are split with
+/// the same dual semantics the PATH lookup uses (`split_shell_path`, which
+/// accepts both `;`-separated drive entries and `:`-separated shell
+/// entries), each drive entry is rewritten to its `/c/...` shell spelling
+/// (`C:\x` and `C:/x` both become `/c/x`), and the list is joined with
+/// `:`. The reverse direction for native children is the pre-existing
+/// `shell_path_to_process` below, which turns `/c/x` entries back into
+/// `C:\x` drive directories. The function is idempotent: a PATH already in
+/// shell form splits and rejoins unchanged, so the in-process
+/// `${THIS_SH} ./x.sub` child path that re-imports a normalized PATH keeps
+/// it stable.
+pub(crate) fn process_path_to_shell(path: &str) -> String {
+    if !cfg!(windows) {
+        return path.to_string();
+    }
+    split_shell_path(path)
+        .into_iter()
+        .map(|entry| windows_drive_entry_to_shell(&entry))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Rewrite one PATH entry from Windows drive spelling to shell spelling:
+/// `C:\Windows` / `C:/Windows` -> `/c/Windows`. Non-drive entries (shell
+/// paths, UNC paths, relative entries) pass through unchanged.
+fn windows_drive_entry_to_shell(entry: &str) -> String {
+    let bytes = entry.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+    {
+        // entry[2..] is "/..." or "\...": normalize separators and keep the
+        // lowercase-drive /c/ spelling that shell_path_to_windows maps back
+        // to `C:\` (path.rs drive branch).
+        let rest = entry[2..].replace('\\', "/");
+        return format!("/{}{}", (bytes[0] as char).to_ascii_lowercase(), rest);
+    }
+    entry.to_string()
+}
+
 /// Materialize a shell PATH for a native child process.
 ///
 /// Logical shell PATH entries are converted to their real Windows directories
@@ -1739,12 +1789,19 @@ pub(crate) fn shell_root_configured(env_vars: &HashMap<String, String>) -> bool 
 /// configured.
 #[cfg(windows)]
 pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
+    // The startup PATH arrives in Windows `;` form while an assigned PATH
+    // (and the imported shell-form PATH, rubash#175) is `:`-separated
+    // `/c/...` entries. Split with the dual-semantics splitter and map each
+    // entry to its Windows directory so both spellings find the toolset.
     let tools_dir = |path_value: &str| {
-        std::env::split_paths(path_value).find(|dir| {
-            ["sh.exe", "cat.exe", "rm.exe"]
-                .iter()
-                .all(|name| dir.join(name).is_file())
-        })
+        split_shell_path(path_value)
+            .into_iter()
+            .map(|entry| shell_drive_entry_to_windows(&entry))
+            .find(|dir| {
+                ["sh.exe", "cat.exe", "rm.exe"]
+                    .iter()
+                    .all(|name| dir.join(name).is_file())
+            })
     };
     // The toolset location is a host property: a script that overwrites
     // PATH (`PATH=/bin:/usr/bin`, invocation.tests) must not lose it, so
@@ -1759,6 +1816,24 @@ pub(crate) fn windows_posix_tools_dir(env_vars: &HashMap<String, String>) -> Opt
         return Some(pinned);
     }
     env_vars.get("PATH").and_then(|path| tools_dir(path))
+}
+
+/// `/c/x` -> `C:\x` for one PATH entry; every other spelling (native
+/// `C:\x`, `C:/x`, relative) passes through, since PathBuf accepts those
+/// natively. Deliberately NOT routed through `shell_path_to_windows`,
+/// whose logical `/bin` mapping consults `windows_posix_tools_dir` and
+/// would recurse into this probe.
+fn shell_drive_entry_to_windows(entry: &str) -> PathBuf {
+    let bytes = entry.as_bytes();
+    if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {
+        let rest = entry[3..].replace('/', "\\");
+        return PathBuf::from(format!(
+            "{}:\\{}",
+            (bytes[1] as char).to_ascii_uppercase(),
+            rest
+        ));
+    }
+    PathBuf::from(entry)
 }
 
 fn map_windows_home_path(normalized: &str, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
@@ -1889,6 +1964,47 @@ mod tests {
     use std::collections::HashSet;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn process_path_to_shell_rewrites_windows_process_form() {
+        assert_eq!(
+            process_path_to_shell("C:\\Windows;C:\\WINDOWS\\System32;D:\\Git\\bin"),
+            "/c/Windows:/c/WINDOWS/System32:/d/Git/bin"
+        );
+        // Forward-slash drive entries normalize the same way.
+        assert_eq!(
+            process_path_to_shell("C:/Program Files/Git/usr/bin"),
+            "/c/Program Files/Git/usr/bin"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_path_to_shell_is_idempotent_on_shell_form() {
+        let shell_form = "/c/Windows:/d/Git/bin:/usr/bin";
+        assert_eq!(process_path_to_shell(shell_form), shell_form);
+        // Hybrid lists keep both spellings working.
+        assert_eq!(
+            process_path_to_shell("/c/tools/cloc:/c/tools/winuxcmd;C:/Windows"),
+            "/c/tools/cloc:/c/tools/winuxcmd:/c/Windows"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_path_to_shell_round_trips_through_shell_path_to_process() {
+        let env_vars = HashMap::new();
+        let windows_form = "C:\\Windows;C:\\WINDOWS\\System32;D:\\Git\\bin";
+        let shell_form = process_path_to_shell(windows_form);
+        assert_eq!(shell_path_to_process(&shell_form, &env_vars), windows_form);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn process_path_to_shell_passes_unix_form_through() {
+        assert_eq!(process_path_to_shell("/usr/bin:/bin"), "/usr/bin:/bin");
+    }
 
     #[cfg(unix)]
     #[test]
