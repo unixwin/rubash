@@ -1,5 +1,7 @@
 # 跨三平台差距台账（rubash 引擎 + niubash 产品层）
 
+> **本账本为历史参考（2026-09-27 起现状以 docs/TASK-BOARD.md 为准）。**
+
 > 2026-09-26 复查基线：rubash @f12aa756（unix 进程域接线已落地，见下），
 > niubash 1.1.4（crates/niubash-runtime，rubash 走 git master 依赖）。
 > 每项附 file:line 证据与修复方向；行号随并行修复漂移，动手前先 grep 复核。
