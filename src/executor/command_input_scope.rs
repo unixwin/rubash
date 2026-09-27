@@ -86,6 +86,35 @@ impl Executor {
             // the source-test `if` scanner, which then consumes the frame).
             return Ok(T::default());
         }
+        // GNU do_redirection_internal opens `< file` as a REAL descriptor
+        // on fd 0: the shell reads it record-wise off the shared file
+        // offset (read.def zreadc + zsyncfd), and a child spawned in the
+        // body inherits a dup of the same open file description — a child
+        // that never reads leaves the parent's cursor untouched, so
+        // `while read -r l; do expr ...; done < f` iterates over every
+        // line (rubash#260: the FUNCTION_STDIN text mirror eagerly fed the
+        // whole remaining buffer to every child and marked it consumed,
+        // ending the loop after one iteration). For a regular-file source
+        // the fd table already has the whole GNU mechanism — byte-accurate
+        // record reads (FdTable::read_file_bytes) and DuplicateHandle-based
+        // child inheritance — so bind fd 0 to the handle instead of
+        // slurping the text mirror. Non-file sources (pipes, procsubs,
+        // heredocs, here-strings, /dev-aliases) keep the mirror below.
+        if let Some(file) = self.compound_fd0_regular_file(cmd) {
+            let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
+            self.fd_table
+                .open_input(0, FdReadEndpoint::File(file), false);
+            let result = execute(self);
+            match saved_fd0_entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(0, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&0);
+                }
+            }
+            return result;
+        }
         let Some(input) = self.command_input_redirect(cmd) else {
             return execute(self);
         };
@@ -846,6 +875,44 @@ fn strip_heredoc_body(body: &str) -> String {
 }
 
 impl Executor {
+    /// The compound's fd-0 `< file` source when it is a real regular file
+    /// on disk — the case where GNU's shared-offset descriptor semantics
+    /// (rubash#260) are exactly representable with a FileFd on fd 0 (see
+    /// with_command_input_redirects_inner). Everything else — pipes,
+    /// process substitutions, /dev-fd aliases, /proc synthetic files,
+    /// /dev/null, missing files, `<>` read-write opens — returns None and
+    /// keeps the FUNCTION_STDIN text-mirror transport.
+    fn compound_fd0_regular_file(&mut self, cmd: &CommandNode) -> Option<Rc<FileFd>> {
+        let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd.unwrap_or(0) != 0 || redirect.fd_var.is_some() {
+            return None;
+        }
+        if redirect.kind != crate::parser::RedirectKind::Input {
+            return None;
+        }
+        if redirect.target.starts_with("<(") {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if super::execution_misc::is_closed_redirect_target(&target)
+            || super::execution_misc::dev_stdio_redirect_fd(&target).is_some()
+            || is_null_device(&target)
+        {
+            return None;
+        }
+        if crate::proc_vfs::proc_file_content(&target).is_some() {
+            return None;
+        }
+        let path = super::path::shell_path_to_windows(&target, &self.shell_state.env_vars);
+        if !std::fs::metadata(&path)
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        FileFd::open_read(path).ok()
+    }
+
     /// GNU redir.c do_redirection_internal (redir.c:767-955) opens a
     /// compound command's fd-0 input redirection before the command runs;
     /// open failure aborts the compound with the diagnostic and status 1
@@ -877,7 +944,20 @@ impl Executor {
             return None;
         }
         let path = super::path::shell_path_to_windows(&target, &self.shell_state.env_vars);
-        match std::fs::File::open(&path) {
+        // `<> word` (r_input_output) opens O_RDWR|O_CREAT (make_cmd.c:682),
+        // so a missing name is CREATED by the open and never fails here
+        // (rubash#264); a genuine open error (bad directory, permission)
+        // still aborts the compound.
+        let probe = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .open(&path)
+        } else {
+            std::fs::File::open(&path)
+        };
+        match probe {
             Ok(_) => None,
             Err(error) => Some(format!(
                 "{}{target}: {}",

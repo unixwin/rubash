@@ -936,6 +936,32 @@ impl Executor {
     /// `script: command substitution: line N: `. The comsub parse inherits
     /// the outer line_number (evalstring.c push_stream(0)), so `line` is the
     /// script line where the substitution's input ran out.
+    /// GNU error.c sys_error prolog: get_name_for_error() with NO line
+    /// segment — `script: ` in script mode, the shell basename when
+    /// interactive, `bash: ` otherwise. redir.c:1291 add_undo_redirect's
+    /// "redirection error: cannot duplicate fd" sys_error reports through
+    /// this shape (verified vs WSL GNU 5.3.0: `script: redirection error:
+    /// cannot duplicate fd: Bad file descriptor`).
+    pub(in crate::executor) fn script_name_prefix(&self) -> String {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_INTERACTIVE")
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        let name = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .cloned()
+            .unwrap_or_else(|| "bash".to_string());
+        format!("{name}: ")
+    }
+
     pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
         if self
             .shell_state

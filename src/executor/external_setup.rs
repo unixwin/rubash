@@ -147,15 +147,23 @@ impl Executor {
             // do_redirections): an earlier fd-0 `< file` still runs its
             // open even though a later `<<` overrides fd 0, so a missing
             // file aborts the command rather than silently yielding the
-            // heredoc body.
+            // heredoc body. `<> file` runs its O_RDWR|O_CREAT open
+            // (make_cmd.c:682) the same way (rubash#264).
             for redirect in cmd.redirects.iter() {
                 if redirect.fd.unwrap_or(0) == 0
-                    && redirect.kind == crate::parser::RedirectKind::Input
+                    && matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                    )
                 {
                     let target = self.expand_redirect_target(redirect);
                     if redirect_target_fd(&target).is_none() && !is_closed_redirect_target(&target)
                     {
-                        self.probe_input_redirect(&target)?;
+                        if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                            self.probe_input_redirect_readwrite(&target)?;
+                        } else {
+                            self.probe_input_redirect(&target)?;
+                        }
                     }
                 }
             }
@@ -163,7 +171,17 @@ impl Executor {
         } else if let Some(ref redirect) = cmd.redirect_in {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd.unwrap_or(0) == 0 {
-                if let Some(fd) = redirect_target_fd(&target) {
+                // `<&N` and the move form `<&N-` (make_cmd.c:704-718) both
+                // hand the child a dup of fd N's open file description; the
+                // move's close of fd N is scoped to the command in the
+                // parent (GNU RX_UNDOABLE) and the child's dup survives
+                // independently (redir.c:1153-1166). Only `&`-prefixed
+                // operands take this arm — /dev/stdin-style fd-alias NAMES
+                // keep their dedicated piped-stdin handling below
+                // (niubash#118).
+                if let Some((fd, _move_fd)) =
+                    redirect_target_fd_and_move(&target).filter(|_| target.starts_with('&'))
+                {
                     match self.fd_table.read_endpoint(fd) {
                         Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) => {
                             let dup = crate::fd::duplicate_handle_inheritable(pipe.handle)

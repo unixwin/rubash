@@ -14,6 +14,21 @@ impl Executor {
         self.open_input_redirect_impl(target, false)
     }
 
+    /// `<> word` validity probe: r_input_output opens O_RDWR|O_CREAT with
+    /// mode 0666 (make_cmd.c:682, consumed by redir.c:702 redir_open), so
+    /// probing a missing name CREATES it — the open is part of the
+    /// redirection's side effects (rubash#264), not just a check.
+    pub(in crate::executor) fn probe_input_redirect_readwrite(
+        &self,
+        target: &str,
+    ) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(shell_path_to_windows(target, &self.shell_state.env_vars))
+    }
+
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
         if is_null_device(target) {
             return File::open(shell_path_to_windows(

@@ -43,7 +43,7 @@ impl Executor {
             if redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none() {
                 let target = self.expand_redirect_target(redirect);
                 if !is_closed_redirect_target(&target)
-                    && redirect_target_fd(&target).is_none()
+                    && redirect_target_fd_and_move(&target).is_none()
                     && !target.starts_with("<(")
                 {
                     if let Err(error) = self.probe_input_redirect(&target) {
@@ -2395,6 +2395,16 @@ impl Executor {
     fn read_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
         if self.coproc_read_file(fd).is_some() || (fd == 0 && self.first_coproc_read().is_some()) {
             return true;
+        }
+        // A move redirection `<&N-`/`>&N-` closed fd N for this command's
+        // duration (make_cmd.c:704-718 → redir.c:1159-1166 close), so
+        // `read -u 5 x <&5-` sees fd 5 invalid exactly like GNU's
+        // read.def:377-381 sh_validfd check (verified vs WSL GNU 5.3.0).
+        if let Some(redirect) = cmd.redirect_in.as_ref() {
+            let target = self.expand_redirect_target(redirect);
+            if redirect_target_fd_and_move(&target) == Some((fd, true)) {
+                return false;
+            }
         }
         if self.fd_table.is_open_for_read(fd) {
             return true;

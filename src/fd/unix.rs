@@ -241,6 +241,24 @@ pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Absolute seek — GNU read.def zsyncfd (builtins/read.def:940) parity,
+/// see windows_impl::seek_absolute.
+pub fn seek_absolute(h: HANDLE, pos: u64) -> std::io::Result<()> {
+    if unsafe { libc::lseek(h, pos as i64, libc::SEEK_SET) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Current file position.
+pub fn file_position(h: HANDLE) -> std::io::Result<u64> {
+    let pos = unsafe { libc::lseek(h, 0, libc::SEEK_CUR) };
+    if pos < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(pos as u64)
+}
+
 pub fn process_std_handle(fd: u32) -> HANDLE {
     match fd {
         0 => 0,

@@ -135,6 +135,10 @@ impl Executor {
             let expanded_target = self.expand_redirect_target(redirect);
             if let Some(fd) = expanded_target.strip_prefix('&') {
                 let fd = fd.trim_matches(|ch| ch == '"' || ch == STORAGE_WORD_PREFIX);
+                // The move form `<&N-` (make_cmd.c:704-718) dups fd N onto
+                // fd 0 — the same open file description (redir.c:1153), so
+                // reading N's endpoint reads the dup.
+                let fd = fd.strip_suffix('-').unwrap_or(fd);
                 if let Ok(fd) = fd.parse::<u32>() {
                     if let Some(output) =
                         self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)

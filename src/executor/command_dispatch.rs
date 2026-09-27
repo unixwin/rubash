@@ -4,6 +4,7 @@ impl Executor {
     pub(in crate::executor) fn execute_materialized_command(
         &mut self,
         cmd: &CommandNode,
+        // DBG
         process_substitution_files: ProcessSubstitutionFiles,
     ) -> Result<(), ExecuteError> {
         let _t = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_MATCMD);
@@ -26,7 +27,7 @@ impl Executor {
         // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
         // before apply_temporary_assignments — seeds the redirect-target memo
         // with the correct pre-binding values; the apply sites reuse them.
-        let ambiguous_redirect = self.reject_ambiguous_redirects(cmd)?;
+        let redirect_rejected = self.reject_invalid_redirects(cmd)?;
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
@@ -68,7 +69,7 @@ impl Executor {
         // simple command; builtins that return EX_USAGE/EX_UTILERROR/etc.
         // (> EX_SHERRBASE) set it during dispatch.
         self.special_builtin_failed.set(false);
-        let result = if ambiguous_redirect {
+        let result = if redirect_rejected {
             Ok(())
         } else {
             self.execute_prepared_command(cmd)

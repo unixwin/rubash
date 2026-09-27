@@ -252,11 +252,24 @@ pub(in crate::executor) fn dev_stdio_redirect_fd(target: &str) -> Option<u32> {
         .flatten()
 }
 
+/// GNU redir.c:298 redirection_expand → subst.c expand_words_no_vars: a
+/// redirect word whose expansion is EMPTY still counts as one field when
+/// the raw word contains a quoted span (`""`, `''`, `"$unset"`): the quoted
+/// null anchors the field, so the open proceeds with the empty filename
+/// and fails ENOENT (`: No such file or directory`). Only a word made
+/// entirely of UNQUOTED expansions that produced nothing expands to zero
+/// fields — redirection_expand returns NULL there and the caller reports
+/// AMBIGUOUS_REDIRECT. A backslash escape always leaves a literal
+/// character (never an empty expansion), so only quoting characters decide
+/// the anchored-empty class.
+pub(in crate::executor) fn raw_word_has_quoted_span(raw: &str) -> bool {
+    raw.chars().any(|ch| ch == '\'' || ch == '"' || ch == '\\')
+}
+
 pub(in crate::executor) fn redirect_target_is_ambiguous(raw: &str, expanded: &str) -> bool {
     if !expanded.chars().any(char::is_whitespace) {
         return false;
     }
-
     let mut single_quoted = false;
     let mut double_quoted = false;
     let mut escaped = false;

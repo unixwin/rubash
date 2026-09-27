@@ -73,13 +73,61 @@ impl Executor {
             )
     }
 
-    pub(in crate::executor) fn reject_ambiguous_redirects(
+    /// GNU do_redirections (redir.c:230-260) applies a command's
+    /// redirection list left to right and the FIRST failing entry aborts
+    /// the command (exit 1) with its diagnostic. This is rubash's
+    /// equivalent gate, run before execute_prepared_command: it rejects
+    /// (returns true) for the whole error class do_redirection_internal
+    /// can produce at APPLY time, so the command never runs — matching
+    /// GNU's "command not executed, $? = 1" contract for every command
+    /// type (builtin, external, function) alike:
+    ///
+    /// - AMBIGUOUS_REDIRECT (redir.c:911 / :784-843): a file-redirect word
+    ///   that expands to ZERO fields (`> $unset`) or MORE THAN ONE field
+    ///   (`> $v` with v="a b"). An EMPTY single field is NOT ambiguous —
+    ///   a quoted null (`> ""`, `> "$unsetv"`) anchors one empty field
+    ///   (execution_misc::raw_word_has_quoted_span), the open("")
+    ///   proceeds and fails ENOENT (`: No such file or directory`,
+    ///   redir.c:895-930 open + redirection_error default arm).
+    /// - dup/EBADF shapes (redir.c:1115 dup2, redir.c:149-176
+    ///   redirection_error): `<&N`/`>&N`/`>&N-` with fd N not open →
+    ///   `N: Bad file descriptor`; `>& ""`/`>& "$unset"` (all_digits("")
+    ///   vacuously true at general.c:233 but valid_number("") fails at
+    ///   general.c:243 → dest -1) → raw-word (redirector 0/1) or
+    ///   redirector-number EBADF text.
+    /// - move-fd with a bad source (redir.c:1137-1143 add_undo_redirect of
+    ///   the closed moved fd fails → sys_error line + `N: Bad file
+    ///   descriptor`).
+    /// - `<> word` (r_input_output, make_cmd.c:682 O_RDWR|O_CREAT): the
+    ///   open CREATES the missing file; only a real open error rejects.
+    ///
+    /// Diagnostics are order-routed (issue #250 semantics): only the
+    /// redirects BEFORE the failing entry have applied, so a preceding
+    /// `2>/dev/null` silences and a following one leaks.
+    pub(in crate::executor) fn reject_invalid_redirects(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
+        // Semantic identity of a redirect for this scan (the same key the
+        // expand_redirect_target memo uses): the ordered `redirects` list
+        // plus the legacy mirror fields may carry THE SAME source redirect
+        // twice with cosmetic differences — re-validating a duplicate
+        // would see the first copy's ordered fd effects (a move marks its
+        // source fd closed) and misreport a dup that already succeeded.
+        // GNU has exactly one do_redirections list (redir.c:246).
+        let semantic_key = |redirect: &Redirect| {
+            format!(
+                "{:?}\x1f{}\x1f{:?}\x1f{}",
+                redirect.kind, redirect.operator, redirect.fd, redirect.target
+            )
+        };
         let mut redirects = cmd.redirects.iter();
         let mut candidates = Vec::new();
         candidates.extend(redirects.by_ref());
+        let mut seen_keys: std::collections::HashSet<String> = candidates
+            .iter()
+            .map(|redirect| semantic_key(redirect))
+            .collect();
         for redirect in [
             cmd.redirect_in.as_ref(),
             cmd.redirect_out.as_ref(),
@@ -90,79 +138,336 @@ impl Executor {
         .into_iter()
         .flatten()
         {
-            if !candidates.iter().any(|candidate| *candidate == redirect) {
+            if seen_keys.insert(semantic_key(redirect)) {
                 candidates.push(redirect);
             }
         }
 
-        for redirect in candidates {
+        // GNU applies the list left to right (redir.c:246 do_redirections
+        // for-loop); a dup only sees fds opened by redirects BEFORE it
+        // (`cmd <&7 7<f` still fails — GNU opens in order). fd_table
+        // carries the ambient state; `opened` overlays the fds this
+        // command's earlier redirects opened/closed/duped for the scan.
+        let mut opened: HashMap<u32, bool> = HashMap::new();
+
+        for (index, redirect) in candidates.iter().enumerate() {
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 continue;
             }
             let target = self.expand_redirect_target(redirect);
-            // GNU redir.c:832-838: [N]>&WORD with a non-numeric WORD is not
-            // an error when the redirector is stdout and there is no
-            // varassign - it translates to r_err_and_out (>&file == >file
-            // 2>&1). Only other redirectors ({var}>&word, 2>&word, <&word)
-            // report AMBIGUOUS_REDIRECT (redir.c:839-843).
-            let dup_output_err_and_out =
-                matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput)
-                    && redirect.fd.unwrap_or(1) == 1
-                    && redirect.fd_var.is_none();
-            let invalid_fd_target = target.starts_with('&')
-                && !is_closed_redirect_target(&target)
-                && redirect_target_fd_and_move(&target).is_none()
-                && !dup_output_err_and_out;
-            // GNU redir.c:325-333 redirection_expand: a redirect word that
-            // expands to ZERO words (empty result, e.g. `>&$(true)`) returns
-            // NULL -> report_ambiguous_redirect, same as a multi-word split.
-            // `>&WORD` targets carry a leading `&` in this representation,
-            // so the emptiness test applies to the word body.
-            let empty_target = target.strip_prefix('&').unwrap_or(&target).is_empty()
-                && !matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
-                );
-            if invalid_fd_target
-                || empty_target
-                || redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target)
+            let raw_word = redirect
+                .target_metadata
+                .raw
+                .strip_prefix('&')
+                .unwrap_or(&redirect.target_metadata.raw);
+            let expanded_word = target.strip_prefix('&').unwrap_or(&target);
+            let file_open_kind = matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend
+            );
+            let is_dup_kind = matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::DuplicateOutput
+            );
+            // fd_var ({var}<>) redirects allocate dynamically at apply time
+            // (redir.c redir_varassign); only their DUP forms carry
+            // gate-visible errors — `{v}>&word` (non-digit word) is
+            // AMBIGUOUS_REDIRECT reported under the VARIABLE name
+            // (redir.c:137-138: the REDIR_VARASSIGN && error<0 branch uses
+            // the redirector word), and `{v}>&N` with N closed is the
+            // plain EBADF shape. File-open {var} forms need no gate check.
+            if redirect.fd_var.is_some() && !is_dup_kind {
+                continue;
+            }
+            let default_redirector = if redirect.kind == crate::parser::RedirectKind::DuplicateInput
             {
-                // GNU redir.c report_ambiguous_redirect (redir.c:846-870).
-                // File redirections report the word as written ($z keeps its
-                // raw spelling even when expansion is non-empty; redir.tests
-                // line 58). Dup redirections report the expanded fd word
-                // (redir.tests line 52: fd=-1 reports "-1") and fall back to
-                // the raw word only when expansion is empty (redir4.sub
-                // lines 45-46: unset fd reports "$fd").
-                let is_dup_kind = matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::DuplicateInput
-                        | crate::parser::RedirectKind::DuplicateOutput
-                );
-                let raw_word = redirect
-                    .target_metadata
-                    .raw
-                    .strip_prefix('&')
-                    .unwrap_or(&redirect.target_metadata.raw);
-                let expanded_word = target.strip_prefix('&').unwrap_or(&target);
-                let diagnostic_target = if is_dup_kind && !expanded_word.is_empty() {
-                    expanded_word
-                } else {
-                    raw_word
-                };
-                let mut stderr = Vec::new();
-                writeln!(
-                    &mut stderr,
-                    "{}{diagnostic_target}: ambiguous redirect",
-                    self.diagnostic_prefix()
-                )?;
-                self.write_default_stderr(&stderr)?;
-                self.exit_code = 1;
-                return Ok(true);
+                0
+            } else {
+                1
+            };
+            let redirector = redirect.fd.unwrap_or(default_redirector);
+
+            // ---- validation FIRST: a redirect never invalidates itself
+            // (GNU applies the redirector's own dup2 before the move's
+            // close, redir.c:1153-1166), so the ordered fd effects of THIS
+            // entry are recorded only after its checks pass. ----
+            if !(file_open_kind || is_dup_kind) {
+                // Non-file, non-dup kinds (heredocs etc.) carry no fd
+                // effects for the scan either.
+                continue;
+            }
+
+            // ---- dup redirections: [N]<&WORD / [N]>&WORD ----------------
+            if is_dup_kind {
+                if is_closed_redirect_target(&target) {
+                    opened.insert(redirector, false);
+                    continue;
+                }
+                // {var}>&word: the varassign word rules (redir.c:784-843
+                // with REDIR_VARASSIGN). A digit target still dups fd N
+                // (the allocate-and-dup runs at redir_varassign); a
+                // non-digit word never reaches the r_err_and_out arm
+                // (redirector is a word, not dest 1) — AMBIGUOUS_REDIRECT
+                // under the variable name.
+                if let Some(name) = redirect.fd_var.as_deref() {
+                    if let Some((fd, _move_fd)) = redirect_target_fd_and_move(&target) {
+                        if !dup_source_fd_open(&self.fd_table, fd, &opened) {
+                            // move_fd=true shape: the REDIR_VARASSIGN pre-dup
+                            // (redir.c:1122-1127 fcntl F_DUPFD) sys_errors
+                            // the same two-line diagnostic as the move undo.
+                            return self
+                                .reject_with_dup_bad_fd(cmd, index, fd, true, raw_word, redirector)
+                                .map(|_| true);
+                        }
+                        continue;
+                    }
+                    if !expanded_word.chars().all(|ch| ch.is_ascii_digit())
+                        || expanded_word
+                            .parse::<i64>()
+                            .ok()
+                            .and_then(|value| u32::try_from(value).ok())
+                            .is_none()
+                    {
+                        return self
+                            .reject_redirect_at(cmd, index, &format!("{name}: ambiguous redirect"))
+                            .map(|_| true);
+                    }
+                    continue;
+                }
+                // A dup-kind target WITHOUT the `&` marker is rubash's own
+                // materialized form — command_with_process_substitution_
+                // files rewrites an external command's `<&N` operand to the
+                // temp file holding fd N's remaining bytes (the rewrite only
+                // runs when fd N was open, so validation already happened).
+                // GNU never sees such an operand; skip the word rules.
+                if !target.starts_with('&') {
+                    opened.insert(redirector, true);
+                    continue;
+                }
+                // Digit forms `&N` / `&N-` (possibly via expansion).
+                if let Some((fd, move_fd)) = redirect_target_fd_and_move(&target) {
+                    if !dup_source_fd_open(&self.fd_table, fd, &opened) {
+                        return self
+                            .reject_with_dup_bad_fd(cmd, index, fd, move_fd, raw_word, redirector)
+                            .map(|_| true);
+                    }
+                    // The dup itself succeeds (GNU dup2 at redir.c:1153);
+                    // the command-scoped application sites own the binding
+                    // and the move's close.
+                    opened.insert(redirector, true);
+                    if move_fd {
+                        opened.insert(fd, false);
+                    }
+                    continue;
+                }
+                // Word forms (redir.c:784-843 TRANSLATE_REDIRECT).
+                // Zero-field expansion → redirection_expand NULL →
+                // AMBIGUOUS_REDIRECT reporting the RAW word.
+                if expanded_word.is_empty() && !raw_word_has_quoted_span(raw_word) {
+                    return self
+                        .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
+                        .map(|_| true);
+                }
+                if expanded_word == "-" {
+                    continue; // `>&$x` with x=- → close (redir.c:798-803)
+                }
+                if expanded_word.chars().all(|ch| ch.is_ascii_digit()) {
+                    // all_digits("") is vacuously true (general.c:233) but
+                    // valid_number("") fails (general.c:243) → dest -1 →
+                    // dup2(-1) EBADF. A digit word that parses dups that fd.
+                    match expanded_word
+                        .parse::<i64>()
+                        .ok()
+                        .and_then(|value| u32::try_from(value).ok())
+                    {
+                        Some(fd) => {
+                            if !dup_source_fd_open(&self.fd_table, fd, &opened) {
+                                return self
+                                    .reject_with_dup_bad_fd(
+                                        cmd, index, fd, false, raw_word, redirector,
+                                    )
+                                    .map(|_| true);
+                            }
+                            opened.insert(redirector, true);
+                        }
+                        None => {
+                            // dest -1: EBADF text per redir.c:149-176 — the
+                            // raw word for redirector 0/1 dup-WORD
+                            // instructions, the redirector number otherwise.
+                            let name = dup_bad_fd_name(raw_word, redirector, redirector);
+                            return self
+                                .reject_redirect_at(
+                                    cmd,
+                                    index,
+                                    &format!("{name}: Bad file descriptor"),
+                                )
+                                .map(|_| true);
+                        }
+                    }
+                    continue;
+                }
+                // A source word ending in `-` never reaches the
+                // r_err_and_out translation (that arm requires
+                // r_duplicating_output_word, redir.c:832; the dash already
+                // made make_redirection build r_move_output_word,
+                // make_cmd.c:716) — a non-digit expansion is
+                // AMBIGUOUS_REDIRECT reporting the expanded word with the
+                // dash stripped (make_cmd.c:709-710 mutated the word).
+                let move_word = raw_word.ends_with('-');
+                // Non-digit, non-empty word: `>&word` with redirector 1 and
+                // no varassign is r_err_and_out (redir.c:832-838) — a file
+                // open, not a dup. Everything else is AMBIGUOUS_REDIRECT
+                // reporting the EXPANDED word (redir.c:839-843 + :186-190).
+                let dup_output_err_and_out = !move_word
+                    && redirect.kind == crate::parser::RedirectKind::DuplicateOutput
+                    && redirector == 1;
+                if !dup_output_err_and_out {
+                    let diagnostic_word = expanded_word
+                        .strip_suffix('-')
+                        .filter(|_| move_word)
+                        .unwrap_or(expanded_word);
+                    return self
+                        .reject_redirect_at(
+                            cmd,
+                            index,
+                            &format!("{diagnostic_word}: ambiguous redirect"),
+                        )
+                        .map(|_| true);
+                }
+                // r_err_and_out falls through to the file-open class with
+                // the stripped word as filename.
+            }
+
+            // ---- file-open redirections --------------------------------
+            if expanded_word.is_empty() {
+                // Multi-field split or zero-field expansion: both are the
+                // redirection_expand NULL condition (redir.c:325-333); an
+                // anchored quoted-null single empty field is NOT.
+                if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target)
+                    || !raw_word_has_quoted_span(raw_word)
+                {
+                    return self
+                        .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
+                        .map(|_| true);
+                }
+                // One anchored empty field: the open itself fails —
+                // open("") → ENOENT on every flag combination, so the
+                // diagnostic is deterministic without touching the disk.
+                return self
+                    .reject_redirect_at(cmd, index, ": No such file or directory")
+                    .map(|_| true);
+            }
+            if redirect_target_is_ambiguous(&redirect.target_metadata.raw, &target) {
+                return self
+                    .reject_redirect_at(cmd, index, &format!("{raw_word}: ambiguous redirect"))
+                    .map(|_| true);
+            }
+            // `<> word` opens O_RDWR|O_CREAT (make_cmd.c:682) — creating
+            // the missing file is part of the redirection, not a consumer
+            // side effect (rubash#264). Other open failures (bad
+            // directory, permission) abort like GNU's redir_open.
+            if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                && !is_null_device(&target)
+                && dev_stdio_redirect_fd(&target).is_none()
+                && !target.starts_with("<(")
+            {
+                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                if let Err(error) = FileFd::open_readwrite(path) {
+                    let message = crate::posix_errors::path_error(&target, error);
+                    let text = crate::posix_errors::message(&message);
+                    return self
+                        .reject_redirect_at(cmd, index, &format!("{target}: {text}"))
+                        .map(|_| true);
+                }
+            }
+            // Checks passed — record this entry's ordered fd effect for
+            // later dups in the same list: a plain file open binds its
+            // redirector, an fd-alias name (redir.c /dev/fd resolution)
+            // dups the aliased fd's state.
+            if is_closed_redirect_target(&target) {
+                opened.insert(redirector, false);
+            } else if let Some(source) = dev_stdio_redirect_fd(&target) {
+                let open = dup_source_fd_open(&self.fd_table, source, &opened);
+                opened.insert(redirector, open);
+            } else {
+                opened.insert(redirector, true);
             }
         }
 
         Ok(false)
+    }
+
+    /// The dup bad-fd rejection. GNU `>&7-`/`<&7-` with fd 7 closed fails
+    /// in TWO steps (verified against WSL GNU 5.3.0, rubash#263/#266):
+    /// redir.c:1137-1143's add_undo_redirect of the moved fd sys_errors
+    /// `script: redirection error: cannot duplicate fd: ...` (error.c
+    /// get_name_for_error prolog, no line segment), then
+    /// REDIRECTION_ERROR returns EBADF and redirection_error
+    /// (redir.c:149-158) prints the fd with the full prefix. Plain dups
+    /// (`>&7`, redir.c:1153 dup2) report only the second line.
+    fn reject_with_dup_bad_fd(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        fd: u32,
+        move_fd: bool,
+        raw_word: &str,
+        redirector: u32,
+    ) -> Result<(), ExecuteError> {
+        let mut stderr = Vec::new();
+        if move_fd {
+            writeln!(
+                &mut stderr,
+                "{}redirection error: cannot duplicate fd: Bad file descriptor",
+                self.script_name_prefix()
+            )?;
+        }
+        let name = dup_bad_fd_name(raw_word, redirector, fd);
+        writeln!(
+            &mut stderr,
+            "{}{name}: Bad file descriptor",
+            self.diagnostic_prefix()
+        )?;
+        self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+        self.exit_code = 1;
+        Ok(())
+    }
+
+    fn reject_redirect_at(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        text: &str,
+    ) -> Result<(), ExecuteError> {
+        let mut stderr = Vec::new();
+        writeln!(&mut stderr, "{}{text}", self.diagnostic_prefix())?;
+        self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+        self.exit_code = 1;
+        Ok(())
+    }
+
+    /// Order-routed redirect diagnostic (issue #250 semantics): only the
+    /// redirects strictly BEFORE the failing one have applied when GNU
+    /// reports, so their fd-2 binding routes this message —
+    /// `cmd 2>/dev/null > /missing` is silent, the reversed order leaks.
+    fn write_redirect_diagnostic_at(
+        &mut self,
+        cmd: &CommandNode,
+        index: usize,
+        message: &[u8],
+    ) -> Result<(), ExecuteError> {
+        let mut state = self.command_output_fd_state();
+        let mut prefix_cmd = cmd.clone();
+        prefix_cmd.redirects.truncate(index);
+        let _ = self.apply_ordered_output_redirects(&prefix_cmd, &mut state)?;
+        state.write_to_fd(self, 2, message)
     }
 
     pub(in crate::executor) fn command_output_redirect_fails(
@@ -491,7 +796,14 @@ impl Executor {
                         state.saw_output_redirect = true;
                         continue;
                     }
-                    if let Some(source_fd) = redirect_target_fd(&target) {
+                    // `>&N` and the move form `>&N-` (make_cmd.c:704-718 →
+                    // redir.c r_move_output) both resolve fd N's write
+                    // target into the redirector. This state map is
+                    // per-command transient and GNU's move close is undone
+                    // when the command ends (RX_UNDOABLE), so a plain copy
+                    // matches the command's observable writes (`exec 5>&1;
+                    // echo x >&5-` writes stdout, fd 5 still open after).
+                    if let Some((source_fd, _move_source)) = redirect_target_fd_and_move(&target) {
                         let Some(source_target) = state.fd_target(source_fd).cloned() else {
                             self.write_bad_fd_redirect_diagnostic(
                                 state,
@@ -962,4 +1274,38 @@ fn is_closed_output_error(error: &ExecuteError) -> bool {
             if error.kind() == std::io::ErrorKind::BrokenPipe
                 || error.raw_os_error() == Some(232)
     )
+}
+
+/// Whether fd `fd` is dup2-able in the state the scan has reached: the
+/// overlay decides first (fds this command's earlier redirects opened or
+/// closed), then the fd table; an absent entry for fds 0-2 is the
+/// process's implicit stdio — always open, exactly the fallback
+/// open_compound_output_redirects documents for its own dups.
+fn dup_source_fd_open(table: &FdTable, fd: u32, opened: &HashMap<u32, bool>) -> bool {
+    if let Some(is_open) = opened.get(&fd) {
+        return *is_open;
+    }
+    if table.has_entry(fd) {
+        !table.is_closed(fd)
+    } else {
+        fd <= 2
+    }
+}
+
+/// GNU redir.c:149-176 redirection_error EBADF filename: a pure-digit
+/// source operand came through the NUMBER grammar (`>&7` →
+/// r_duplicating_output → itos(redirectee.dest)); every other source is a
+/// dup-WORD instruction — redirectors 0/1 report the operand word as
+/// written (make_redirection's dash strip at make_cmd.c:709-710 mutates
+/// `7-` to `7` first), other redirectors report itos(redirector).
+/// `fallback` stands in for the dest when no fd parsed (dest -1).
+fn dup_bad_fd_name(raw_word: &str, redirector: u32, fallback: u32) -> String {
+    let base = raw_word.strip_suffix('-').unwrap_or(raw_word);
+    if !base.is_empty() && base.chars().all(|ch| ch.is_ascii_digit()) && raw_word == base {
+        fallback.to_string()
+    } else if redirector == 0 || redirector == 1 {
+        base.to_string()
+    } else {
+        redirector.to_string()
+    }
 }

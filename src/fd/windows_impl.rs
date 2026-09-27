@@ -748,6 +748,30 @@ pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Absolute 64-bit seek (FILE_BEGIN). The buffered record reader uses it to
+/// rewind a disk-file handle to the consumed boundary after a chunked
+/// read — GNU read.def's zsyncfd (builtins/read.def:940) does the same
+/// lseek so duplicated descriptors keep the shared-offset contract.
+pub fn seek_absolute(h: HANDLE, pos: u64) -> std::io::Result<()> {
+    let mut high = (pos >> 32) as i32;
+    let r = unsafe { SetFilePointer(h, pos as u32 as i32, &mut high, FILE_BEGIN) };
+    if r == 0xFFFF_FFFF {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Current 64-bit file position (FILE_CURRENT query).
+pub fn file_position(h: HANDLE) -> std::io::Result<u64> {
+    const FILE_CURRENT: DWORD = 1;
+    let mut high: i32 = 0;
+    let r = unsafe { SetFilePointer(h, 0, &mut high, FILE_CURRENT) };
+    if r == 0xFFFF_FFFF {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(((high as i64 as u64) << 32) | (r as u32 as u64))
+}
+
 /// Anonymous pipe for background-job output capture (rubash#169). Both ends
 /// are NON-inheritable: the caller keeps the read end and hands out per-child
 /// duplicates via `duplicate_handle_inheritable`, so the shared write end's

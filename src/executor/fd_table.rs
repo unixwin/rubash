@@ -448,6 +448,19 @@ impl FdTable {
         if char_limit == Some(0) {
             return Some(Vec::new());
         }
+        // Seekable disk file without a read deadline: GNU buffers this
+        // case (read.def:664-671 keeps unbuffered_read == 0 for non-tty,
+        // non-pipe input and read.def:737 zreadc serves from a buffer),
+        // then rewinds the descriptor to the consumed boundary at exit
+        // (read.def:940 zsyncfd) so the shared offset lands exactly past
+        // the record. Chunked reads + explicit rewind reproduce that
+        // syscall profile — a 1-byte ReadFile loop would make a
+        // while-read over a large file O(bytes) syscalls where GNU is
+        // O(bytes/chunk). Deadline reads stay byte-wise (per-byte
+        // wait_readable, read.def check_read_timeout).
+        if self.read_deadline.is_none() && crate::fd::is_disk_file(file.handle) {
+            return self.read_file_bytes_buffered(file, delimiter, char_limit, exact);
+        }
         let mut result = Vec::new();
         let mut chars = 0usize;
         let mut consumed = false;
@@ -486,6 +499,67 @@ impl FdTable {
         }
         // EOF with zero bytes read must surface as None — `read` at EOF
         // exits 1, distinct from an empty line (delimiter consumed).
+        if !consumed {
+            return None;
+        }
+        Some(result)
+    }
+
+    /// Chunked record read for seekable disk files (see read_file_bytes):
+    /// read 8 KiB chunks, scan for the delimiter / char limit, then seek
+    /// the shared handle back to the consumed boundary — zreadc + zsyncfd
+    /// parity (read.def:737, :940). Byte accounting matches the byte-wise
+    /// loop exactly (delimiter consumed but not returned in non-exact
+    /// mode; chars counted on non-continuation bytes).
+    fn read_file_bytes_buffered(
+        &mut self,
+        file: Rc<FileFd>,
+        delimiter: u8,
+        char_limit: Option<usize>,
+        exact: bool,
+    ) -> Option<Vec<u8>> {
+        let Ok(origin) = crate::fd::file_position(file.handle) else {
+            return None;
+        };
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut result: Vec<u8> = Vec::new();
+        let mut chars = 0usize;
+        let mut consumed = false;
+        let mut rewind: Option<u64> = None;
+        'chunks: loop {
+            let scanned_from = buffer.len();
+            match crate::fd::read_some(file.handle, 8192) {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => buffer.extend_from_slice(&chunk),
+                Err(_) => break,
+            }
+            for (index, &byte) in buffer[scanned_from..].iter().enumerate() {
+                let absolute = scanned_from + index;
+                consumed = true;
+                let mut keep = true;
+                if !exact && byte == delimiter {
+                    keep = false;
+                }
+                if byte & 0xc0 != 0x80 {
+                    chars += 1;
+                }
+                if keep {
+                    result.push(byte);
+                } else {
+                    // Delimiter consumed but not returned; everything after
+                    // its position is prefetched data to rewind over.
+                    rewind = Some(origin + (absolute as u64) + 1);
+                    break 'chunks;
+                }
+                if char_limit.is_some_and(|limit| chars >= limit) {
+                    rewind = Some(origin + (absolute as u64) + 1);
+                    break 'chunks;
+                }
+            }
+        }
+        if let Some(position) = rewind {
+            let _ = crate::fd::seek_absolute(file.handle, position);
+        }
         if !consumed {
             return None;
         }

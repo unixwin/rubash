@@ -39,11 +39,13 @@ impl Executor {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if redirect_target_fd(&target).is_some() {
-                // `<&N` and fd-alias paths (/dev/stdin, /dev/fd/0,
-                // /proc/self/fd/0): the builtin keeps reading its current
-                // stdin channel — the fd dup is a no-op for the virtual
-                // input model.
+            } else if redirect_target_fd_and_move(&target).is_some() {
+                // `<&N`, the move form `<&N-` (make_cmd.c:704-718) and the
+                // fd-alias paths (/dev/stdin, /dev/fd/0, /proc/self/fd/0):
+                // the builtin keeps reading its current stdin channel — the
+                // dup is a no-op for the virtual input model, and the
+                // reject_invalid_redirects gate already validated fd N is
+                // open (redir.c:1115 dup2 EBADF).
             } else if redirect.append {
                 OpenOptions::new()
                     .create(true)
@@ -59,7 +61,9 @@ impl Executor {
             let target = self.expand_redirect_target(redirect);
             if redirect.fd_var.is_some() {
             } else if is_closed_redirect_target(&target) {
-            } else if redirect_target_fd(&target).is_some() {
+            } else if redirect_target_fd_and_move(&target).is_some() {
+                // `>&N` / `>&N-` dup (and move) forms: validated by the
+                // reject_invalid_redirects gate; nothing to open here.
             } else if redirect.fd.unwrap_or(1) == 1 && target.starts_with('&') {
                 // GNU redir.c:832-838: >&WORD with a non-numeric WORD and
                 // redirector 1 translates to r_err_and_out (>&file ==

@@ -189,6 +189,15 @@ impl Executor {
             if let Some(input) = self.stdin_string_for_command_mut(cmd) {
                 return Some(input);
             }
+            // A compound `< file` binds fd 0 to the real shared-offset
+            // handle (with_command_input_redirects_inner, rubash#260) with
+            // no FUNCTION_STDIN mirror — mapfile without -u reads that
+            // descriptor to EOF, exactly like GNU mapfile.def on fd 0.
+            if self.fd_table.is_open_for_read(0) {
+                if let Some(input) = self.fd_table.read_all_text(0) {
+                    return Some(input);
+                }
+            }
             // Fallback: read from inherited process stdin when INHERIT_PROCESS_STDIN is set
             // (e.g., printf '...' | rubash -c 'mapfile arr')
             if self
