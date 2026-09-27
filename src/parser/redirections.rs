@@ -577,11 +577,21 @@ pub(super) fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
         .words
         .last()
         .filter(|word| !word.is_empty() && word.chars().all(|ch| ch.is_ascii_digit()))?
-        .parse::<u32>()
-        .ok()?;
+        // GNU parse.y:5725-5738 read_token_word() (got_token): the fused
+        // digit+operator form is a NUMBER redirection prefix only when
+        // valid_number() succeeds AND the value fits in `int`
+        // (`(int)lvalue == lvalue`). The lexer's number_redirect gate
+        // (rubash#197) already returns out-of-int digits as a WORD; this
+        // adjacency re-fusion of a preceding digit word must apply the same
+        // rule, or `2147483648</dev/null` becomes a silent fd redirect
+        // instead of the command `2147483648` failing with
+        // "command not found".
+        .parse::<i64>()
+        .ok()
+        .and_then(|value| i32::try_from(value).ok())?;
     cmd.words.pop();
     cmd.word_kinds.pop();
-    Some(fd)
+    Some(fd as u32)
 }
 
 pub(super) fn assign_heredoc_body(
