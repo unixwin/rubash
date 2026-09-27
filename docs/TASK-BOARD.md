@@ -43,3 +43,6 @@
 - ci ✅ 回收（1f30c090：tests/regression 21 测试 + windows CI job + 性能哨兵）；**发现 master 回归**：brace_scan_cache 深度≥4 恢复洞 → **regfix 车道在途**（P0 修洞 + snapshot 甄别 + 5 项分歧开单）
 - perfsuite ✅ 回收（7dfdaeb0：24 探针基准 + PERF-BASELINE.md，最差 nvm -n 852x/configure 超时，spawn 1.5x 平价）；3 单（#241-#243）→ **perffix 车道在途**（#243 不终止 P0 + 解析中止项 + 首次热路径攻坚）
 - corpusfix ✅ 回收（e572930a：#214-#217 四单关闭，continuation.rs 船长 diff 审查通过合入；bash-preexec/tldr CLEAN）；ble.sh 新单 #244（词内 {} 分隔符）/#245（--noattach 超时）/#246（declare -i 复合赋值标量化）排队下一波
+
+## 配额中断（2026-09-27 20:15）
+5 agent 撞 5h 配额墙（重置 22:52）。工作树状态已钉：regfix dirty=5（含 brace 洞修复中）、linuxfix dirty=11、ecofix dirty=16、deep201 dirty=5、perffix dirty=3。已约 22:55 定时复活：逐树续作协议唤醒（audit→build→续/弃）。
