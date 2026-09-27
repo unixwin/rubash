@@ -2783,11 +2783,29 @@ fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
             }
             continue;
         }
-        // Existing \x1c markers — copy through with the protected char
+        // Existing \x1c markers — copy through with the protected char. The
+        // byte is dual-role (markers.rs QUOTED_WORD_VALUE_PREFIX): when the
+        // lexer's mark_quoted_assignment_value placed it after the `=` of a
+        // quoted assignment-shaped word (`t3=\x1c${q%%:*}`, the quoted-RHS
+        // signal), the next character is the RHS's first character and may
+        // open an expansion unit. Swallowing it here as "the protected
+        // char" desyncs the scanner past the `$`/backtick introducer, the
+        // `${...}` body then falls to the literal arm, and every IFS char
+        // inside the pattern text gets spuriously guarded — with IFS=:,
+        // `${q%%:*}` reached the pattern matcher as `\x1c:*` and matched
+        // nothing (rubash#175 PATH probes). Only take a payload character
+        // that cannot start a unit; let the unit arms below own `$`,
+        // backtick, and their carrier forms.
         if ch == crate::executor::markers::IFS_GLUE {
             output.push(ch);
             index += 1;
-            if index < chars.len() {
+            let opens_unit = chars.get(index).is_some_and(|next| {
+                matches!(
+                    *next,
+                    '$' | '`' | DATA_DOLLAR | crate::executor::markers::DATA_BACKTICK
+                )
+            });
+            if !opens_unit && index < chars.len() {
                 output.push(chars[index]);
                 index += 1;
             }
