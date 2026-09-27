@@ -53,3 +53,5 @@
 - linuxfix ✅ 回收（5de3d1d2：14 单关闭，Linux 平价 17→19；#236 CTLESC glob 族、#238 环境绑定留单；线索：comsub2/printf Linux 侧回归系 9bf2df9e→4d648499 间引入——并入 nquote 红门禁同族调查）
 - misc ✅ 回收（733d79c2：#247-#250 四单关闭+v=$(f) 双执行顺带修；新单 #254 builtin comsub 赋值位 xtrace 缺行排队）
 - ble ✅ 回收（32d1458e：#244/#245/#246 三单关闭；ble.sh source 与 GNU 一致、-n 推进至 28570→新单 #255 排队）
+## CI 从未绿过（用户发现 2026-09-28）——cifix 车道在途
+三类红：macOS 2 个 uname 测试（linuxrun 改了 darwin 形态没跟上）、Windows golden_nounset_exit_matrix（本地绿 CI 红=最小 PATH 环境嫌疑）、nquote 快照（redgate 车道在修）。教训已记：回收流程加第五道门禁=gh run watch 远端 CI 结论。
