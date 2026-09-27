@@ -860,18 +860,15 @@ impl Executor {
                     status.max(1)
                 }
             };
-            let stderr = if self.stdout_capture.is_some()
-                && declare_args_request_print(&args)
-                && !args.iter().any(|arg| {
-                    (arg.starts_with('-') || arg.starts_with('+'))
-                        && (arg.contains('f') || arg.contains('F'))
-                })
-                && status != 0
-            {
-                Vec::new()
-            } else {
-                stderr
-            };
+            // GNU declare.def:388-404 (pflag loop) -> common.c:188
+            // sh_notfound -> common.c:98 builtin_error vfprintf(stderr):
+            // the `declare -p NAME: not found` diagnostic always reaches
+            // fd 2, including inside a command substitution — the comsub
+            // child inherits fd 2, so it lands on the terminal, and a
+            // body-level `2>&1` dups it onto the capture pipe first. An
+            // earlier guard dropped the buffered stderr whenever
+            // stdout_capture was active (bashdb hardening, no GNU anchor),
+            // which swallowed the diagnostic entirely (rubash#189).
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             Ok(status)
         })();
