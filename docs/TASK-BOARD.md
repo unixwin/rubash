@@ -41,3 +41,4 @@
 - ecosuite ✅ 回收（7cbb21ed：modernish/mvdan/nvm/bats 四套件首跑，#218-#224 七单开立）→ **ecofix 车道在途**（wt4/ecofix，修完重跑套件）
 - linuxrun ✅ 回收（4d648499：Linux 原生可跑——uname/chmod/test -x 四修 + 17/24 套件字节一致 + nvm 加载干净）；16 单（#225-#240）→ **linuxfix 车道在途**（#226 不可杀优先）
 - ci ✅ 回收（1f30c090：tests/regression 21 测试 + windows CI job + 性能哨兵）；**发现 master 回归**：brace_scan_cache 深度≥4 恢复洞 → **regfix 车道在途**（P0 修洞 + snapshot 甄别 + 5 项分歧开单）
+- perfsuite ✅ 回收（7dfdaeb0：24 探针基准 + PERF-BASELINE.md，最差 nvm -n 852x/configure 超时，spawn 1.5x 平价）；3 单（#241-#243）→ **perffix 车道在途**（#243 不终止 P0 + 解析中止项 + 首次热路径攻坚）
