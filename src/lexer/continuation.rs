@@ -541,8 +541,19 @@ pub(crate) fn unclosed_input_close_char_posix(
                         }
                         i += 1;
                     }
-                    Some('\'') if top.is_none() => {
+                    Some('\'')
+                        if top
+                            .is_none_or(|d| d.close == '}' || d.close == ')' || d.close == '`') =>
+                    {
                         // ANSI-C $'...': single-quote close, escapes live.
+                        // parse.y:4062-4068 parse_matched_pair: inside a
+                        // grouping construct ($(...), ${...}, subshell,
+                        // backtick) a `$'` opens a nested P_ALLOWESC unit —
+                        // its \' escapes stay inside and the enclosing
+                        // construct's quote state never sees them
+                        // (rubash#222/t0286: `${foo/$a/$''}` must not read
+                        // as an unclosed `'`). Double quotes stay excluded:
+                        // `"` is not in the guard set.
                         stack.push(UnclosedDelim {
                             close: '\'',
                             open_line: line,
