@@ -352,7 +352,7 @@ fn c_command_retires_finished_coproc_endpoints_before_later_redirects() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: 4: Bad file descriptor\n"
+        "bash: line 1: 4: Bad file descriptor\n"
     );
 }
 
@@ -1125,10 +1125,10 @@ fn function_call_stack_reports_multiline_source_and_line() {
         .expect("run rubash");
 
     assert!(output.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "t2|environment|2\n"
-    );
+    // GNU shell.c:1647 pushes the "main" bottom frame only in
+    // shell_execscript (script FILE); `bash -c` has real function frames
+    // only: FUNCNAME=(t2), BASH_SOURCE=(bash), BASH_LINENO=(2).
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "t2|bash|2\n");
 }
 
 #[test]
@@ -1144,7 +1144,7 @@ fn function_call_stack_omits_internal_main_frame() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "inner outer|environment environment|1 1\n"
+        "inner outer|bash bash|1 1\n"
     );
 }
 
@@ -2255,7 +2255,7 @@ fn c_command_echo_reports_bad_fd_after_exec_close() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\nstatus:1\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: 3: Bad file descriptor\n"
+        "bash: line 1: 3: Bad file descriptor\n"
     );
     assert!(!literal_fd_path.exists());
 }
@@ -2420,7 +2420,7 @@ fn c_command_read_closed_stdin_reports_bad_fd() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "<>:1\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: read: read error: 0: Bad file descriptor\n"
+        "bash: line 1: read: 0: read error: Bad file descriptor\n"
     );
 }
 
@@ -2445,7 +2445,7 @@ fn c_command_read_closed_stdin_redirects_bad_fd_diagnostic() {
         fs::read_to_string(&error_path)
             .unwrap()
             .replace("\r\n", "\n"),
-        "rubash: read: read error: 0: Bad file descriptor\n"
+        "bash: line 1: read: 0: read error: Bad file descriptor\n"
     );
     let _ = fs::remove_file(error_path);
 }
@@ -2854,7 +2854,7 @@ fn c_command_mapfile_reports_bad_fd_after_exec_close() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:1 len:0\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "rubash: mapfile: 3: invalid file descriptor: Bad file descriptor\n"
+        "bash: line 1: mapfile: 3: invalid file descriptor: Bad file descriptor\n"
     );
 }
 

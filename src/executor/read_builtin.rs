@@ -2242,9 +2242,14 @@ impl Executor {
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
+                // GNU read.def:911: builtin_error ("%d: %s: %s", fd,
+                // "read error", strerror(errno)) — the fd number comes
+                // before the "read error" tag (probe 2026-09-27:
+                // `read value <&-` → `bash: line 1: read: 0: read error:
+                // Bad file descriptor`).
                 let _ = writeln!(
                     &mut stderr,
-                    "{}read: read error: 0: Bad file descriptor",
+                    "{}read: 0: read error: Bad file descriptor",
                     self.diagnostic_prefix()
                 );
                 if initial_text.is_none() {

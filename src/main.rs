@@ -986,6 +986,20 @@ fn run_stdin_script(executor: &mut Executor) -> i32 {
     // `$-` gains `s` (`bash < file`, `bash -s < file`). This driver is the
     // common path for all such invocations, so set the marker once here.
     executor.set_env(rubash::script_driver::READ_STDIN_MARKER, "1");
+    // GNU never rebinds $0 for a stdin script (the shell.c:1613 rebind runs
+    // in shell_execscript, the script-FILE path), so $0 stays argv[0] as the
+    // parent invoked it — variables.c initialize_shell_variables binds
+    // dollar_vars[0] = shell_name. Probe 2026-09-27: `printf ... | bash -s
+    // alpha` prints $0=bash (argv[0] verbatim, full path when invoked with
+    // one). Internal respawns carry the parent's name through init.rs, so
+    // only bind when absent.
+    if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
+        let argv0 = std::env::args_os()
+            .next()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bash".to_string());
+        executor.set_env("__RUBASH_SCRIPT_NAME", argv0.as_str());
+    }
     // TODO(shell.c/input.c): Bash reads commands from redirected stdin without
     // prompting, while commands launched from that stream inherit the same
     // input. Keep ordinary input line-oriented, but gather obvious compound

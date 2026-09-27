@@ -26,7 +26,15 @@ fn stdin_script_uses_s_positional_arguments() {
     let output = child.wait_with_output().unwrap();
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "rubash:alpha:2\n");
+    // GNU shell.c:1613 rebinds $0 only in shell_execscript (script FILE);
+    // a stdin script keeps dollar_vars[0] = argv[0] verbatim
+    // (variables.c initialize_shell_variables), so $0 is the full path the
+    // test harness invoked (probe 2026-09-27: `printf ... | bash -s alpha`).
+    let invoked = env!("CARGO_BIN_EXE_rubash");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{invoked}:alpha:2\n")
+    );
 }
 
 #[test]

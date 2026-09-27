@@ -523,40 +523,25 @@ pub(super) fn field_split_positional_values_with_ifs(
     values: Vec<String>,
     ifs: Option<&str>,
 ) -> Vec<String> {
-    let value_count = values.len();
-    values
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, value)| {
-            let is_last = index + 1 == value_count;
-            // GNU subst.c: an unquoted `$@`/`$*` expansion produces one word
-            // per positional parameter, then field-splits each. An empty
-            // parameter yields no fields (subst.c list_string discards
-            // empty words from unquoted expansions), so drop it entirely
-            // rather than keeping a spurious empty field (new-exp `${@%%[!/]*}`
-            // where `.` becomes empty after pattern removal).
-            let mut fields = if value.is_empty() {
-                Vec::new()
-            } else if let Some(ifs) = ifs.filter(|ifs| ifs.chars().any(|ch| !ch.is_whitespace())) {
-                if ifs.chars().any(is_ifs_whitespace) {
-                    split_mixed_ifs(&value, ifs)
-                } else {
-                    value
-                        .split(|ch| ifs.contains(ch))
-                        .map(str::to_string)
-                        .collect()
-                }
-            } else {
-                field_split_values_with_ifs(&value, ifs)
-            };
-            if is_last {
-                while fields.last().is_some_and(|field| field.is_empty()) {
-                    fields.pop();
-                }
-            }
-            fields
-        })
-        .collect()
+    // GNU subst.c:2957 string_list_dollar_at: an UNQUOTED `$@`/`$*` joins
+    // the parameters into ONE string using the first IFS character (a space
+    // when IFS is unset) and hands that string to the standard field
+    // splitter. The joined-string model is what makes the empty-field rules
+    // fall out: an empty parameter between neighbors is just two adjacent
+    // separators, yielding exactly one empty field; trailing empty fields
+    // drop like any IFS split; a lone empty parameter joins to "" and
+    // expands to zero fields. Probes 2026-09-27 (GNU 5.3.0): `set -- a ""
+    // b; set -- $@` -> 3 fields [a][][b]; `set -- a ""` -> 1; `set -- ""
+    // ""` -> 0; IFS=,: `set -- "a:" "" ":b"` -> 5 [a][][][][b].
+    if ifs.is_some_and(|ifs| ifs.is_empty()) {
+        // Posix interp 888 (IFS null): no field splitting — one word per
+        // parameter (callers already special-case the plain `$*`/`${*}`
+        // spellings the same way).
+        return values;
+    }
+    let separator = ifs.and_then(|ifs| ifs.chars().next()).unwrap_or(' ');
+    let joined = values.join(&separator.to_string());
+    field_split_values_with_ifs(&joined, ifs)
 }
 
 #[cfg(test)]

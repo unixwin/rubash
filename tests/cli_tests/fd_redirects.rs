@@ -210,7 +210,7 @@ fn c_external_command_reports_bad_fd_after_exec_close() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: 3: Bad file descriptor\n"
+        "bash: line 1: 3: Bad file descriptor\n"
     );
     assert!(!literal_fd_path.exists());
     let _ = fs::remove_dir_all(bin_dir);
@@ -263,7 +263,7 @@ fn c_external_command_reports_ambiguous_stderr_fd_redirect() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: bad: ambiguous redirect\n"
+        "bash: line 1: bad: ambiguous redirect\n"
     );
     assert!(!literal_fd_path.exists());
     let _ = fs::remove_dir_all(bin_dir);
@@ -282,7 +282,7 @@ fn c_builtin_command_reports_ambiguous_redirect_after_unquoted_expansion() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: a b: ambiguous redirect\n"
+        "bash: line 1: $target: ambiguous redirect\n"
     );
     assert!(!Path::new("a b").exists());
 }
@@ -299,7 +299,7 @@ fn c_exec_reports_ambiguous_redirect_for_invalid_expanded_fd() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: -1: ambiguous redirect\n"
+        "bash: line 1: -1: ambiguous redirect\n"
     );
 }
 
@@ -453,7 +453,7 @@ fn c_dynamic_fd_closed_redirect_preserves_source_token_diagnostic() {
     assert_eq!(stream_text(&output.stdout), "status:1\n");
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: $fd: Bad file descriptor\n"
+        "bash: line 1: $fd: Bad file descriptor\n"
     );
 }
 
@@ -486,7 +486,7 @@ fn c_dynamic_varredir_close_closes_fd_after_command() {
     );
     assert_eq!(
         stream_text(&output.stderr),
-        "rubash: $fd: Bad file descriptor\n"
+        "bash: line 1: $fd: Bad file descriptor\n"
     );
 }
 

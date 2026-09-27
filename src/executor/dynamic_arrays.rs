@@ -143,22 +143,36 @@ impl Executor {
         )
     }
 
+    /// GNU shell.c:1635-1650 (shell_execscript): the synthetic bottom
+    /// frames — FUNCNAME "main", the script's BASH_SOURCE entry, and
+    /// BASH_LINENO "0" — are pushed ONLY when the shell reads a SCRIPT
+    /// FILE. `bash -c` (error.c get_name_for_error reports dollar_vars[0])
+    /// and stdin-script mode (`bash -s`, `bash < file`; shell.c:780-786
+    /// read_from_stdin) never enter shell_execscript, so they have no main
+    /// frame: probe 2026-09-27 — `bash -c 't2; ...'` → FUNCNAME=(t2),
+    /// BASH_SOURCE=(bash), BASH_LINENO=(2), all empty at top level;
+    /// `printf 'f\n' | bash -s` → FUNCNAME=(f), BASH_SOURCE=().
+    fn has_script_main_frame(&self) -> bool {
+        self.shell_state
+            .env_vars
+            .contains_key("__RUBASH_SCRIPT_NAME")
+            && !self.shell_state.env_vars.contains_key("__RUBASH_IS_C")
+            && !self
+                .shell_state
+                .env_vars
+                .contains_key(crate::script_driver::READ_STDIN_MARKER)
+    }
+
     /// GNU keeps a bottom BASH_LINENO frame of "0" for the main script frame
     /// in script-file mode only: dbg-support.tests reports
     /// BASH_LINENO=("0") at the top level and BASH_LINENO[3]=0 inside nested
     /// calls ("main called from ... at line 0"), while `bash -c` has no main
-    /// frame and reports BASH_LINENO with no trailing "0" (cli function
-    /// stack probes: "inner outer|environment environment|1 1"). The main
-    /// script frame exists exactly when __RUBASH_SCRIPT_NAME is bound, the
-    /// same condition FUNCNAME's synthetic "main" uses.
+    /// frame and reports BASH_LINENO with no trailing "0" (probe
+    /// 2026-09-27: "inner outer|bash bash|1 1"). The main script frame
+    /// exists exactly when has_script_main_frame() is true.
     pub(in crate::executor) fn bash_lineno_view(&self) -> Vec<String> {
         let mut stack = self.shell_state.bash_lineno_stack.clone();
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_SCRIPT_NAME")
-            && stack.last().map(String::as_str) != Some("0")
-        {
+        if self.has_script_main_frame() && stack.last().map(String::as_str) != Some("0") {
             stack.push("0".to_string());
         }
         stack
@@ -178,12 +192,11 @@ impl Executor {
                     return Some(String::new());
                 }
                 let mut stack = self.shell_state.function_name_stack.clone();
-                // Bash exposes the script's top-level frame as `main`, but
-                // `bash -c` reports only real function frames.
-                if self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_SCRIPT_NAME")
+                // The "main" bottom frame exists only in script-file mode
+                // (shell.c:1647 array_push(funcname_a, "main") inside
+                // shell_execscript); `bash -c` and stdin scripts have only
+                // real function frames.
+                if self.has_script_main_frame()
                     && !stack.is_empty()
                     && stack.last().map(String::as_str) != Some("main")
                 {
@@ -203,9 +216,17 @@ impl Executor {
             }
             "BASH_LINENO" => return Some(format_indexed_array_values(self.bash_lineno_view())),
             "BASH_SOURCE" => {
-                return Some(format_indexed_array_values(
-                    self.shell_state.bash_source_stack.clone(),
-                ))
+                let mut stack = self.shell_state.bash_source_stack.clone();
+                // Without a main frame (`bash -c`, stdin scripts) the
+                // script-name bottom entry installed with $0 is not a
+                // BASH_SOURCE frame — GNU reports only real call frames
+                // (probe: `bash -c 't2; ...'` → BASH_SOURCE=(bash), top
+                // level ()). The bottom sits at the end because function
+                // calls insert at index 0.
+                if !self.has_script_main_frame() && !stack.is_empty() {
+                    stack.pop();
+                }
+                return Some(format_indexed_array_values(stack));
             }
             _ => {}
         }
