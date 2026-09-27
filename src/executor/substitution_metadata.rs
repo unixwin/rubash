@@ -769,6 +769,19 @@ pub(in crate::executor) fn scan_substitution_spans(raw: &str) -> Vec<Substitutio
                         cursor += 2;
                         continue;
                     }
+                    // GNU parse.y:3952-3956 parse_matched_pair: a `)` closes
+                    // only after count reaches zero, and EVERY unquoted `(`
+                    // nests (`ch == open` -> count++, no `$` prefix required)
+                    // — parse_comsub (parse.y:4451) parses `$(printf "%b"
+                    // @(hugo))` with the extglob group's `(` counted, so
+                    // hugo's `)` does not close the substitution. Counting
+                    // only `$(`-introduced parens truncated the span at the
+                    // first inner `)` and the fragment expander ran
+                    // `printf "%b" @(hugo` as the body (printf.tests line
+                    // 359 red gate).
+                    if !inner_single && !inner_double && inner == '(' && inner_case_depth == 0 {
+                        depth += 1;
+                    }
                     if !inner_single && !inner_double && inner == ')' && inner_case_depth == 0 {
                         depth = depth.saturating_sub(1);
                         if depth == 0 {

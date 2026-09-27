@@ -1165,22 +1165,67 @@ fn line_extglob_mode_change(tokens: &[Token]) -> ExtglobFlip {
 }
 
 /// `shopt` argument scan: does this command turn `extglob` on or off?
-/// Mirrors the option-list walk of GNU shopt (builtins/shopt.def: a -s/-u
-/// selects the mode for the option names that follow it).
+/// Mirrors the argument walk of GNU `shopt_builtin`
+/// (builtins/shopt.def:292-340) and `toggle_shopts` (shopt.def:469-485):
+/// internal_getopt consumes the `-p/-s/-u/-o/-q` flags, then EVERY
+/// remaining word is an option NAME — each recognized name is set or unset,
+/// and an unrecognized name only fails that one entry (shopt_error,
+/// shopt.def:472-476) while the walk continues. So `shopt -s nullglob
+/// extglob` DOES turn extglob on for later parses (shopt.def:640 propagates
+/// extglob_flag to the parser's extended_glob; read_token_word then accepts
+/// `@(` at parse.y:5464-5466) — the printf.tests line-358 form. Two GNU
+/// error paths set nothing and must report no flip: `-s` and `-u` together
+/// ("cannot set and unset shell options simultaneously", shopt.def:327-330)
+/// and an unknown flag letter (builtin_usage, shopt.def:317-318). A `-o`
+/// invocation routes extglob through set_shopt_o_options, where it is not
+/// a -o option name and is never set (shopt.def:337-341) — also no flip.
 fn shopt_extglob_change(args: &[Token]) -> Option<bool> {
+    // The single mode GNU collects from the flags (-s/-u; both = error).
     let mut mode = None;
+    // `shopt -o(-s|-u) ...` sets only -o option names, never extglob.
+    let mut o_names_only = false;
+    let mut flags_ended = false;
     for token in args {
         if token.kind != TokenKind::Word {
-            // A redirection (`shopt -s extglob 2>/dev/null`) or any other
-            // non-word token ends the option-list scan.
-            return None;
+            // A redirection (`shopt -s extglob 2>/dev/null`) is not part of
+            // the builtin's WORD_LIST (GNU loptend skips it), so it only
+            // ENDS the scan here — an `extglob' name already seen still
+            // counts.
+            break;
+        }
+        if !flags_ended && token.value.starts_with('-') && token.value != "-" {
+            if token.value == "--" {
+                flags_ended = true;
+                continue;
+            }
+            for flag in token.value[1..].chars() {
+                match flag {
+                    's' => {
+                        if mode == Some(false) {
+                            // -s and -u together: GNU fails the whole builtin.
+                            return None;
+                        }
+                        mode = Some(true);
+                    }
+                    'u' => {
+                        if mode == Some(true) {
+                            return None;
+                        }
+                        mode = Some(false);
+                    }
+                    'o' => o_names_only = true,
+                    'p' | 'q' => {}
+                    // Unknown flag letter: GNU prints usage and sets nothing.
+                    _ => return None,
+                }
+            }
+            continue;
         }
         match token.value.as_str() {
-            "-s" => mode = Some(true),
-            "-u" => mode = Some(false),
-            "extglob" => return mode,
-            value if value.starts_with('-') || value.starts_with('+') => {}
-            _ => return None,
+            "extglob" => return if o_names_only { None } else { mode },
+            // Any other word is one more option NAME for the same mode;
+            // GNU continues past names it does not recognize.
+            _ => continue,
         }
     }
     None

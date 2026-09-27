@@ -2760,10 +2760,35 @@ fn escape_case_pattern_literal(value: &str) -> String {
     // semantics (posixpat ok 21 keeps `[\]` open) and left `]' entirely
     // unprotected, so the bracket closed early and the pattern could
     // never match.
+    //
+    // One rubash carrier rides as TWO chars: a byte the text pipeline
+    // cannot hold is stored as a raw-byte marker pair (markers.rs
+    // RAW_BYTE_MARKER_ESCAPE + RAW_BYTE_MARKER_FIRST+byte; owner
+    // substitution_metadata.rs) — the pair IS one character unit, the
+    // carrier for one byte. GNU's per-character CTLESC therefore guards
+    // the pair once, as a unit: wrapping each half separately (the
+    // d3e8affa form) read the introducer as a literal U+E000 and
+    // destroyed the pair, so byte-flattening
+    // (conditional/pattern.rs flatten_pattern_to_byte_chars) decoded
+    // garbage and every quoted pattern holding such a byte stopped
+    // matching — `z=$'\v\f\a\b'; case "$z" in "$z")` and the
+    // `$'\v\f\a\b')` clause of nquote.tests line 79 printed `bad'
+    // (nquote snapshot red gate, regression window beb1eca6..d3e8affa).
+    use crate::executor::markers::{
+        CTLESC, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
     let mut escaped = String::new();
-    for ch in value.chars() {
-        escaped.push(crate::executor::markers::CTLESC);
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        escaped.push(CTLESC);
         escaped.push(ch);
+        if (ch as u32) == RAW_BYTE_MARKER_ESCAPE {
+            if let Some(&payload) = chars.peek() {
+                if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(payload as u32)) {
+                    escaped.push(chars.next().expect("peeked raw-byte payload"));
+                }
+            }
+        }
     }
     escaped
 }

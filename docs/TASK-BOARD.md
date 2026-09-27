@@ -49,7 +49,7 @@
 - regfix ✅ 回收（75b26599：brace 洞一行修复+可靠规则3、comsub2 快照之谜=死agent脏文件即缺失代码、21/21 零重录）→ 新单 #247-#251 排队
 - deep201 ✅ 回收（2f611bcf：**#201 关闭**——深水半区 1500/1500 矩阵、comsub2 66→0）；残留：BASH_COMMAND canonical、xtrace PS4 LINENO 待开单
 - perffix ✅ 回收（beb1eca6：#243 测量假象证据关单、#241 部分修复（}} 词规则+游离分隔符 35 形状矩阵）、剖析=重词法化排除/白名单 -5%）；剩 configure:5345+nst2≥3=skip_brace 族待发
-- ecofix ✅ 回收（d3e8affa：#218-#224 七单，两处冲突=deep201签名+ecofix空体检查融合）；**红门禁待查**：nquote 快照失败=recho command not found（harness PATH 或 #218/#220/#224 副作用，下一轮最高优先）；#252/#253 新单；t0286 continuation.rs 船长 diff 待审应用
+- ecofix ✅ 回收（d3e8affa：#218-#224 七单，两处冲突=deep201签名+ecofix空体检查融合）；**红门禁已由 redgate 车道关闭**（wt5/redgate：nquote 快照红根因=d3e8affa escape_case_pattern_literal 把 raw-byte 标记对拆半 CTLESC 包裹 → `$'\v\f\a\b'` case 误报 bad；一并修复 shopt 多选项行扫描 `shopt -s nullglob extglob` 不开解析门 + scan_substitution_spans 只计 `$(` 不计普通 `(`（GNU parse.y:3952-3956 每个未引用 `(` 都嵌套）→ printf.tests 358-359 `@(hugo)`-in-comsub 拒绝；Linux comsub2=0 diff rc0、printf 359 行中止已修（残留 4 行+rc 差为窗口前旧账）；Windows regression 23/23、lib 481）；#252/#253 新单；t0286 continuation.rs 船长 diff 待审应用
 - linuxfix ✅ 回收（5de3d1d2：14 单关闭，Linux 平价 17→19；#236 CTLESC glob 族、#238 环境绑定留单；线索：comsub2/printf Linux 侧回归系 9bf2df9e→4d648499 间引入——并入 nquote 红门禁同族调查）
 - misc ✅ 回收（733d79c2：#247-#250 四单关闭+v=$(f) 双执行顺带修；新单 #254 builtin comsub 赋值位 xtrace 缺行排队）
 - ble ✅ 回收（32d1458e：#244/#245/#246 三单关闭；ble.sh source 与 GNU 一致、-n 推进至 28570→新单 #255 排队）
