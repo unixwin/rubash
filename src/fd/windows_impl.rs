@@ -721,6 +721,87 @@ pub fn seek_end(h: HANDLE) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Anonymous pipe for background-job output capture (rubash#169). Both ends
+/// are NON-inheritable: the caller keeps the read end and hands out per-child
+/// duplicates via `duplicate_handle_inheritable`, so the shared write end's
+/// inherit flag is never mutated (same discipline as the fd>=3 spawn
+/// whitelist). EOF on the read end therefore means "every duplicated writer
+/// has exited" — the drain side relies on exactly that (GNU subst.c:7143
+/// command_substitute's capture pipe read blocks until all async children
+/// that inherited fd 1 are gone).
+pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreatePipe(
+            read: *mut HANDLE,
+            write: *mut HANDLE,
+            attrs: *const SECURITY_ATTRIBUTES,
+            size: DWORD,
+        ) -> BOOL;
+    }
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as DWORD,
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: 0,
+    };
+    let (mut r, mut w): (HANDLE, HANDLE) = (0, 0);
+    if unsafe { CreatePipe(&mut r, &mut w, &sa, 0) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((r, w))
+}
+
+/// Read all bytes currently available on an anonymous-pipe read handle
+/// without blocking (rubash#169 background-capture drain). Non-pipe handles
+/// read to EOF; a pipe is peeked then read in chunks until empty.
+pub fn read_available(mut file: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::os::windows::io::AsRawHandle;
+    const FILE_TYPE_PIPE: DWORD = 0x0000_0003;
+    let h = file.as_raw_handle() as HANDLE;
+    if unsafe { GetFileType(h) } != FILE_TYPE_PIPE {
+        let mut buffer = Vec::new();
+        use std::io::Read;
+        file.read_to_end(&mut buffer)?;
+        return Ok(buffer);
+    }
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let mut available: DWORD = 0;
+        if unsafe {
+            PeekNamedPipe(
+                h,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        if available == 0 {
+            return Ok(out);
+        }
+        let want = (available as usize).min(chunk.len());
+        let mut read_n: DWORD = 0;
+        if unsafe {
+            ReadFile(
+                h,
+                chunk.as_mut_ptr(),
+                want as DWORD,
+                &mut read_n,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        out.extend_from_slice(&chunk[..read_n as usize]);
+    }
+}
+
 /// Adopt a raw HANDLE into a `std::fs::File` (ownership transferred —
 /// the File closes it on drop).
 pub fn handle_to_file(h: HANDLE) -> std::fs::File {

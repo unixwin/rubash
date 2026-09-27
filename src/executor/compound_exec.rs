@@ -406,7 +406,8 @@ impl Executor {
         // does not re-open them — `cmd >f 2>&1` must keep fd1/fd2 on the
         // same open file description, which only the spawn-time stdio pair
         // preserves.
-        let (stdio, consumed) = self.resolve_background_stdio(&background_command.command);
+        let (stdio, consumed, captured_pipe_writer) =
+            self.resolve_background_stdio(&background_command.command);
         let mut child_command = background_command.command.clone();
         strip_consumed_redirects(&mut child_command, &consumed);
         let source = self.background_command_source(&child_command);
@@ -523,6 +524,12 @@ impl Executor {
         }
         let child = spawn_result?;
         let pid = child.id();
+        // rubash#169: the child holds a capture write end — registering its
+        // pid lets the reap path (wait/refresh) drain the shared pipe into
+        // the capture buffer at the moment the shell observes the exit.
+        if captured_pipe_writer {
+            crate::executor::shell_options::register_background_capture_writer(pid);
+        }
         self.background_children.insert(pid, child);
         self.shell_state
             .job_table
@@ -548,7 +555,7 @@ impl Executor {
     fn resolve_background_stdio(
         &mut self,
         command: &CommandNode,
-    ) -> ([BackgroundStdio; 3], Vec<bool>) {
+    ) -> ([BackgroundStdio; 3], Vec<bool>, bool) {
         use crate::parser::RedirectKind;
         // GNU execute_cmd.c:2837-2841 (execute_connection '&') + :595
         // async_redirect_stdin: CMD_STDIN_REDIR is set — and the spawned
@@ -569,6 +576,28 @@ impl Executor {
                 self.inherited_async_stdin()
             };
         let mut fd1 = BackgroundStdio::Inherit;
+        // rubash#169: GNU's substitution child holds a real capture pipe as
+        // fd 1 (subst.c:7143 command_substitute), and an async child forked
+        // inside (`{ ...; } & wait` — nvm `nvm ls`) inherits THAT pipe, so
+        // its output is captured. In-process captures are Vec buffers an
+        // OS-spawned child cannot write into, so `Inherit` (duplicating the
+        // process stdout) leaks the output past the capture. When a capture
+        // scope is live, replace the inherited fd 1 with a duplicate of the
+        // scope's shared background pipe — every background child of the
+        // scope shares one write end and the kernel merges their writes, and
+        // the drain at reap/capture-end reads it back in that order. The
+        // command's own fd-1 redirects below still override this, and
+        // `2>&1`-style dups copy it, matching the sequential dup2 ordering a
+        // forked GNU child would apply on top of the inherited pipe.
+        let mut captured_pipe_writer = false;
+        if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
+            fd1 = BackgroundStdio::File(write);
+            // Registration is conservative: a later fd-1 redirect may drop
+            // the pipe for THIS child, but reaping it then only drains an
+            // empty pipe — never another child's bytes (the drain fires when
+            // the whole writer set is reaped).
+            captured_pipe_writer = true;
+        }
         let mut fd2 = BackgroundStdio::Inherit;
         let mut consumed = vec![false; command.redirects.len()];
 
@@ -746,7 +775,7 @@ impl Executor {
             }
         }
 
-        ([fd0, fd1, fd2], consumed)
+        ([fd0, fd1, fd2], consumed, captured_pipe_writer)
     }
 
     /// GNU make_child fork semantics for an async command that inherits

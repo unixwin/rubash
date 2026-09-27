@@ -1344,11 +1344,133 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Background-output capture pipe for async children spawned while a stdout
+/// capture is active (rubash#169). GNU's command-substitution child holds a
+/// REAL pipe as fd 1 (subst.c:7143 command_substitute), so `{ cmd; } & wait`
+/// inside `$( )` captures the async child's output: every forked async child
+/// inherits the same pipe write end and the kernel merges their writes.
+/// rubash runs substitution bodies in-process against a Vec capture, so an
+/// OS-spawned background child cannot write into it — instead the first
+/// background spawn under an active capture creates ONE pipe for the capture
+/// scope; every background child's stdout is a duplicate of its write end
+/// (kernel-order merge, exactly GNU), and the read end is drained into the
+/// capture buffer when the writers are reaped (`wait`) or when the capture
+/// scope ends — the blocking drain-to-EOF reproduces GNU's semantics where
+/// the parent reading the substitution pipe waits for every async child that
+/// inherited fd 1.
+struct BackgroundCapture {
+    read: std::fs::File,
+    /// The pipe's original write handle, kept open for the scope so later
+    /// background spawns can duplicate it. Closed by the drain before
+    /// reading (EOF then means "every spawned writer has exited").
+    write: crate::fd::HANDLE,
+    write_open: bool,
+    writer_pids: std::collections::HashSet<u32>,
+}
+
+impl BackgroundCapture {
+    /// Hand out one more write end (owned File) for a background child.
+    fn duplicate_write(&self) -> Option<std::fs::File> {
+        if !self.write_open {
+            return None;
+        }
+        let dup = crate::fd::duplicate_handle(self.write).ok()?;
+        Some(crate::fd::handle_to_file(dup))
+    }
+
+    /// Read every byte currently sitting in the pipe WITHOUT waiting for EOF
+    /// (the scope's original write end is still open, so a blocking read
+    /// would never see EOF). Called when the last registered child exits:
+    /// everything a dead child wrote is already in the pipe, so a
+    /// read-until-empty loop collects exactly its output at the moment the
+    /// shell observed the exit — the ordering GNU's shared pipe gets from
+    /// the kernel.
+    fn drain_available(&mut self) -> std::io::Result<Vec<u8>> {
+        crate::fd::read_available(&self.read)
+    }
+
+    /// Close the original write end, then read to EOF. EOF arrives once every
+    /// background child that holds a duplicated write end has exited — the
+    /// same condition GNU's substitution-pipe read blocks on.
+    fn drain(&mut self) -> std::io::Result<Vec<u8>> {
+        if self.write_open {
+            crate::fd::close_handle(self.write);
+            self.write_open = false;
+        }
+        let mut buffer = Vec::new();
+        self.read.read_to_end(&mut buffer)?;
+        Ok(buffer)
+    }
+}
+
+thread_local! {
+    static BG_CAPTURE: std::cell::RefCell<Option<BackgroundCapture>> =
+        const { std::cell::RefCell::new(None) };
+    static BG_CAPTURE_SAVED: std::cell::RefCell<Vec<Option<BackgroundCapture>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Reserve a stdout pipe write end for a background child spawned under an
+/// active capture. Creates the scope's pipe on first use; subsequent calls
+/// duplicate the same write end so every background child of the capture
+/// scope shares one pipe (kernel-order merge).
+pub(in crate::executor) fn background_capture_write_end() -> Option<std::fs::File> {
+    if !stdout_capture_active() {
+        return None;
+    }
+    BG_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        if capture.is_none() {
+            let (read, write) = crate::fd::create_capture_pipe().ok()?;
+            *capture = Some(BackgroundCapture {
+                read: crate::fd::handle_to_file(read),
+                write,
+                write_open: true,
+                writer_pids: std::collections::HashSet::new(),
+            });
+        }
+        capture
+            .as_ref()
+            .and_then(BackgroundCapture::duplicate_write)
+    })
+}
+
+/// Record that the just-spawned background child `pid` holds a capture write
+/// end (called after a successful spawn).
+pub(in crate::executor) fn register_background_capture_writer(pid: u32) {
+    BG_CAPTURE.with(|capture| {
+        if let Some(state) = capture.borrow_mut().as_mut() {
+            state.writer_pids.insert(pid);
+        }
+    });
+}
+
+/// A background child that held a capture write end left the live set
+/// (reaped by `wait` / refresh). When it was the last writer, drain the pipe
+/// now — bytes already written land in the capture buffer at the point the
+/// shell observed the child's exit, preserving the `& ... wait; echo after`
+/// ordering GNU's single shared pipe produces. Returns the drained bytes (empty
+/// when writers remain or no capture pipe exists).
+pub(in crate::executor) fn retire_background_capture_writer(pid: u32) -> Vec<u8> {
+    BG_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some(state) = capture.as_mut() else {
+            return Vec::new();
+        };
+        let was_writer = state.writer_pids.remove(&pid);
+        if was_writer && state.writer_pids.is_empty() {
+            state.drain_available().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    })
+}
+
 pub(in crate::executor) fn stdout_capture_active() -> bool {
     STDOUT_CAPTURE.with(|capture| capture.borrow().is_some())
 }
 
-fn stdout_capture_write(output: &[u8]) -> io::Result<()> {
+pub(in crate::executor) fn stdout_capture_write(output: &[u8]) -> io::Result<()> {
     STDOUT_CAPTURE.with(|capture| {
         if let Some(buffer) = capture.borrow_mut().as_mut() {
             buffer.write_all(output)?;
@@ -1358,18 +1480,40 @@ fn stdout_capture_write(output: &[u8]) -> io::Result<()> {
 }
 
 /// Begins thread-local stdout capture, returning the previous capture buffer
-/// (if any) so callers can nest captures and restore afterwards.
+/// (if any) so callers can nest captures and restore afterwards. The
+/// background-capture pipe state is saved alongside: a nested capture scope
+/// is a fresh substitution pipe in GNU terms, so background children spawned
+/// inside it bind to the inner scope's pipe, never the outer one's.
 pub(in crate::executor) fn begin_stdout_capture() -> Option<Vec<u8>> {
-    STDOUT_CAPTURE.with(|capture| {
+    let previous = STDOUT_CAPTURE.with(|capture| {
         let previous = capture.borrow_mut().take();
         *capture.borrow_mut() = Some(Vec::new());
         previous
-    })
+    });
+    let saved_bg = BG_CAPTURE.with(|state| state.borrow_mut().take());
+    BG_CAPTURE_SAVED.with(|saved| saved.borrow_mut().push(saved_bg));
+    previous
 }
 
-/// Ends thread-local stdout capture and returns the captured bytes.
+/// Ends thread-local stdout capture and returns the captured bytes. Any
+/// background child still holding a capture write end is drained first —
+/// read-to-EOF blocks until it exits, which is exactly what GNU's
+/// substitution-pipe reader does (the parent's read completes only after
+/// every async child that inherited fd 1 is gone).
 pub(in crate::executor) fn take_stdout_capture() -> Vec<u8> {
-    STDOUT_CAPTURE.with(|capture| capture.borrow_mut().take().unwrap_or_default())
+    let mut buffer = STDOUT_CAPTURE.with(|capture| capture.borrow_mut().take().unwrap_or_default());
+    let drained = BG_CAPTURE.with(|state| {
+        let drained = state
+            .borrow_mut()
+            .as_mut()
+            .map(BackgroundCapture::drain)
+            .and_then(Result::ok)
+            .unwrap_or_default();
+        *state.borrow_mut() = None;
+        drained
+    });
+    buffer.extend_from_slice(&drained);
+    buffer
 }
 
 /// Restores a previously saved capture buffer (used after nested captures).
@@ -1377,6 +1521,10 @@ pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
     STDOUT_CAPTURE.with(|capture| {
         *capture.borrow_mut() = previous;
     });
+    let saved_bg = BG_CAPTURE_SAVED.with(|saved| saved.borrow_mut().pop().flatten());
+    if let Some(state) = saved_bg {
+        BG_CAPTURE.with(|state_slot| *state_slot.borrow_mut() = Some(state));
+    }
 }
 
 /// Runs `body` under a fresh thread-local stdout capture and returns the

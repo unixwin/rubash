@@ -554,6 +554,17 @@ impl Executor {
 
         for (pid, status) in finished {
             self.background_children.remove(&pid);
+            // rubash#169: the reaped child no longer holds a capture pipe
+            // write end — retire it from the writer set (drain when last).
+            let drained = crate::executor::shell_options::retire_background_capture_writer(pid);
+            if !drained.is_empty() {
+                // Same buffer-priority as write_fd_endpoint's Stdout arm.
+                if crate::executor::shell_options::stdout_capture_active() {
+                    let _ = crate::executor::shell_options::stdout_capture_write(&drained);
+                } else if let Some(buffer) = self.stdout_capture.as_mut() {
+                    buffer.extend_from_slice(&drained);
+                }
+            }
             self.join_coproc_stderr_forwarder(pid)?;
             self.shell_state.job_table.mark_completed(pid, status);
             self.run_sigchld_trap_for_reaped_child()?;
@@ -671,6 +682,24 @@ impl Executor {
 
     fn forget_background_runtime(&mut self, pid: u32) {
         self.background_children.remove(&pid);
+        // rubash#169: a background child spawned under a capture scope holds
+        // a duplicate of the scope's capture pipe; reaping it (wait paths)
+        // must retire it from the writer set and, when it was the last one,
+        // fold whatever it wrote into the capture buffer now — the same
+        // point GNU's kernel pipe delivered those bytes. Field capture
+        // (substitution stdout) is the byte-order authority; a stage-local
+        // thread capture takes them otherwise.
+        let drained = crate::executor::shell_options::retire_background_capture_writer(pid);
+        if !drained.is_empty() {
+            // Byte-order authority is wherever in-process writes land
+            // (write_fd_endpoint's Stdout arm): thread-local capture first,
+            // executor field capture second.
+            if crate::executor::shell_options::stdout_capture_active() {
+                let _ = crate::executor::shell_options::stdout_capture_write(&drained);
+            } else if let Some(buffer) = self.stdout_capture.as_mut() {
+                buffer.extend_from_slice(&drained);
+            }
+        }
         // Close the coproc endpoint fds for this pid before dropping the
         // pipe maps, mirroring retire_completed_coproc's fd cleanup so the
         // high fds 63/60 become reusable for the next coproc (coproc.tests

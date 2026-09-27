@@ -129,6 +129,54 @@ pub fn handle_to_file(h: HANDLE) -> std::fs::File {
     unsafe { std::fs::File::from_raw_fd(owned) }
 }
 
+/// Anonymous pipe for background-job output capture (rubash#169); both ends
+/// CLOEXEC — per-child writers go through `duplicate_handle_inheritable`.
+pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
+    let mut fds = [0 as libc::c_int; 2];
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((fds[0], fds[1]))
+}
+
+/// Read all bytes currently available without blocking (rubash#169
+/// background-capture drain): flip O_NONBLOCK, read until EAGAIN, restore.
+pub fn read_available(file: &std::fs::File) -> std::io::Result<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let got = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if got > 0 {
+            out.extend_from_slice(&chunk[..got as usize]);
+            continue;
+        }
+        if got == 0 {
+            break; // EOF: every writer (incl. the original end) is gone
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            break;
+        }
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            continue;
+        }
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        return Err(err);
+    }
+    unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+    Ok(out)
+}
+
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     let mut buf = vec![0u8; n.max(1)];
     let got = loop {
