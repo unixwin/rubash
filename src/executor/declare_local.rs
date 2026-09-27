@@ -809,6 +809,30 @@ impl Executor {
             let status = if !local_blocked.is_empty() && local_names(&args).is_empty() {
                 1
             } else {
+                // rubash#183: GNU's FUNCNAME is a real dynamic array
+                // (variables.c) whose cell carries the call stack; declare -p
+                // reads that cell directly, so inside a function
+                // `declare -p FUNCNAME` prints ([0]="f" [1]="main")
+                // (make_funcname_visible flips att_invisible at function
+                // entry, variables.c:1812). rubash models FUNCNAME virtually
+                // (parameter_array_storage), so the builtin's env-map lookup
+                // found no cell and printed a valueless `declare -a
+                // FUNCNAME`. Seed the storage into env_vars for exactly the
+                // named print lookup, then restore — bare list mode stays
+                // untouched (GNU excludes the invisible array there) and
+                // assignments stay blocked (is_noassign_bash_array).
+                let funcname_print_operand = declare_args_request_print(&args)
+                    && args
+                        .iter()
+                        .any(|arg| arg == "FUNCNAME" || arg.starts_with("FUNCNAME["));
+                let saved_funcname = funcname_print_operand.then(|| {
+                    let storage = self.parameter_array_storage("FUNCNAME").unwrap_or_default();
+                    let saved = self.shell_state.env_vars.get("FUNCNAME").cloned();
+                    self.shell_state
+                        .env_vars
+                        .insert("FUNCNAME".to_string(), storage);
+                    saved
+                });
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -818,6 +842,18 @@ impl Executor {
                     self.shell_state.function_depth > 0,
                     &frame_locals,
                 )?;
+                if let Some(saved) = saved_funcname {
+                    match saved {
+                        Some(value) => {
+                            self.shell_state
+                                .env_vars
+                                .insert("FUNCNAME".to_string(), value);
+                        }
+                        None => {
+                            self.shell_state.env_vars.remove("FUNCNAME");
+                        }
+                    }
+                }
                 if local_blocked.is_empty() {
                     status
                 } else {
