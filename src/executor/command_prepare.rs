@@ -850,26 +850,18 @@ impl Executor {
             } else {
                 let literal = crate::lexer::remove_shell_quotes(&fragment.text);
                 if !literal.is_empty() {
-                    // GNU subst.c:12273+: the CTLESC protection the quote
-                    // scanner puts before double-quoted glob metacharacters
-                    // matters only while pathname expansion may still
-                    // consume the word. A raw word that is quoted from its
-                    // first character never reaches the globber (the caller
-                    // sets suppress_glob), and the fragment byte splice
-                    // below re-tags every C0 byte as DATA
-                    // (bytes_to_shell_text), which would freeze these
-                    // markers into literal \x11 bytes in argv and output —
-                    // `echo "a*$(echo hi)*b"` printed a\x11*hi*b
-                    // (rubash#179). Dequote the pairs here, the same
-                    // dequote_string (subst.c:4807) drop the materializer
-                    // performs. Leading-unquoted raw words keep the
-                    // markers: their mixed quoted spans still need glob
-                    // suppression downstream.
-                    let literal = if raw.starts_with('"') || raw.starts_with('\'') {
-                        crate::executor::markers::dequote_ctlesc_pairs(&literal)
-                    } else {
-                        literal
-                    };
+                    // GNU expand_word_internal carries characters that were
+                    // quoted in the source word through the splice with a
+                    // CTLESC prefix (subst.c:11639-11673): pathname
+                    // expansion then treats them as literals (glob.c
+                    // udequote_pathname, 429-448) and the final dequote
+                    // (subst.c:4807 dequote_string) drops the markers at
+                    // argv materialization. The fragment splice keeps that
+                    // model for every mixed-quote shape — quote segment
+                    // before or after the substitution — via the fragment's
+                    // ctlesc_markers provenance (rubash#187; the older
+                    // quote-initial-only pre-dequote from rubash#179 is
+                    // subsumed by the unified materialization).
                     expanded_fragments.push(ExpandedFragment::literal(&literal, false));
                 }
             }

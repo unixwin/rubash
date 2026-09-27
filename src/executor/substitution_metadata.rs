@@ -173,6 +173,7 @@ impl SubstitutionOutput {
             bytes: self.bytes,
             quoted,
             splittable: !quoted,
+            ctlesc_markers: false,
         }
     }
 }
@@ -190,6 +191,19 @@ pub(in crate::executor) struct ExpandedFragment {
     pub(in crate::executor) bytes: Vec<u8>,
     pub(in crate::executor) quoted: bool,
     pub(in crate::executor) splittable: bool,
+    /// Source-text provenance: the fragment's 0x11 bytes are live CTLESC
+    /// markers, not data. GNU expand_word_internal copies characters that
+    /// were quoted in the source word into the expansion result with a
+    /// CTLESC prefix (subst.c:11639-11673, `SCOPY_CHAR_I (twochars,
+    /// CTLESC, c, ...)`); those markers ride through the splice until the
+    /// globber (glob.c udequote_pathname, 429-448) treats the protected
+    /// characters as literals, and argv materialization strips them the
+    /// way dequote_string (subst.c:4807) does. Capture bytes from a
+    /// command substitution are payload data — a literal 0x11 byte in
+    /// `$(printf '\x11')` output has no marker meaning — so only
+    /// source-text fragments raise this flag (rubash#187: the mixed word
+    /// `pre"a*"$(echo hi)post` froze its quoted-span marker into argv).
+    pub(in crate::executor) ctlesc_markers: bool,
 }
 
 impl ExpandedFragment {
@@ -199,6 +213,7 @@ impl ExpandedFragment {
             bytes: text.as_bytes().to_vec(),
             quoted,
             splittable: false,
+            ctlesc_markers: true,
         }
     }
 
@@ -208,6 +223,7 @@ impl ExpandedFragment {
             bytes: text.as_bytes().to_vec(),
             quoted,
             splittable: true,
+            ctlesc_markers: false,
         }
     }
 }
@@ -242,12 +258,19 @@ impl ExpandedWord {
 
     #[allow(dead_code)]
     pub(in crate::executor) fn materialize_lossy_at_boundary(&self) -> String {
-        let bytes = self
-            .fragments
-            .iter()
-            .flat_map(|fragment| fragment.bytes.iter().copied())
-            .collect::<Vec<_>>();
-        bytes_to_shell_text(&bytes)
+        let mut bytes = Vec::new();
+        let mut marker_positions = Vec::new();
+        for fragment in &self.fragments {
+            if fragment.ctlesc_markers {
+                for (offset, byte) in fragment.bytes.iter().enumerate() {
+                    if *byte == CTLESC_MARKER_BYTE {
+                        marker_positions.push(bytes.len() + offset);
+                    }
+                }
+            }
+            bytes.extend(fragment.bytes.iter().copied());
+        }
+        materialize_field_text(&bytes, &marker_positions)
     }
 }
 
@@ -464,12 +487,23 @@ pub(in crate::executor) fn split_expanded_fragments(
     ifs: Option<&str>,
     policy: SubstitutionSplitPolicy,
 ) -> Vec<String> {
+    // Field text accumulates as raw bytes and materializes through
+    // bytes_to_shell_text at each boundary: fragment bytes are payload data
+    // (substitution output may hold non-UTF-8 bytes), so widening each byte
+    // with `byte as char` would Latin-1-encode multibyte literal text into
+    // mojibake (niubash#92: "中文$(echo h)"$(echo x) printed ä¸­æ–‡hx).
+    // Source-text fragments additionally record the byte positions of their
+    // live CTLESC markers so materialization keeps them as marker chars
+    // instead of owner-tagging them as payload data (rubash#187).
+    let mut fields = Vec::new();
     if policy == SubstitutionSplitPolicy::NoSplit {
-        let bytes = fragments
-            .iter()
-            .flat_map(|fragment| fragment.bytes.iter().copied())
-            .collect::<Vec<_>>();
-        return vec![bytes_to_shell_text(&bytes)];
+        let mut bytes = Vec::new();
+        let mut marker_positions = Vec::new();
+        for fragment in fragments {
+            record_ctlesc_markers(fragment, bytes.len(), &mut marker_positions);
+            bytes.extend(fragment.bytes.iter().copied());
+        }
+        return vec![materialize_field_text(&bytes, &marker_positions)];
     }
     let ifs = ifs.unwrap_or(" \t\n");
     let whitespace: Vec<u8> = ifs
@@ -480,22 +514,20 @@ pub(in crate::executor) fn split_expanded_fragments(
         .bytes()
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect();
-    // Field text accumulates as raw bytes and materializes through
-    // bytes_to_shell_text at each boundary: fragment bytes are payload data
-    // (substitution output may hold non-UTF-8 bytes), so widening each byte
-    // with `byte as char` would Latin-1-encode multibyte literal text into
-    // mojibake (niubash#92: "中文$(echo h)"$(echo x) printed ä¸­æ–‡hx).
-    let mut fields = Vec::new();
     let mut current: Vec<u8> = Vec::new();
+    let mut current_markers: Vec<usize> = Vec::new();
     let mut saw_unquoted = false;
     let mut pending_non_whitespace = false;
     for fragment in fragments {
+        record_ctlesc_markers(fragment, current.len(), &mut current_markers);
         for byte in &fragment.bytes {
             let is_ifs = ifs.as_bytes().contains(byte);
             if fragment.splittable && !fragment.quoted && is_ifs {
                 saw_unquoted = true;
                 if non_whitespace.contains(byte) || !current.is_empty() {
-                    fields.push(bytes_to_shell_text(std::mem::take(&mut current).as_slice()));
+                    let taken = std::mem::take(&mut current);
+                    let taken_markers = std::mem::take(&mut current_markers);
+                    fields.push(materialize_field_text(&taken, &taken_markers));
                     pending_non_whitespace = non_whitespace.contains(byte);
                 }
                 continue;
@@ -514,9 +546,55 @@ pub(in crate::executor) fn split_expanded_fragments(
         }
     }
     if !current.is_empty() || !saw_unquoted {
-        fields.push(bytes_to_shell_text(current.as_slice()));
+        fields.push(materialize_field_text(&current, &current_markers));
     }
     fields
+}
+
+/// The byte a live CTLESC marker occupies inside source-text fragments.
+const CTLESC_MARKER_BYTE: u8 = crate::executor::markers::CTLESC as u8;
+
+/// Record the absolute positions a fragment's live CTLESC marker bytes will
+/// occupy when appended to an accumulator of length `base_len`.
+fn record_ctlesc_markers(
+    fragment: &ExpandedFragment,
+    base_len: usize,
+    marker_positions: &mut Vec<usize>,
+) {
+    if !fragment.ctlesc_markers {
+        return;
+    }
+    for (offset, byte) in fragment.bytes.iter().enumerate() {
+        if *byte == CTLESC_MARKER_BYTE {
+            marker_positions.push(base_len + offset);
+        }
+    }
+}
+
+/// Materialize one accumulated field: bytes that are payload data go through
+/// the bytes_to_shell_text owner-tagging, while bytes at `marker_positions`
+/// (ascending) stay live CTLESC marker chars — the globber consumes them as
+/// per-character quoting (glob.c udequote_pathname, 429-448) and argv
+/// materialization strips them (dequote_string, subst.c:4807). This is the
+/// rubash port of GNU keeping CTLESC-protected characters in the expansion
+/// result until after pathname expansion (subst.c:11639-11673).
+fn materialize_field_text(bytes: &[u8], marker_positions: &[usize]) -> String {
+    if marker_positions.is_empty() {
+        return bytes_to_shell_text(bytes);
+    }
+    let mut output = String::with_capacity(bytes.len());
+    let mut run_start = 0usize;
+    for &position in marker_positions {
+        if position > run_start {
+            output.push_str(&bytes_to_shell_text(&bytes[run_start..position]));
+        }
+        output.push(crate::executor::markers::CTLESC);
+        run_start = position + 1;
+    }
+    if run_start < bytes.len() {
+        output.push_str(&bytes_to_shell_text(&bytes[run_start..]));
+    }
+    output
 }
 
 #[allow(dead_code)]
@@ -1131,6 +1209,61 @@ mod tests {
         );
     }
 
+    /// rubash#187: a mixed word's quoted span sits BEFORE the command
+    /// substitution (`pre"a*"$(echo hi)post`). The literal fragment's
+    /// CTLESC bytes are live glob-protection markers (GNU expand_word_
+    /// internal copies quoted chars with CTLESC, subst.c:11639-11673) and
+    /// must survive the byte splice as raw marker chars — NOT be
+    /// owner-tagged as payload data the way bytes captured FROM the
+    /// substitution are.
+    #[test]
+    fn split_keeps_literal_ctlesc_markers_as_chars_and_capture_bytes_as_data() {
+        let literal = format!("a{}*", crate::executor::markers::CTLESC);
+        let fragments = [
+            ExpandedFragment::literal("pre", false),
+            ExpandedFragment::literal(&literal, false),
+            ExpandedFragment {
+                bytes: vec![b'h', b'i'],
+                quoted: false,
+                splittable: true,
+                ctlesc_markers: false,
+            },
+            ExpandedFragment::literal("post", false),
+        ];
+        let fields = split_expanded_fragments(&fragments, None, SubstitutionSplitPolicy::NoSplit);
+        assert_eq!(
+            fields[0].chars().collect::<Vec<_>>(),
+            vec!['p', 'r', 'e', 'a', '\u{11}', '*', 'h', 'i', 'p', 'o', 's', 't']
+        );
+    }
+
+    /// rubash#187 companion: a 0x11 byte that came OUT of a command
+    /// substitution is payload data — the splice owner-tags it, so the
+    /// globber and the final dequote never mistake it for a marker.
+    #[test]
+    fn split_owner_tags_capture_0x11_as_data() {
+        let fragments = [
+            ExpandedFragment::literal("x", false),
+            ExpandedFragment {
+                bytes: vec![0x11],
+                quoted: true,
+                splittable: false,
+                ctlesc_markers: false,
+            },
+            ExpandedFragment::literal("y", false),
+        ];
+        let fields = split_expanded_fragments(&fragments, None, SubstitutionSplitPolicy::NoSplit);
+        assert_eq!(
+            fields[0].chars().map(|ch| ch as u32).collect::<Vec<_>>(),
+            vec![
+                'x' as u32,
+                RAW_BYTE_MARKER_ESCAPE,
+                RAW_BYTE_MARKER_FIRST + 0x11,
+                'y' as u32,
+            ]
+        );
+    }
+
     #[test]
     fn split_preserves_ifs_whitespace_inside_literal_fragments() {
         // Literal (non-splittable) fragment text is data: the space inside
@@ -1166,6 +1299,7 @@ mod tests {
             bytes: vec![b'a', 0xff, b'b'],
             quoted: true,
             splittable: false,
+            ctlesc_markers: false,
         }];
         let fields = split_expanded_fragments(&fragments, None, SubstitutionSplitPolicy::NoSplit);
         assert_eq!(

@@ -183,7 +183,20 @@ fn arithmetic_raw_slice(tokens: &[Token], open_end: usize, close_index: Option<u
     let mut raw = String::new();
     for token in &tokens[open_end.min(end)..end] {
         raw.push_str(&token.leading_ws);
-        raw.push_str(&token.raw);
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            // GNU parse.y:3459 read_token / parse_dparen (parse.y:3517+)
+            // consume the arithmetic body through parse_matched_pair across
+            // physical lines, and expr.c's lexer treats '\n' as whitespace —
+            // a newline inside `(( ... ))` is never a command separator.
+            // The line-oriented tokenizer folds the physical line break into
+            // a `;` token; restore the newline in the verbatim capture so a
+            // cross-line `if (( a > maj\n|| ... ))` still evaluates and the
+            // diagnostic shows the newline, not `;` (rubash#174). A literal
+            // `;` (no line_break) is data and stays.
+            raw.push('\n');
+        } else {
+            raw.push_str(&token.raw);
+        }
     }
     if let Some(closer) = tokens.get(end) {
         raw.push_str(&closer.leading_ws);

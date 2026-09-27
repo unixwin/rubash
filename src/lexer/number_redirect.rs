@@ -37,6 +37,18 @@ impl<'a> Lexer<'a> {
     }
 
     fn finish_number_input_redirect(&mut self, start: usize) -> Token {
+        // GNU parse.y:2626 read_token hands `((` to parse_dparen
+        // (parse.y:3517+), which consumes the arithmetic body through
+        // parse_matched_pair as raw text — so `2<<3` inside `(( ))` is a
+        // shift of the number 2, never an fd-prefixed here-document
+        // (rubash#181). Emit just the number word and let the guarded `<`
+        // branch produce the `<<` operator token.
+        if self.peek() == Some('<')
+            && self.input.as_bytes().get(self.position + 1) == Some(&b'<')
+            && self.inside_arithmetic_command()
+        {
+            return self.finish_word_token(start, true);
+        }
         self.advance();
         match self.peek() {
             Some('>') => {

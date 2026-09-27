@@ -58,6 +58,27 @@ pub(super) struct Lexer<'a> {
     /// double-quoted `${...}` are literal, so `}` closes the expansion.
     pub(super) posix: bool,
     parse_state: LexerParseState,
+    /// Open `(` groups of the logical line being scanned, innermost last.
+    /// An entry is an arithmetic-command candidate when it is the first
+    /// `(` of an adjacent `((` pair; `arith_close_verified` memoizes the
+    /// parse_dparen-style verification that the group ends in `))`.
+    open_parens: Vec<OpenParenGroup>,
+    /// End offset of the last emitted token (for `((` adjacency) and
+    /// whether that token was an unquoted `(`.
+    last_token_end: Option<usize>,
+    last_token_was_open_paren: bool,
+}
+
+/// One open `(` group tracked while scanning a logical line.
+#[derive(Clone)]
+struct OpenParenGroup {
+    /// True once an immediately adjacent second `(` made this group the
+    /// opener of a possible `(( ... ))` arithmetic command.
+    arithmetic_candidate: bool,
+    /// Offset of the first `(` of the (possible) pair.
+    open_pos: usize,
+    /// Memoized result of `closes_as_arithmetic_group` for this group.
+    arith_close_verified: Option<bool>,
 }
 
 impl<'a> Lexer<'a> {
@@ -67,6 +88,9 @@ impl<'a> Lexer<'a> {
             position: 0,
             posix,
             parse_state: LexerParseState::default(),
+            open_parens: Vec::new(),
+            last_token_end: None,
+            last_token_was_open_paren: false,
         }
     }
 
@@ -258,6 +282,70 @@ impl<'a> Lexer<'a> {
     }
 
     pub(super) fn next_token(&mut self) -> Option<Token> {
+        let token = self.scan_token()?;
+        self.note_open_paren_group(&token);
+        Some(token)
+    }
+
+    /// Track `(` group opens/closes so the `<<` decision can tell an
+    /// arithmetic-command body from command context (GNU parse.y:2626 hands
+    /// `((` to parse_dparen, which consumes the body through
+    /// parse_matched_pair before read_token's REDIR_LESSLESS branch at
+    /// parse.y:2630+ could ever see the `<<`).
+    fn note_open_paren_group(&mut self, token: &Token) {
+        if token.kind == TokenKind::Keyword {
+            match token.value.as_str() {
+                "(" => {
+                    let adjacent_pair = self.last_token_was_open_paren
+                        && self.last_token_end == Some(token.position);
+                    if adjacent_pair {
+                        if let Some(first) = self.open_parens.last_mut() {
+                            first.arithmetic_candidate = true;
+                        }
+                    }
+                    self.open_parens.push(OpenParenGroup {
+                        arithmetic_candidate: false,
+                        open_pos: token.position,
+                        arith_close_verified: None,
+                    });
+                }
+                ")" => {
+                    self.open_parens.pop();
+                }
+                _ => {}
+            }
+        }
+        self.last_token_was_open_paren = token.kind == TokenKind::Keyword && token.value == "(";
+        self.last_token_end = Some(token.position + token.raw.len());
+    }
+
+    /// Whether the scan position currently sits inside an open `((` group
+    /// that closes as an arithmetic command (the `))` sits directly after
+    /// the balanced inner group — the parse_dparen verdict). Used to keep `<<`
+    /// the shift/shift-assign operator instead of a here-document opener
+    /// (rubash#181: `((x<<=2))` swallowed the rest of the script).
+    pub(super) fn inside_arithmetic_command(&mut self) -> bool {
+        for index in 0..self.open_parens.len() {
+            if !self.open_parens[index].arithmetic_candidate {
+                continue;
+            }
+            let verified = match self.open_parens[index].arith_close_verified {
+                Some(verified) => verified,
+                None => {
+                    let verified =
+                        closes_as_arithmetic_group(self.input, self.open_parens[index].open_pos);
+                    self.open_parens[index].arith_close_verified = Some(verified);
+                    verified
+                }
+            };
+            if verified {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scan_token(&mut self) -> Option<Token> {
         self.skip_ws();
         if self.at_end() {
             return Some(Token::new(TokenKind::Eof, "", self.position));
@@ -350,6 +438,20 @@ impl<'a> Lexer<'a> {
             '<' => match self.peek() {
                 Some('<') => {
                     self.advance();
+                    if self.inside_arithmetic_command() {
+                        // GNU parse.y:2626 read_token routes `((` to
+                        // parse_dparen (parse.y:3517+), which consumes the
+                        // entire arithmetic body through parse_matched_pair
+                        // as raw text — read_token's redirection branch
+                        // (parse.y:2630+) never sees the `<<`, so inside an
+                        // arithmetic command `<<` is the shift operator and
+                        // `<<=` the shift-assign, never REDIR_LESSLESS
+                        // (rubash#181: `((x<<=2))` opened a here-document
+                        // and swallowed the rest of the script). The
+                        // arithmetic parser re-combines `<<` with the
+                        // following `=…` token (arithmetic_combined_operator).
+                        return Some(Token::new(TokenKind::Word, "<<", start));
+                    }
                     if self.peek() == Some('<') {
                         self.advance();
                         Some(Token::new(TokenKind::HereString, "<<<", start))
@@ -754,4 +856,55 @@ impl<'a> Iterator for Lexer<'a> {
         }
         token
     }
+}
+
+/// GNU parse_dparen verdict in text space: does the `((` pair at `open_pos`
+/// close as an arithmetic command — the balanced inner group followed
+/// directly by `))` (parse.y:3517+ reads the matched pair and accepts the
+/// arithmetic reading only when the next character is `)`)? A `((` that
+/// closes as a subshell (`((echo hi); cat <<X)`) keeps its here-document
+/// semantics. Quote- and backslash-aware like parse_matched_pair; iterating
+/// raw bytes is safe because every delimiter checked is ASCII and UTF-8
+/// continuation bytes never collide with them.
+fn closes_as_arithmetic_group(input: &str, open_pos: usize) -> bool {
+    let bytes = input.as_bytes();
+    let mut index = open_pos + 2;
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => {
+                index += 2;
+                continue;
+            }
+            b'\'' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'\'' {
+                    index += 1;
+                }
+            }
+            b'"' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index += 2;
+                        continue;
+                    }
+                    if bytes[index] == b'"' {
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return bytes.get(index + 1) == Some(&b')');
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }

@@ -315,6 +315,25 @@ impl Executor {
                 self.exit_code = code;
                 Ok(())
             }
+            // GNU evalstring.c:372 installs a local top_level catch for the
+            // string being evaluated ("prevents errors in substitution from
+            // restarting the reader loop directly"); its DISCARD arm
+            // (evalstring.c:423-450) runs the pe_dispose cleanup, forces
+            // last_command_exit_value = EXECUTION_FAILURE, and — outside a
+            // subshell — RETURNS from parse_and_execute instead of
+            // unwinding further. A bad substitution (or any DISCARD-class
+            // word-expansion failure) inside `eval '...'` therefore ends
+            // only the eval'd string: eval yields the failure status and
+            // the CALLER's remaining commands run — inside a function body
+            // `f() { eval 'x=${.sh.version}'; return 5; }` reaches the
+            // `return 5` (rubash#188), and at script top level the next
+            // line runs. The flat-subshell boundary in the eval'd list
+            // absorbs its own ExpansionFailure before it can reach here,
+            // matching GNU's forked-subshell re-jump.
+            Err(ExecuteError::ExpansionFailure(code)) => {
+                self.exit_code = code;
+                Ok(())
+            }
             other => other,
         }
     }
