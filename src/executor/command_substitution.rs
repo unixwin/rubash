@@ -645,11 +645,18 @@ impl Executor {
         if let Some(inner) = strip_wrapping_subshell_group(source) {
             return self.expand_command_substitution_inner(inner, context);
         }
-        if source == "false" {
+        // GNU execute_cmd.c:4648-4649: every simple command — `true`,
+        // `false`, `:` included — prints its xtrace head line inside the
+        // substitution child. The hardcoded status shortcuts cannot express
+        // that side effect, so under `set -x` they are disqualified (the
+        // rubash#117 whitelist discipline: a shortcut must be provably
+        // equivalent, and it is not when tracing) and the body falls to the
+        // real parser/executor below, which traces it (rubash#254).
+        if source == "false" && !self.xtrace_enabled() {
             self.last_command_substitution_status.set(Some(1));
             return String::new();
         }
-        if matches!(source, "true" | ":") {
+        if matches!(source, "true" | ":") && !self.xtrace_enabled() {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
@@ -701,11 +708,18 @@ impl Executor {
             }
             return String::new();
         }
-        if let Some(output) = self.command_substitution_cd_pwd_output(source) {
-            return output;
-        }
-        if let Some(output) = self.command_substitution_heredoc_output(source) {
-            return output;
+        // cd/pwd and heredoc word shortcuts predate the triviality gate and
+        // likewise bypass the execute_cmd.c:4649 head-line trace; under
+        // `set -x` they are disqualified so the multi-command body (`cd X &&
+        // pwd` traces TWO lines, `++ cd X` then `++ pwd`) reaches the real
+        // executor (rubash#254).
+        if !self.xtrace_enabled() {
+            if let Some(output) = self.command_substitution_cd_pwd_output(source) {
+                return output;
+            }
+            if let Some(output) = self.command_substitution_heredoc_output(source) {
+                return output;
+            }
         }
         // GNU applies alias expansion while reading the substitution body
         // (parse.y alias_expand_token + push_string): expand the body text
@@ -724,7 +738,12 @@ impl Executor {
         // to the real parser/executor: a false positive only costs speed,
         // while the blacklist guards this replaced kept producing silent
         // semantic bugs for the next uncovered character class.
-        if !command_substitution_body_is_trivial(&word_source) {
+        // `set -x` also disqualifies the whole shortcut family: every word
+        // below would skip the simple-command head line that GNU prints at
+        // execute_cmd.c:4649 (`++ echo hi` for `v=$(echo hi)`), and the
+        // shortcut cannot express it. Routing to the real executor costs
+        // speed only (rubash#254).
+        if !command_substitution_body_is_trivial(&word_source) || self.xtrace_enabled() {
             if let Some(output) = self.command_list_substitution_output(source, context) {
                 return output;
             }
@@ -1051,6 +1070,18 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // GNU subst.c:7413 runs the body through parse_and_execute
+        // ("command substitution"), whose reader bumps indirection_level
+        // (builtins/evalstring.c:348) — every trace inside the substitution
+        // child renders one PS4 level deeper (`++ echo hi` for
+        // `v=$(echo hi; true)`, and the head line execute_cmd.c:4649 prints
+        // for each simple command of the body). Pipeline-stage clones must
+        // NOT inherit this bump, so it lives here at the body-reader
+        // boundary, not in command_substitution_executor (rubash#254).
+        subshell
+            .shell_state
+            .xtrace_indirection_level
+            .set(subshell.shell_state.xtrace_indirection_level.get() + 1);
         // The body was alias-expanded at stream level by
         // comsub_body_alias_splice above (parse.y alias_expand_token on the
         // fresh input); the child must not expand those words a second time.
@@ -1308,6 +1339,7 @@ impl Executor {
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),
+            assignment_expansion_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
@@ -1388,6 +1420,15 @@ impl Executor {
         }
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // GNU subst.c:7101 runs the funsub body through parse_and_execute
+        // ("nofork comsub") → evalstring.c:348 indirection_level++, so the
+        // body's traces render one PS4 level deeper (`${ echo cur; }` under
+        // `set -x` prints `++ echo cur`). Same body-reader bump as
+        // command_list_substitution_output_typed (rubash#254).
+        subshell
+            .shell_state
+            .xtrace_indirection_level
+            .set(subshell.shell_state.xtrace_indirection_level.get() + 1);
         let posix_mode = self.posix_mode_enabled();
         let inherit_errexit =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");

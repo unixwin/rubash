@@ -724,6 +724,16 @@ pub struct Executor {
     /// entry; keyed by node address, valid only within that command's
     /// execution span.
     redirect_target_memo: RefCell<HashMap<String, String>>,
+    /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
+    /// exactly once and subst.c:3576 hands the COMPUTED value to
+    /// xtrace_print_assignment — the trace never re-runs the expansion.
+    /// apply_permanent_assignments/apply_temporary_assignments record each
+    /// computed value here so the command's xtrace rendering (and any other
+    /// consumer needing the bound value) reuses it instead of executing a
+    /// `v=$(cmd)` RHS a second time (`args=$(echo hi) echo x` under `set -x`
+    /// must run `echo hi` once, rubash#254). Keyed by (name, raw value);
+    /// cleared at each execute_command entry like redirect_target_memo.
+    assignment_expansion_memo: RefCell<HashMap<(String, String), String>>,
     /// GNU execute_cmd.c: external commands (and the forced fork of a
     /// wordless `{var}` command, execute_null_command:4203-4278) run
     /// do_redirections in the child — the `{var}` bind never reaches the

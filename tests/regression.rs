@@ -88,6 +88,7 @@ macro_rules! golden_fixture {
     };
 }
 
+golden_fixture!(golden_andor_continuation => "andor-continuation", timeout 60, corpus []);
 golden_fixture!(golden_at_star_matrix => "at-star-matrix", timeout 60, corpus []);
 golden_fixture!(golden_catfile_comsub => "catfile-comsub", timeout 60, corpus []);
 golden_fixture!(golden_digit_intfit => "digit-intfit", timeout 60, corpus []);

@@ -14,6 +14,7 @@ impl Executor {
         // command execution; drop the previous command's target memo so a
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
+        self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand
         // evaluates in the live environment; the queue exists only because

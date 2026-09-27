@@ -20,6 +20,9 @@ impl Executor {
                 eprintln!("ASSIGN {name}={value:?}");
             }
             let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
+            self.assignment_expansion_memo
+                .borrow_mut()
+                .insert((name.clone(), value.clone()), expanded_value.clone());
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
@@ -139,6 +142,9 @@ impl Executor {
                 .flatten()
                 .map(String::as_str);
             let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
+            self.assignment_expansion_memo
+                .borrow_mut()
+                .insert((name.clone(), value.clone()), expanded_value.clone());
             let (base_name, _) = assignment_name_and_append(name);
             let saved_env = self.shell_state.env_vars.get(base_name).cloned();
             let saved_typed = self.shell_state.variables.get(base_name).cloned();

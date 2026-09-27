@@ -365,6 +365,16 @@ impl Executor {
 
         let saved_dir = env::current_dir().ok();
         let mut subshell = self.command_substitution_executor();
+        // GNU subst.c:6618 runs the process-substitution body through
+        // parse_and_execute ("process substitution") → evalstring.c:348
+        // indirection_level++, so `<(...)` bodies trace one PS4 level deeper
+        // than the command carrying them (`cat <(echo hi)` under `set -x`:
+        // `+ cat /dev/fd/63` then `++ echo hi`) — the same body-reader bump
+        // as the command-substitution paths (rubash#254).
+        subshell
+            .shell_state
+            .xtrace_indirection_level
+            .set(subshell.shell_state.xtrace_indirection_level.get() + 1);
         crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
         subshell.stdout_capture = Some(Vec::new());
         // Direct-stdout builtins inside the substitution consult the

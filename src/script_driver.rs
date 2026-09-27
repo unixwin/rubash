@@ -538,7 +538,7 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
 
     let tokens = tokenize(source);
     let mut stack = Vec::new();
-    for token in tokens {
+    for token in &tokens {
         if token.kind != TokenKind::Keyword {
             continue;
         }
@@ -556,7 +556,34 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
             _ => {}
         }
     }
-    !stack.is_empty()
+    if !stack.is_empty() {
+        return true;
+    }
+    // GNU parse.y grammar consumes the newline AFTER a binary connector as
+    // part of the same production — `list1: list1 AND_AND newline_list
+    // list1` (parse.y:1286), `... OR_OR newline_list ...` (parse.y:1288),
+    // `pipeline: pipeline '|' newline_list pipeline` (parse.y:1471) and
+    // BAR_AND (parse.y:1473-1474) — so input whose last significant token
+    // is `&&`, `||`, `|`, or `|&` is an INCOMPLETE command: the reader
+    // keeps reading (PS2) instead of submitting the truncated text, whose
+    // parse would die with `syntax error: unexpected end of file`
+    // (rubash#255: ble.sh line 28570, the file's first line-spanning `&&`).
+    // `&` and `;` do NOT continue — they terminate the command
+    // (parse.y:1290 `list1 '&' newline_list list1` completes $1 first).
+    // tokenize emits one Semicolon with line_break=true per physical line,
+    // so skip those trailing separators before inspecting the last token.
+    let last_significant = tokens
+        .iter()
+        .rev()
+        .find(|token| !(token.kind == TokenKind::Semicolon && token.line_break))
+        .map(|token| token.kind.clone());
+    matches!(
+        last_significant,
+        Some(TokenKind::And)
+            | Some(TokenKind::Or)
+            | Some(TokenKind::Pipe)
+            | Some(TokenKind::PipeErr)
+    )
 }
 
 /// Net open-paren count for one command line, ignoring quoted spans. Used

@@ -932,7 +932,19 @@ impl Executor {
             }
             // Scalar: the EXPANDED value is quoted like an xtrace word,
             // except an empty value prints as nothing (GNU print_cmd.c:522).
-            let expanded = self.expand_assignment_value(name, value);
+            // GNU subst.c:3565/3576: the RHS was already expanded exactly
+            // once by the apply path — reuse the memoized computed value so
+            // the trace never executes a `v=$(cmd)` RHS a second time
+            // (rubash#254: `args=$(echo hi) echo x` ran `echo hi` twice).
+            let memoized = self
+                .assignment_expansion_memo
+                .borrow()
+                .get(&(name.clone(), value.clone()))
+                .cloned();
+            let expanded = match memoized {
+                Some(memoized) => memoized,
+                None => self.expand_assignment_value(name, value),
+            };
             let expanded = expanded
                 .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
                 .unwrap_or(&expanded);

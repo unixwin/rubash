@@ -1684,7 +1684,10 @@ impl Executor {
         self.shell_state.local_attr_scopes.push(HashMap::new());
         self.shell_state.local_typed_scopes.push(HashMap::new());
         self.shell_state.function_depth += 1;
-        let result = self.execute_ast(ast);
+        // GNU subst.c:7101 parses the funsub body with parse_and_execute
+        // ("nofork comsub") → evalstring.c:348 indirection_level++, so the
+        // in-place body's traces render one PS4 level deeper (rubash#254).
+        let result = self.with_xtrace_indirection(|executor| executor.execute_ast(ast));
         self.shell_state.function_depth -= 1;
         self.restore_function_locals();
         result
@@ -1726,8 +1729,15 @@ impl Executor {
         // on the next line, and the `cat` command line is
         // current_line + leading_newlines.
         self.comsub_leading_newlines.set(leading_newlines);
-        if let Some(output) = self.command_substitution_heredoc_output_mut_typed(source, context) {
-            return output;
+        // The heredoc word shortcut bypasses the execute_cmd.c:4649 head
+        // line (`++ cat`); under `set -x` it is disqualified so the body
+        // reaches a real-executor path (rubash#254).
+        if !self.xtrace_enabled() {
+            if let Some(output) =
+                self.command_substitution_heredoc_output_mut_typed(source, context)
+            {
+                return output;
+            }
         }
         let saved_positional_params = self.shell_state.positional_params.clone();
         // GNU subst.c:7143 command_substitute feeds the body to
@@ -1921,22 +1931,27 @@ impl Executor {
         // discards the child's trap table.
         let mut trap_status: Option<i32> = None;
         let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            let result = if posix_mode || inherit_errexit {
-                self.execute_ast(&ast)
-            } else {
-                self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
-            };
-            let body_status = match &result {
-                Ok(()) => self.exit_code,
-                Err(ExecuteError::Return(status))
-                | Err(ExecuteError::ExitCode(status))
-                | Err(ExecuteError::ExpansionFailure(status)) => *status,
-                Err(_) => 1,
-            };
-            if let Ok(exit_status) = self.run_exit_trap_for_status(body_status) {
-                trap_status = Some(exit_status);
-            }
-            result
+            // GNU subst.c:7413 parse_and_execute ("command substitution") →
+            // evalstring.c:348 indirection_level++: the body's traces render
+            // one PS4 level deeper (rubash#254).
+            self.with_xtrace_indirection(|executor| {
+                let result = if posix_mode || inherit_errexit {
+                    executor.execute_ast(&ast)
+                } else {
+                    executor.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
+                };
+                let body_status = match &result {
+                    Ok(()) => executor.exit_code,
+                    Err(ExecuteError::Return(status))
+                    | Err(ExecuteError::ExitCode(status))
+                    | Err(ExecuteError::ExpansionFailure(status)) => *status,
+                    Err(_) => 1,
+                };
+                if let Ok(exit_status) = executor.run_exit_trap_for_status(body_status) {
+                    trap_status = Some(exit_status);
+                }
+                result
+            })
         });
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);

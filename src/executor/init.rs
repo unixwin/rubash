@@ -301,6 +301,7 @@ impl Executor {
             special_builtin_failed: Cell::new(false),
             last_builtin_write_failed: Cell::new(false),
             redirect_target_memo: RefCell::new(HashMap::new()),
+            assignment_expansion_memo: RefCell::new(HashMap::new()),
             fd_var_external_undo: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
