@@ -669,6 +669,40 @@ impl Executor {
         }
     }
 
+    /// Foreground wait for a spawned external command. GNU jobs.c:3064
+    /// wait_for blocks in waitpid but the shell stays interruptible: a
+    /// caught signal is recorded (trap.c:545 trap_handler -> trap.c:537
+    /// set_trap_state, `pending_traps[sig]++`) and its trap action runs at
+    /// the next command boundary (execute_cmd.c:643 run_pending_traps —
+    /// bash manual, SIGNALS: the trap "will not be executed until the
+    /// command completes"); an untrapped terminating signal kills the shell
+    /// mid-wait through SIG_DFL. The mailbox port slices the kernel wait
+    /// (fd wait_child_slice) and records deliveries between slices with the
+    /// same deferral (trap_exec observe_signals_while_blocked); on unix the
+    /// kernel backend already records arrivals during the plain blocking
+    /// wait.
+    fn wait_external_child(
+        &mut self,
+        child: &mut std::process::Child,
+    ) -> Result<std::process::ExitStatus, ExecuteError> {
+        #[cfg(not(unix))]
+        {
+            const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+            loop {
+                if let Some(status) =
+                    crate::fd::wait_child_slice(child, SLICE).map_err(ExecuteError::IoError)?
+                {
+                    return Ok(status);
+                }
+                self.observe_signals_while_blocked()?;
+            }
+        }
+        #[cfg(unix)]
+        {
+            child.wait().map_err(ExecuteError::IoError)
+        }
+    }
+
     fn spawn_external_process(
         &mut self,
         cmd: &CommandNode,
@@ -851,16 +885,23 @@ impl Executor {
                         Err(error) => self.report_external_spawn_error(cmd, error)?,
                     }
                 } else {
-                    match child.wait() {
+                    match self.wait_external_child(&mut child) {
                         Ok(status) => {
                             self.exit_code =
                                 crate::executor::wait_status::process_exit_status(&status);
                             // A reaped foreground child delivers SIGCHLD in
-                            // GNU bash; a set trap runs once at this
-                            // boundary (trap8.sub).
+                            // GNU bash; a set trap runs once at this boundary
+                            // (trap8.sub).
                             self.run_sigchld_trap_for_reaped_child()?;
                         }
-                        Err(error) => self.report_external_spawn_error(cmd, error)?,
+                        Err(ExecuteError::IoError(error)) => {
+                            self.report_external_spawn_error(cmd, error)?
+                        }
+                        // An untrapped terminating signal observed mid-wait:
+                        // GNU's SIG_DFL kills the shell while it is still
+                        // inside wait_for, so the 128+sig exit propagates
+                        // instead of being reported as a spawn failure.
+                        Err(error) => return Err(error),
                     }
                 }
                 // /dev/fd operands materialized as temps resolve now: write

@@ -136,11 +136,23 @@ impl Executor {
             }
             "sleep" => {
                 if crate::builtins::sleep::can_execute_fast_path(&cmd.words[1..]) {
-                    let (status, stderr) = crate::builtins::sleep::execute(&cmd.words[1..]);
-                    if let Some(stderr) = stderr {
-                        eprint!("{stderr}");
+                    // GNU sleep is an external child process, so the waiting
+                    // shell is interruptible: a caught signal is recorded
+                    // (trap.c:545 trap_handler -> trap.c:537 set_trap_state)
+                    // and its trap runs when the sleep completes; an untrapped
+                    // terminating signal kills the shell mid-wait (SIG_DFL).
+                    // sleep_interruptibly slices the wait so the Windows
+                    // mailbox is observed with the same deferral semantics.
+                    if let Some(seconds) = crate::builtins::sleep::total_duration(&cmd.words[1..]) {
+                        self.sleep_interruptibly(seconds)?;
+                        self.exit_code = 0;
+                    } else {
+                        let (status, stderr) = crate::builtins::sleep::execute(&cmd.words[1..]);
+                        if let Some(stderr) = stderr {
+                            eprint!("{stderr}");
+                        }
+                        self.exit_code = status;
                     }
-                    self.exit_code = status;
                     // GNU sleep is a real child process; its completion
                     // delivers SIGCHLD and a set trap runs at this boundary
                     // (trap8.sub counts the foreground sleep among the four

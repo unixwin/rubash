@@ -562,10 +562,20 @@ impl Executor {
     }
 
     pub(crate) fn run_pending_signal_traps(&mut self) -> Result<(), ExecuteError> {
-        if self.signal_trap_running || self.shell_state.subshell_depth.get() > 0 {
-            // Pending signals belong to the shell process. A subshell can target
-            // the parent with $$, but must not consume its mailbox or dispatch
-            // the parent's traps after resetting caught dispositions.
+        // Pending signals belong to the shell process. A subshell sharing
+        // this process (the flat `( ... )` emulation, the in-process
+        // ${THIS_SH} child) must not consume the parent's mailbox or
+        // dispatch the parent's traps after resetting caught dispositions.
+        // A respawned `rubash -c` background child is different: it owns its
+        // own mailbox (`{pid}.alive` names the real process id), and GNU
+        // runs a trap set INSIDE its subshell body inside that subshell —
+        // execute_cmd.c:1670 execute_in_subshell resets only the INHERITED
+        // dispositions, a `trap` in the body installs fresh ones
+        // (builtins/trap.def), and the pending TERM dispatches at the next
+        // execute_cmd.c:643 run_pending_traps before the body scope ends.
+        if self.signal_trap_running
+            || (self.shell_state.subshell_depth.get() > 0 && self.shell_pid == std::process::id())
+        {
             return Ok(());
         }
 
@@ -689,6 +699,75 @@ impl Executor {
         }
 
         Ok(())
+    }
+
+    /// The Windows-mailbox port of GNU's "record the signal while blocked"
+    /// step: trap.c:545-627 trap_handler only calls set_trap_state
+    /// (trap.c:537-543, `pending_traps[sig]++`) when a caught signal arrives
+    /// while the shell is blocked inside a command; the ACTION itself is
+    /// deferred to the next command boundary (execute_cmd.c:643
+    /// run_pending_traps — bash manual, SIGNALS: "If bash is waiting for a
+    /// command to complete and receives a signal for which a trap has been
+    /// set, the trap will not be executed until the command completes"). An
+    /// untrapped terminating signal has no handler at all in GNU: SIG_DFL
+    /// kills the shell immediately, even mid-wait_for.
+    ///
+    /// Called from the sleep fast path and the foreground external wait.
+    /// Trapped deliveries are re-queued into the in-process queue (which the
+    /// boundary poll drains unconditionally), ignored ones are dropped (the
+    /// boundary would skip them anyway, trap_exec run_pending_signal_traps
+    /// `action.is_empty()`), and an untrapped terminating delivery ends the
+    /// shell now with 128+sig — the SIG_DFL equivalent. The subshell guard
+    /// mirrors run_pending_signal_traps above: a flat subshell sharing this
+    /// process must leave the shared mailbox alone, while a respawned
+    /// background child observes its own mailbox even inside its subshell
+    /// body.
+    pub(crate) fn observe_signals_while_blocked(&mut self) -> Result<(), ExecuteError> {
+        if self.signal_trap_running
+            || (self.shell_state.subshell_depth.get() > 0 && self.shell_pid == std::process::id())
+        {
+            return Ok(());
+        }
+        let signals =
+            crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
+        if signals.is_empty() {
+            return Ok(());
+        }
+        let mut trapped = Vec::new();
+        for &signal in &signals {
+            let Some(signal_name) = signal_trap_name(signal) else {
+                continue;
+            };
+            let action =
+                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &signal_name);
+            match action {
+                Some(action) if !action.is_empty() => trapped.push(signal),
+                Some(_) => {}
+                None if signal == crate::builtins::kill::SIGCHLD_NUMBER => {}
+                None => return Err(ExecuteError::ExitCode(128 + signal)),
+            }
+        }
+        crate::builtins::kill::requeue_pending_signals(trapped);
+        Ok(())
+    }
+
+    /// GNU `sleep N` is an external child process, so the waiting shell
+    /// stays interruptible (jobs.c:3064 wait_for; a caught signal is
+    /// recorded by trap.c:545 trap_handler and dispatched when the sleep
+    /// completes, an untrapped one kills the shell via SIG_DFL). The
+    /// in-process fast path emulates that by slicing the sleep and running
+    /// observe_signals_while_blocked between slices.
+    pub(crate) fn sleep_interruptibly(&mut self, seconds: f64) -> Result<(), ExecuteError> {
+        const SLICE: std::time::Duration = std::time::Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+        loop {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            std::thread::sleep((deadline - now).min(SLICE));
+            self.observe_signals_while_blocked()?;
+        }
     }
 
     /// Run the ERR trap after a command (or pipeline) completes with a

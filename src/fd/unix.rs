@@ -427,6 +427,20 @@ fn dup_for_child(fd: HANDLE) -> std::io::Result<HANDLE> {
     Ok(n)
 }
 
+/// Unix counterpart of the Windows sliced child wait (windows_impl.rs
+/// wait_child_slice): kernel signal delivery interrupts waitpid and the
+/// signal_hook backend (builtins/kill.rs kernel_signals) records arrivals
+/// in memory, which the unthrottled take_all_signals drains at the command
+/// boundary — the plain blocking wait already carries GNU's
+/// interruptible-wait semantics (jobs.c:3064 wait_for), so no slicing is
+/// needed and the timeout is unused.
+pub fn wait_child_slice(
+    child: &mut std::process::Child,
+    _timeout: std::time::Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    child.wait().map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

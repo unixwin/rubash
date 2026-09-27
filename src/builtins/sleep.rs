@@ -26,15 +26,27 @@ pub fn execute(args: &[String]) -> (i32, Option<String>) {
     (0, None)
 }
 
-pub fn can_execute_fast_path(args: &[String]) -> bool {
+/// Sum of the sleep durations in `args`, or None when an operand is
+/// missing/unparseable. Shared by `execute` and the executor's
+/// interruptible fast path (`command_dispatch_primary.rs`), which needs the
+/// total without blocking.
+pub fn total_duration(args: &[String]) -> Option<f64> {
     let mut index = 0;
     if args.first().is_some_and(|arg| arg == "--") {
         index = 1;
     }
-    index < args.len()
-        && args[index..]
-            .iter()
-            .all(|value| parse_duration(value).is_some())
+    if index == args.len() {
+        return None;
+    }
+    let mut total_seconds = 0.0_f64;
+    for value in &args[index..] {
+        total_seconds += parse_duration(value)?;
+    }
+    Some(total_seconds)
+}
+
+pub fn can_execute_fast_path(args: &[String]) -> bool {
+    total_duration(args).is_some()
 }
 
 fn parse_duration(value: &str) -> Option<f64> {

@@ -618,6 +618,33 @@ pub fn is_char_device_handle(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_CHAR
 }
 
+/// Bounded wait for a spawned child — the Windows stand-in for GNU's
+/// interruptible waitpid (jobs.c:3064 wait_for returns early when a caught
+/// signal arrives; trap.c:545 trap_handler records it). WAIT_OBJECT_0 means
+/// the child exited (the status is still reaped through Child::try_wait);
+/// WAIT_TIMEOUT returns None so the caller can observe the signal mailbox
+/// between slices and wait again. Unlike a try_wait+sleep poll loop, the
+/// kernel wait returns the instant the child exits, so short commands pay
+/// no added latency.
+pub fn wait_child_slice(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    use std::os::windows::io::AsRawHandle;
+    extern "system" {
+        fn WaitForSingleObject(h: HANDLE, ms: DWORD) -> DWORD;
+    }
+    const WAIT_OBJECT_0: DWORD = 0;
+    const WAIT_TIMEOUT: DWORD = 0x102;
+    let ms = timeout.as_millis().min(DWORD::MAX as u128) as DWORD;
+    let raw = child.as_raw_handle() as HANDLE;
+    match unsafe { WaitForSingleObject(raw, ms) } {
+        WAIT_OBJECT_0 => child.try_wait(),
+        WAIT_TIMEOUT => Ok(None),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
 /// Bounded wait until `h` has readable input — the Windows port of GNU
 /// builtins/read.def's select()-backed read_timeout (`shtimer_select`).
 /// Regular files are always readable (select reports them ready). Pipes
