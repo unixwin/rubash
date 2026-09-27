@@ -15,7 +15,18 @@ impl Executor {
         // re-read a data `"` as an opener and drop it plus everything after
         // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
         let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
-        let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(&expanded));
+        // GNU subst.c:11671-11674 (expand_word_internal backslash branch,
+        // unquoted context): quote removal takes the backslash but the
+        // escaped character keeps its QUOTED status — it is added as
+        // CTLESC + c, so pathname expansion never sees it as a pattern
+        // char (pathexp.c unquoted_glob_pattern_p skips CTLESC-protected
+        // characters). Mark the escaped glob-metacharacter class with the
+        // CTLESC port before the generic unescape pass drops the
+        // backslashes, so ${x:+pre.a\*} stays the literal pre.a* even
+        // when a file matches, and the value of ${x:+a\[b} is `a[b`.
+        let expanded = unescape_remaining_shell_escapes(&mark_escaped_glob_metachars(
+            &decode_parameter_word_quotes(&expanded),
+        ));
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 

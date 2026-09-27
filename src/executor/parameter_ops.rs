@@ -1,6 +1,34 @@
 use super::*;
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
+/// Quote removal for the rhs of a ${parameter<op>word} expansion, run on the
+/// dequoted word text: an escaped glob metacharacter becomes the CTLESC
+/// port (`\x11` + char), mirroring GNU subst.c:11671-11674 (the backslash
+/// branch of expand_word_internal in unquoted context adds the escaped
+/// character as CTLESC + c — a quoted literal). The CTLESC carrier keeps
+/// the character out of pathname expansion (glob.rs unquoted_glob_pattern_p
+/// skips CTLESC-protected characters, the pathexp.c port) and is dropped
+/// before argv by the same dequote every other CTLESC producer uses. For
+/// `\[`/`\@`/`\+` the backslash is now also consumed, which matches GNU's
+/// value (`${x:+a\[b}` is `a[b`, not `a\[b`); every other escape keeps its
+/// existing rubash treatment byte-for-byte.
+pub(in crate::executor) fn mark_escaped_glob_metachars(word: &str) -> String {
+    let mut output = String::with_capacity(word.len());
+    let mut chars = word.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' && matches!(chars.peek(), Some('*' | '?' | '[' | ']' | '@' | '+' | '!')) {
+            // The generic unescape would drop this backslash (or, for the
+            // bracket/extglob starters, leave it as a data pair); replace
+            // the pair with the protected form so the char stays quoted.
+            output.push(crate::executor::markers::CTLESC);
+            output.push(chars.next().expect("peeked a metachar"));
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
 pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();

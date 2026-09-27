@@ -566,6 +566,22 @@ impl Executor {
                             // GNU dquote rule: a backslash before an
                             // ordinary character is literal data.
                             output.push('\\');
+                        } else if matches!(other, '*' | '?' | '[' | '@' | '+' | '!') {
+                            // GNU subst.c:11671-11674 (expand_word_internal
+                            // backslash branch, unquoted context): the
+                            // escaped character is added as CTLESC + c — a
+                            // QUOTED literal. quote removal takes the
+                            // backslash but the character keeps its quoted
+                            // status through field splitting and pathname
+                            // expansion (pathexp.c unquoted_glob_pattern_p
+                            // skips CTLESC-protected chars), so
+                            // ${x:+glob.t\*} yields the literal glob.t* even
+                            // when a file matches. Emit the CTLESC port for
+                            // the glob-metacharacter class (markers.rs CTLESC
+                            // contract); dequote drops it before argv
+                            // (glob.rs dequote_pathname / command_prepare
+                            // materialize_expanded_command_word).
+                            output.push(crate::executor::markers::CTLESC);
                         }
                         output.push(other);
                         continue;

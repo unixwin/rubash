@@ -1146,9 +1146,18 @@ impl Executor {
             .unwrap_or(core.len());
         let base = &core[..base_len];
         if base.len() < core.len() || core.len() != name.len() {
+            // GNU subst.c:9935-9951 parameter_brace_expand: every unbound
+            // diagnostic for the `${#...}` length form reports `name+1` —
+            // the direct route calls err_unboundvar (name+1) (subst.c:9948)
+            // and the scalar route rewrites `#name` to `$name` before
+            // expanding (subst.c:8353-8357, reported by expand_word_internal
+            // subst.c:11023-11027) — so the `#` never appears in the
+            // message (`#UNSET` reports `UNSET`, `#1` reports `1`,
+            // `#a[0]` reports `a[0]`; issue #200). `core` is `name`
+            // unchanged when there is no leading `#`.
             if let Ok(index) = base.parse::<usize>() {
                 return (index > 0 && self.shell_state.positional_params.get(index - 1).is_none())
-                    .then(|| name.to_string());
+                    .then(|| core.to_string());
             }
             if is_shell_name(base) {
                 // GNU subst.c: `${a[k]}` (and the `#a[k]` length form) is
@@ -1156,12 +1165,12 @@ impl Executor {
                 // the full `a[k]` reference (nameref25.sub ok 1 reports
                 // `a[k]: unbound variable` for an empty array).
                 if let Some((abase, sub)) = parse_array_subscript(core) {
-                    return self.nounset_array_element_unbound(abase, sub, name);
+                    return self.nounset_array_element_unbound(abase, sub, core);
                 }
                 return (!self.dynamic_parameter_is_set(base)
                     && !self.shell_state.env_vars.contains_key(base)
                     && std::env::var(base).is_err())
-                .then(|| name.to_string());
+                .then(|| core.to_string());
             }
             return None;
         }

@@ -18,7 +18,17 @@ fn posix_parameter_word_can_contain_single_quoted_closing_brace() {
 }
 
 #[test]
-fn posix_parameter_word_preserves_single_quoted_closing_brace_in_double_quotes() {
+fn posix_dq_parameter_word_single_quotes_are_literal() {
+    // GNU 5.3.0 parse.y:4032-4035 parse_matched_pair (Austin Group Interp
+    // 221 "big hammer"): inside a double-quoted ${...} a single quote is
+    // skipped as non-special unless the dolbrace state is DOLBRACE_QUOTE
+    // or DOLBRACE_QUOTE2 (the %#/^,/ pattern ops). For ${IFS+'}'z} the
+    // `+` puts the state at DOLBRACE_OP/WORD, so the `'` never protects
+    // the `}` and the FIRST `}` closes the expansion: word `'` plus
+    // trailing text `'z}` -> `2 ''z}`. Probed against WSL GNU Bash 5.3.0
+    // in script-file and -c forms (both print `2 ''z}`); bash 5.2.21
+    // printed `2 '}'z`, which is where the previous expectation came
+    // from. Rubash matches 5.3.0 byte-for-byte.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg("set -o posix; (echo 2 \"${IFS+'}'z}\")")
@@ -26,7 +36,7 @@ fn posix_parameter_word_preserves_single_quoted_closing_brace_in_double_quotes()
         .expect("run quoted POSIX parameter brace probe");
 
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "2 '}'z\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "2 ''z}\n");
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
 }
 #[test]
@@ -1452,7 +1462,7 @@ fn double_quoted_parameter_alternate_keeps_escaped_space_literal() {
     // b, not a and b.
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
-        .arg(r#"unset v; printf '1=<%s>\n' "${v-a\ b}"; printf '2=<%s>\n' "${v:-a\ b}"; printf '3=<%s>\n' ${v-a\ b}"; printf '4=<%s>\n' ${v-foo\\bar}"#)
+        .arg(r#"unset v; printf '1=<%s>\n' "${v-a\ b}"; printf '2=<%s>\n' "${v:-a\ b}"; printf '3=<%s>\n' ${v-a\ b}; printf '4=<%s>\n' ${v-foo\\bar}"#)
         .output()
         .expect("run double-quoted escaped-space probe");
 
