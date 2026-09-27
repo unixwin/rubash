@@ -143,19 +143,116 @@ impl Executor {
     }
 
     fn external_touch(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
-        // GNU touch.c processes every operand independently: a failed create
-        // prints `touch: cannot touch 'FILE': ...` and continues with the
-        // remaining files, leaving exit status 1 (touch.c: do_touch loop).
+        // GNU coreutils touch.c do_touch: for an EXISTING operand,
+        // utimensat(AT_FDCWD, file, NULL, 0) stamps atime and mtime with
+        // the current time — the file is opened O_WRONLY only when it has
+        // to be created, and the content is never truncated or rewritten.
+        // The previous File::create here truncated every existing operand
+        // to zero bytes. A missing operand is created empty (unless
+        // -c/--no-create) and then stamped. Every operand is processed
+        // independently: a failure prints `touch: cannot touch 'FILE': ...`
+        // and the loop continues, leaving exit status 1 (touch.c do_touch
+        // loop). Timestamp-bearing options (-t TIME, -d TIME, -r FILE)
+        // consume their argument; their clock is approximated as "now" —
+        // the invariants this emulation preserves are non-truncation,
+        // creation, -c, and the per-operand error loop.
         let mut failed = false;
-        for path in &cmd.words[1..] {
-            let expanded = self.expand_word(path);
+        let mut create_missing = true;
+        let mut stamp_accessed = true;
+        let mut stamp_modified = true;
+        let mut operands: Vec<String> = Vec::new();
+        let mut no_more_options = false;
+        let mut index = 1;
+        while let Some(word) = cmd.words.get(index) {
+            index += 1;
+            let expanded = self.expand_word(word);
+            if no_more_options || !expanded.starts_with('-') || expanded == "-" {
+                operands.push(expanded);
+                continue;
+            }
+            if expanded == "--" {
+                no_more_options = true;
+                continue;
+            }
+            if let Some(long) = expanded.strip_prefix("--") {
+                // Long options that take a value: consume it.
+                if matches!(long, "date" | "reference" | "time") {
+                    index += 1;
+                    continue;
+                }
+                if long == "no-create" {
+                    create_missing = false;
+                } else {
+                    failed = true;
+                    eprintln!(
+                        "{}touch: unrecognized option '--{}'",
+                        self.diagnostic_prefix(),
+                        long
+                    );
+                }
+                continue;
+            }
+            let shorts = &expanded[1..];
+            if let Some(bad) = shorts
+                .chars()
+                .find(|flag| !matches!(flag, 'c' | 'a' | 'm' | 'h' | 't' | 'd' | 'r'))
+            {
+                failed = true;
+                eprintln!(
+                    "{}touch: invalid option -- '{}'",
+                    self.diagnostic_prefix(),
+                    bad
+                );
+                continue;
+            }
+            for flag in shorts.chars() {
+                match flag {
+                    'c' => create_missing = false,
+                    'a' => stamp_modified = false,
+                    'm' => stamp_accessed = false,
+                    // -t/-d/-r take a value: consume the next word.
+                    't' | 'd' | 'r' => index += 1,
+                    _ => {}
+                }
+            }
+        }
+        for expanded in operands {
             let target = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
-            if let Err(error) = File::create(target) {
+            let stamped = File::options().write(true).open(&target).and_then(|file| {
+                let now = SystemTime::now();
+                let mut times = std::fs::FileTimes::new();
+                if stamp_accessed {
+                    times = times.set_accessed(now);
+                }
+                if stamp_modified {
+                    times = times.set_modified(now);
+                }
+                file.set_times(times)
+            });
+            let outcome = match stamped {
+                Ok(()) => Ok(()),
+                // -c on a missing operand: GNU touch skips it silently
+                // (touch.c: no_create + ENOENT -> no error, no create).
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create_missing => {
+                    Ok(())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => File::create(&target)
+                    .and_then(|file| {
+                        let now = SystemTime::now();
+                        file.set_times(
+                            std::fs::FileTimes::new()
+                                .set_accessed(now)
+                                .set_modified(now),
+                        )
+                    }),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = outcome {
                 eprintln!(
                     "{}touch: cannot touch '{}': {}",
                     self.diagnostic_prefix(),
                     expanded,
-                    error
+                    crate::posix_errors::message(&error)
                 );
                 failed = true;
             }
