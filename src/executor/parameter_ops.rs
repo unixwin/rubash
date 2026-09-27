@@ -29,6 +29,44 @@ pub(in crate::executor) fn mark_escaped_glob_metachars(word: &str) -> String {
     output
 }
 
+/// GNU subst.c:4462 expand_string_for_rhs -> call_expand_word_internal with
+/// quoted == 0: in an UNQUOTED ${parameter<op>word} rhs, quote removal
+/// consumes the backslash before ANY character. The backslash branch of
+/// expand_word_internal (subst.c:11671-11674) adds the escaped character —
+/// CTLESC + c for the glob-metacharacter class (quoted status survives for
+/// pathname expansion, pathexp.c), the plain character for everything else
+/// — so `${x:+a\qb}` is `aqb` and `${x:-e\@f}` is `e@f` in assignment and
+/// fragment positions exactly like in the whole-word argument position.
+/// mark_escaped_glob_metachars runs first so `\*` keeps its CTLESC port;
+/// the remaining `\X` pairs (ordinary X) then lose the backslash.
+pub(in crate::executor) fn unescape_unquoted_rhs_escapes(word: &str) -> String {
+    let mut output = String::with_capacity(word.len());
+    let mut chars = word.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some(next) => {
+                    chars.next();
+                    if matches!(next, '*' | '?' | '[' | ']' | '@' | '+' | '!') {
+                        output.push(crate::executor::markers::CTLESC);
+                    } else if matches!(next, ' ' | '\t' | '\n') {
+                        // Escaped whitespace keeps its quoted status for
+                        // field splitting — the same \x1c sentinel the
+                        // alternate-rhs walker emits (posixexp2 37:
+                        // ${x:-a\ b} stays one field in argument position).
+                        output.push(crate::executor::markers::IFS_GLUE);
+                    }
+                    output.push(next);
+                }
+                None => output.push(ch),
+            }
+            continue;
+        }
+        output.push(ch);
+    }
+    output
+}
+
 pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();

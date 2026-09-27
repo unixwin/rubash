@@ -861,14 +861,26 @@ impl Executor {
         }
 
         let expanded = if quoted {
-            let expanded_value = self.expand_embedded_parameters_mut(value);
+            // GNU expand_string_internal with Q_DOUBLE_QUOTES (subst.c:11432
+            // W_ASSIGNMENT): the whole quoted RHS is one double-quoted
+            // region, so `${param<op>word}` fragments inside it expand their
+            // rhs in double-quote context — a backslash before an ordinary
+            // character is literal data (`v="pre${x:+p\q}post"` stores
+            // `prep\qpost`, rubash#209 probe 13). The lexer consumed the
+            // delimiting quotes, so the walker cannot track this locally —
+            // pass the context here.
+            let expanded_value = self.expand_embedded_parameters_mut_with_context(
+                value,
+                SubstitutionQuoteContext::DoubleQuoted,
+            );
             // Prompt transforms consume Bash's `\!` and `\#` escapes after
             // parameter expansion. Keep those two quoted backslashes until
             // `${var@P}` reaches prompt_expansion; ordinary shell escapes
             // still undergo the normal assignment quote-removal pass.
             {
                 let mut restored = preserve_prompt_escapes(&expanded_value)
-                    .replace(crate::executor::markers::CTLESC, "");
+                    .replace(crate::executor::markers::CTLESC, "")
+                    .replace(crate::executor::markers::IFS_GLUE, "");
                 if value.contains([
                     crate::executor::markers::PROTECTED_ESCAPED_SQUOTE,
                     crate::executor::markers::DATA_SQUOTE,
@@ -978,7 +990,17 @@ impl Executor {
             let unescaped = if compound_paren_value {
                 stripped
             } else {
-                unescape_remaining_shell_escapes(&stripped)
+                // GNU subst.c:4807 dequote_word runs on the stored
+                // assignment value: CTLESC carriers the expansion put in
+                // front of quoted glob metacharacters (e.g. the `\*` in
+                // `v=${x:+a\*b}`) are dropped because an assignment value
+                // never undergoes pathname expansion (rubash#209), and the
+                // IFS_GLUE sentinel has no meaning once the value no longer
+                // field-splits.
+                crate::executor::markers::dequote_ctlesc_pairs(&unescape_remaining_shell_escapes(
+                    &stripped,
+                ))
+                .replace(crate::executor::markers::IFS_GLUE, "")
             };
             unescaped
                 .replace(DATA_SINGLE_QUOTE, "'")

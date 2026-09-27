@@ -15,18 +15,14 @@ impl Executor {
         // re-read a data `"` as an opener and drop it plus everything after
         // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
         let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
-        // GNU subst.c:11671-11674 (expand_word_internal backslash branch,
-        // unquoted context): quote removal takes the backslash but the
-        // escaped character keeps its QUOTED status — it is added as
-        // CTLESC + c, so pathname expansion never sees it as a pattern
-        // char (pathexp.c unquoted_glob_pattern_p skips CTLESC-protected
-        // characters). Mark the escaped glob-metacharacter class with the
-        // CTLESC port before the generic unescape pass drops the
-        // backslashes, so ${x:+pre.a\*} stays the literal pre.a* even
-        // when a file matches, and the value of ${x:+a\[b} is `a[b`.
-        let expanded = unescape_remaining_shell_escapes(&mark_escaped_glob_metachars(
-            &decode_parameter_word_quotes(&expanded),
-        ));
+        // GNU subst.c:4462 expand_string_for_rhs with quoted == 0 runs the
+        // rhs through expand_word_internal, whose unquoted backslash branch
+        // (subst.c:11671-11674) consumes the backslash before ANY character
+        // — CTLESC + c for the glob-metacharacter class, the plain char
+        // otherwise (`${x:+a\qb}` is `aqb`; rubash#209). The former
+        // admission-list unescape kept `\@`/`\q` pairs outside the
+        // whole-word argument position.
+        let expanded = unescape_unquoted_rhs_escapes(&decode_parameter_word_quotes(&expanded));
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
@@ -44,9 +40,15 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_parameter_word_mut(&mut self, word: &str) -> String {
-        let expanded = unescape_remaining_shell_escapes(&decode_parameter_word_quotes(
-            &self.expand_embedded_parameters_mut(word),
-        ));
+        // GNU subst.c:4462 expand_string_for_rhs with quoted == 0 (the
+        // `=`/`:=` rhs on an assignment RHS is the same unquoted-rhs
+        // expansion): the alternate-rhs walker resolves backslashes for ANY
+        // character in one pass, CTLESC-quotes the glob-metachar class, and
+        // IFS-glues escaped whitespace — a final text unescape cannot
+        // distinguish a source `\X` from a `\` the generic walker already
+        // collapsed out of `\\` (rubash#209: `${z=a\\b}` stores `a\b`,
+        // `${z=a\@b}` stores `a@b`).
+        let expanded = self.expand_embedded_parameters_alternate_mut(word);
         tilde_expand::expand_assignment_tilde_value(&expanded, &self.shell_state.env_vars, false)
     }
 
@@ -424,6 +426,37 @@ impl Executor {
         }
     }
 
+    /// GNU subst.c:4462 expand_string_for_rhs / 7663
+    /// parameter_brace_expand_word: the `word` half of `${var op word}`
+    /// expands under the word's own quote context. The UNQUOTED case is the
+    /// alternate-rhs walker — the expand_string_for_rhs quoted==0 port with
+    /// unquoted backslash rules for ANY character (subst.c:11671-11674: the
+    /// escaped char is added, CTLESC-quoted for the glob-metachar class),
+    /// IFS_GLUE for quoted/escaped whitespace, and single-pass resolution so
+    /// a source `\\` becomes one literal `\` exactly once. A final
+    /// text-level unescape cannot reproduce that: the generic walker
+    /// pre-collapses `\\` to a bare `\` that is then indistinguishable from
+    /// a source escape (`${v-foo\\bar}` is `foo\bar` while `${v-foo\bar}`
+    /// is `foobar`), which is what kept `\@`/`\q` alive in assignment and
+    /// fragment positions (rubash#209).
+    fn expand_operator_rhs_for_context(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        if !matches!(context, SubstitutionQuoteContext::Unquoted) {
+            return unescape_parameter_operator_result(
+                &self.expand_embedded_parameters_mut_with_context(
+                    &self.decode_operator_word_for_context(word, context),
+                    context,
+                ),
+                context,
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
+            );
+        }
+        self.expand_embedded_parameters_alternate_mut(word)
+    }
+
     pub(in crate::executor) fn expand_quoted_parameter_word_mut(
         &mut self,
         word: &str,
@@ -559,14 +592,7 @@ impl Executor {
                         return joined;
                     }
                     let default = self.tilde_expand_operator_word(default, context);
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters_mut_with_context(
-                            &self.decode_operator_word_for_context(&default, context),
-                            context,
-                        ),
-                        context,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_operator_rhs_for_context(&default, context);
                 }
                 return self
                     .parameter_operator_value(var_name)
@@ -574,14 +600,7 @@ impl Executor {
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| {
                         let default = self.tilde_expand_operator_word(default, context);
-                        unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters_mut_with_context(
-                                &self.decode_operator_word_for_context(&default, context),
-                                context,
-                            ),
-                            context,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        )
+                        self.expand_operator_rhs_for_context(&default, context)
                     });
             }
         }
@@ -593,14 +612,7 @@ impl Executor {
                 if let Some((joined, _)) = self.list_operand_joined_word(var_name) {
                     if !joined.is_empty() {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
-                        return unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters_mut_with_context(
-                                &self.decode_operator_word_for_context(&alternate, context),
-                                context,
-                            ),
-                            context,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+                        return self.expand_operator_rhs_for_context(&alternate, context);
                     }
                     return String::new();
                 }
@@ -609,14 +621,7 @@ impl Executor {
                     .is_some_and(|value| !value.is_empty())
                 {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters_mut_with_context(
-                            &self.decode_operator_word_for_context(&alternate, context),
-                            context,
-                        ),
-                        context,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_operator_rhs_for_context(&alternate, context);
                 }
                 return String::new();
             }
@@ -759,28 +764,13 @@ impl Executor {
                 if let Some((_, non_empty)) = self.list_operand_joined_word(var_name) {
                     if non_empty {
                         let alternate = self.tilde_expand_operator_word(alternate, context);
-                        let decoded = self.decode_operator_word_for_context(&alternate, context);
-                        let expanded =
-                            self.expand_embedded_parameters_mut_with_context(&decoded, context);
-                        return unescape_parameter_operator_result(
-                            &expanded,
-                            context,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        );
+                        return self.expand_operator_rhs_for_context(&alternate, context);
                     }
                     return String::new();
                 }
                 if self.parameter_operator_value(var_name).is_some() {
                     let alternate = self.tilde_expand_operator_word(alternate, context);
-                    let decoded = self.decode_operator_word_for_context(&alternate, context);
-                    let expanded =
-                        self.expand_embedded_parameters_mut_with_context(&decoded, context);
-                    let final_value = unescape_parameter_operator_result(
-                        &expanded,
-                        context,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
-                    return final_value;
+                    return self.expand_operator_rhs_for_context(&alternate, context);
                 }
                 return String::new();
             }
@@ -795,28 +785,14 @@ impl Executor {
                         return joined;
                     }
                     let default = self.tilde_expand_operator_word(default, context);
-                    return unescape_parameter_operator_result(
-                        &self.expand_embedded_parameters_mut_with_context(
-                            &self.decode_operator_word_for_context(&default, context),
-                            context,
-                        ),
-                        context,
-                        self.shell_state.env_vars.get("IFS").map(String::as_str),
-                    );
+                    return self.expand_operator_rhs_for_context(&default, context);
                 }
                 return self
                     .parameter_operator_value(var_name)
                     .map(|value| shell_safe_value(&value))
                     .unwrap_or_else(|| {
                         let default = self.tilde_expand_operator_word(default, context);
-                        unescape_parameter_operator_result(
-                            &self.expand_embedded_parameters_mut_with_context(
-                                &self.decode_operator_word_for_context(&default, context),
-                                context,
-                            ),
-                            context,
-                            self.shell_state.env_vars.get("IFS").map(String::as_str),
-                        )
+                        self.expand_operator_rhs_for_context(&default, context)
                     });
             }
         }
@@ -864,7 +840,15 @@ impl Executor {
         double_quoted: bool,
     ) -> String {
         if !double_quoted {
-            return self.expand_parameter_word_mut(value);
+            // GNU subst.c:4807 dequote_word on the stored value: the CTLESC
+            // carriers expand_parameter_word_mut puts in front of escaped
+            // glob metacharacters are dropped (an assignment never undergoes
+            // pathname expansion), and the IFS_GLUE sentinel is data-less
+            // once the value no longer field-splits.
+            return self
+                .expand_parameter_word_mut(value)
+                .replace(crate::executor::markers::CTLESC, "")
+                .replace(crate::executor::markers::IFS_GLUE, "");
         }
         // 0x0e is unused by every other sentinel layer (the lexer's
         // PARAM_NAME_END_MARKER is 0x13); protect/restore is local to this
