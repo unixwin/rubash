@@ -2642,8 +2642,34 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        // GNU builtins/exec.def:151 exec_builtin resolves the operand with
+        // search_for_command and shell_execve's it — on POSIX `env` is the
+        // external coreutils binary that consumes the VAR=value prefixes and
+        // execs the target. Rubash ports the external `env` as an internally
+        // emulated command (external_inner.rs execute_env_command) that a
+        // plain `env VAR=x cmd` always dispatches to; `exec env VAR=x cmd`
+        // must resolve the same way. The PATH-search fallback instead binds
+        // to whatever `env`-named file comes first in PATH — on a Windows
+        // profile that is the extensionless ~/.local/bin/env POSIX shim,
+        // which ignores its operands and exits 0, so the whole exec chain
+        // silently no-ops (rubash#172).
+        if let Some(status) = self.execute_exec_env_command(cmd)? {
+            self.exit_code = status;
+            return self.finish_exec_replacement(cmd, status);
+        }
         let status = self.execute_exec(cmd)?;
         self.exit_code = status;
+        self.finish_exec_replacement(cmd, status)
+    }
+
+    /// The exit contract of `exec_builtin` (exec.def:248-260): with a
+    /// command operand exec replaces the shell, so the script terminates
+    /// with the command's status instead of continuing past it.
+    fn finish_exec_replacement(
+        &mut self,
+        cmd: &CommandNode,
+        status: i32,
+    ) -> Result<(), ExecuteError> {
         // GNU exec.def: a failed `exec command` exits a noninteractive
         // shell (EXECUTION_FAILURE). A `{var}` word that reached argv is a
         // spaced form — an ordinary operand — while the adjacent
@@ -2654,6 +2680,24 @@ impl Executor {
             return Err(ExecuteError::ExitCode(status));
         }
         Ok(())
+    }
+
+    /// Run `exec env ...` through rubash's internal emulation of the
+    /// external `env` command. Returns None when the operand shape is not
+    /// the plain `exec env ...` form (exec's own options like `-c`/`-a`
+    /// keep the execve semantics of the fallback path) or when the
+    /// emulation is disabled.
+    fn execute_exec_env_command(&mut self, cmd: &CommandNode) -> Result<Option<i32>, ExecuteError> {
+        if cmd.words.get(1).map(String::as_str) != Some("env") {
+            return Ok(None);
+        }
+        if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, "env") {
+            return Ok(None);
+        }
+        let mut env_cmd = cmd.clone();
+        env_cmd.words = cmd.words[1..].to_vec();
+        self.execute_env_command(&env_cmd)?;
+        Ok(Some(self.exit_code))
     }
 
     fn exec_has_no_command_operand_after_expansion(&self, cmd: &CommandNode) -> bool {
