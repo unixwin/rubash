@@ -24,7 +24,7 @@ pub(in crate::executor) struct SavedOutputFd {
 }
 
 impl Executor {
-    pub(crate) fn with_command_input_redirects<T>(
+    pub(crate) fn with_command_input_redirects<T: Default>(
         &mut self,
         cmd: &CommandNode,
         execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
@@ -58,11 +58,29 @@ impl Executor {
         result
     }
 
-    fn with_command_input_redirects_inner<T>(
+    fn with_command_input_redirects_inner<T: Default>(
         &mut self,
         cmd: &CommandNode,
         execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
+        // GNU redir.c do_redirection_internal (redir.c:767-955): a compound
+        // command's fd-0 input redirection is opened BEFORE the command
+        // runs; an open failure reports the diagnostic and terminates the
+        // whole compound with the redirection's status (1) without
+        // executing it — `while read -r l; do :; done < noexist` prints
+        // "noexist: No such file or directory" and leaves $? = 1
+        // (rubash#137; rubash used to run the loop against inherited stdin
+        // silently and report 0).
+        if let Some(message) = self.compound_stdin_open_failure(cmd) {
+            let mut stderr = Vec::new();
+            writeln!(&mut stderr, "{message}")?;
+            self.write_redirected_command_stderr(cmd, &stderr)?;
+            self.exit_code = 1;
+            // The compound command is terminated without running: its
+            // result is the default (unit for loop/group bodies, None for
+            // the source-test `if` scanner, which then consumes the frame).
+            return Ok(T::default());
+        }
         let Some(input) = self.command_input_redirect(cmd) else {
             return execute(self);
         };
@@ -771,4 +789,47 @@ fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
 #[allow(dead_code)]
 fn strip_heredoc_body(body: &str) -> String {
     strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
+}
+
+impl Executor {
+    /// GNU redir.c do_redirection_internal (redir.c:767-955) opens a
+    /// compound command's fd-0 input redirection before the command runs;
+    /// open failure aborts the compound with the diagnostic and status 1
+    /// (rubash#137). Mirrors loop_redirect_input's target resolution:
+    /// closed targets (`<&-`), process substitutions (`<(`), /dev/fd
+    /// aliases, /proc synthetic files and append-creates never fail here.
+    pub(in crate::executor) fn compound_stdin_open_failure(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<String> {
+        let redirect = cmd.redirect_in.as_ref()?;
+        if redirect.fd.unwrap_or(0) != 0 {
+            return None;
+        }
+        if redirect.target.starts_with("<(") {
+            return None;
+        }
+        let target = self.expand_redirect_target(redirect);
+        if super::execution_misc::is_closed_redirect_target(&target) {
+            return None;
+        }
+        if super::execution_misc::dev_stdio_redirect_fd(&target).is_some() {
+            return None;
+        }
+        if redirect.append {
+            return None;
+        }
+        if crate::proc_vfs::proc_file_content(&target).is_some() {
+            return None;
+        }
+        let path = super::path::shell_path_to_windows(&target, &self.shell_state.env_vars);
+        match std::fs::File::open(&path) {
+            Ok(_) => None,
+            Err(error) => Some(format!(
+                "{}{target}: {}",
+                self.diagnostic_prefix(),
+                crate::posix_errors::message(&error)
+            )),
+        }
+    }
 }
