@@ -277,3 +277,43 @@ Not yet covered on Linux (next lanes): the remaining 59 GNU suites (notably
 coproc, vredir, lastpipe, dbg-support, history, complete, tilde, posixexp
 family), interactive/readline behavior (no tty exercised), locale variants
 beyond en_US.UTF-8, and the `--version`/banner policy decision (#240).
+## Perf-suite lane section (wt4/perfsuite; baselines in docs/PERF-BASELINE.md)
+
+Per-probe corpus entries for the performance suite. Every probe is a
+committed file under `benchmarks/`; ratio/status from the 2026-09-27 baseline
+(rubash 9bf2df9e debug vs WSL GNU bash 5.3.0). Ratios >= 10x are tracked in
+rubash#241 (parse family) and rubash#242 (hot path); the #206-shape hang is
+rubash#243.
+
+| Probe | Corpus entry | Shape family | Baseline ratio |
+|---|---|---|---|
+| 01-startup-empty.sh | empty script | startup floor (#158) | 13.1x |
+| 02-startup-fndef.sh | 1 fn def + call | startup lazy-init (#158) | 12.7x |
+| 04-loop-true-builtin-x2000.sh | builtin loop | hot path (#157/#186) | 52.4x |
+| 05-arith-x5000.sh | `(( ))` loop | arithmetic (#156) | 49.8x |
+| 06-strconcat-x5000.sh | `s+=x` loop | assignment (#157) | 76.6x |
+| 07-fncall-noop-x5000.sh | fn call loop | dispatch (#157/#186) | 94.1x |
+| 08-cmdsub-true-x1000.sh | `$(true)` loop | subshell spawn | 1.2x |
+| 09-external-uname-x300.sh | external spawn loop | fork/exec (env-bound) | 1.5x |
+| 10-pathmiss-x100.sh | PATH miss loop | lookup storm (#159) | 10.9x |
+| 11-pipeline-yes-head.sh | `yes \| head -100000` | pipeline streaming (#157/#206) | 27.6x |
+| 12-pipe-echo-read-x2000.sh | `echo \| while read` x2000 | builtin pipeline (#157) | 5.7x |
+| 13-readloop-gen-x2000.sh | gen \| while read | read-loop throughput | 106.2x |
+| 14-glob-srcrels-x100.sh | `src/*/*.rs` glob loop | glob (#157; env-bound: GNU drvfs) | 0.1x* |
+| 15-expansion-x5000.sh | param-expansion mix | expansion hot path | 76.1x |
+| 16-parse-flat8000.sh | 8000 assignments | flat parse throughput (#155) | 123.3x |
+| 17-parse-flat8000-n.sh | same, `-n` only | parse-only throughput | 39.2x |
+| 18-nested-brace-nst1-d200.sh | one-line nesting D=200 | #176 nst1 | 96.5x |
+| 19-nested-brace-nst2-d200.sh | two-line nesting D=200 | #176 nst2 (rubash parse-FAIL canary) | RC2 |
+| 20-as-fn-mkdir-p-rep40.sh | autoconf unit x40 | #178 rep-40 | 65.1x |
+| 21-configure-head1374-n.sh | GNU bash configure head 1374 L, `-n` | #130/#155/#178 family | 356.8x |
+| 22-configure-full-n.sh | GNU bash configure full 24753 L, `-n` | #130/#155/#178 family | TIMEOUT |
+| 23-nvm-parse-n.sh | nvm.sh v0.40.8, `-n` | #130/#155 family | 852.2x |
+| 24-nvm-load.sh | nvm.sh v0.40.8 sourced | #130/#155 family (load) | 379.0x |
+| 25-yes-head-read.sh | `yes \| head \| while read` | #206 hang canary | TIMEOUT |
+| corpus/nvm.sh | nvm-sh/nvm v0.40.8 (a885b885, MIT) | vendored verbatim, offline | — |
+
+*14's ratio measures WSL drvfs vs NTFS, not the shells (GNU side inflated);
+tracked for rubash-side regressions only. Probe 03 (`-i -c exit`) was retired:
+GNU bash hangs on interactive invocations without a tty in WSL.
+
