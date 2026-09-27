@@ -1318,14 +1318,35 @@ impl Executor {
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
             );
-            let status = crate::builtins::exec::execute_with_child_stdio(
-                &exec_args,
-                &self.shell_state.env_vars,
-                &mut std::io::stdout().lock(),
-                &mut file,
-                Stdio::inherit(),
-                child_stderr,
-            )?;
+            // GNU redir.c do_redirections: `exec cmd 2>/dev/null` rebinds
+            // ONLY fd 2 — the child's fd 1 keeps whatever the shell carried,
+            // which inside a command substitution is the capture pipe
+            // (subst.c:7143). Stdio::inherit() here instead gave the child
+            // the CONSOLE stdout, leaking its output past the capture
+            // (modernish goodsh.sh `_Msh_Gsh_doTestShell`, rubash#252).
+            // Route through the capture-aware sink under the same
+            // fd1_lands_in_capture condition as the no-redirect arm below.
+            let fd1_lands_in_capture = self.fd_table.write_endpoint(1)
+                == Some(FdWriteEndpoint::Stdout)
+                && (self.stdout_capture.is_some()
+                    || crate::executor::shell_options::stdout_capture_active());
+            let status = if fd1_lands_in_capture {
+                crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut file,
+                )?
+            } else {
+                crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut file,
+                    Stdio::inherit(),
+                    child_stderr,
+                )?
+            };
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
         }
@@ -1342,14 +1363,29 @@ impl Executor {
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
             );
-            let status = crate::builtins::exec::execute_with_child_stdio(
-                &exec_args,
-                &self.shell_state.env_vars,
-                &mut std::io::stdout().lock(),
-                &mut file,
-                Stdio::inherit(),
-                child_stderr,
-            )?;
+            // Same capture-aware fd-1 routing as the redirect_err arm above
+            // (GNU redir.c: the append redirect on fd 2 never rebinds fd 1).
+            let fd1_lands_in_capture = self.fd_table.write_endpoint(1)
+                == Some(FdWriteEndpoint::Stdout)
+                && (self.stdout_capture.is_some()
+                    || crate::executor::shell_options::stdout_capture_active());
+            let status = if fd1_lands_in_capture {
+                crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut file,
+                )?
+            } else {
+                crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut file,
+                    Stdio::inherit(),
+                    child_stderr,
+                )?
+            };
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
         }

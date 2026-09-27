@@ -768,6 +768,31 @@ impl Executor {
                 std::borrow::Cow::Borrowed(value)
             };
         let value: &str = &tilde_value;
+        // GNU arrayfunc.c:557-605 expand_compound_array_assignment splits the
+        // raw parenthesized body into words FIRST (parse_string_to_word_list,
+        // arrayfunc.c:581) and runs brace expansion on those RAW words BEFORE
+        // parameter expansion: expand_words_no_vars (arrayfunc.c:605) ->
+        // subst.c:12590 expand_word_list_internal(list, WEXP_NOVARS), whose
+        // WEXP_BRACEEXP bit (subst.c:12570) runs brace_expand_word_list
+        // (subst.c:13235) ahead of shell_expand_word_list (subst.c:13240).
+        // Rubash expanded parameters across the whole body first and only
+        // checked braces on the re-quoted products (arrays.rs append_array
+        // _value), so a brace group whose members carry quoted parameters —
+        // locations=({"$A","$B"}/lib/"$n".{bash,sh}, oh-my-bash module
+        // discovery, rubash#251) — arrived outer-wrapped in data quotes and
+        // never expanded. Brace-expand the raw storage words here and hand
+        // the walker the products as separate elements, GNU's order.
+        let brace_value = if compound_assignment
+            && !quoted
+            && value.starts_with('(')
+            && value.ends_with(')')
+            && self.is_brace_expand_enabled()
+        {
+            std::borrow::Cow::Owned(self.brace_expand_compound_body_words(value))
+        } else {
+            std::borrow::Cow::Borrowed(value)
+        };
+        let value: &str = &brace_value;
         // The previous early return for "\\$(" treated "\\$(" (literal backslash + comsub)
         // as a literal, breaking cases like c=\$\'\\$(printf ...)\' where the
         // "\\$(" is actually "\\" (escaped backslash) + "$(comsub)" that must expand.
@@ -801,12 +826,18 @@ impl Executor {
         }
         let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
         if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+            if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
+            }
             if compound_assignment {
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
             return expanded;
         }
         if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
+            if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
+            }
             if compound_assignment {
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
@@ -954,7 +985,14 @@ impl Executor {
             // dequoting them into bare quote data that the re-split would
             // read back as syntax (assoc11.sub: ('"' dquote "'" squote)).
             let expanded_value = if compound_paren_value {
-                self.expand_compound_assignment_parameters_mut(&hoisted_value)
+                if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                    eprintln!("[ECAPM] in={hoisted_value:?}");
+                }
+                let out = self.expand_compound_assignment_parameters_mut(&hoisted_value);
+                if std::env::var_os("RUBASH_DBG_AAV").is_some() {
+                    eprintln!("[ECAPM] out={out:?}");
+                }
+                out
             } else {
                 // Assignment-RHS walker mode: parameter-expansion results
                 // carry their backslashes as ASSIGN_EXPANSION_BACKSLASH so
@@ -2086,6 +2124,22 @@ impl Executor {
                 && text.len() > 1
             {
                 text[1..text.len() - 1].to_string()
+            } else if text.contains('"') || text.contains('\'') {
+                // A PARTIALLY quoted word (brace products like `"$A"/x.bash`
+                // from brace_expand_compound_body_words): keep the walker's
+                // balanced quote syntax as the storage token. Storage's own
+                // passes honor it — glob.rs compound_element_glob_pattern
+                // re-encodes quoted characters as CTLESC-protected data
+                // while an unquoted `*` suffix pathname-expands (GNU
+                // arrayfunc.c:574+610: `arr=("dir"/*.txt)` stores the
+                // matches) and unquote_storage_value removes the quote
+                // delimiters from the final element. Dequoting and
+                // rewrapping here instead quote-protected the unquoted glob
+                // suffix, so rubash#251's `_omb_util_glob_expand` products
+                // stored a literal `*`. The walker's preserve mode keeps
+                // quote delimiters paired (embedded_parameters.rs `"`
+                // arm), so the token stays one storage word.
+                return vec![text.replace(crate::executor::markers::IFS_GLUE, "")];
             } else {
                 text
             };
@@ -2250,6 +2304,63 @@ impl Executor {
             .map(|value| quote_array_value(&value))
             .collect(),
         )
+    }
+
+    /// GNU arrayfunc.c:557-605 expand_compound_array_assignment runs brace
+    /// expansion on the RAW element words (parse_string_to_word_list
+    /// tokenization, arrayfunc.c:581) before any parameter expansion
+    /// (expand_words_no_vars -> subst.c:12590 expand_word_list_internal:
+    /// WEXP_BRACEEXP precedes WEXP_PARAMEXP, subst.c:12570/13235-13240).
+    /// Split the raw `( ... )` body into storage words and brace-expand each
+    /// word, re-joining the products as separate elements. A raw
+    /// `[sub]=value` word keeps its braces literal: GNU
+    /// quote_array_assignment_chars (arrayfunc.c:633-650) quote_assign-wraps
+    /// it and marks W_NOGLOB before expansion, so the brace scanner sees a
+    /// fully quoted word (`c=([k]={1,2})` stores one literal element).
+    fn brace_expand_compound_body_words(&self, value: &str) -> String {
+        let Some(inner) = value.strip_prefix('(').and_then(|v| v.strip_suffix(')')) else {
+            return value.to_string();
+        };
+        if !inner.contains('{') {
+            return value.to_string();
+        }
+        let mut products: Vec<String> = Vec::new();
+        let mut changed = false;
+        for stored_word in crate::executor::assignment_helpers::split_storage_words(inner) {
+            if !stored_word.contains('{')
+                || stored_word.starts_with(crate::executor::markers::STORAGE_WORD_PREFIX)
+                || (stored_word.starts_with('[') && stored_word.contains('='))
+            {
+                // A fully double-quoted word (\x1d marker) never
+                // brace-expands — GNU subst.c:13235 brace_expand_word_list
+                // sees words whose W_QUOTED flag the tokenizer preserved,
+                // and quoted braces are data.
+                products.push(stored_word);
+                continue;
+            }
+            // Decode the lexer's DATA-quote sentinels (E301/E302) back to
+            // real quote characters before expanding: GNU braces.c operates
+            // on the RAW word (quotes intact), and the brace products are
+            // raw word text again — `{"$A","$B"}` yields the products
+            // `"$A"` `"$B"` with their member quotes. The downstream
+            // compound walkers understand real quote syntax; leaving the
+            // sentinels would make the products carry unpaired carriers
+            // that storage re-quoting turns into stray quotes.
+            let word = stored_word
+                .replace(crate::executor::markers::ASSIGN_DATA_DQUOTE_STR, "\"")
+                .replace(crate::executor::markers::ASSIGN_DATA_SQUOTE_STR, "'");
+            let expanded = crate::expand::braces::expand_braces(&word);
+            if expanded.len() > 1 || expanded.first().is_some_and(|w| w != &word) {
+                changed = true;
+                products.extend(expanded);
+            } else {
+                products.push(stored_word);
+            }
+        }
+        if !changed {
+            return value.to_string();
+        }
+        format!("({})", products.join(" "))
     }
 
     pub(in crate::executor) fn expand_unquoted_parameter_compound_assignment(

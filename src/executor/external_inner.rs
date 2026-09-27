@@ -256,6 +256,28 @@ impl Executor {
             for (name, value) in local_export_env_values(&self.shell_state.env_vars) {
                 env_vars.insert(name, value);
             }
+            // GNU `env` is an external binary that inherits the shell's OS
+            // environment, in which every exported function was
+            // materialized as BASH_FUNC_<name>%% (variables.c:3989-4034
+            // push_exported_function / make_env_array_from_var_list). The
+            // internal emulation must materialize them the same way the
+            // real spawn path does (apply_exported_functions_to_child),
+            // or `env | grep BASH_FUNC` reports nothing while `printenv`
+            // (a real external) sees the function (rubash#253).
+            for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS) {
+                if let Some(body) = self.shell_state.functions.get(&name) {
+                    let def_redirects = self
+                        .shell_state
+                        .function_def_infos
+                        .get(&name)
+                        .map(|info| info.def_redirects.as_slice())
+                        .unwrap_or(&[]);
+                    env_vars.insert(
+                        exported_function_env_name(&name),
+                        exported_function_env_value(&body.commands, def_redirects),
+                    );
+                }
+            }
             // Windows child processes need the session variables (SystemRoot
             // for crypto/socket setup, WINDIR/ComSpec for subprocess spawning)
             // even when the exporting shell state does not carry them. Unix

@@ -1060,13 +1060,19 @@ impl Executor {
                 .env_vars
                 .insert("__RUBASH_ALIAS_STREAMED".to_string(), "1".to_string());
         }
-        // Trap mutation needs the Bash command-substitution trap lifecycle.
-        // Keep the compatibility adjustment scoped to parsed bodies that
-        // actually invoke trap, preserving specialized substitution modes.
-        let has_trap_command = source.split_whitespace().any(|word| word == "trap");
-        if has_trap_command {
-            crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
-        }
+        // GNU subst.c:7143 command_substitute: the forked child is a POSIX
+        // subshell — every inherited non-ignored trap is reset (signals.c
+        // restore/original dispositions via the fork; an `trap '' SIG`
+        // ignore action survives) — and its exit path ALWAYS runs
+        // run_exit_trap (subst.c:7340-7341 `rc = run_exit_trap ();
+        // exit (rc);`), so an EXIT trap installed by the body runs there:
+        // set directly, or indirectly through eval, a function, or a
+        // sourced file (modernish fatal.sh installs `trap 'echo $PPID' 0`
+        // via `command . "$MSH_AUX/fatal.sh"`, rubash#252). The previous
+        // word-level gate ran the reset and the exit trap only when the
+        // body text contained a literal `trap` word, so an EXIT trap set
+        // by a sourced file never fired and the substitution read empty.
+        crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
         // Keep the command source visible to BASH_COMMAND while the parsed
         // substitution body runs, including DEBUG trap actions.
         *subshell.shell_state.debug_trap_command.borrow_mut() = Some(source.trim().to_string());
@@ -1122,6 +1128,13 @@ impl Executor {
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
+            if std::env::var_os("RUBASH_DBG_TRAP").is_some() {
+                eprintln!(
+                    "[CS] body-pre trapEXIT={:?} reset={:?}",
+                    subshell.shell_state.env_vars.get("__RUBASH_TRAP_EXIT"),
+                    subshell.shell_state.env_vars.get("__RUBASH_TRAP_RESET")
+                );
+            }
             let result = if posix_mode || inherit_errexit {
                 subshell.execute_ast(&ast)
             } else {
@@ -1134,6 +1147,13 @@ impl Executor {
                 );
                 subshell.execute_ast(&ast)
             };
+            if std::env::var_os("RUBASH_DBG_TRAP").is_some() {
+                eprintln!(
+                    "[CS] body-post trapEXIT={:?} reset={:?}",
+                    subshell.shell_state.env_vars.get("__RUBASH_TRAP_EXIT"),
+                    subshell.shell_state.env_vars.get("__RUBASH_TRAP_RESET")
+                );
+            }
             // GNU parse.y: a syntax error inside the substitution body is a
             // read-time failure of the ENCLOSING command — after this command
             // finishes the reader stops (`$( esac ; ...)` in a case pattern:
@@ -1147,11 +1167,9 @@ impl Executor {
             let mut status = command_substitution_result_status(result, subshell.exit_code);
             // Bash runs EXIT in the command-substitution child, so an
             // EXIT trap installed by the body contributes its output to
-            // captured stdout.
-            if has_trap_command {
-                if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
-                    status = exit_status;
-                }
+            // captured stdout (subst.c:7340 — unconditional run_exit_trap).
+            if let Ok(exit_status) = subshell.run_exit_trap_for_status(status) {
+                status = exit_status;
             }
             status
         });

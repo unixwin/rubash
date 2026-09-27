@@ -546,3 +546,17 @@ fn ansi_c_assignment_with_backtick_comment_closes_cleanly() {
     assert!(!has_unclosed_quotes(input));
     assert!(!has_unclosed_input_syntax_posix(input, false));
 }
+
+/// rubash#251: a multi-byte UTF-8 character in a double-quoted `${...}`
+/// alternate (`x="${SCM_THEME_PROMPT_CLEAN:-✔}"`, oh-my-bash
+/// omb-prompt-base.sh) must not corrupt the char→byte translation in
+/// scan_braced_parameter — the closing quote terminates the word and the
+/// following line lexes normally. GNU parse.y parse_matched_pair scans
+/// characters, not bytes.
+#[test]
+fn quoted_dolbrace_utf8_alternate_closes_word() {
+    let tokens = tokenize("x=\"${V:-\u{2714}}\"\necho ok\n");
+    assert_eq!(tokens[0].kind, crate::lexer::TokenKind::Assignment);
+    // The word ends at the closing quote; `echo` is a separate word.
+    assert!(tokens.iter().any(|t| t.value == "echo"));
+}

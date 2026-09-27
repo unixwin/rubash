@@ -1867,6 +1867,14 @@ impl Executor {
         let saved_state = self.shell_state.clone_for_child_save();
         let saved_exit_code = self.exit_code;
         let saved_dir = env::current_dir().ok();
+        // The forked child owns its descriptor table: `exec 2>/dev/null`
+        // inside the body (modernish fatal.sh line 37) must not silence the
+        // parent's stderr or xtrace after the substitution returns. The
+        // flat `( )` region (ast_exec.rs) uses the same clone/restore
+        // boundary; GNU has it for free from fork() (subst.c:7143
+        // command_substitute -> the child's do_redirections die with the
+        // child).
+        let saved_fd_table = self.fd_table.clone();
         // The body is fresh parser input whose alias expansion GNU applies
         // at its read (subst.c:7143 parse_and_execute); it already ran at
         // stream level in comsub_body_alias_splice above, so mark the inner
@@ -1879,6 +1887,12 @@ impl Executor {
 
         let saved_capture = self.stdout_capture.take();
         self.stdout_capture = Some(Vec::new());
+        // GNU trap.c reset_or_restore_signal_handlers (~1480): the forked
+        // command-substitution child resets every inherited non-ignored
+        // trap, so a parent trap cannot fire inside the substitution. The
+        // in-place body below runs on this executor, but the wholesale
+        // state restore at the end rolls the parent's trap table back.
+        crate::builtins::trap::reset_for_subshell(&mut self.shell_state.env_vars);
         // Bash runs command substitution in a subshell where errexit is
         // suppressed: `$(false; echo ok)` prints ok because the inner `false`
         // does not abort the substitution (set-e.tests "command subst should
@@ -1897,24 +1911,44 @@ impl Executor {
         // Direct-stdout builtins inside the body consult the thread-local
         // capture, which belongs to an enclosing pipeline stage when this
         // substitution runs inside one; give the body its own capture.
+        // GNU subst.c:7340-7341: the child ends with `rc = run_exit_trap ();
+        // exit (rc);` — an EXIT trap the body installed (directly, or
+        // indirectly through eval, a function, or a sourced file —
+        // modernish fatal.sh via `command . "$MSH_AUX/fatal.sh"`,
+        // rubash#252) runs HERE, its stdout joining the capture, and its
+        // status becoming the substitution's status. It must run before
+        // restore_flat_subshell, which is the in-place fork boundary that
+        // discards the child's trap table.
+        let mut trap_status: Option<i32> = None;
         let (thread_captured, result) = crate::executor::shell_options::capture_stdout(|| {
-            if posix_mode || inherit_errexit {
+            let result = if posix_mode || inherit_errexit {
                 self.execute_ast(&ast)
             } else {
                 self.with_errexit_suppressed(|executor| executor.execute_ast(&ast))
+            };
+            let body_status = match &result {
+                Ok(()) => self.exit_code,
+                Err(ExecuteError::Return(status))
+                | Err(ExecuteError::ExitCode(status))
+                | Err(ExecuteError::ExpansionFailure(status)) => *status,
+                Err(_) => 1,
+            };
+            if let Ok(exit_status) = self.run_exit_trap_for_status(body_status) {
+                trap_status = Some(exit_status);
             }
+            result
         });
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;
 
         let status = match result {
-            Ok(()) => self.exit_code,
-            Err(ExecuteError::Return(status)) => status,
+            Ok(()) => trap_status.unwrap_or(self.exit_code),
+            Err(ExecuteError::Return(status)) => trap_status.unwrap_or(status),
             Err(ExecuteError::ExitCode(status)) | Err(ExecuteError::ExpansionFailure(status)) => {
-                status
+                trap_status.unwrap_or(status)
             }
-            Err(_) => 1,
+            Err(_) => trap_status.unwrap_or(1),
         };
 
         // GNU parse.y: a syntax error inside the substitution body is a
@@ -1928,6 +1962,7 @@ impl Executor {
         }
 
         self.restore_flat_subshell(saved_state, saved_dir);
+        self.fd_table = saved_fd_table;
         self.exit_code = saved_exit_code;
         self.last_command_substitution_status.set(Some(status));
 
@@ -1976,7 +2011,11 @@ impl Executor {
         // the outer file while the capture reads an empty pipe (rubash#161:
         // bash-it alias reload empty, nvm `nvm ls` missing default aliases).
         // fd 2 stays inherited — `$()` does not capture stderr (GNU
-        // subst.c:7149).
+        // subst.c:7149) — but a forked child's descriptor changes all die
+        // with the child, so snapshot the whole table here: an
+        // `exec 2>/dev/null` inside the function must not silence the
+        // caller's stderr after the substitution returns.
+        let saved_fd_table = self.fd_table.clone();
         let saved_fd1 = self.fd_table.entries.insert(
             1,
             crate::executor::fd_table::FdEntry {
@@ -2010,14 +2049,7 @@ impl Executor {
                 executor.execute_function(name, &args, &call)
             })
         });
-        match saved_fd1 {
-            Some(entry) => {
-                self.fd_table.entries.insert(1, entry);
-            }
-            None => {
-                self.fd_table.entries.remove(&1);
-            }
-        }
+        self.fd_table = saved_fd_table;
         let mut output = self.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&thread_captured);
         self.stdout_capture = saved_capture;

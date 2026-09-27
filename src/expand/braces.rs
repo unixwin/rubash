@@ -168,6 +168,43 @@ fn valid_seqterm(amble: &str) -> bool {
     true
 }
 
+/// UTF-8 bytes of markers.rs ASSIGN_DATA_DQUOTE (U+E302) — the stored form
+/// of a `"` in de-quoted assignment text.
+const DQUOTE_CARRIER: &[u8] = "\u{E302}".as_bytes();
+/// UTF-8 bytes of markers.rs ASSIGN_DATA_SQUOTE (U+E301) — the stored form
+/// of a `'` in de-quoted assignment text.
+const SQUOTE_CARRIER: &[u8] = "\u{E301}".as_bytes();
+
+/// Returns the DATA-quote carrier starting at `i`, if any.
+fn data_quote_carrier_at(bytes: &[u8], i: usize) -> Option<&'static [u8]> {
+    if bytes.len() >= i + DQUOTE_CARRIER.len()
+        && &bytes[i..i + DQUOTE_CARRIER.len()] == DQUOTE_CARRIER
+    {
+        Some(DQUOTE_CARRIER)
+    } else if bytes.len() >= i + SQUOTE_CARRIER.len()
+        && &bytes[i..i + SQUOTE_CARRIER.len()] == SQUOTE_CARRIER
+    {
+        Some(SQUOTE_CARRIER)
+    } else {
+        None
+    }
+}
+
+/// Skips a DATA-quote span opened by `carrier`, mirroring GNU braces.c
+/// brace_gobbler's quoted-state skip: everything until the same carrier
+/// recurs is opaque. An unterminated span runs to the end of the word,
+/// after which no valid brace group can follow.
+fn skip_data_quote_carrier(bytes: &[u8], i: usize, carrier: &[u8]) -> usize {
+    let mut j = i + carrier.len();
+    while j + carrier.len() <= bytes.len() {
+        if &bytes[j..j + carrier.len()] == carrier {
+            return j + carrier.len();
+        }
+        j += 1;
+    }
+    bytes.len()
+}
+
 fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -182,6 +219,19 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
         if bytes[i] == b'\\' {
             escaped = true;
             i += 1;
+            continue;
+        }
+        // Assignment-storage DATA quotes ride as the PUA sentinels
+        // E301 (') / E302 (") because the lexer already de-quoted the word
+        // (markers.rs ASSIGN_DATA_SQUOTE / ASSIGN_DATA_DQUOTE). GNU
+        // braces.c:189-193 brace_gobbler opens quoted state on those
+        // characters in the RAW word and skips everything until the same
+        // character closes it — a comma or brace inside a quoted brace
+        // member never splits (`a=({","})` stays one literal element). The
+        // sentinels carry exactly that quote through rubash's stored form,
+        // so the scanner must honor them as quote openers the same way.
+        if let Some(carrier) = data_quote_carrier_at(bytes, i) {
+            i = skip_data_quote_carrier(bytes, i, carrier);
             continue;
         }
         // Skip single-quoted strings
@@ -279,6 +329,18 @@ fn find_first_valid_brace(text: &str) -> Option<(usize, usize, i32)> {
             if bytes[j] == b'"' && !j_single {
                 j_double = !j_double;
                 j += 1;
+                continue;
+            }
+            if let Some(carrier) = data_quote_carrier_at(bytes, j) {
+                // GNU braces.c brace_gobbler: inside quote state only the
+                // same quote character closes it; the other quote kind is
+                // data and never opens nested state.
+                if carrier == DQUOTE_CARRIER && !j_single {
+                    j_double = !j_double;
+                } else if carrier == SQUOTE_CARRIER && !j_double {
+                    j_single = !j_single;
+                }
+                j += carrier.len();
                 continue;
             }
             if j_single || j_double {
@@ -471,6 +533,20 @@ fn split_brace_commas(s: &str) -> Vec<&str> {
             }
             b'\'' if !double => single = !single,
             b'"' if !single => double = !double,
+            // Data-quote sentinels (markers.rs E301/E302) are the stored
+            // form of the quotes GNU braces.c skips while splitting commas
+            // (braces.c:189-193 quoted-state handling in brace_gobbler).
+            // Only the same carrier kind toggles its state; the other kind
+            // is data inside the active quote.
+            b'\xEE' if data_quote_carrier_at(bytes, i).is_some() => {
+                match data_quote_carrier_at(bytes, i) {
+                    Some(DQUOTE_CARRIER) if !single => double = !double,
+                    Some(SQUOTE_CARRIER) if !double => single = !single,
+                    _ => {}
+                }
+                i += DQUOTE_CARRIER.len();
+                continue;
+            }
             b'{' if !single && !double => depth += 1,
             b'}' if !single && !double => depth = depth.saturating_sub(1),
             b',' if depth == 0 && !single && !double => {

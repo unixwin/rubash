@@ -81,8 +81,16 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
     for event in &scan.quote_events {
         max_event = max_event.max(event.offset);
     }
-    for (byte, (index, _)) in input.char_indices().enumerate() {
-        if index > max_event {
+    // char_indices() yields BYTE offsets; enumerate() numbers CHARS. The
+    // break must compare the CHAR ordinal against the char-indexed
+    // max_event — comparing the byte offset instead truncates the table
+    // whenever the body contains a multi-byte character, and translate()'s
+    // input.len() fallback then reports the whole remainder as the span
+    // (`x="${V:-<U+2714>}"` swallowed the closing quote and the rest of
+    // the script, rubash#251 omb-prompt-base.sh:196). GNU parse.y
+    // parse_matched_pair scans characters, not bytes.
+    for (char_index, (byte, _)) in input.char_indices().enumerate() {
+        if char_index > max_event {
             break;
         }
         char_to_byte.push(byte);
