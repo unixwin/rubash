@@ -332,3 +332,71 @@ Full per-area tables, C anchors, classifications and probe verdicts:
 Probe harness: target/issue-suites/results/source-audit/cmp.sh; raw
 artifacts under target/issue-suites/results/source-audit/{probes,out}/;
 durable reproducers under tests/fixtures/audit/.
+
+# ===== SECTION: corpus3 lane (wt5/corpus3, 2026-09-27) — APPENDED, DO NOT REORDER =====
+
+Corpus-discovery lane run by wt5/corpus3 (worktree base `86818357`, rubash built
+from that commit; oracle WSL GNU Bash 5.3.0 script-file runs, configure-class
+with `PATH=/usr/local/bin:/usr/bin:/bin`). Sandbox:
+`target/issue-suites/results/corpus3/` (corpora + SOURCES.txt + work/ probes +
+results/<case>/{rub,gnu}.{out,err,rc,meta}). Pinned repro fixtures:
+`tests/fixtures/corpus3/repro/`. All four mission candidates were verified
+against §1/§3 as never-run before executing (git's *configure* ran in ecosys4;
+git's *test harness* had not; FFmpeg/OpenSSH configure absent from §1; bash-it
+coverage in ecosys1-3 counted loader/component files only, no test-suite run).
+
+## Verdict table
+
+| Corpus | Source / version | Verdict | Issues |
+| --- | --- | --- | --- |
+| git test harness (`t/test-lib.sh` framework) | git v2.47.2 tarball (t/ extracted, 1136 files) | **partially runnable**: `-n` parity CLEAN on all 5 harness files; t0000-basic `--run=1,4` runs end-to-end under rubash (2/2 selected pass, full plan line `# passed all 92 test(s)`); BUT `test_oid_init` loads only 1 row per file (rubash#260 read-loop stdin bug) → 4 `undefined key` BUG lines at every startup; nested sub-test machinery blocked by env: `uname -s`=MINGW64 → harness wraps `pwd` as `builtin pwd -W` (MSYS-only extension, GNU bash has no `-W`; rubash is GNU-faithful) → `$(pwd)` empty in test bodies; `/d/`-style absolute paths given to native git.exe children are reinterpreted as drive-relative (`git init /d/...` created `D:\d\...`) — MSYS arg-conversion gap, ecosys4 precedent (env-bound) | **#260** (rubash-caused) |
+| FFmpeg configure | tag n7.1.1 raw file, 8345 L, sha256 e7c000ab… | **clean**: `-n` rc=0/0 parity (rubash 14 s vs GNU <1 s = known #155/#130 perf family); `--help` stdout byte-identical 27797 B rc=0/0; invalid-flag stdout byte-identical (incl. `$0` rendering) rc=1/1; only stderr noise = missing-source-tree sed diagnostics rendered by different sed binaries (env-bound) | none |
+| OpenSSH configure | openssh-9.9p2 tarball, 27712 L, sha256 91aadb60… | **exec clean, parse timeout**: `-n` rubash TIMEOUT@110 s (rc=124) vs GNU 0 s rc=0 — known #155/#130 O(N²) family (ecosys4 already has configure-scale evidence, not re-filed); `--help` (after touching stub `ssh.c`) stdout+stderr **byte-identical** 8059 B rc=0/0; invalid flag byte-identical both streams rc=1/1 | none new (perf: #130/#155) |
+| bash-it own test suite (`test/run` + 25 `.bats`) | master @4725d29d; bats submodules pinned per .gitmodules (bats-core 6636e2c2 = v1.9.0; also probed 52439ebf) | **blocked both sides, no rubash divergence measurable**: rubash runner-chain (`test/run`: git submodule init/update, git diff gate, exec bats) works up to the KNOWN env-bound `exec env` exported-function loss (`bats_readlinkf: command not found`, ecosuite §4 blocker 1 — not re-filed); oracle side itself executes **0 of 13** tests in lib/log.bats silently under GNU 5.3.0 with BOTH bats 1.9.0 and 1.14.0 (bats' own suite: 113/113 green on the same fixture → bash-it × bash-5.3 interaction, oracle-side env incompat); raw `.bats` `-n` symmetric rc=2 (bats macros, no signal) | none (ecosuite blockers) |
+
+## New issues from this lane
+
+| issue | corpus | class |
+| --- | --- | --- |
+| rubash#260 | git test-lib (and general idiom) | rubash-caused: external command inside `while read` loop with file redirect consumes the loop stdin → 1 iteration (GNU 5); breaks `test_oid_cache` (`t/test-lib-functions.sh:1725`) → every git t-file startup |
+| rubash#262 | OpenSSH configure lane (mistyped path exposed it) | rubash-caused: script-file open failure exits 1 instead of 127 (ENOENT) / 126 (EISDIR); C owner `shell.c:1572 open_shell_script()` `sh_exit((e==ENOENT)?EX_NOTFOUND:EX_NOINPUT)`, `shell.h:65-66` |
+
+## Environment-bound findings recorded (no issue, per ecosys4 MSYS-arg precedent)
+
+1. **rubash `uname -s` = `MINGW64_NT-10.0-19044` claims MSYS identity but MSYS
+   runtime extensions are absent** (correct per GNU source): git's test-lib
+   MINGW branch wraps `pwd () { builtin pwd -W }` (MSYS-bash extension; GNU
+   bash 5.3 pwd has only -L/-P) → every `$(pwd)` inside harness test bodies is
+   empty → nested sub-test `cd`/paths collapse. Also sets NATIVE_CRLF /
+   WINDOWS prereqs and `GIT_TEST_CMP=git diff…`. Policy decision (not a
+   GNU-compat bug): either implement MSYS extensions behind the MINGW uname
+   identity or change the identity string.
+2. **`/d/`-style absolute paths handed to native children**: `git init
+   "/d/…"` under rubash created `D:\d\…` (drive-relative reinterpretation by
+   the native child); MSYS2 bash converts args for native children, rubash
+   does not. Same class as ecosys4's `cmd //c` note. Workaround used:
+   `TEST_OUTPUT_DIRECTORY=.` (relative trash dir) — which in turn trips the
+   harness's absolute-TRASH assumption ("Tests passed but trash directory
+   already removed" rc=1), i.e. the harness needs either fix above or a real
+   built tree to be harvestable.
+3. **bats 1.9.0/1.14.0 × bash-it master × bash 5.3**: 0 tests executed on the
+   GNU oracle itself (bats self-suite green) — re-try bash-it suite only
+   after bash-it or bats adapts to 5.3.
+
+## Positive parity results worth keeping
+
+- Autoconf-generated `--help`/`--version`/error-path exec parity now holds for
+  bash53, git, php, ltmain (ecosys4), **FFmpeg** and **OpenSSH** (this lane):
+  the autoconf + hand-written-torturous-configure exec paths are byte-clean
+  under rubash; the only configure-class residue is the `-n` O(N²) family.
+- git t/ harness *startup* (option parsing, chainlint via perl, prereq setup,
+  test selection, TAP emission, fd 3/4 juggling, `--run`/`--root` handling,
+  shebang `#!D:/…exe` re-exec of nested test scripts) is byte-parity against
+  GNU up to the two blockers above.
+
+## Reproducer fixture map (tests/fixtures/corpus3/repro/)
+
+| Fixture | Issue | One-line shape |
+| --- | --- | --- |
+| `read_loop_child_consumes_stdin.sh` | #260 | `while read l; do expr …; done < f` → rubash 1 iteration, GNU 5; `</dev/null` on child restores 5 |
+| `script_open_exit_status.sh` | #262 | `bash -n missing.sh` → GNU rc=127 / rubash rc=1 (dir-as-script: 126 vs 1) |
