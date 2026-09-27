@@ -1251,12 +1251,142 @@ pub(in crate::executor) fn funsub_introducer(ch: char) -> Option<bool> {
 /// A `}` inside a word (`\"}\" in `${ echo \"}\"; }`, `a}b`, `x=}`) is word
 /// text, and a `{` opens a brace group only in command position
 /// (`${ echo {; }` runs `echo {`).
+/// Consume one `$'-introduced unit (`${...}', `$(...)', `$((...))',
+/// `$'...'') from `chars`, appending its full text to `out`. Shared by the
+/// two executor funsub scanners.
+///
+/// GNU parse.y:5494 read_token_word (shellexp branch): `$' followed by `{',
+/// `(' or `'' is read as ONE word unit at ANY word position — there is no
+/// command-position gate on it, unlike the bare `{' group opener. Inside a
+/// funsub body a nested `${ ... }' therefore never opens a bare brace group
+/// and its matching `}' never terminates the body; only a word BEGINNING
+/// with `}' does (parse.y:5400-5416, the PST_FUNSUBST special case).
+pub(in crate::executor) fn consume_nested_dollar_unit(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+    out: &mut String,
+) {
+    fn push_quoted(
+        chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+        out: &mut String,
+        close: char,
+    ) {
+        while let Some(qc) = chars.next() {
+            out.push(qc);
+            if qc == '\\' {
+                if let Some(escaped) = chars.next() {
+                    out.push(escaped);
+                }
+            } else if qc == close {
+                break;
+            }
+        }
+    }
+    match chars.peek().copied() {
+        Some('{') => {
+            chars.next();
+            let funsub = chars.peek().is_some_and(|c| *c == '|' || c.is_whitespace());
+            if funsub {
+                // extract_funsub_body's head consumes the introducer (`{'
+                // or `|') and the body starts AT the blank — calling it
+                // here (with `{' already consumed) would eat that blank
+                // (`${ echo x; }' became `${echo x; }', and the funsub
+                // introducer was lost downstream). Run the tail scan
+                // directly, with the `{' already consumed above.
+                if let Some(inner) = extract_funsub_body_tail(chars) {
+                    out.push('{');
+                    out.push_str(&inner);
+                    out.push('}');
+                } else {
+                    out.push('{');
+                }
+                return;
+            }
+            out.push('{');
+            let mut depth = 1usize;
+            while let Some(pc) = chars.next() {
+                match pc {
+                    '\\' => {
+                        out.push(pc);
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    }
+                    '\'' | '"' => {
+                        out.push(pc);
+                        push_quoted(chars, out, pc);
+                    }
+                    '{' => {
+                        depth += 1;
+                        out.push(pc);
+                    }
+                    '}' => {
+                        depth -= 1;
+                        out.push(pc);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => out.push(pc),
+                }
+            }
+        }
+        Some('(') => {
+            chars.next();
+            out.push('(');
+            let mut depth = 1usize;
+            while let Some(pc) = chars.next() {
+                match pc {
+                    '\\' => {
+                        out.push(pc);
+                        if let Some(escaped) = chars.next() {
+                            out.push(escaped);
+                        }
+                    }
+                    '\'' | '"' => {
+                        out.push(pc);
+                        push_quoted(chars, out, pc);
+                    }
+                    '(' => {
+                        depth += 1;
+                        out.push(pc);
+                    }
+                    ')' => {
+                        depth -= 1;
+                        out.push(pc);
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => out.push(pc),
+                }
+            }
+        }
+        Some('\'') => {
+            chars.next();
+            out.push('\'');
+            push_quoted(chars, out, '\'');
+        }
+        _ => {}
+    }
+}
+
 pub(in crate::executor) fn extract_funsub_body(
     chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
 ) -> Option<(String, bool)> {
     let introducer = *chars.peek()?;
     let valsub = funsub_introducer(introducer)?;
     chars.next();
+    extract_funsub_body_tail(chars).map(|body| (body, valsub))
+}
+
+/// The body scan of `extract_funsub_body` with the introducer already
+/// consumed: the iterator sits at the first body character (the blank after
+/// `${' or the first byte after `${|'). Consumes through the terminating
+/// `}' (exclusive) and returns the verbatim body text, or None when the
+/// input ended unterminated.
+fn extract_funsub_body_tail(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+) -> Option<String> {
     let mut body = String::new();
     let mut single = false;
     let mut double = false;
@@ -1297,6 +1427,17 @@ pub(in crate::executor) fn extract_funsub_body(
         }
         let mut word_text = false;
         match ch {
+            '$' => {
+                // parse.y:5494 read_token_word (shellexp branch): a `$'
+                // unit is one word element at any position — see
+                // consume_nested_dollar_unit. Without this arm
+                // `${ echo X${ echo nested; }Y; }' ended the outer body at
+                // the inner funsub's `}' (341bf41b follow-up).
+                body.push(ch);
+                consume_nested_dollar_unit(chars, &mut body);
+                term = false;
+                continue;
+            }
             '\'' => {
                 single = true;
                 term = false;
@@ -1311,7 +1452,7 @@ pub(in crate::executor) fn extract_funsub_body(
             }
             ')' if paren_depth > 0 => {
                 paren_depth -= 1;
-                // A closed outermost `( ... )` is a complete command.
+                // A closed outermost `( )` is a complete command.
                 term = paren_depth == 0;
             }
             '{' if term && paren_depth == 0 => {
@@ -1332,7 +1473,7 @@ pub(in crate::executor) fn extract_funsub_body(
                     brace_depth -= 1;
                     term = true;
                 } else {
-                    return Some((body, valsub));
+                    return Some(body);
                 }
             }
             ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,

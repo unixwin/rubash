@@ -28,15 +28,35 @@
 //! - An *unclosed* (resume) result is only recorded when no lookahead in
 //!   the scan ran to end-of-input undecided (the `esac)` case-pattern
 //!   lookahead reports truncation and poisons the resume).
+//! - A resume is consumed by restoring BOTH halves of the snapshot
+//!   together: the loop state via `SkipBraceScan::from_resume` AND the
+//!   byte position via `resume.pos` (`self.position = resume.pos` before
+//!   re-entering the scan loop). Restoring the state without the position
+//!   re-walks the already-verified prefix while keeping the snapshot
+//!   depth, so every `{` between the opening brace and the snapshot stop
+//!   is counted once more per pass — the depth inflates monotonically and
+//!   the group can never close again. This was the rubash#176 follow-up
+//!   hole (depth-4 multi-line group rejected with `unexpected end of file
+//!   from `{'' while GNU parses clean; depth 1-8 x shape matrix in
+//!   target/issue-suites/results/wt4-regfix/matrix-run). Note the
+//!   asymmetry with `HeredocOpScanResume`, which is immune by
+//!   construction: its `index` is relative to the scan start, an offset
+//!   that is identical on every pass.
 //! - Every non-append mutation of the logical line clears the cache.
 
 /// Snapshot of `skip_brace`'s outer-loop state at the moment its scan
 /// reached end-of-input without finding a close. Resuming the loop from
 /// `pos` with these fields reproduces exactly what a fresh scan over the
-/// longer input would do from the opening `{`.
+/// longer input would do from the opening `{` — which REQUIRES setting
+/// the scanner position to `pos` (see soundness rule 3 above): `pos` is
+/// the position half of the snapshot, the fields below are the state
+/// half, and neither is valid without the other.
 #[derive(Clone)]
 pub(crate) struct BraceScanResume {
     /// Byte offset where scanning stopped (end of input at record time).
+    /// The consumer must move the lexer position here before running the
+    /// resumed scan loop; a resume that starts anywhere earlier replays
+    /// verified text against snapshot depth and corrupts the count.
     pub(crate) pos: usize,
     pub(crate) depth: usize,
     pub(crate) case_depth: usize,

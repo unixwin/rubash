@@ -378,6 +378,53 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
                 match c {
+                    '$' => {
+                        // parse.y:5494 read_token_word (shellexp branch):
+                        // `$' followed by `{', `(' or `'' is consumed as ONE
+                        // unit at ANY word position — there is no
+                        // command-position gate on it, unlike the bare `{'
+                        // group opener below. A nested `${ ... }' inside a
+                        // funsub body therefore never opens a bare brace
+                        // group and its matching `}' never terminates the
+                        // body; only a word BEGINNING with `}' does
+                        // (parse.y:5400-5416). Without this arm,
+                        // `${ echo X${ echo nested; }Y; }' ended the outer
+                        // body at the inner funsub's `}' (341bf41b
+                        // follow-up; the same rule now lives in the three
+                        // sibling funsub scanners).
+                        match self.peek() {
+                            Some('{') => {
+                                self.advance();
+                                self.skip_braced(false);
+                            }
+                            Some('(') => {
+                                self.advance();
+                                if self.peek() == Some('(') {
+                                    self.advance();
+                                    self.skip_arith_paren();
+                                } else {
+                                    self.skip_cmd_subst();
+                                }
+                            }
+                            Some('\'') => {
+                                // $'...' is one quoted unit (shellexp ->
+                                // parse_matched_pair): opaque to `;' / `}'.
+                                self.advance();
+                                while let Some(qc) = self.advance() {
+                                    if qc == '\\' {
+                                        self.advance();
+                                    } else if qc == '\'' {
+                                        break;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                        // The unit continues the current word
+                        // (`X${...}Y', `$(x)y'); a terminator only a
+                        // following `;'/`&'/newline can set.
+                        term = false;
+                    }
                     '\'' => {
                         single = true;
                         term = false;
@@ -533,7 +580,21 @@ impl<'a> Lexer<'a> {
                 }
                 BraceScanEntry::Unclosed(resume) => {
                     if resume.pos <= self.input.len() {
+                        // The resume must restore BOTH halves of the snapshot
+                        // (brace_scan_cache.rs soundness rule 3): the scan
+                        // state via `SkipBraceScan::from_resume' AND the byte
+                        // position via `resume.pos'. Restoring only the state
+                        // re-scans the verified prefix from just past the `{'
+                        // while KEEPING the snapshot depth — every `{' between
+                        // the brace and the snapshot stop is counted once more
+                        // per pass, the depth inflates monotonically, and the
+                        // group can never reach depth 0 again (rubash#176
+                        // follow-up: a depth-4 multi-line group made the
+                        // parser reject earlier groups with `unexpected end of
+                        // file from `{'' while GNU parses clean; matrix S2/S7
+                        // shapes, depth >= 4).
                         let scan = SkipBraceScan::from_resume(resume.clone());
+                        self.position = resume.pos;
                         return self.run_skip_brace(brace_offset, scan, cache);
                     }
                 }

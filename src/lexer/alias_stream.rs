@@ -756,6 +756,37 @@ fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
             continue;
         }
         match ch {
+            '$' => {
+                // parse.y:5494 read_token_word (shellexp branch): `$'
+                // followed by `{', `(' or `'' is consumed as ONE unit at
+                // ANY word position — no command-position gate, unlike the
+                // bare `{' group opener below. A nested `${ ... }' inside
+                // the funsub body therefore never opens a bare brace group
+                // and its matching `}' never terminates the body; only a
+                // word BEGINNING with `}' does (parse.y:5400-5416).
+                // Without this arm `${ echo X${ echo nested; }Y; }' ended
+                // the outer body at the inner funsub's `}' (341bf41b
+                // follow-up; the same rule lives in skip.rs,
+                // command_substitution.rs and embedded_mutations.rs).
+                index = match chars.get(index + 1) {
+                    Some('{')
+                        if chars
+                            .get(index + 2)
+                            .is_some_and(|c| *c == '|' || c.is_whitespace()) =>
+                    {
+                        skip_funsub_body(chars, index + 1).unwrap_or(chars.len())
+                    }
+                    Some('{') => skip_dollar_brace(chars, index),
+                    Some('(') => skip_dollar_paren(chars, index),
+                    Some('\'') => skip_ansi_quote(chars, index),
+                    _ => {
+                        term = false;
+                        index + 1
+                    }
+                };
+                term = false;
+                continue;
+            }
             '\'' => {
                 single = true;
                 term = false;

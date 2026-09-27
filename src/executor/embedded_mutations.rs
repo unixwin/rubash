@@ -1393,6 +1393,17 @@ impl Executor {
             }
             let mut word_text = false;
             match source_ch {
+                '$' => {
+                    // parse.y:5494 read_token_word (shellexp branch): a `$'
+                    // unit is one word element at any position — see
+                    // consume_nested_dollar_unit. Without this arm
+                    // `${ echo X${ echo nested; }Y; }' ended the outer body
+                    // at the inner funsub's `}' (341bf41b follow-up).
+                    source.push(source_ch);
+                    super::command_substitution::consume_nested_dollar_unit(chars, &mut source);
+                    term = false;
+                    continue;
+                }
                 '\'' => {
                     single = true;
                     term = false;
