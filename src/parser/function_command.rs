@@ -110,6 +110,11 @@ pub(super) fn parse_function_command_with_diagnostic(
         // as one token. Recognize it as a function body for `name() { ...; }`
         // until the parser owns brace groups structurally.
         let inner = group.trim_start_matches('{').trim_end_matches('}').trim();
+        // rubash#131: re-parse the folded body under the gate of the pass
+        // that folded it (Token::extglob_gate) — GNU decides at read time.
+        let saved_extglob = crate::lexer::parse_extended_glob();
+        let group_gate = tokens.get(i).map_or(true, |token| token.extglob_gate);
+        crate::lexer::set_parse_extended_glob(group_gate);
         let mut body_tokens = crate::lexer::tokenize(inner);
         // GNU parse.y keeps absolute source lines inside function bodies:
         // `typeset -n v=$1` under a multi-line `function f1 { ... }` reports
@@ -128,6 +133,7 @@ pub(super) fn parse_function_command_with_diagnostic(
             }
         }
         let mut body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);
+        crate::lexer::set_parse_extended_glob(saved_extglob);
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(

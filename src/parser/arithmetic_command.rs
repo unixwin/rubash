@@ -413,6 +413,11 @@ pub(super) fn finish_compound_command(
     mut index: usize,
 ) -> (CommandNode, usize) {
     collect_trailing_redirections(tokens, &mut index, &mut command);
+    // rubash#131: a syntax error inside a compound body fails the whole
+    // compound in GNU's grammar; surface the inner marker on the compound
+    // itself so the reader reports it at this command (see
+    // support.rs propagate_subtree_parse_error).
+    super::support::propagate_subtree_parse_error(&mut command);
     // GNU sets each top-level command's ambient line_number from where its
     // parse ended — the last token consumed by the command itself (closing
     // keyword or trailing redirect target), before the list terminator.

@@ -5,6 +5,7 @@
 mod alias_stream;
 pub(crate) mod ansi;
 mod brace_scan;
+mod brace_scan_cache;
 mod classification;
 mod continuation;
 pub(crate) mod dolbrace;
@@ -29,6 +30,7 @@ use continuation::{
 };
 
 pub(crate) use alias_stream::{expand_aliases_in_source, AliasLookup};
+use brace_scan_cache::BraceScanCache;
 pub(crate) use continuation::has_unclosed_command_substitution;
 pub(crate) use continuation::unclosed_command_substitution_depth;
 pub(crate) use continuation::unclosed_input_close_char_posix;
@@ -74,6 +76,67 @@ pub fn heredoc_overflow_line() -> Option<usize> {
         0 => None,
         line => Some(line),
     }
+}
+
+/// Parse-time `extended_glob` (rubash#131).
+///
+/// GNU gates extglob pattern operators (`?(`, `*(`, `+(`, `@(`, `!(`) on the
+/// runtime `extended_glob` variable inside `read_token_word`
+/// (parse.y:5466 `if MBTEST(extended_glob && PATTERN_CHAR (character))`),
+/// which `reset_parser` syncs from the `extglob` shopt flag (parse.y:3502
+/// `extended_glob = extglob_flag`) and the shopt builtin updates live
+/// (builtins/shopt.def). Bash 5.3 defaults to
+/// `shell_compatibility_level` 53 (version.c DEFAULT_COMPAT_LEVEL =
+/// `${dist_major}${dist_minor}`), so parse.y:4538's parse_comsub forcing
+/// (`shell_compatibility_level <= 51`) does NOT apply: `$(` command
+/// substitution bodies are gated by the shopt too (verified: GNU 5.3.0
+/// rejects `r=$(case x in ?(a)) :;; esac)` with rc 2). The only exception
+/// is the `[[ ... ]]` pattern/regexp right-hand side
+/// (parse.y:5203-5210 parse_cond_command forces extended_glob under
+/// PST_EXTPAT), which rubash's conditional parser already handles by
+/// merging the RHS fragments (conditional_command.rs
+/// merge_pattern_rhs_fragments).
+///
+/// Rubash tokenizes a whole script before anything executes, so this static
+/// stands in for GNU's variable: the tokenizer's line loop flips it when it
+/// sees a top-level `shopt -s/-u extglob` (mirroring GNU's parse-execute
+/// cadence, the same granularity `line_posix_mode_change` uses for
+/// `set -o posix`), and the shopt builtin keeps it current as commands
+/// execute. Initialized off: `extglob` is off by default in GNU.
+static PARSE_EXTENDED_GLOB: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the commands of the script being tokenized will actually
+/// execute. Under `-n` (noexec) GNU still parses every command but never
+/// runs the `shopt` builtin, so a top-level `shopt -s extglob` line must
+/// NOT open the parse gate for later lines (verified: GNU 5.3.0 `bash -n`
+/// on `shopt -s extglob` + `case x in ?(a)) ...` fails with rc 2).
+static PARSE_EXECUTION_EXPECTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Current parse-time extglob gate (see `PARSE_EXTENDED_GLOB`).
+pub(crate) fn parse_extended_glob() -> bool {
+    PARSE_EXTENDED_GLOB.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set the parse-time extglob gate. Called by the shopt builtin when
+/// `extglob` is turned on or off (GNU builtins/shopt.def updates
+/// extglob_flag, and reset_parser parse.y:3502 propagates it to
+/// extended_glob).
+pub(crate) fn set_parse_extended_glob(enabled: bool) {
+    PARSE_EXTENDED_GLOB.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Record whether the current shell invocation will execute commands
+/// (`-n` means it will not; GNU shell.c reader_loop still parses).
+pub fn set_parse_execution_expected(expected: bool) {
+    PARSE_EXECUTION_EXPECTED.store(expected, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the line-loop shopt simulation may run (see
+/// `PARSE_EXECUTION_EXPECTED`).
+pub(crate) fn parse_execution_expected() -> bool {
+    PARSE_EXECUTION_EXPECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Identifies where lexer input came from; alias handling is reserved for later.
@@ -171,6 +234,19 @@ fn tokenize_with_heredocs(
     start_line: usize,
     in_comsub: bool,
 ) -> Vec<Token> {
+    let result =
+        tokenize_with_heredocs_inner(input, initial_posix, input_origin, start_line, in_comsub);
+    TOKENIZE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    result
+}
+
+fn tokenize_with_heredocs_inner(
+    input: &str,
+    initial_posix: bool,
+    input_origin: InputOrigin,
+    start_line: usize,
+    in_comsub: bool,
+) -> Vec<Token> {
     // TODO(parse.y/redir.c): Bash parses here-documents after reading the
     // complete command and performs delimiter-specific expansion rules. This
     // line-oriented collector handles the simple `<<word` and `<<'word'`
@@ -190,6 +266,17 @@ fn tokenize_with_heredocs(
     let mut logical_line = String::new();
     let mut continued_line = false;
     let mut parse_posix = initial_posix;
+    // rubash#131: flips of the parse-time extglob gate are detected only in
+    // the outermost script tokenization. Nested tokenizations (a brace-group
+    // body re-tokenized by the folding parser, a `$(` body parsed inline)
+    // are not execution boundaries in GNU: the enclosing command is parsed
+    // as a unit before any of its lines could run a `shopt'.
+    let mut extglob_flips_allowed = true;
+    let tokenize_depth = TOKENIZE_DEPTH.with(|depth| {
+        let value = depth.get() + 1;
+        depth.set(value);
+        value
+    });
     // GNU reader state for heredocs opened inside an unclosed command
     // substitution (parse.y PST_CMDSUBST): body lines stay verbatim in the
     // accumulated input — the backslash-newline join must not consume them
@@ -204,6 +291,11 @@ fn tokenize_with_heredocs(
     // instances so `{` in a case pattern on its own line is still word
     // text, not a group opener.
     let mut lexer_parse_state = LexerParseState::default();
+    // rubash#176/#178: resumable brace-group scan cache for the accumulating
+    // logical line (see brace_scan_cache.rs). Cleared on every mutation of
+    // `logical_line` that is not a pure append, and when the line is
+    // accepted and flushed.
+    let mut brace_cache = BraceScanCache::default();
     // rubash#155 / #130: whether the previous physical line was joined by
     // the token-level brace-group signal (`tokens_open_unclosed_brace_group`
     // below) with every text-level scan closed at that point. While true, an
@@ -325,6 +417,8 @@ fn tokenize_with_heredocs(
                     if let Some(rel_pos) = logical_line[delim_end..].find(')') {
                         logical_line
                             .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
+                        // Mid-string rewrite: positional scan cache invalid.
+                        brace_cache.clear();
                     }
                 }
             }
@@ -352,6 +446,9 @@ fn tokenize_with_heredocs(
             && !in_comsub_heredoc_body
         {
             logical_line.pop();
+            // The popped byte changes the text every later offset depends
+            // on: positional scan cache invalid.
+            brace_cache.clear();
             continued_line = true;
             brace_join_active = false;
             continue;
@@ -403,6 +500,8 @@ fn tokenize_with_heredocs(
         // downstream consumer sees the GNU reprint order (heredoc7.sub).
         if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
             logical_line = rotated;
+            // Rotation rewrites the middle of the line: cache invalid.
+            brace_cache.clear();
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
         // state feeding reserved_word_acceptable (parse.y:5899) is the state
@@ -416,9 +515,28 @@ fn tokenize_with_heredocs(
         // partial ended with last=esac, so `{` sat in reserved-word
         // position) and swallowed the rest of the function body.
         let mut line_lex_state = lexer_parse_state.clone();
-        let mut line_tokens = tokenize_plain(&logical_line, parse_posix, &mut line_lex_state);
+        let mut line_tokens = tokenize_plain(
+            &logical_line,
+            parse_posix,
+            &mut line_lex_state,
+            &mut brace_cache,
+        );
         if let Some(updated) = line_posix_mode_change(&line_tokens) {
             parse_posix = updated;
+        }
+        // rubash#131: a top-level `shopt -s/-u extglob` executes before the
+        // next line parses in GNU's read-execute loop; mirror that for the
+        // parse-time gate (same per-line granularity as the posix flip
+        // above). Disabled under -n (nothing executes) and after a top-level
+        // `set -n` (GNU executes `set -n` and then only parses).
+        // `tokenize_depth == 1` is the outermost script tokenization.
+        if parse_execution_expected() && extglob_flips_allowed && tokenize_depth == 1 {
+            match line_extglob_mode_change(&line_tokens) {
+                ExtglobFlip::Enable => set_parse_extended_glob(true),
+                ExtglobFlip::Disable => set_parse_extended_glob(false),
+                ExtglobFlip::ExecutionOff => extglob_flips_allowed = false,
+                ExtglobFlip::None => {}
+            }
         }
         // Record the whitespace run before each token. Token::column stays a
         // byte offset into the logical line (only the position field is
@@ -484,6 +602,8 @@ fn tokenize_with_heredocs(
         // the same line-start state (see the comment at tokenize_plain).
         lexer_parse_state = line_lex_state;
         logical_line.clear();
+        // Offsets restart for the next logical line: cache invalid.
+        brace_cache.clear();
         header_scan_from = 0;
         brace_join_active = false;
 
@@ -630,8 +750,14 @@ fn tokenize_with_heredocs(
         // downstream consumer sees the GNU reprint order (heredoc7.sub).
         if let Some(rotated) = relocate_comsub_heredoc_paren(&logical_line) {
             logical_line = rotated;
+            brace_cache.clear();
         }
-        let mut line_tokens = tokenize_plain(&logical_line, parse_posix, &mut lexer_parse_state);
+        let mut line_tokens = tokenize_plain(
+            &logical_line,
+            parse_posix,
+            &mut lexer_parse_state,
+            &mut brace_cache,
+        );
         for token in &mut line_tokens {
             token.position = logical_start_line;
         }
@@ -927,8 +1053,138 @@ fn brace_join_fast_path_line(line: &str) -> bool {
     !line.contains("posix")
 }
 
-fn tokenize_plain(input: &str, posix: bool, parse_state: &mut LexerParseState) -> Vec<Token> {
-    let mut lexer = Lexer::new(input, posix);
+thread_local! {
+    static TOKENIZE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What a top-level line's tokens say about the parse-time extglob gate.
+enum ExtglobFlip {
+    None,
+    /// `shopt -s extglob` seen: later lines parse with the gate open.
+    Enable,
+    /// `shopt -u extglob` seen: later lines parse with the gate closed.
+    Disable,
+    /// A top-level `set -n` executed: from here on GNU parses without
+    /// executing, so shopt lines must stop flipping the gate.
+    ExecutionOff,
+}
+
+/// Detect a top-level `shopt -s/-u extglob` (or `set -n`) command in a
+/// tokenized logical line. `shopt` commands nested inside a compound
+/// (function body, brace group, subshell, if/while/for/case) do not count:
+/// GNU parses the whole enclosing definition before any of its body
+/// commands could execute (verified: GNU 5.3.0 rejects
+/// `g() { shopt -s extglob; case x in ?(a)) :;; esac; }` with rc 2).
+fn line_extglob_mode_change(tokens: &[Token]) -> ExtglobFlip {
+    let mut result = ExtglobFlip::None;
+    let mut command_start = true;
+    // Compound opener stack (innermost last). A closer pops only when it
+    // matches the top, so a case-clause `)` inside `case ... esac` never
+    // pops the case frame, and a folded `{ ... }' keyword token (a complete
+    // compound in one token) neither opens nor closes a frame.
+    let mut compound: Vec<&'static str> = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        let is_separator = token.line_break
+            || matches!(
+                token.kind,
+                TokenKind::Semicolon
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Background
+                    | TokenKind::Pipe
+                    | TokenKind::PipeErr
+            );
+        if is_separator {
+            command_start = true;
+            index += 1;
+            continue;
+        }
+        if token.kind == TokenKind::Keyword {
+            let closes = match token.value.as_str() {
+                "}" => Some("}"),
+                ")" => Some(")"),
+                "fi" => Some("fi"),
+                "done" => Some("done"),
+                "esac" => Some("esac"),
+                "]]" => Some("]]"),
+                _ => None,
+            };
+            let opens = match token.value.as_str() {
+                "{" => Some("}"),
+                "(" => Some(")"),
+                "if" => Some("fi"),
+                "while" | "until" | "for" | "select" => Some("done"),
+                "case" => Some("esac"),
+                "[[" => Some("]]"),
+                _ => None,
+            };
+            if let Some(closer) = closes {
+                if compound.last() == Some(&closer) {
+                    compound.pop();
+                }
+            } else if let Some(closer) = opens {
+                if !token.value.starts_with('{') || token.value.trim() == "{" {
+                    compound.push(closer);
+                }
+            }
+        }
+        if command_start && compound.is_empty() {
+            if token.kind == TokenKind::Word && token.value == "shopt" {
+                if let Some(enabled) = shopt_extglob_change(&tokens[index + 1..]) {
+                    result = if enabled {
+                        ExtglobFlip::Enable
+                    } else {
+                        ExtglobFlip::Disable
+                    };
+                }
+            } else if token.kind == TokenKind::Word && token.value == "set" {
+                if tokens[index + 1..]
+                    .iter()
+                    .take_while(|next| next.kind == TokenKind::Word)
+                    .any(|next| next.value == "-n")
+                {
+                    result = ExtglobFlip::ExecutionOff;
+                }
+            }
+        }
+        command_start = false;
+        index += 1;
+    }
+    result
+}
+
+/// `shopt` argument scan: does this command turn `extglob` on or off?
+/// Mirrors the option-list walk of GNU shopt (builtins/shopt.def: a -s/-u
+/// selects the mode for the option names that follow it).
+fn shopt_extglob_change(args: &[Token]) -> Option<bool> {
+    let mut mode = None;
+    for token in args {
+        if token.kind != TokenKind::Word {
+            // A redirection (`shopt -s extglob 2>/dev/null`) or any other
+            // non-word token ends the option-list scan.
+            return None;
+        }
+        match token.value.as_str() {
+            "-s" => mode = Some(true),
+            "-u" => mode = Some(false),
+            "extglob" => return mode,
+            value if value.starts_with('-') || value.starts_with('+') => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn tokenize_plain(
+    input: &str,
+    posix: bool,
+    parse_state: &mut LexerParseState,
+    brace_cache: &mut BraceScanCache,
+) -> Vec<Token> {
+    let mut lexer = Lexer::new_with_cache(input, posix, brace_cache);
+    lexer.extended_glob = parse_extended_glob();
     // parse.y keeps a single parser_state for the whole input — resume the
     // PST_CASEPAT / last_read_token state left by the previous logical line.
     lexer.restore_parse_state(parse_state.clone());

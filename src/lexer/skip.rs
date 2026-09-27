@@ -1,3 +1,4 @@
+use super::brace_scan_cache::{BraceScanCache, BraceScanEntry, BraceScanResume};
 use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
 use super::scanner::Lexer;
 
@@ -434,98 +435,193 @@ impl<'a> Lexer<'a> {
     /// (`f() { # note' became `{ # note'), which the parser then rejected
     /// (niubash #120 follow-up).
     pub(super) fn skip_brace(&mut self) -> BraceScan {
-        let mut depth = 1usize;
-        let mut case_depth = 0usize;
-        let mut word = String::new();
-        let mut word_boundary = true;
-        let mut current_word_boundary = true;
-        // The scan starts just past the opening `{', which is itself a word
-        // start, so the character at hand is mid-word: `{#note' is one word in
-        // GNU (a `#' comments only at a word start), and the whitespace
-        // branches below raise this again for `{ # note'.
-        let mut comment_start = false;
-        let mut comment_at = None;
-        let mut saw_top_level_whitespace = false;
-        let mut ansi_single = false;
-        let mut escaped = false;
-        while let Some(c) = self.advance() {
-            if escaped {
-                escaped = false;
-                comment_start = false;
+        // rubash#176/#178: the `{` was just consumed, so its byte offset is
+        // one before the scan position. GNU reads a script exactly once
+        // (parse.y:3557 read_token carries the reader state forward); the
+        // batch tokenizer instead re-scans the whole accumulated logical
+        // line on every appended physical line, and this scan used to run
+        // from each still-open `{` to end-of-input on every pass —
+        // O(open_braces · buffer) per pass, near-cubic over a file. The
+        // per-logical-line cache stores, per `{`, either the finished
+        // result or a continuation of the scan state, valid while the line
+        // only grows by appends (the line loop clears the cache on every
+        // non-append mutation).
+        let brace_offset = self.position - 1;
+        let mut cache = self.brace_cache.take();
+        let result = self.skip_brace_cached(brace_offset, cache.as_deref_mut());
+        self.brace_cache = cache;
+        result
+    }
+
+    fn skip_brace_cached(
+        &mut self,
+        brace_offset: usize,
+        mut cache: Option<&mut BraceScanCache>,
+    ) -> BraceScan {
+        if let Some(entry) = cache
+            .as_ref()
+            .and_then(|cache| cache.lookup_brace(brace_offset))
+        {
+            match entry {
+                BraceScanEntry::Closed { end, comment_start } => {
+                    if *end <= self.input.len() {
+                        self.position = *end;
+                        return BraceScan {
+                            closed: true,
+                            comment_start: *comment_start,
+                        };
+                    }
+                }
+                BraceScanEntry::Unclosed(resume) => {
+                    if resume.pos <= self.input.len() {
+                        let scan = SkipBraceScan::from_resume(resume.clone());
+                        return self.run_skip_brace(brace_offset, scan, cache);
+                    }
+                }
+            }
+        }
+        self.run_skip_brace(brace_offset, SkipBraceScan::new(), cache)
+    }
+
+    fn run_skip_brace(
+        &mut self,
+        brace_offset: usize,
+        mut scan: SkipBraceScan,
+        mut cache: Option<&mut BraceScanCache>,
+    ) -> BraceScan {
+        // Set when the `esac)' case-pattern lookahead ran to end-of-input
+        // undecided: its answer was computed against a truncated tail and a
+        // longer input could change it, so the scan must not be resumed.
+        let mut lookahead_truncated = false;
+        loop {
+            // Resumed inside an unterminated `#' comment: keep eating
+            // comment text through the terminator, exactly as the comment
+            // branch below does for in-scan comments.
+            if scan.pending_comment {
+                while self.peek().is_some_and(|ch| ch != '\n') {
+                    self.advance();
+                }
+                if self.peek() == Some('\n') {
+                    // The newline itself is processed by the normal path so
+                    // the case-depth/word trackers see it, matching a fresh
+                    // scan where the comment branch stops before the `\n'.
+                    scan.pending_comment = false;
+                }
+            }
+            let Some(c) = self.advance() else { break };
+            if scan.escaped {
+                scan.escaped = false;
+                scan.comment_start = false;
                 continue;
             }
-            if ansi_single {
+            if scan.ansi_single {
                 if c == '\\' {
-                    escaped = true;
+                    scan.escaped = true;
                 } else if c == '\'' {
-                    ansi_single = false;
+                    scan.ansi_single = false;
                 }
-                comment_start = false;
+                scan.comment_start = false;
                 continue;
             }
             let rest = &self.input[self.position..];
             update_brace_group_case_depth(
                 c,
-                &mut word,
-                &mut case_depth,
-                &mut word_boundary,
-                &mut current_word_boundary,
+                &mut scan.word,
+                &mut scan.case_depth,
+                &mut scan.word_boundary,
+                &mut scan.current_word_boundary,
                 rest,
+                &mut lookahead_truncated,
             );
             if c == '\n' {
-                if depth == 1 {
-                    saw_top_level_whitespace = true;
+                if scan.depth == 1 {
+                    scan.saw_top_level_whitespace = true;
                 }
-                comment_start = true;
+                scan.comment_start = true;
                 continue;
             }
             if c.is_whitespace() {
-                if depth == 1 {
-                    saw_top_level_whitespace = true;
+                if scan.depth == 1 {
+                    scan.saw_top_level_whitespace = true;
                 }
-                comment_start = true;
+                scan.comment_start = true;
                 continue;
             }
-            if c == '#' && comment_start {
-                if comment_at.is_none() && depth == 1 {
+            if c == '#' && scan.comment_start {
+                if scan.comment_at.is_none() && scan.depth == 1 {
                     // `advance' already consumed the `#', which is one byte.
-                    comment_at = Some(self.position - 1);
+                    scan.comment_at = Some(self.position - 1);
                 }
                 while self.peek().is_some_and(|ch| ch != '\n') {
                     self.advance();
                 }
+                if self.peek().is_none() {
+                    scan.pending_comment = true;
+                }
                 continue;
             }
             match c {
-                '{' if case_depth == 0 => {
-                    comment_start = false;
-                    depth += 1;
+                '{' if scan.case_depth == 0 => {
+                    scan.comment_start = false;
+                    scan.depth += 1;
                 }
-                '}' if case_depth == 0 => {
-                    comment_start = false;
-                    depth -= 1;
-                    if depth == 0 {
-                        if self.peek() == Some('}') {
-                            depth = 1;
-                            continue;
+                '}' if scan.case_depth == 0 => {
+                    scan.comment_start = false;
+                    scan.depth -= 1;
+                    if scan.depth == 0 {
+                        match self.peek() {
+                            Some('}') => {
+                                scan.depth = 1;
+                                continue;
+                            }
+                            // A close decided without consulting past the
+                            // current end of input is stable under later
+                            // appends and can be cached; a close at
+                            // end-of-input is not (the appended bytes could
+                            // be the `}' of a `}}' cascade or a compact-group
+                            // terminator).
+                            Some(_) => {
+                                if !scan.saw_top_level_whitespace {
+                                    self.record_brace_scan_closed(
+                                        brace_offset,
+                                        scan.comment_at,
+                                        cache.as_deref_mut(),
+                                    );
+                                    return BraceScan {
+                                        closed: true,
+                                        comment_start: scan.comment_at,
+                                    };
+                                }
+                            }
+                            None => {
+                                if !scan.saw_top_level_whitespace {
+                                    return BraceScan {
+                                        closed: true,
+                                        comment_start: scan.comment_at,
+                                    };
+                                }
+                            }
                         }
-                        if !saw_top_level_whitespace {
+                        let (ends_group, decided_in_prefix) =
+                            self.brace_close_can_end_compact_group();
+                        if ends_group {
+                            if decided_in_prefix {
+                                self.record_brace_scan_closed(
+                                    brace_offset,
+                                    scan.comment_at,
+                                    cache.as_deref_mut(),
+                                );
+                            }
                             return BraceScan {
                                 closed: true,
-                                comment_start: comment_at,
+                                comment_start: scan.comment_at,
                             };
                         }
-                        if self.brace_close_can_end_compact_group() {
-                            return BraceScan {
-                                closed: true,
-                                comment_start: comment_at,
-                            };
-                        }
-                        depth = 1;
+                        scan.depth = 1;
                     }
                 }
                 '$' => {
-                    comment_start = false;
+                    scan.comment_start = false;
                     match self.peek() {
                         Some('{') => {
                             self.advance();
@@ -542,39 +638,64 @@ impl<'a> Lexer<'a> {
                         }
                         Some('\'') => {
                             self.advance();
-                            ansi_single = true;
+                            scan.ansi_single = true;
                         }
                         _ => {}
                     }
                 }
                 '`' => {
-                    comment_start = false;
+                    scan.comment_start = false;
                     self.skip_backtick();
                 }
                 '\'' => {
-                    comment_start = false;
+                    scan.comment_start = false;
                     self.skip_single();
                 }
                 '"' => {
-                    comment_start = false;
+                    scan.comment_start = false;
                     self.skip_double();
                 }
                 '\\' => {
-                    comment_start = false;
+                    scan.comment_start = false;
                     self.advance();
                 }
                 _ => {
-                    comment_start = false;
+                    scan.comment_start = false;
                 }
+            }
+        }
+        if !lookahead_truncated {
+            if let Some(cache) = cache.as_deref_mut() {
+                cache.record_brace(
+                    brace_offset,
+                    BraceScanEntry::Unclosed(scan.clone().into_resume(self.position)),
+                );
             }
         }
         BraceScan {
             closed: false,
-            comment_start: comment_at,
+            comment_start: scan.comment_at,
         }
     }
 
-    fn brace_close_can_end_compact_group(&self) -> bool {
+    fn record_brace_scan_closed(
+        &self,
+        brace_offset: usize,
+        comment_start: Option<usize>,
+        mut cache: Option<&mut BraceScanCache>,
+    ) {
+        if let Some(cache) = cache.as_deref_mut() {
+            cache.record_brace(
+                brace_offset,
+                BraceScanEntry::Closed {
+                    end: self.position,
+                    comment_start,
+                },
+            );
+        }
+    }
+
+    fn brace_close_can_end_compact_group(&self) -> (bool, bool) {
         let rest = &self.input[self.position..];
         let mut saw_blank = false;
         for (index, ch) in rest.char_indices() {
@@ -583,38 +704,141 @@ impl<'a> Lexer<'a> {
                     saw_blank = true;
                     continue;
                 }
-                '\n' => return true,
+                '\n' => return (true, true),
                 // A word-initial `#' after the closing brace comments out the
                 // rest of the physical line (parse.y read_token ->
                 // parse_comment), so the `}' really does end the group:
                 // `{ echo x; } # note' (niubash #120 follow-up). Without this
                 // the group keeps scanning for a later `}' and swallows the
                 // comment text into the brace token.
-                '#' => return true,
-                ';' | '|' | '&' | '<' | '>' | ')' => return true,
-                _ if !saw_blank => return true,
-                _ if ch.is_ascii_digit()
-                    && rest[index..].chars().any(|c| matches!(c, '<' | '>')) =>
-                {
-                    return true;
+                '#' => return (true, true),
+                ';' | '|' | '&' | '<' | '>' | ')' => return (true, true),
+                _ if !saw_blank => return (true, true),
+                _ if ch.is_ascii_digit() => {
+                    // Decided in-prefix iff a redirection operator exists in
+                    // the remaining text: without one the arm falls through
+                    // to the reserved-word check, and a later append could
+                    // add the `<'/`>' that flips which arm runs.
+                    let redirect_ahead = rest[index..].chars().any(|c| matches!(c, '<' | '>'));
+                    if redirect_ahead {
+                        return (true, true);
+                    }
+                    let (ends, decided) = brace_close_followed_by_reserved_word(&rest[index..]);
+                    return (ends, decided);
                 }
-                _ => return brace_close_followed_by_reserved_word(&rest[index..]),
+                _ => {
+                    let (ends, decided) = brace_close_followed_by_reserved_word(&rest[index..]);
+                    return (ends, decided);
+                }
             }
         }
-        true
+        // Only blanks until the end of input: the answer today is `true',
+        // but it was decided by end-of-input, not by a real character.
+        (true, false)
     }
 }
 
-fn brace_close_followed_by_reserved_word(rest: &str) -> bool {
+/// Outer-loop state of `skip_brace`, kept in a struct so an interrupted
+/// scan can be resumed after more physical lines are appended (rubash#176).
+#[derive(Clone)]
+struct SkipBraceScan {
+    depth: usize,
+    case_depth: usize,
+    word: String,
+    word_boundary: bool,
+    current_word_boundary: bool,
+    /// True when the scan stopped inside an unterminated `#' comment.
+    pending_comment: bool,
+    /// The scan starts just past the opening `{', which is itself a word
+    /// start, so the character at hand is mid-word: `{#note' is one word in
+    /// GNU (a `#' comments only at a word start), and the whitespace
+    /// branches of the scan raise this again for `{ # note'.
+    comment_start: bool,
+    comment_at: Option<usize>,
+    saw_top_level_whitespace: bool,
+    ansi_single: bool,
+    escaped: bool,
+}
+
+impl SkipBraceScan {
+    fn new() -> Self {
+        Self {
+            depth: 1,
+            case_depth: 0,
+            word: String::new(),
+            word_boundary: true,
+            current_word_boundary: true,
+            pending_comment: false,
+            comment_start: false,
+            comment_at: None,
+            saw_top_level_whitespace: false,
+            ansi_single: false,
+            escaped: false,
+        }
+    }
+
+    fn from_resume(resume: BraceScanResume) -> Self {
+        Self {
+            depth: resume.depth,
+            case_depth: resume.case_depth,
+            word: resume.word,
+            word_boundary: resume.word_boundary,
+            current_word_boundary: resume.current_word_boundary,
+            pending_comment: resume.pending_comment,
+            comment_start: resume.comment_start,
+            comment_at: resume.comment_at,
+            saw_top_level_whitespace: resume.saw_top_level_whitespace,
+            ansi_single: resume.ansi_single,
+            escaped: resume.escaped,
+        }
+    }
+
+    fn into_resume(self, pos: usize) -> BraceScanResume {
+        BraceScanResume {
+            pos,
+            depth: self.depth,
+            case_depth: self.case_depth,
+            word: self.word,
+            word_boundary: self.word_boundary,
+            current_word_boundary: self.current_word_boundary,
+            pending_comment: self.pending_comment,
+            comment_start: self.comment_start,
+            comment_at: self.comment_at,
+            saw_top_level_whitespace: self.saw_top_level_whitespace,
+            ansi_single: self.ansi_single,
+            escaped: self.escaped,
+        }
+    }
+}
+
+/// Whether the text after a candidate closing `}' starts a new command (so
+/// the `}' ends the group) — the reserved-word check of the compact-group
+/// close. Returns `(answer, decided)`: `decided` is false when the answer
+/// relied on the input ending (an exact reserved-word match at
+/// end-of-input), which a later append could change.
+fn brace_close_followed_by_reserved_word(rest: &str) -> (bool, bool) {
     const RESERVED: &[&str] = &["do", "done", "elif", "else", "esac", "fi", "then"];
 
-    RESERVED.iter().any(|word| {
-        rest.strip_prefix(word).is_some_and(|tail| {
-            tail.chars().next().is_none_or(|ch| {
-                ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | ')' | '(')
-            })
-        })
-    })
+    let mut answer = false;
+    let mut decided = false;
+    for word in RESERVED {
+        if let Some(tail) = rest.strip_prefix(word) {
+            match tail.chars().next() {
+                Some(ch) => {
+                    if ch.is_whitespace() || matches!(ch, ';' | '|' | '&' | '<' | '>' | ')' | '(') {
+                        answer = true;
+                        decided = true;
+                    }
+                }
+                None => {
+                    // The reserved word ends the input: `true' today, but an
+                    // appended separator or word byte decides differently.
+                    answer = true;
+                }
+            }
+        }
+    }
+    (answer, decided)
 }
 
 fn update_brace_group_case_depth(
@@ -624,6 +848,7 @@ fn update_brace_group_case_depth(
     word_boundary: &mut bool,
     current_word_boundary: &mut bool,
     rest: &str,
+    lookahead_truncated: &mut bool,
 ) {
     if ch == '_' || ch.is_ascii_alphanumeric() {
         if word.is_empty() {
@@ -642,8 +867,14 @@ fn update_brace_group_case_depth(
         return;
     }
 
-    let reserved_word_allows_next =
-        update_brace_group_reserved_word_depth(word, *current_word_boundary, case_depth, ch, rest);
+    let reserved_word_allows_next = update_brace_group_reserved_word_depth(
+        word,
+        *current_word_boundary,
+        case_depth,
+        ch,
+        rest,
+        lookahead_truncated,
+    );
     word.clear();
     *word_boundary = reserved_word_allows_next || brace_group_separator_allows_reserved_word(ch);
 }
@@ -654,6 +885,7 @@ fn update_brace_group_reserved_word_depth(
     case_depth: &mut usize,
     delimiter: char,
     rest: &str,
+    lookahead_truncated: &mut bool,
 ) -> bool {
     if !word_boundary {
         return false;
@@ -664,11 +896,18 @@ fn update_brace_group_reserved_word_depth(
             *case_depth += 1;
             false
         }
-        "esac" if !case_pattern_starts_with_esac_rest(delimiter, rest) => {
-            *case_depth = case_depth.saturating_sub(1);
-            true
+        "esac" => {
+            let (esac_is_pattern, truncated) = case_pattern_starts_with_esac_rest(delimiter, rest);
+            if truncated {
+                *lookahead_truncated = true;
+            }
+            if !esac_is_pattern {
+                *case_depth = case_depth.saturating_sub(1);
+                true
+            } else {
+                false
+            }
         }
-        "esac" => false,
         "for" | "select" | "while" | "until" | "then" | "do" | "else" | "elif" | "in" | "fi"
         | "done" => true,
         _ => false,
@@ -717,7 +956,7 @@ fn update_command_substitution_case_depth(
             *case_depth += 1;
             false
         }
-        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest) => {
+        "esac" if *current_word_boundary && !case_pattern_starts_with_esac_rest(ch, rest).0 => {
             *case_depth = case_depth.saturating_sub(1);
             true
         }
@@ -738,9 +977,9 @@ fn command_substitution_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | ')' | '\n')
 }
 
-fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
+fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> (bool, bool) {
     if !matches!(delimiter, ')' | '|') {
-        return false;
+        return (false, false);
     }
 
     let chars = std::iter::once(delimiter)
@@ -750,12 +989,14 @@ fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
     while close < chars.len() {
         match chars[close] {
             ')' => break,
-            ';' | '\n' => return false,
+            ';' | '\n' => return (false, false),
             _ => close += 1,
         }
     }
     if chars.get(close) != Some(&')') {
-        return false;
+        // No `)` before the end of input: the answer was decided by EOF,
+        // and more appended text could still supply the closer.
+        return (false, true);
     }
 
     let mut scan = close + 1;
@@ -777,9 +1018,11 @@ fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
                 after += 1;
             }
             if chars.get(after) == Some(&')') {
-                return false;
+                return (false, false);
             }
-            return true;
+            // Whitespace running to the end of input leaves the `)` check
+            // undecided until more text arrives.
+            return (true, after >= chars.len());
         }
         if ch == '_' || ch.is_ascii_alphanumeric() {
             word.push(ch);
@@ -787,10 +1030,10 @@ fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
             continue;
         }
         if word == "esac" && word_boundary {
-            return true;
+            return (true, false);
         }
         if ch == ')' {
-            return false;
+            return (false, false);
         }
         if word.is_empty() {
             if command_substitution_separator_allows_reserved_word(ch) {
@@ -808,8 +1051,9 @@ fn case_pattern_starts_with_esac_rest(delimiter: char, rest: &str) -> bool {
             reserved_word_allows_next || command_substitution_separator_allows_reserved_word(ch);
         scan += 1;
     }
-
-    word == "esac" && word_boundary
+    // The trailing word ends at end-of-input: a longer input could extend
+    // it into `esac' (or past it), so this answer is EOF-based.
+    (word == "esac" && word_boundary, true)
 }
 
 fn command_substitution_reserved_word_allows_next(word: &str) -> bool {

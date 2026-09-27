@@ -327,6 +327,14 @@ fn state_contains(env_vars: &HashMap<String, String>, name: &str) -> bool {
 }
 
 pub(crate) fn set_option(env_vars: &mut HashMap<String, String>, name: &str, enabled: bool) {
+    // rubash#131: keep the parse-time extglob gate in step with the runtime
+    // shopt (GNU builtins/shopt.def updates extglob_flag; reset_parser
+    // parse.y:3502 propagates it into the parser's extended_glob). Later
+    // in-process parses (`eval`, ${THIS_SH} scripts) then see the same
+    // value GNU's parser would.
+    if name == "extglob" {
+        crate::lexer::set_parse_extended_glob(enabled);
+    }
     match name {
         "xpg_echo" => XPG_ECHO.store(enabled, Ordering::Relaxed),
         "sourcepath" => SOURCEPATH.store(enabled, Ordering::Relaxed),

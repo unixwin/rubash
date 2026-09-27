@@ -1,3 +1,4 @@
+use super::brace_scan_cache::{BraceScanCache, HeredocOpEntry, HeredocOpScanResume};
 use super::classification::{is_brace_expansion, is_word_delimiter};
 use super::quotes::normalize_backtick_command_substitution;
 use super::token::{Token, TokenKind};
@@ -57,7 +58,17 @@ pub(super) struct Lexer<'a> {
     /// POSIX parse mode (Austin Group Interp 221): single quotes inside a
     /// double-quoted `${...}` are literal, so `}` closes the expansion.
     pub(super) posix: bool,
+    /// Parse-time extglob gate (rubash#131): GNU read_token_word consumes
+    /// `?(`/`*(`/`+(`/`@(`/`!(` pattern groups only while the `extglob`
+    /// shopt is on (parse.y:5466 `extended_glob && PATTERN_CHAR`); without
+    /// it the `(` is an ordinary token (a case pattern then fails with
+    /// "syntax error near unexpected token `('").
+    pub(super) extended_glob: bool,
     parse_state: LexerParseState,
+    /// Resumable brace-group scan continuations shared by every re-tokenize
+    /// pass over one accumulating logical line (rubash#176/#178). `None`
+    /// for one-shot Lexer uses that get no reuse anyway.
+    pub(super) brace_cache: Option<&'a mut BraceScanCache>,
     /// Open `(` groups of the logical line being scanned, innermost last.
     /// An entry is an arithmetic-command candidate when it is the first
     /// `(` of an adjacent `((` pair; `arith_close_verified` memoizes the
@@ -67,6 +78,10 @@ pub(super) struct Lexer<'a> {
     /// whether that token was an unquoted `(`.
     last_token_end: Option<usize>,
     last_token_was_open_paren: bool,
+    /// Set by `skip_word_inner` when the word scan broke at a `(' directly
+    /// after an extglob operator with the parse-time gate closed; consumed
+    /// by `finish_word_token` onto the produced token (rubash#131).
+    pub(super) extglob_split_pending: bool,
 }
 
 /// One open `(` group tracked while scanning a logical line.
@@ -87,10 +102,26 @@ impl<'a> Lexer<'a> {
             input,
             position: 0,
             posix,
+            extended_glob: false,
             parse_state: LexerParseState::default(),
+            brace_cache: None,
             open_parens: Vec::new(),
             last_token_end: None,
             last_token_was_open_paren: false,
+            extglob_split_pending: false,
+        }
+    }
+
+    /// Tokenize with the shared resumable brace-scan cache of an
+    /// accumulating logical line (see `BraceScanCache`).
+    pub(super) fn new_with_cache(
+        input: &'a str,
+        posix: bool,
+        brace_cache: &'a mut BraceScanCache,
+    ) -> Self {
+        Self {
+            brace_cache: Some(brace_cache),
+            ..Self::new(input, posix)
         }
     }
 
@@ -745,45 +776,93 @@ impl<'a> Lexer<'a> {
                 } else {
                     TokenKind::Keyword
                 };
-                Some(Token::new(kind, v, start))
+                let mut token = Token::new(kind, v, start);
+                // rubash#131: stamp this pass's extglob gate for the body
+                // re-parse (see Token::extglob_gate).
+                token.extglob_gate = self.extended_glob;
+                Some(token)
             }
             '}' => Some(Token::new(TokenKind::Keyword, "}", start)),
             _ => Some(self.finish_word_token(start, true)),
         }
     }
 
-    fn brace_group_contains_heredoc_operator(&self) -> bool {
-        let chars = self.input[self.position..].chars().collect::<Vec<_>>();
-        let mut index = 0usize;
-        let mut depth = 1usize;
-        let mut single = false;
-        let mut double = false;
-        let mut escaped = false;
+    fn brace_group_contains_heredoc_operator(&mut self) -> bool {
+        // rubash#176/#178: this query used to rebuild and walk the whole
+        // rest of the buffer per `{` per re-tokenize pass. Like `skip_brace`
+        // it is a left-to-right DFA over the accumulating logical line, so
+        // its result or continuation is cached per opening-brace offset
+        // (GNU reads the input exactly once — parse.y:3557 read_token — and
+        // never re-scans text for a nested construct).
+        let brace_offset = self.position - 1;
+        let mut cache = self.brace_cache.take();
+        let found = match cache
+            .as_deref_mut()
+            .and_then(|cache| cache.lookup_operator(brace_offset).cloned())
+        {
+            Some(HeredocOpEntry::Found) => true,
+            Some(HeredocOpEntry::Absent) => false,
+            Some(HeredocOpEntry::Resume(resume)) => {
+                let (found, state) = self.scan_brace_group_for_heredoc_operator(Some(resume));
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.record_operator(brace_offset, state);
+                }
+                found
+            }
+            None => {
+                let (found, state) = self.scan_brace_group_for_heredoc_operator(None);
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.record_operator(brace_offset, state);
+                }
+                found
+            }
+        };
+        self.brace_cache = cache;
+        found
+    }
 
-        while index < chars.len() {
-            let ch = chars[index];
+    /// The operator scan itself: does the brace group opened at the current
+    /// position contain an unquoted `<<` (heredoc) before its close? Pure
+    /// query — `self.position` is not moved. Returns the answer plus the
+    /// cache entry describing how the scan ended (found / closed cleanly /
+    /// resumable).
+    fn scan_brace_group_for_heredoc_operator(
+        &self,
+        resume: Option<HeredocOpScanResume>,
+    ) -> (bool, HeredocOpEntry) {
+        let scan_start = self.position;
+        let mut index = resume.as_ref().map_or(0usize, |state| state.index);
+        let mut depth = resume.as_ref().map_or(1usize, |state| state.depth);
+        let mut single = resume.as_ref().is_some_and(|state| state.single);
+        let mut double = resume.as_ref().is_some_and(|state| state.double);
+        let mut escaped = resume.as_ref().is_some_and(|state| state.escaped);
+
+        let input = self.input;
+        let char_at =
+            |pos: usize| -> Option<char> { input.get(pos..).and_then(|rest| rest.chars().next()) };
+        while let Some(ch) = char_at(scan_start + index) {
             if escaped {
                 escaped = false;
-                index += 1;
+                index += ch.len_utf8();
                 continue;
             }
             if ch == '\\' && !single {
                 escaped = true;
-                index += 1;
+                index += ch.len_utf8();
                 continue;
             }
             if ch == '\'' && !double {
                 single = !single;
-                index += 1;
+                index += ch.len_utf8();
                 continue;
             }
             if ch == '"' && !single {
                 double = !double;
-                index += 1;
+                index += ch.len_utf8();
                 continue;
             }
             if single || double {
-                index += 1;
+                index += ch.len_utf8();
                 continue;
             }
 
@@ -792,18 +871,29 @@ impl<'a> Lexer<'a> {
                 '}' => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        return false;
+                        return (false, HeredocOpEntry::Absent);
                     }
                 }
-                '<' if chars.get(index + 1) == Some(&'<') && chars.get(index + 2) != Some(&'<') => {
-                    return true;
+                '<' if char_at(scan_start + index + 1) == Some('<')
+                    && char_at(scan_start + index + 2) != Some('<') =>
+                {
+                    return (true, HeredocOpEntry::Found);
                 }
                 _ => {}
             }
-            index += 1;
+            index += ch.len_utf8();
         }
 
-        false
+        (
+            false,
+            HeredocOpEntry::Resume(HeredocOpScanResume {
+                index,
+                depth,
+                single,
+                double,
+                escaped,
+            }),
+        )
     }
 
     fn finish_prefixed_input_redirect(&mut self, start: usize) -> Token {

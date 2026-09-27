@@ -6,6 +6,32 @@ impl Executor {
         cmd: &CommandNode,
         function: &FunctionCommand,
     ) -> Result<(), ExecuteError> {
+        // rubash#131: GNU parses a function definition as one unit — a
+        // syntax error anywhere in the body aborts the reader at the
+        // definition (parse.y parse_command -> report_syntax_error; e.g. an
+        // extglob case pattern with the shopt off). The parser bubbles the
+        // body's marker onto this node (support.rs
+        // propagate_subtree_parse_error); the compound dispatch reaches
+        // this point before the generic preamble, so report the
+        // near-token diagnostic here.
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+            self.mark_parse_error();
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let token = fields.next().unwrap_or_default();
+            let line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            eprintln!(
+                "{}syntax error near unexpected token `{token}'",
+                self.parser_diagnostic_prefix_for_line(line)
+            );
+            if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                eprintln!("{}`{source}'", self.parser_diagnostic_prefix_for_line(line));
+            }
+            self.exit_code = 2;
+            return Err(ExecuteError::ExitCode(2));
+        }
         // TODO(parse.y/execute_cmd.c): Bash stores a COMMAND tree plus source
         // metadata and function attributes. Keep the parsed body in a small
         // function table until the command representation is complete.

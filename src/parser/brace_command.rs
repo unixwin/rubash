@@ -13,7 +13,37 @@ pub(super) fn parse_brace_group_command(
         && token.value.len() >= 2
     {
         let inner_source = token.value.trim_start_matches('{').trim_end_matches('}');
-        if !brace_group_source_has_completed_command(inner_source) {
+        // GNU parse.y:1196 group_command: `'{' compound_list '}'` —
+        // compound_list must end in a completed command (parse.y:1262-1279:
+        // `list1 '\n' | '&' | ';'`, or a closed compound). The cheap tail
+        // checks replicate brace_group_source_has_completed_command's
+        // prefix; anything else asks the already-tokenized body's last
+        // token (rubash#176: the old gate re-tokenized the whole body per
+        // nesting level — and recursed into every folded child — making a
+        // depth-D single-line chain O(D²·N); a folded child group is itself
+        // a completed compound command, and its own recursive parse below
+        // enforces its body's completion at its own level, exactly where
+        // GNU's grammar checks it).
+        // rubash#131: the body re-parse uses the gate of the pass that
+        // folded this group (Token::extglob_gate), not the current global
+        // (a later line's `shopt' may have flipped it after this line was
+        // read; GNU gates at read time, parse.y:5466).
+        let saved_extglob = crate::lexer::parse_extended_glob();
+        crate::lexer::set_parse_extended_glob(token.extglob_gate);
+        let body_tokens =
+            crate::lexer::tokenize_with_initial_posix_and_line(inner_source, false, token.position);
+        crate::lexer::set_parse_extended_glob(saved_extglob);
+        let inner_tail = inner_source.trim_end_matches([' ', '\t']);
+        let completed = if inner_tail.is_empty() {
+            false
+        } else if inner_tail.ends_with(';') || inner_tail.ends_with('\n') {
+            true
+        } else {
+            body_tokens
+                .last()
+                .is_some_and(token_completes_brace_group_command)
+        };
+        if !completed {
             let mut command = CommandNode::new();
             command.insert_assignment(
                 "__RUBASH_PARSE_ERROR__".to_string(),
@@ -26,8 +56,6 @@ pub(super) fn parse_brace_group_command(
         // inner source untrimmed so the tokenizer's newline counting keeps
         // positions anchored at the `{` token's line — trimming leading
         // newlines here would shift every body command up.
-        let body_tokens =
-            crate::lexer::tokenize_with_initial_posix_and_line(inner_source, false, token.position);
         let mut command = CommandNode::new();
         command.line = Some(token.position);
         command.brace_group = Some(Box::new(BraceGroupCommand {

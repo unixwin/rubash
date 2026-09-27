@@ -264,22 +264,127 @@ fn compound_close_precedes(tokens: &[Token], index: usize) -> bool {
     false
 }
 
-pub(super) fn is_boundary_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
-    command_boundary_keyword_allowed(tokens, index) && is_keyword(tokens, index, value)
+/// Deepest-first search for a parse-error marker inside a command subtree.
+/// Mirrors GNU's unit-of-parse: a compound command (function definition,
+/// brace group, subshell, if/while/for/case/select body) is parsed as one
+/// command, and a syntax error anywhere inside it aborts the reader at
+/// that command (parse.y parse_command -> report_syntax_error; verified:
+/// GNU 5.3.0 rejects `f() { case x in ?(a)) :;; esac; }` with rc 2 at the
+/// definition, and `bash -n` on bash-completion fails at the pattern line).
+/// Rubash parks body errors as marker assignments on the inner node, so
+/// this walks the child command containers and reports the innermost
+/// marked node. Word-embedded command substitutions are deliberately not
+/// walked: their failure is contained per GNU's child parse (rubash#131).
+pub(super) fn subtree_parse_error_node(command: &CommandNode) -> Option<&CommandNode> {
+    fn walk<'a>(command: &'a CommandNode, found: &mut Option<&'a CommandNode>) {
+        if found.is_some() {
+            return;
+        }
+        if command
+            .assignments
+            .iter()
+            .any(|(name, _)| name.starts_with("__RUBASH_PARSE_ERROR"))
+        {
+            *found = Some(command);
+            return;
+        }
+        let mut bodies: Vec<&[CommandNode]> = Vec::new();
+        if let Some(list) = &command.and_or_list {
+            bodies.push(&list.commands);
+        }
+        if let Some(pipeline) = &command.pipeline_command {
+            bodies.push(&pipeline.stages);
+        }
+        if let Some(compound) = &command.for_command {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.select_command {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.if_command {
+            bodies.push(&compound.then_body);
+            if let Some(else_body) = &compound.else_body {
+                bodies.push(else_body);
+            }
+        }
+        if let Some(compound) = &command.loop_command {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.subshell_command {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.case_command {
+            for clause in &compound.clauses {
+                bodies.push(&clause.body);
+            }
+        }
+        if let Some(compound) = &command.function_command {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.brace_group {
+            bodies.push(&compound.body);
+        }
+        if let Some(compound) = &command.coproc_command {
+            if let Some(body) = &compound.body {
+                bodies.push(body);
+            }
+        }
+        let singles: Vec<&CommandNode> = [
+            command.time_command.as_ref().map(|c| &*c.command),
+            command.background_command.as_ref().map(|c| &*c.command),
+            command.inverted_command.as_ref().map(|c| &*c.command),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for body in bodies {
+            for child in body {
+                walk(child, found);
+                if found.is_some() {
+                    return;
+                }
+            }
+        }
+        for child in singles {
+            walk(child, found);
+            if found.is_some() {
+                return;
+            }
+        }
+    }
+    let mut found = None;
+    walk(command, &mut found);
+    found
 }
 
-pub(super) fn brace_group_source_has_completed_command(source: &str) -> bool {
-    let terminator_source = source.trim_end_matches([' ', '\t']);
-    if terminator_source.is_empty() {
-        return false;
+/// Bubble an inner parse-error marker up to the compound command's own
+/// node so the executor's top-level marker check (which fires under `-n`
+/// too, via the reader-loop diagnostics) reports the failure where GNU's
+/// parser would have aborted (rubash#131).
+pub(super) fn propagate_subtree_parse_error(command: &mut CommandNode) {
+    if command
+        .assignments
+        .iter()
+        .any(|(name, _)| name.starts_with("__RUBASH_PARSE_ERROR"))
+    {
+        return;
     }
-    if terminator_source.ends_with(';') || terminator_source.ends_with('\n') {
-        return true;
+    let markers: Vec<(String, String)> = match subtree_parse_error_node(command) {
+        Some(inner) => inner
+            .assignments
+            .iter()
+            .filter(|(name, _)| name.starts_with("__RUBASH_PARSE"))
+            .cloned()
+            .collect(),
+        None => return,
+    };
+    for (name, value) in markers {
+        command.insert_assignment(name, value);
     }
+}
 
-    crate::lexer::tokenize(terminator_source)
-        .last()
-        .is_some_and(token_completes_brace_group_command)
+pub(super) fn is_boundary_keyword(tokens: &[Token], index: usize, value: &str) -> bool {
+    command_boundary_keyword_allowed(tokens, index) && is_keyword(tokens, index, value)
 }
 
 pub(super) fn token_completes_brace_group_command(token: &Token) -> bool {
@@ -299,8 +404,15 @@ pub(super) fn token_completes_brace_group_command(token: &Token) -> bool {
         return true;
     }
     if token.value.starts_with('{') && token.value.ends_with('}') && token.value.len() >= 2 {
-        let inner_source = token.value.trim_start_matches('{').trim_end_matches('}');
-        return brace_group_source_has_completed_command(inner_source);
+        // A collapsed `{ ... }' group token is itself a completed compound
+        // command (GNU parse.y:1196 group_command; a closed group satisfies
+        // compound_list without a trailing separator). Whether ITS body ends
+        // in a completed command is enforced when the group's own recursive
+        // parse runs below — the innermost incomplete group reports the
+        // error at its own level, where GNU's grammar checks it. The old
+        // re-tokenize recursion here summed to O(depth²·input) on nested
+        // single-line groups (rubash#176).
+        return true;
     }
     false
 }

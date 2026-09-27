@@ -13,10 +13,24 @@ use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
 
 impl<'a> Lexer<'a> {
     pub(super) fn finish_word_token(&mut self, start: usize, allow_keyword: bool) -> Token {
-        if self.word_so_far_ends_extglob_operator(start) && self.peek() == Some('(') {
+        // rubash#131: GNU read_token_word (parse.y:5466) consumes the
+        // pattern group only under the extglob shopt (extended_glob).
+        if self.extended_glob
+            && self.word_so_far_ends_extglob_operator(start)
+            && self.peek() == Some('(')
+        {
             self.skip_extglob_group();
+        } else if !self.extended_glob
+            && self.word_so_far_ends_extglob_operator(start)
+            && self.peek() == Some('(')
+        {
+            // The operator is this word's first character (scan_token
+            // consumed it before dispatch), so skip_word_inner below starts
+            // past it with no operator state: record the gated split here.
+            self.extglob_split_pending = true;
         }
         self.skip_word_at(start);
+        let extglob_split = std::mem::take(&mut self.extglob_split_pending);
         let raw = self.slice(start);
         // Only real assignment words (`a=$(cmd)`) preserve quotes verbatim so
         // the RHS quote state survives to assignment expansion. Ordinary words
@@ -140,7 +154,9 @@ impl<'a> Lexer<'a> {
         } else {
             raw.to_string()
         };
-        Token::new_with_raw(kind, &value, &raw, start)
+        let mut token = Token::new_with_raw(kind, &value, &raw, start);
+        token.extglob_split = extglob_split;
+        token
     }
 
     pub(super) fn skip_word_at(&mut self, token_start: usize) {
@@ -205,10 +221,17 @@ impl<'a> Lexer<'a> {
                             && array_subscript_depth == 0
                             && self.input[..self.position].ends_with('='))))
             {
-                if c == '(' && extglob_operator {
+                if c == '(' && extglob_operator && self.extended_glob {
                     self.skip_extglob_group();
                     extglob_operator = false;
                     continue;
+                }
+                if c == '(' && extglob_operator {
+                    // rubash#131: the gate is closed, so GNU read_token_word
+                    // would have ended the word here (parse.y:5466); remember
+                    // the split so the case-pattern reader later rejects (or,
+                    // with the gate open at read time, never sees) this shape.
+                    self.extglob_split_pending = true;
                 }
                 if c == '{' {
                     if self.position == word_start {

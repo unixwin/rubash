@@ -39,6 +39,20 @@ pub struct Token {
     /// (parse.y keeps it so arithmetic commands can recover the raw text
     /// between `((` and `))` the way GNU bash's parse_matched_pair does).
     pub leading_ws: String,
+    /// rubash#131: the word scan broke this token at a `(' that directly
+    /// followed an extglob operator while the parse-time extglob gate was
+    /// CLOSED. Binds the case-pattern reader's reassembly/error decision to
+    /// the gate value of THIS token's line, not whatever the shopt state is
+    /// when the parser later runs (GNU gates in read_token_word at read
+    /// time, parse.y:5466).
+    pub extglob_split: bool,
+    /// rubash#131: for a folded `{ ... }' keyword token, the parse-time
+    /// extglob gate value of the pass that produced it. The folding parser
+    /// re-tokenizes the body later, possibly after a later line's shopt
+    /// flipped the global gate; GNU decides at read time (parse.y:5466), so
+    /// the body re-parse must use this snapshot, not the current value.
+    /// Defaults to open so legacy producers keep accepting.
+    pub extglob_gate: bool,
 }
 
 impl Token {
@@ -51,6 +65,8 @@ impl Token {
             column: position,
             line_break: false,
             leading_ws: String::new(),
+            extglob_split: false,
+            extglob_gate: true,
         }
     }
 
@@ -77,6 +93,8 @@ impl Token {
             column: position,
             line_break: false,
             leading_ws: String::new(),
+            extglob_split: false,
+            extglob_gate: true,
         }
     }
 }

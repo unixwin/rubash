@@ -439,6 +439,13 @@ fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
             return false;
         };
         executor.set_shell_option(name, enabled);
+        // rubash#131: under -n nothing executes, so a top-level
+        // `shopt -s extglob` line must not open the parse-time extglob
+        // gate for later lines (GNU parses but never runs the shopt;
+        // verified: `bash -n` on shopt+pattern still fails rc 2).
+        if name == "noexec" {
+            rubash::lexer::set_parse_execution_expected(!enabled);
+        }
     }
     true
 }

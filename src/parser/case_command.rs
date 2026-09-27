@@ -154,10 +154,18 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                 | TokenKind::CommandSubst
                 | TokenKind::BraceExpand => {
                     let text = &tokens[i].value;
-                    // Check if this word ends with an extglob operator before (
+                    // Check if this word ends with an extglob operator before (.
+                    // rubash#131: the reassembly mirrors GNU read_token_word's
+                    // pattern-group consumption (parse.y:5466), which only
+                    // runs while the extglob shopt is on; gated off, the
+                    // `(' stays an ordinary token and the pattern loop below
+                    // reports it (GNU: `syntax error near unexpected token
+                    // `('').
                     if i + 1 < tokens.len()
                         && is_keyword(tokens, i + 1, "(")
                         && ends_with_extglob_operator(text)
+                        && crate::lexer::parse_extended_glob()
+                        && !tokens[i].extglob_split
                     {
                         // Collect the full extglob pattern
                         let extglob = collect_extglob_pattern(tokens, &mut i);
@@ -183,17 +191,50 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
                     current_pattern.push_str(&tokens[i].value);
                     current_raw_pattern.push_str(&tokens[i].raw);
                 }
-                // Handle `!(` as extglob negation pattern
+                // Handle `!(` as extglob negation pattern (rubash#131:
+                // same parse-time extglob gate as the reassembly above).
                 TokenKind::Keyword
                     if tokens[i].value == "!"
                         && i + 1 < tokens.len()
-                        && is_keyword(tokens, i + 1, "(") =>
+                        && is_keyword(tokens, i + 1, "(")
+                        && crate::lexer::parse_extended_glob()
+                        && !tokens[i].extglob_split =>
                 {
                     let extglob = collect_extglob_pattern_from_bang(tokens, &mut i);
                     current_pattern.push_str(&extglob);
                     current_raw_pattern.push_str(&extglob);
                 }
                 TokenKind::Keyword if tokens[i].value == "(" => {
+                    // Error when the gate is closed now, or when the
+                    // preceding word was split at this `(' while the gate
+                    // was closed at ITS read time (rubash#131: the shopt
+                    // state may have flipped between that line and this
+                    // parse; GNU decides at read time, parse.y:5466).
+                    let split_while_gated = i > 0 && tokens[i - 1].extglob_split;
+                    if !crate::lexer::parse_extended_glob() || split_while_gated {
+                        // rubash#131: with the extglob shopt off, GNU's
+                        // read_token_word never absorbs this `(' into the
+                        // pattern word (parse.y:5466 gate), the grammar then
+                        // rejects it in pattern position, and yacc reports
+                        // `syntax error near unexpected token `(' with the
+                        // offending line echoed (verified GNU 5.3.0:
+                        // `case ab in a?(b)) echo m;; *) echo n;; esac').
+                        let mut command = CommandNode::new();
+                        command.line = tokens.get(start).map(|token| token.position);
+                        command.insert_assignment(
+                            "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                            format!(
+                                "({}{}",
+                                crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                                tokens[i].position,
+                            ),
+                        );
+                        command.insert_assignment(
+                            "__RUBASH_PARSE_SOURCE__".to_string(),
+                            pattern_error_line_text(tokens, i),
+                        );
+                        return Some(finish_compound_command(command, tokens, tokens.len()));
+                    }
                     current_pattern.push('(');
                     current_raw_pattern.push_str(&tokens[i].raw);
                     in_extglob += 1;
@@ -325,6 +366,7 @@ fn pattern_error_line_text(tokens: &[Token], index: usize) -> String {
     }
     let mut text = String::new();
     let mut prev_end: Option<usize> = None;
+    let mut first = true;
     for token in &tokens[start..] {
         if token.position != line {
             break;
@@ -332,7 +374,17 @@ fn pattern_error_line_text(tokens: &[Token], index: usize) -> String {
         if token.kind == TokenKind::Semicolon && token.line_break {
             continue;
         }
-        if let Some(end) = prev_end {
+        // GNU y.error echoes the physical line verbatim (parse.y
+        // report_syntax_error -> the saved shell_input_line), so keep the
+        // original inter-token whitespace captured in `leading_ws` instead
+        // of normalizing to single spaces (rubash#131 reproducer:
+        // `  -?([a-z])+([0-9])) echo m ;;' keeps its two-space indent).
+        if first {
+            text.push_str(&token.leading_ws);
+            first = false;
+        } else if !token.leading_ws.is_empty() {
+            text.push_str(&token.leading_ws);
+        } else if let Some(end) = prev_end {
             if token.column > end {
                 text.push(' ');
             }

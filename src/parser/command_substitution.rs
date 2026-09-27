@@ -649,8 +649,28 @@ fn command_substitution_node(
     current_shell: bool,
     pipe_output: bool,
 ) -> CommandSubstitutionNode {
+    // rubash#131: a `$(` body is parsed in place by GNU's outer parse
+    // (parse.y:4451 parse_comsub -> parse_string), so the parse-time extglob
+    // gate applies to it exactly as to the surrounding script (GNU 5.3.0
+    // rejects `r=$(case x in ?(a)) :;; esac)' with rc 2). A backtick body
+    // instead parses inside the substituted child at execution time, where
+    // a syntax error only kills the child (GNU prints `command
+    // substitution: ... syntax error ...' and the script continues, rc 0).
+    // Rubash parses both eagerly; for backticks the gate is therefore held
+    // open so a gated-off pattern keeps the pre-#131 accepted-parse
+    // behavior instead of aborting the whole script.
+    // The gate is consulted by both the tokenizer and the parser (the case
+    // pattern reader re-checks it), so hold it open across both stages for
+    // backtick bodies.
+    let saved_gate = crate::lexer::parse_extended_glob();
+    if backtick {
+        crate::lexer::set_parse_extended_glob(true);
+    }
     let tokens = crate::lexer::tokenize(&source);
     let commands = parse(&tokens).commands;
+    if backtick {
+        crate::lexer::set_parse_extended_glob(saved_gate);
+    }
     let (open_delimiter, operator, close_delimiter) = if backtick {
         ("`".to_string(), "`".to_string(), "`".to_string())
     } else if current_shell {
