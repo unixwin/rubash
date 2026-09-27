@@ -133,9 +133,18 @@ pub fn handle_to_file(h: HANDLE) -> std::fs::File {
 /// CLOEXEC — per-child writers go through `duplicate_handle_inheritable`.
 pub fn create_capture_pipe() -> std::io::Result<(HANDLE, HANDLE)> {
     let mut fds = [0 as libc::c_int; 2];
+    // libc::pipe2 is glibc/musl-only; Darwin exposes pipe + fcntl instead.
+    #[cfg(target_os = "linux")]
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error());
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
     }
     Ok((fds[0], fds[1]))
 }
