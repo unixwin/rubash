@@ -11,7 +11,7 @@ pub(crate) mod dolbrace;
 mod heredoc;
 mod heredoc_scan;
 mod number_redirect;
-mod quotes;
+pub(crate) mod quotes;
 mod scanner;
 mod skip;
 mod token;

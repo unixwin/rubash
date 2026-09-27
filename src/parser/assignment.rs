@@ -117,7 +117,6 @@ fn split_compound_element_operator<'a>(
     if !word.starts_with('[') {
         return None;
     }
-
     let assignment = operator.strip_prefix(']')?;
     let mut single = false;
     let mut double = false;
@@ -148,6 +147,17 @@ fn split_compound_element_operator<'a>(
     }
 
     None
+}
+
+/// Split a compound-assignment element of the form `[subscript]=value`
+/// (or `[subscript]+=value`) into `(subscript, value)`. Exposed for the
+/// xtrace declaration-argument renderer (GNU quote_compound_array_word
+/// shape `['sub']='value'`).
+pub fn split_subscripted_element(word: &str) -> Option<(&str, &str, bool)> {
+    if let Some((subscript, value)) = split_compound_element_operator(word, "]+=") {
+        return Some((subscript, value, true));
+    }
+    split_compound_element_operator(word, "]=").map(|(subscript, value)| (subscript, value, false))
 }
 
 pub fn split_compound_assignment_words(inner: &str) -> Vec<String> {

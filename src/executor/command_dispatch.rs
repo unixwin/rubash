@@ -41,28 +41,8 @@ impl Executor {
             // second, normalized line (issue: gnu-compat set-x G16).
             let prefix = self.xtrace_prefix();
             let mut xtrace_output = Vec::new();
-            if !cmd.assignments.is_empty() && !cmd.words.is_empty() {
-                // GNU traces the assignment prefix on its own line before the
-                // command words (`foo=one echo hi` → `+ foo=one` `+ echo hi`).
-                let assignments = self.xtrace_assignment_text(cmd);
-                writeln!(xtrace_output, "{prefix}{}", assignments.join(" ")).ok();
-                writeln!(
-                    xtrace_output,
-                    "{prefix}{}",
-                    cmd.words
-                        .iter()
-                        .map(|word| {
-                            super::prompt_expansion::xtrace_quote_word(
-                                crate::builtins::arrayref::take_arrayref_flag(word).1,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-                .ok();
-            } else {
-                let text = self.xtrace_command_text(cmd);
-                writeln!(xtrace_output, "{prefix}{text}").ok();
+            for line in self.xtrace_command_lines(cmd) {
+                writeln!(xtrace_output, "{prefix}{line}").ok();
             }
             // GNU bash emits xtrace after applying the command's redirects
             // (execute_cmd.c:4480+), so the trace goes to the redirected

@@ -102,6 +102,93 @@ fn compound_element_xtrace_text(raw: &str) -> String {
     out
 }
 
+/// A word of a traced simple command: either printed as-is, or a
+/// declaration-builtin compound-assignment argument that GNU prints as its
+/// own assignment line plus a bare-name command word.
+pub(in crate::executor) enum XtraceCommandWord {
+    Plain(String),
+    /// `NAME=(quoted elements)` line + the bare `NAME` surviving in argv.
+    DeclarationAssignment {
+        line: String,
+        arg: String,
+    },
+}
+
+/// Detect a declaration-builtin compound-assignment argument in its
+/// transport form `NAME[+]=<COMPOUND_ASSIGNMENT_MARKER>(...)` and render it
+/// the GNU way. GNU subst.c:13084 (shell_expand_word_list) routes
+/// W_COMPASSIGN|W_ASSIGNARG words to expand_declaration_argument: the word
+/// is expanded and re-quoted by subst.c:12909 expand_compound_assignment_word
+/// (each element single-quoted; `[ind]=value` becomes `['ind']='value'` per
+/// arrayfunc.c:1135 quote_compound_array_word / subst.c:12896 expand_oneword),
+/// traced as its own assignment line by subst.c:3580 (do_assignment_internal
+/// → print_cmd.c:514 xtrace_print_assignment, assign_list form), and then
+/// truncated to the bare NAME (subst.c:13053) so the command line reads
+/// `declare -A name`.
+pub(in crate::executor) fn split_xtrace_declaration_word(word: &str) -> XtraceCommandWord {
+    const MARKER: &str = crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
+    let Some(eq) = word.find(MARKER) else {
+        return XtraceCommandWord::Plain(word.to_string());
+    };
+    let (lhs, rest) = word.split_at(eq);
+    // GNU expand_declaration_argument (subst.c:12930+) accepts NAME= and
+    // NAME+= (append); anything else is an ordinary word.
+    let (name, append) = if let Some(base) = lhs.strip_suffix("+=") {
+        (base, true)
+    } else {
+        (lhs.strip_suffix('=').unwrap_or(lhs), false)
+    };
+    let valid_name = !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !valid_name {
+        return XtraceCommandWord::Plain(word.to_string());
+    }
+    let interior = rest
+        .strip_prefix(MARKER)
+        .unwrap_or(rest)
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+        .unwrap_or(rest.strip_prefix(MARKER).unwrap_or(rest));
+    let rendered = declaration_compound_trace_text(interior);
+    let operator = if append { "+=" } else { "=" };
+    XtraceCommandWord::DeclarationAssignment {
+        line: format!("{name}{operator}({rendered})"),
+        arg: name.to_string(),
+    }
+}
+
+/// Element text inside a traced declaration assignment: GNU expand_oneword
+/// (subst.c:12896) expands each element (quote removal included) and then
+/// single-quotes it — plain words via sh_single_quote, `[ind]=value` words
+/// as `['ind']='value'` (arrayfunc.c:1135 quote_compound_array_word).
+/// `$'...'` elements are decoded first (parse.y:5563 rewrites them to plain
+/// single quotes in the word text).
+fn declaration_compound_trace_text(interior: &str) -> String {
+    crate::parser::assignment::split_compound_assignment_words(interior)
+        .iter()
+        .map(|element| {
+            let text = compound_element_xtrace_text(element);
+            let dequoted = crate::lexer::quotes::remove_shell_quotes(&text);
+            match crate::parser::assignment::split_subscripted_element(&dequoted) {
+                Some((subscript, value, append)) => {
+                    let operator = if append { "+=" } else { "=" };
+                    format!(
+                        "[{}]{operator}{}",
+                        xtrace_single_quote(subscript),
+                        xtrace_single_quote(value)
+                    )
+                }
+                None => xtrace_single_quote(&dequoted),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// lib/sh/shquote.c sh_single_quote: wrap a string in single quotes,
 /// `'` → `'\''`.
 fn xtrace_single_quote(word: &str) -> String {
@@ -703,24 +790,56 @@ impl Executor {
         result
     }
 
-    /// Rendered command text for xtrace: prefix assignments followed by words.
-    /// Bash traces both `VAR=x cmd args` and bare `VAR=x` assignments.
-    pub(in crate::executor) fn xtrace_command_text(&mut self, cmd: &CommandNode) -> String {
+    /// Rendered xtrace lines for a simple command (no PS4 prefix). GNU
+    /// order (execute_cmd.c:4610-4649): the declaration-builtin
+    /// compound-assignment arguments expand first — each traced as its own
+    /// assignment line (subst.c:3580 via expand_declaration_argument,
+    /// before the command words) and reduced to bare names in argv
+    /// (subst.c:13053) — then the assignment prefix line, then the command
+    /// words. Probe `a=1 declare -A m=([q]=r)`:
+    /// `+ m=(['q']='r')` `+ a=1` `+ declare -A m`.
+    pub(in crate::executor) fn xtrace_command_lines(&mut self, cmd: &CommandNode) -> Vec<String> {
+        let mut declaration_lines = Vec::new();
         let mut parts: Vec<String> = Vec::new();
-        parts.extend(self.xtrace_assignment_text(cmd));
-        parts.extend(cmd.words.iter().map(|w| {
+        for word in &cmd.words {
             // W_ARRAYREF (in-band ARRAYREF_FLAG) is node metadata in GNU —
             // invisible in xtrace output.
-            xtrace_quote_word(crate::builtins::arrayref::take_arrayref_flag(w).1)
-        }));
-        parts.join(" ")
+            let bare = crate::builtins::arrayref::take_arrayref_flag(word).1;
+            match split_xtrace_declaration_word(bare) {
+                XtraceCommandWord::DeclarationAssignment { line, arg } => {
+                    declaration_lines.push(line);
+                    parts.push(xtrace_quote_word(&arg));
+                }
+                XtraceCommandWord::Plain(text) => parts.push(xtrace_quote_word(&text)),
+            }
+        }
+        let mut lines = declaration_lines;
+        let assignments = self.xtrace_assignment_text(cmd, cmd.words.is_empty());
+        if !assignments.is_empty() {
+            lines.push(assignments.join(" "));
+        }
+        if !parts.is_empty() {
+            lines.push(parts.join(" "));
+        }
+        lines
     }
 
     /// GNU execute_simple_command traces the assignment prefix on its own
     /// line, separate from the command words: `foo=one echo hi` traces as
     /// `+ foo=one` then `+ echo hi` (assignments are traced as they are
     /// performed, before the command words are dispatched).
-    pub(in crate::executor) fn xtrace_assignment_text(&mut self, cmd: &CommandNode) -> Vec<String> {
+    /// STANDALONE selects the two compound forms: a standalone assignment
+    /// `x=([a]=1)` traces its raw element list (do_assignment_internal
+    /// assign_list=1, subst.c:3560 extract_array_assignment_list), while a
+    /// command-prefix tempenv assignment `w=([b]=2) echo hi` traces the
+    /// whole parenthesized text as a single-quoted scalar `w='([b]=2)'`
+    /// (probe 2026-09-27: the tempenv path bypasses the W_COMPASSIGN
+    /// branch, so print_cmd.c:514 sh_single_quotes the value).
+    pub(in crate::executor) fn xtrace_assignment_text(
+        &mut self,
+        cmd: &CommandNode,
+        standalone: bool,
+    ) -> Vec<String> {
         let mut parts: Vec<String> = Vec::new();
         for (name, value) in &cmd.assignments {
             // GNU subst.c:3580 xtrace_print_assignment: a compound assignment
@@ -733,20 +852,28 @@ impl Executor {
             if let Some(raw) =
                 value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
             {
-                let interior = raw
-                    .strip_prefix('(')
-                    .and_then(|inner| inner.strip_suffix(')'))
-                    .unwrap_or(raw);
-                let joined = crate::parser::assignment::split_compound_assignment_words(interior)
-                    .iter()
-                    .map(|element| {
-                        crate::locale::decode_to_visible_text(&compound_element_xtrace_text(
-                            element,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                parts.push(format!("{name}=({joined})"));
+                if standalone {
+                    let interior = raw
+                        .strip_prefix('(')
+                        .and_then(|inner| inner.strip_suffix(')'))
+                        .unwrap_or(raw);
+                    let joined =
+                        crate::parser::assignment::split_compound_assignment_words(interior)
+                            .iter()
+                            .map(|element| {
+                                crate::locale::decode_to_visible_text(
+                                    &compound_element_xtrace_text(element),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                    parts.push(format!("{name}=({joined})"));
+                    continue;
+                }
+                // Command-prefix tempenv form: scalar-quote the whole `(...)`
+                // text like any other shell-meta value.
+                let visible = crate::locale::decode_to_visible_text(raw);
+                parts.push(format!("{name}={}", xtrace_single_quote(&visible)));
                 continue;
             }
             // Scalar: the EXPANDED value is quoted like an xtrace word,

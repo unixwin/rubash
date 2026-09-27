@@ -2727,6 +2727,95 @@ fn c_command_external_uses_persistent_fd_copied_from_stdin() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
+/// GNU redir.c redir_open: `{fd}</dev/stdin` opens the symlink
+/// /proc/self/fd/0 — the LIVE stdin stream, not a fresh device. Windows
+/// path translation maps /dev/stdin to the CONIN$ console device, whose
+/// reads block forever; the fd-alias dup (niubash#118 family) must cover
+/// the `{var}<` form too. bashdb's `_Dbg_do_source /dev/stdin` command-file
+/// reader is the upstream consumer (its whole 48-test compat block used to
+/// hang here).
+#[test]
+fn c_command_brace_fd_from_dev_stdin_reads_live_stdin() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-c")
+        .arg("exec {fd}</dev/stdin; read a <&$fd; read b <&$fd; printf '<%s><%s>\\n' \"$a\" \"$b\"")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rubash");
+
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"alpha\nbeta\n")
+        .unwrap();
+    // A regression re-opens CONIN$ and blocks on console input: bound the
+    // wait so the failure is a fast assertion, not a suite hang.
+    assert!(
+        wait_for_child_exit(&mut child, Duration::from_secs(5)),
+        "{{fd}}</dev/stdin blocked instead of reading piped stdin"
+    );
+    let output = child.wait_with_output().expect("wait rubash");
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "<alpha><beta>\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+/// GNU subst.c:13084 expand_declaration_argument: a declaration-builtin
+/// compound-assignment argument traces as its own assignment line
+/// (elements single-quoted via expand_oneword, subst.c:12896) and the
+/// command line carries only the bare NAME (subst.c:13053). The in-band
+/// COMPOUND_ASSIGNMENT_MARKER must never reach xtrace output (it used to
+/// panic the output sanitizer).
+#[test]
+fn xtrace_declaration_compound_assignment_matches_gnu_shape() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg("-xc")
+        .arg(concat!(
+            "declare -A m=([q]=r)\n",
+            "declare -a n=(1 2 'x y')\n",
+            "declare -A s=([k]=v); declare -A s+=( [k2]=v2 )\n",
+            "w=([b]=2) echo hi\n",
+            "a=1 declare -A c=([j]=w)\n",
+            "x=([z]=9)\n",
+        ))
+        .output()
+        .expect("run rubash");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    for line in [
+        "+ m=(['q']='r')",
+        "+ declare -A m",
+        "+ n=('1' '2' 'x y')",
+        "+ declare -a n",
+        "+ s+=(['k2']='v2')",
+        "+ declare -A s",
+        "+ w='([b]=2)'",
+        "+ echo hi",
+        "+ c=(['j']='w')",
+        "+ a=1",
+        "+ declare -A c",
+        "+ x=([z]=9)",
+    ] {
+        assert!(
+            stderr.contains(&format!("{line}\n")),
+            "missing {line:?} in:\n{stderr}"
+        );
+    }
+    assert!(
+        !stderr.contains("__RUBASH_CA1__"),
+        "COMPOUND_ASSIGNMENT_MARKER leaked to xtrace: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains('\u{10}'),
+        "CTLESC leaked to xtrace: {stderr:?}"
+    );
+}
+
 #[test]
 fn c_command_mapfile_uses_persistent_fd_copied_from_stdin() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))

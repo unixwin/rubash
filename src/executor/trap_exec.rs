@@ -2418,6 +2418,39 @@ impl Executor {
                     }
                 }
 
+                // GNU redir.c redir_open: on Linux `/dev/stdin` is a symlink
+                // to /proc/self/fd/N, so opening it hands back the LIVE
+                // stream behind that fd (same pipe buffer, same terminal) —
+                // never a fresh device. Windows has no such filesystem and
+                // the host path translation maps /dev/stdin to the CONIN$
+                // console device, which blocks forever on read. Recognize
+                // the fd-alias spellings here and dup the referenced fd,
+                // exactly like the `N<&M` branch above (niubash#118 fixed
+                // the plain fd-0 read path the same way; bashdb's
+                // `exec {fd}</dev/stdin` command-file reader hits this).
+                if redirect.kind == crate::parser::RedirectKind::Input {
+                    if let Some(source_fd) = redirect_target_fd(&target) {
+                        if self.fd_table.is_open_for_read(source_fd) {
+                            let Some(fd) = self.allocate_dynamic_fd() else {
+                                return Err(ExecuteError::IoError(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    self.fd_dup_error_payload(&target),
+                                )));
+                            };
+                            self.copy_persistent_input_fd(fd, source_fd);
+                            if !self.set_dynamic_fd_variable(name, fd) {
+                                self.close_persistent_fd(fd)?;
+                                return Err(ExecuteError::IoError(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    format!("{name}: cannot assign fd to variable"),
+                                )));
+                            }
+                            close_after_success(self, fd)?;
+                            return Ok(true);
+                        }
+                    }
+                }
+
                 let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
                 let file = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                     FileFd::open_readwrite(path)

@@ -333,32 +333,11 @@ impl Executor {
         }
         if self.xtrace_enabled() && cmd.arithmetic_command.is_none() {
             // Same arithmetic-command exclusion as execute_materialized_command:
-            // `(( ))` traces once via execute_arithmetic_command (GNU
+            // `(( ))` traces once via execute_arith_command (GNU
             // execute_cmd.c:3940), not through the generic simple-command path.
             let prefix = self.xtrace_prefix();
-            if !cmd.assignments.is_empty() && !cmd.words.is_empty() {
-                // GNU traces the assignment prefix on its own line (see
-                // xtrace_assignment_text).
-                let assignments = self.xtrace_assignment_text(cmd);
-                self.xtrace_write(format!("{prefix}{}\n", assignments.join(" ")).as_bytes());
-                self.xtrace_write(
-                    format!(
-                        "{prefix}{}\n",
-                        cmd.words
-                            .iter()
-                            .map(|word| {
-                                super::prompt_expansion::xtrace_quote_word(
-                                    crate::builtins::arrayref::take_arrayref_flag(word).1,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
-                    .as_bytes(),
-                );
-            } else {
-                let text = self.xtrace_command_text(cmd);
-                self.xtrace_write(format!("{prefix}{text}\n").as_bytes());
+            for line in self.xtrace_command_lines(cmd) {
+                self.xtrace_write(format!("{prefix}{line}\n").as_bytes());
             }
         }
         let mut status = 0;

@@ -1763,14 +1763,11 @@ impl Executor {
         // here once for every simple stage.
         if self.xtrace_enabled() {
             let prefix = self.xtrace_prefix();
-            let text = self.xtrace_command_text(command);
-            self.xtrace_write(
-                format!(
-                    "{prefix}{text}
-"
-                )
-                .as_bytes(),
-            );
+            let mut trace = Vec::new();
+            for line in self.xtrace_command_lines(command) {
+                writeln!(trace, "{prefix}{line}").ok();
+            }
+            self.xtrace_write(&trace);
         }
 
         match name {
