@@ -665,8 +665,140 @@ impl Executor {
         used_shell: bool,
         dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
     ) -> Result<(), ExecuteError> {
+        // rubash#180: GNU's forked disk-command child inherits every fd >= 3
+        // the command opened (`"$SH" -c 'echo hi >&3' 3>f` writes f) or that
+        // a persistent `exec 3>f` bound in the parent. std::process::Command
+        // cannot attach numbered descriptors, so route the binding through
+        // the __RUBASH_FD_* env-key channel the background-spawn path and
+        // the child's startup (init.rs) already speak: duplicate each handle
+        // as a fresh INHERITABLE handle (the shared slot's inherit flag is
+        // never touched, so no cross-spawn race), name it in the child's
+        // environment, and close the parent-side duplicate after the spawn —
+        // exactly GNU's open->fork->close-unwind shape. Non-rubash children
+        // simply see one extra env var (same limitation the background path
+        // documents).
+        let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed {
+                continue;
+            }
+            let mut pass = |endpoint: Option<&Rc<crate::executor::fd_table::FileFd>>,
+                            write: bool,
+                            process: &mut Command,
+                            dups: &mut Vec<crate::fd::HANDLE>| {
+                let Some(file) = endpoint else {
+                    return;
+                };
+                let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) else {
+                    return;
+                };
+                process.env(
+                    format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
+                    format!("{dup:#x}"),
+                );
+                process.env(
+                    format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
+                    file.path.to_string_lossy().into_owned(),
+                );
+                dups.push(dup);
+            };
+            pass(
+                entry.read.as_ref().and_then(|read| match read {
+                    crate::executor::fd_table::FdReadEndpoint::File(file) => Some(file),
+                    _ => None,
+                }),
+                false,
+                &mut process,
+                &mut parent_side_dups,
+            );
+            pass(
+                entry.write.as_ref().and_then(|write| match write {
+                    crate::executor::fd_table::FdWriteEndpoint::File(file) => Some(file),
+                    _ => None,
+                }),
+                true,
+                &mut process,
+                &mut parent_side_dups,
+            );
+        }
+        // The command's own fd>=3 file redirects are not fd-table entries on
+        // the simple-command path (only compounds bind them scoped), so open
+        // them here for the child alone: GNU do_redirections opens them in
+        // the parent, the fork inherits, and the parent's copy closes at
+        // command end (redir.c undo) — the parent's fd table stays untouched.
+        for redirect in &cmd.redirects {
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            let fd = match redirect.fd {
+                Some(fd) if fd >= 3 => fd,
+                _ => continue,
+            };
+            let target = self.expand_redirect_target(redirect);
+            if redirect_target_fd(&target).is_some()
+                || is_closed_redirect_target(&target)
+                || is_null_device(&target)
+                || target.starts_with("<(")
+            {
+                continue;
+            }
+            let write = !matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::ReadWrite
+            );
+            if self.fd_table.entries.contains_key(&fd) {
+                continue;
+            }
+            let opened = if write {
+                if redirect.append {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(shell_path_to_windows(&target, &self.shell_state.env_vars))
+                } else {
+                    self.create_redirect_output(&target, redirect.clobber)
+                        .map_err(|error| crate::posix_errors::path_error(&target, error))
+                }
+            } else {
+                self.open_input_redirect(&target)
+            };
+            let Ok(file) = opened else {
+                continue;
+            };
+            #[cfg(windows)]
+            let raw = {
+                use std::os::windows::io::AsRawHandle;
+                file.as_raw_handle() as crate::fd::HANDLE
+            };
+            #[cfg(unix)]
+            let raw = {
+                use std::os::unix::io::AsRawFd;
+                file.as_raw_fd()
+            };
+            let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) else {
+                continue;
+            };
+            process.env(
+                format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
+                format!("{dup:#x}"),
+            );
+            process.env(
+                format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
+                target.clone(),
+            );
+            parent_side_dups.push(dup);
+            // The parent's own open was transient (GNU closes it after the
+            // fork); the dup above is what the child holds.
+            drop(file);
+        }
         match process.spawn() {
             Ok(mut child) => {
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
                 // Only materialize the virtual stdin text when the child
                 // actually owns a pipe — `<&N` on a real file handle uses
                 // Stdio::from(dup) (no child.stdin to take), and draining
@@ -725,6 +857,9 @@ impl Executor {
                 self.finish_dev_fd_operands(dev_ops);
             }
             Err(error) => {
+                for dup in parent_side_dups {
+                    crate::fd::close_handle(dup);
+                }
                 if !used_shell && is_exec_format_error(&error) {
                     // GNU execute_cmd.c:6139-6233 (shell_execve): when the OS
                     // refuses to exec a file, its first bytes decide. A #!
