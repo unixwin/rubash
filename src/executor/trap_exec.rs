@@ -1233,27 +1233,63 @@ impl Executor {
         }
 
         self.apply_no_output_builtin_redirects(cmd)?;
-        // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
-        // context — a group/ambient redirect already bound on the fd table
-        // (`${THIS_SH} script >file`, `{ exec cmd; } >file`) must reach the
-        // spawned child. Inheriting raw process stdio bypasses the bound
-        // file and leaks the child's output to the console while leaving
-        // the redirect target empty (niubash run-test gate).
-        let child_stdout = self.exec_inherited_stdio(1)?;
-        let child_stderr = self.exec_inherited_stdio(2)?;
+        // GNU exec.def exec_builtin -> shell_execve (execute_cmd.c:6126):
+        // the exec'd program inherits the shell's fd 1 — inside a command
+        // substitution that descriptor IS the capture pipe (subst.c:7143
+        // command_substitute dup2'd it before the body ran), so
+        // `exec prog` at the end of a script captured via `$(script)` feeds
+        // the capture, not the console (rubash#193: rbenv's
+        // `exec rbenv---version`). An fd-1 Stdout endpoint with an active
+        // in-process capture has no inheritable OS handle, so run the child
+        // piped and forward its bytes through the capture-aware sink — the
+        // same shape run_external_command_substitution uses for external
+        // comsub bodies.
+        let fd1_lands_in_capture = self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
+            && (self.stdout_capture.is_some()
+                || crate::executor::shell_options::stdout_capture_active());
         let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
-        let status = crate::builtins::exec::execute_with_child_stdio(
-            &exec_args,
-            &self.shell_state.env_vars,
-            &mut crate::executor::GlobalStdout,
-            &mut std::io::stderr().lock(),
-            child_stdout,
-            child_stderr,
-        )?;
+        let status = if fd1_lands_in_capture {
+            // `exec cmd 2>&1` inside the substitution resolves fd 2 to the
+            // same Stdout endpoint — its diagnostics join the capture too;
+            // a plain fd 2 stays the terminal stream.
+            if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+                crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut crate::executor::GlobalStdout,
+                )?
+            } else {
+                crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &mut crate::executor::GlobalStdout,
+                    &mut std::io::stderr().lock(),
+                )?
+            }
+        } else {
+            // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
+            // context — a group/ambient redirect already bound on the fd
+            // table (`${THIS_SH} script >file`, `{ exec cmd; } >file`) must
+            // reach the spawned child. Inheriting raw process stdio
+            // bypasses the bound file and leaks the child's output to the
+            // console while leaving the redirect target empty (niubash
+            // run-test gate).
+            let child_stdout = self.exec_inherited_stdio(1)?;
+            let child_stderr = self.exec_inherited_stdio(2)?;
+            crate::builtins::exec::execute_with_child_stdio(
+                &exec_args,
+                &self.shell_state.env_vars,
+                &mut crate::executor::GlobalStdout,
+                &mut std::io::stderr().lock(),
+                child_stdout,
+                child_stderr,
+            )?
+        };
         self.finish_dev_fd_operands(dev_ops);
         Ok(status)
     }
