@@ -332,9 +332,15 @@ pub(crate) fn unclosed_input_close_char_posix(
             // the `$((` inner paren reports open and is arithmetic text
             // where `#` is the base operator, never a comment) a `#` at a
             // token boundary comments through end of line, so the `)` in
-            // `$(# c )` cannot close the substitution (comsub-posix).
+            // `$(# c )` cannot close the substitution (comsub-posix). An
+            // array list (`name=(`, also report_open — parse_matched_pair's
+            // start_lineno report) is element text where `#` IS a comment:
+            // a `)` inside the comment must not close the list (probe
+            // 2026-09-27: `declare -a x=(\n 1 # c )` at EOF → GNU reports
+            // "unexpected EOF while looking for matching `)'" + exit 1).
             if d.close == ')' || d.funsub {
-                if !(d.close == ')' && d.report_open) && ch == '#' && comment_start {
+                if !(d.close == ')' && d.report_open && !d.array_list) && ch == '#' && comment_start
+                {
                     while i < chars.len() && chars[i] != '\n' {
                         i += 1;
                     }
