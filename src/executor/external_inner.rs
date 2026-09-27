@@ -619,7 +619,11 @@ impl Executor {
         Ok(true)
     }
 
-    fn apply_external_environment(&mut self, cmd: &CommandNode, process: &mut Command) {
+    pub(in crate::executor) fn apply_external_environment(
+        &mut self,
+        cmd: &CommandNode,
+        process: &mut Command,
+    ) {
         self.apply_child_environment(process);
         for (var_name, var_value) in &cmd.assignments {
             let (base_name, append) = assignment_name_and_append(var_name);

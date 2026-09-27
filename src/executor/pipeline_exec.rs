@@ -857,7 +857,22 @@ impl Executor {
                         || !command.heredoc_redirects.is_empty()
                         || command.here_string.is_some())
                         && index != 0)
-                    || !command.assignments.is_empty()
+                    // GNU execute_cmd.c:4617 execute_simple_command runs a
+                    // pipeline element with a `VAR=value` tempenv prefix as
+                    // an ordinary forked member whose child environment
+                    // carries the assignment; the concurrent OS-pipe path
+                    // supports it (apply_external_environment below). Only
+                    // the forms that need the sequential executor's shell-
+                    // table handling bail: `name+=value` appends (whose env
+                    // value comes from a shell-table pre-assignment) and
+                    // PATH= (command resolution must observe the new PATH).
+                    || command
+                        .assignments
+                        .iter()
+                        .any(|(name, _)| -> bool {
+                            let (base, append) = assignment_name_and_append(name);
+                            append || base == "PATH"
+                        })
                     || !command.process_substitutions.is_empty()
                     || command_has_pipeline_process_substitution(command)
             || command.pipe == Some(2)
@@ -1029,7 +1044,11 @@ impl Executor {
                     &self.shell_state.env_vars,
                 )
             };
-            self.apply_child_environment(&mut process);
+            // Apply the element's `VAR=value` tempenv prefix to the child
+            // (execute_cmd.c execute_simple_command tempenv); plain
+            // assignments are the only ones that reach the concurrent path
+            // (the bail above routed +=/PATH to the sequential executor).
+            self.apply_external_environment(&commands[index], &mut process);
 
             if index == 0 {
                 if stage0_inherits {
@@ -1198,7 +1217,22 @@ impl Executor {
                         || !command.heredoc_redirects.is_empty()
                         || command.here_string.is_some())
                         && index != 0)
-                    || !command.assignments.is_empty()
+                    // GNU execute_cmd.c:4617 execute_simple_command runs a
+                    // pipeline element with a `VAR=value` tempenv prefix as
+                    // an ordinary forked member whose child environment
+                    // carries the assignment; the concurrent OS-pipe path
+                    // supports it (apply_external_environment below). Only
+                    // the forms that need the sequential executor's shell-
+                    // table handling bail: `name+=value` appends (whose env
+                    // value comes from a shell-table pre-assignment) and
+                    // PATH= (command resolution must observe the new PATH).
+                    || command
+                        .assignments
+                        .iter()
+                        .any(|(name, _)| -> bool {
+                            let (base, append) = assignment_name_and_append(name);
+                            append || base == "PATH"
+                        })
                     || !command.process_substitutions.is_empty()
                     || command_has_pipeline_process_substitution(command)
             || command.pipe == Some(2)
@@ -1277,7 +1311,8 @@ impl Executor {
                 &args,
                 &self.shell_state.env_vars,
             );
-            self.apply_child_environment(&mut process);
+            // Same tempenv application as the os_pipe path above.
+            self.apply_external_environment(&commands[index], &mut process);
 
             if let Some(stdout) = previous_stdout.take() {
                 process.stdin(Stdio::from(stdout));
