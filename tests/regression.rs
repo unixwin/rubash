@@ -235,6 +235,11 @@ fn run_rubash_in(dir: &Path, args: &[&str], limit: Duration) -> RunOutcome {
         // their bytes were recorded with it.)
         .env_clear()
         .env("PATH", minimal_path())
+        // Real-world fixtures consult $HOME (nvm's NVM_DIR defaults under
+        // it; trap subshells cd there; ruby-build refs it). A fixed
+        // synthetic HOME = the fixture's own scratch dir keeps the env
+        // airtight while giving every run — local or CI — the same value.
+        .env("HOME", dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
