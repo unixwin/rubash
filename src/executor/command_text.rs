@@ -222,6 +222,51 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
         && !command_is_time_prefixed_compound(cmd)
 }
 
+/// GNU `Simple->line` for a plain simple command is `simplecmd_lineno`
+/// (parse.y:316), which read_token_word captures at the END of the first
+/// word in command position (parse.y:5849-5851 `simplecmd_lineno =
+/// line_number`). A first word that spans physical lines — a multi-line
+/// assignment RHS or a quoted multi-line word — therefore stamps the line
+/// where that word FINISHED reading, not the line where it started
+/// (rubash#201: `x="$(for ...; done)"` spanning lines 1-3 executes with
+/// line_number 3, so the comsub string is numbered from 3; verified
+/// against WSL GNU Bash 5.3.0, probes q4/q7/q9 under
+/// target/deep201/probes). Only plain simple commands use this; compound
+/// keywords keep their own token line (For->line etc.).
+pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode) -> Option<usize> {
+    let start = cmd.line?;
+    let simple = cmd.for_command.is_none()
+        && cmd.select_command.is_none()
+        && cmd.loop_command.is_none()
+        && cmd.if_command.is_none()
+        && cmd.case_command.is_none()
+        && cmd.function_command.is_none()
+        && cmd.brace_group.is_none()
+        && cmd.subshell_command.is_none()
+        && cmd.coproc_command.is_none()
+        && cmd.conditional_command.is_none()
+        && cmd.arithmetic_command.is_none()
+        && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
+        && cmd.background_command.is_none()
+        && cmd.inverted_command.is_none()
+        && cmd.time_command.is_none();
+    if !simple {
+        return Some(start);
+    }
+    let first_word_newlines = if !cmd.assignments.is_empty() {
+        let raw = cmd
+            .assignment_raws
+            .first()
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or(&cmd.assignments[0].1);
+        raw.matches('\n').count()
+    } else {
+        cmd.words.first().map(|word| word.matches('\n').count())?
+    };
+    Some(start + first_word_newlines)
+}
+
 pub(in crate::executor) fn command_needs_process_line_env(cmd: &CommandNode) -> bool {
     cmd.words
         .iter()

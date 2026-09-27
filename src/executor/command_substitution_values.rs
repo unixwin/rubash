@@ -1051,14 +1051,20 @@ impl Executor {
         }
         let source =
             decode_backtick_substitution_source(word.strip_prefix('`')?.strip_suffix('`')?);
-        Some(self.expand_command_substitution_mut_typed_with_context(
-            &source,
-            if quoted {
-                SubstitutionQuoteContext::DoubleQuoted
-            } else {
-                SubstitutionQuoteContext::Unquoted
-            },
-        ))
+        // GNU keeps backquote bodies verbatim (parse.y:3877
+        // parse_matched_pair) — no print_comsub canonicalization — so their
+        // diagnostics number the raw body lines under the same (S - 1) base
+        // as `$()` bodies (probes b1/b2, rubash#201).
+        Some(super::command_substitution::with_comsub_raw_text(|| {
+            self.expand_command_substitution_mut_typed_with_context(
+                &source,
+                if quoted {
+                    SubstitutionQuoteContext::DoubleQuoted
+                } else {
+                    SubstitutionQuoteContext::Unquoted
+                },
+            )
+        }))
     }
 
     pub(in crate::executor) fn expand_backtick_substitution(&self, word: &str) -> Option<String> {
@@ -1071,10 +1077,12 @@ impl Executor {
         let source =
             decode_backtick_substitution_source(word.strip_prefix('`')?.strip_suffix('`')?);
         Some(
-            self.expand_command_substitution_readback_with_context(
-                &source,
-                SubstitutionQuoteContext::Unquoted,
-            )
+            super::command_substitution::with_comsub_raw_text(|| {
+                self.expand_command_substitution_readback_with_context(
+                    &source,
+                    SubstitutionQuoteContext::Unquoted,
+                )
+            })
             .text_lossy(),
         )
     }

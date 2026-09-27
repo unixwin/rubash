@@ -698,10 +698,35 @@ impl Executor {
         // the enclosing body's frozen line or, at top level, this
         // command's own parse-end line (see CommandNode::end_line).
         let line = if command_sets_own_line(cmd) {
+            // cm_simple stamps Simple->line, which parse.y:5851 captured at
+            // the END of the command's first word — a multi-line first word
+            // (assignment RHS, quoted word) stamps its last line, and that
+            // is the base every command substitution inside it is numbered
+            // from (rubash#201: evalstring.c:345-346 keeps the enclosing
+            // command's line for the string's first canonical line).
+            simple_command_first_word_end_line(cmd).or(cmd.line)
+        } else {
+            self.ambient_line.get().or(cmd.end_line).or(cmd.line)
+        };
+        // The command's START line (first token) for the comsub here-document
+        // paths: GNU gathers a comsub's here-document during the outer
+        // script parse (parse.y parse_comsub yyparse ->
+        // gather_here_documents), so those warnings carry the physical
+        // `cat <<EOF` line, not the execution-time `line_number`
+        // (comsub-eof0.sub: `foo=$(cat <<EOF ... EOF)` spanning lines 2-4
+        // warns "line 4: ... at line 2" — physical, unaffected by
+        // Simple->line).
+        let start_line = if command_sets_own_line(cmd) {
             cmd.line
         } else {
             self.ambient_line.get().or(cmd.end_line).or(cmd.line)
         };
+        if let Some(start_line) = start_line {
+            self.shell_state.env_vars.insert(
+                "__RUBASH_CMD_START_LINE".to_string(),
+                start_line.to_string(),
+            );
+        }
         if let Some(line) = line {
             let line = line.to_string();
             self.shell_state

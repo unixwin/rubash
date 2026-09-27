@@ -235,7 +235,8 @@ impl Executor {
             let start_line = self
                 .shell_state
                 .env_vars
-                .get("__RUBASH_CURRENT_LINE")
+                .get("__RUBASH_CMD_START_LINE")
+                .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
                 .and_then(|line| line.parse::<usize>().ok())
                 .unwrap_or(1);
             eprintln!(
@@ -243,10 +244,16 @@ impl Executor {
                 self.diagnostic_prefix_for_line(start_line)
             );
         }
+        // The cat/heredoc-optimized comsub paths re-derive the here-document
+        // warning lines, which GNU reports from the outer script's physical
+        // parse (parse_comsub yyparse + gather_here_documents), so seed the
+        // body numbering from the command's START line, not the
+        // execution-time line_number (rubash#201: comsub-eof0.sub).
         let comsub_start_line = self
             .shell_state
             .env_vars
-            .get("__RUBASH_CURRENT_LINE")
+            .get("__RUBASH_CMD_START_LINE")
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
             + self.comsub_leading_newlines.get();
@@ -334,10 +341,13 @@ impl Executor {
         let closed_by_paren = source.contains(crate::executor::markers::IFS_GLUE);
         let source = source.replace(crate::executor::markers::IFS_GLUE, "");
         let source = self.comsub_body_alias_splice_extracted(&source);
+        // Start-line seeding like the heredoc path above: here-document
+        // warning lines are the outer script's physical lines (rubash#201).
         let comsub_start_line = self
             .shell_state
             .env_vars
-            .get("__RUBASH_CURRENT_LINE")
+            .get("__RUBASH_CMD_START_LINE")
+            .or_else(|| self.shell_state.env_vars.get("__RUBASH_CURRENT_LINE"))
             .and_then(|line| line.parse::<usize>().ok())
             .unwrap_or(1)
             + self.comsub_leading_newlines.get();

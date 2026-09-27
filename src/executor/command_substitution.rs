@@ -1,35 +1,146 @@
 use super::*;
 use crate::executor::markers::DATA_DOLLAR;
 
-/// Normalize error-line attribution across a parsed command-substitution
-/// body so diagnostics match GNU's comsub line namespace (rubash#136).
+// Whether the command-substitution body currently being parsed came from a
+// backquote. GNU extracts `` `...` `` bodies verbatim (parse.y:3877
+// parse_matched_pair — the backquote matcher) instead of re-serializing
+// them through print_comsub (which only `$(`, `${` and `<(` bodies get,
+// parse.y:4451 parse_comsub), so a backquote body's diagnostics number its
+// RAW physical lines under the same (S - 1) base — probed as b1/b2:
+// `` echo "`for f in 1 2; do\n nosuchcmd\ndone`" `` reports the raw
+// nosuchcmd line, not the canonical one.
+thread_local! {
+    static COMSUB_BODY_RAW_TEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with backquote body semantics: command-substitution bodies
+/// parsed inside keep their raw line numbering (no canonical layout).
+pub(in crate::executor) fn with_comsub_raw_text<T>(f: impl FnOnce() -> T) -> T {
+    let saved = COMSUB_BODY_RAW_TEXT.replace(true);
+    let result = f();
+    COMSUB_BODY_RAW_TEXT.set(saved);
+    result
+}
+
+/// Canonical line layout for a parsed command-substitution body so every
+/// diagnostic and `$LINENO` inside the body lands on GNU's line (rubash#136,
+/// rubash#201 comsub-string half).
 ///
-/// GNU runs comsub bodies through parse_and_execute
-/// (builtins/evalstring.c:319), whose string namespace advances
-/// `line_number` once per bare-newline statement boundary — never for
-/// connector continuations (`;` `&` `&&` `||` `|` ending a line) and never
-/// more than once for a run of blank lines. Verified against WSL GNU Bash
-/// 5.3.0 (2026-09-27, target/p4/shape{1,4,5,7}.sh):
-/// - `$(\nc41 ||\nc42 ||\nc43)` opened at line N reports N,N,N
-///   (pyenv-global #124: GNU prints 42,42,42 where rubash printed
-///   42,43,44);
-/// - `$(\nc41\nc42 ||\nc43)` reports N,N+1,N+1;
-/// - `$(\nc41;\nc42\n)` and `$(\nc41 &\nc42\n)` report N,N;
-/// - `$(\nb41\n\n\nb42\n)` reports N,N+1 (blank lines collapse).
-/// The physical-line counts rubash's reparse produces are remapped onto
-/// that statement index; the seed line itself (first statement) already
-/// matches GNU and is left alone. Top-level script attribution is
-/// physical-line based in GNU (parse.y:5851 simplecmd_lineno) and in
-/// rubash, so this normalization is scoped to comsub bodies only.
+/// GNU does not execute the raw body text: at parse time `parse_comsub`
+/// (parse.y:4451) fully yyparse()s the body and REPLACES it with the
+/// canonical serialization of `print_comsub` (parse.y:4632 ->
+/// print_cmd.c:164 make_command_string). At expansion time
+/// `command_substitute` (subst.c:7143) hands that canonical text to
+/// `parse_and_execute` (builtins/evalstring.c:315), which pushes the string
+/// stream (evalstring.c:340 `push_stream(0)`, saving the enclosing command's
+/// `line_number` stamped by execute_cmd.c:936 `SET_LINE_NUMBER(Simple->line)`)
+/// and compensates `line_number--` (evalstring.c:345-346) so the string's
+/// first line re-uses the enclosing command's line. The string reader then
+/// counts one line per canonical newline (parse.y:2504 shell_getc line
+/// fetch). Net attribution for anything inside the body:
+///
+///   reported line = (S - 1) + canonical_line
+///
+/// where S is the enclosing command's `Simple->line` — the line where its
+/// FIRST WORD finished reading (parse.y:5851 `simplecmd_lineno =
+/// line_number` at read_token_word end), i.e. the first word's end line for
+/// multi-line assignment/quoted first words — and canonical_line is the
+/// position in the print_cmd.c serialization:
+///
+/// - for/select (`print_for_command` print_cmd.c:618): `for v in w;` on the
+///   head line, `do` on head+1, body from head+2, `done` at body_end+1;
+///   arith-for (print_cmd.c:635) has the same shape.
+/// - while/until (`print_until_or_while` print_cmd.c:812): `while test; do`
+///   — `do` stays on the condition's last line, body at +1, `done` at
+///   body_end+1.
+/// - if (`print_if_command` print_cmd.c:836): `if test; then` — `then` on
+///   the condition's last line, body at +1; every `elif` prints as a nested
+///   `else\nif cond; then` (one elif puts the outer `fi` at body_end+2),
+///   `else` at prev_body_end+1 with its body at +1, one `fi` line per
+///   nesting level.
+/// - case (`print_case_command` print_cmd.c:750 + print_case_clauses
+///   print_cmd.c:760): the first clause's patterns share the `case w in `
+///   line (comsub printing suppresses the leading newline, print_cmd.c:771),
+///   action at patterns+1, `;;` at action_end+1, later clause patterns at
+///   prev `;;`+1, `esac` at last terminator+1.
+/// - function definitions (`print_function_def` print_cmd.c:1323): `name ()`
+///   on line L, `{` on L+1, body from L+2, closing `}` at body_end+1; the
+///   function-body environment line is the `{` line (execute_cmd.c:5351
+///   `line_number = function_line_number = tc->line`). INSIDE the body
+///   print_cmd.c sets inside_function_def (print_cmd.c:1362), and the
+///   connector case then ends EVERY statement separator with `cprintf
+///   ("\n")` (print_cmd.c:309): a `;`-joined statement gets its own line
+///   and a newline separator leaves a blank line (probes f1/f2 — GNU
+///   reports the second `;`-joined statement one line further and a
+///   newline-separated one two lines further than outside a function).
+///   This applies to every list nested in the body, including for/if/case
+///   bodies, and `{ ... }` groups print their braces on separate lines
+///   (print_cmd.c:702-712), while `( ... )` subshells keep the one-line
+///   form (print_cmd.c:348 has no funcdef branch).
+/// - `{ ...; }` groups (`print_group_command` print_cmd.c:693) and `( ... )`
+///   subshells (print_cmd.c:348) print braces and body on ONE canonical line.
+/// - statement separators: an explicit `;`/`&`/`&&`/`||`/`|` connector joins
+///   the next command onto the same canonical line; a bare newline moves to
+///   the next line (print_cmd.c:288-319 connector printing); runs of blank
+///   lines collapse because blank lines are not in the parse tree. A
+///   newline boundary is consumed by the first command starting on its raw
+///   line; a `;`-joined follower on the same raw line stays put (probe g1:
+///   `a <nl> b1; b2` reports b1 and b2 on the same line), and boundaries
+///   pointing inside a construct's own span (its `do`/`done`, a redirect
+///   target after a newline) never bump the next sibling (probe g3:
+///   `done; follower` stays on the closer's line).
+/// - here-documents (print_cmd.c:120 PRINT_DEFERRED_HEREDOCS,
+///   print_cmd.c:1035-1043 print_heredoc_bodies): the body block prints
+///   after the command as a leading `\n`, the B body lines and the
+///   terminator on its own line, so the next statement lands at
+///   terminator+1 (`;` join) or terminator+2 with a blank line (newline
+///   join) — probes h1-h3: GNU reports cat+B+3 for a newline-separated
+///   follower.
+///
+/// Verified against WSL GNU Bash 5.3.0 (2026-09-27,
+/// target/deep201/probes/{p*,q*,v*,x*,y*,z*,e*,f*,g*,h*}.sh): for-body errors report
+/// the canonical body line (p04: GNU 3; raw text numbering says 2), a
+/// comsub opened on a later line of its word still numbers from the
+/// ENCLOSING command's line (p11: GNU 3), `;`+newline list separators
+/// collapse (v5 / issue #201 repro A: GNU 5), assignments take the
+/// first-word END line as base (q4 A2/B3, q7 P5, q9 line 2), elif chains
+/// follow the nested-else layout (e1 Q7, e2 Q9, e6 E8/Q11), case
+/// clauses follow the first-pattern-on-case-line layout (e4 C2/Q4, e5
+/// C2/Q7), function-definition bodies follow the per-statement-newline
+/// layout (f1/f2/f3/f6: `;`-join +1, newline +2), and same-line joins
+/// after a newline boundary keep the boundary's line (g1/g2/g5).
 pub(in crate::executor) fn normalize_comsub_body_statement_lines(
     ast: &mut crate::parser::Ast,
     tokens: &[crate::lexer::Token],
 ) {
-    use crate::lexer::TokenKind;
+    // Backquote bodies keep GNU's raw line numbering (see
+    // COMSUB_BODY_RAW_TEXT above); the seed-based raw numbering the callers
+    // already applied is GNU's answer for them.
+    if COMSUB_BODY_RAW_TEXT.get() {
+        return;
+    }
+    let Some(first) = tokens.first() else {
+        return;
+    };
+    let seed = first.position.max(1);
+    let mut boundaries = canonical_newline_boundaries(tokens);
+    let mut line = 1usize;
+    // The body's first command is canonical line 1 regardless of any
+    // leading blank lines in the raw text (blank lines have no node).
+    layout_command_list(&mut ast.commands, seed, &mut boundaries, &mut line, false);
+}
 
-    // A statement break is a line-break separator whose immediately
-    // preceding token is not itself a connector or another line-break
-    // separator (run collapse). Connectors: |, |&, &&, ||, &, ;.
+/// Raw source lines that a genuine newline-run statement boundary crosses
+/// INTO (the raw line of the first token after the run). Mirrors the
+/// connector printing of print_cmd.c:294-319: a run of physical line breaks
+/// only becomes a canonical newline when the statement did not already end
+/// with an explicit connector (`;` `&` `&&` `||` `|`) — `a; <newline> b`
+/// re-prints as `a; b` on one line — and a run of blank lines collapses to
+/// one boundary because blank lines carry no parse-tree node.
+fn canonical_newline_boundaries(
+    tokens: &[crate::lexer::Token],
+) -> std::collections::HashSet<usize> {
+    use crate::lexer::TokenKind;
     let is_connector = |kind: &TokenKind| {
         matches!(
             kind,
@@ -41,57 +152,335 @@ pub(in crate::executor) fn normalize_comsub_body_statement_lines(
                 | TokenKind::Semicolon
         )
     };
-    let is_break_separator =
+    let is_line_break_separator =
         |kind: &TokenKind, line_break: bool| kind == &TokenKind::Semicolon && line_break;
-    let mut breaks: Vec<usize> = Vec::new();
+
+    let mut boundaries = std::collections::HashSet::new();
     let mut previous: Option<&crate::lexer::Token> = None;
+    let mut pending = false;
     for token in tokens {
-        if is_break_separator(&token.kind, token.line_break)
-            && previous.is_some_and(|prev| {
-                !is_connector(&prev.kind) && !is_break_separator(&prev.kind, prev.line_break)
-            })
-        {
-            breaks.push(token.position);
+        if token.kind == TokenKind::HereDocBody {
+            // The here-document body is part of the PRECEDING command's
+            // canonical footprint (print_cmd.c:1035-1043
+            // print_heredoc_bodies), not a statement boundary; the newline
+            // after the terminator closes it and starts the next run.
+            previous = Some(token);
+            continue;
+        }
+        if is_line_break_separator(&token.kind, token.line_break) {
+            let starts_run = previous.is_some_and(|prev| {
+                !is_connector(&prev.kind) && !is_line_break_separator(&prev.kind, prev.line_break)
+            });
+            if starts_run {
+                pending = true;
+            }
+            previous = Some(token);
+            continue;
+        }
+        if pending {
+            boundaries.insert(token.position);
+            pending = false;
         }
         previous = Some(token);
     }
+    boundaries
+}
 
-    let Some(base) = ast.commands.iter().filter_map(|command| command.line).min() else {
-        return;
-    };
-    let remap = |line: usize| -> usize {
-        base + breaks
+/// Assign the canonical line to every command of a (possibly compound-body)
+/// list. `line` is the 1-based canonical line where the list's first
+/// command starts (the caller has applied the construct's fixed offset);
+/// the first command never bumps (its position is fixed by the construct's
+/// shape, print_cmd.c prints it right after the construct's header).
+///
+/// `funcdef` is print_cmd.c's inside_function_def state (set while printing
+/// a function-definition body, print_cmd.c:1362/1380): inside it every
+/// statement separator — even an explicit `;` — is followed by `cprintf
+/// ("\n")` (print_cmd.c:309), so `;`-joined statements each get their own
+/// canonical line and newline separators leave a blank line.
+fn layout_command_list(
+    commands: &mut [crate::parser::CommandNode],
+    seed: usize,
+    boundaries: &mut std::collections::HashSet<usize>,
+    line: &mut usize,
+    funcdef: bool,
+) {
+    let mut prev_heredoc = false;
+    for (index, command) in commands.iter_mut().enumerate() {
+        if index > 0 {
+            // Consume-once: the boundary crossing into this command's raw
+            // line belongs to the first command on that line; a `;`-joined
+            // follower on the same raw line stays on the canonical line
+            // (probe g1: `a <nl> b1; b2` prints b1,b2 on one line).
+            let had_newline = command.line.is_some_and(|raw| boundaries.remove(&raw));
+            // Here-document follower (print_cmd.c:120-137
+            // print_deferred_heredocs + print_cmd.c:294-319 connector): the
+            // body block ends with its own `\n` and was_heredoc suppresses
+            // the connector's own separator, so the follower lands one line
+            // past the terminator line, plus one more only through the
+            // non-funcdef preserve-newline branch (print_cmd.c:315) — the
+            // funcdef branch (print_cmd.c:309) already printed its newline.
+            let bump = if prev_heredoc {
+                1 + funcdef as usize + (!funcdef && had_newline) as usize
+            } else {
+                funcdef as usize + had_newline as usize
+            };
+            *line += bump;
+        }
+        let raw_start = command.line;
+        let raw_end = command.end_line;
+        prev_heredoc = command
+            .heredoc_redirects
             .iter()
-            .filter(|&&break_line| break_line >= base && break_line < line)
-            .count()
-    };
-    let remap_opt = |line: &mut Option<usize>| {
-        if let Some(value) = *line {
-            *line = Some(remap(value));
-        }
-    };
-
-    for command in &mut ast.commands {
-        remap_opt(&mut command.line);
-        if let Some(list) = &mut command.and_or_list {
-            for member in &mut list.commands {
-                remap_opt(&mut member.line);
-                if let Some(pipeline) = &mut member.pipeline_command {
-                    for stage in &mut pipeline.stages {
-                        remap_opt(&mut stage.line);
-                    }
-                }
-            }
-        }
-        if let Some(pipeline) = &mut command.pipeline_command {
-            for stage in &mut pipeline.stages {
-                remap_opt(&mut stage.line);
-            }
-        }
-        if let Some(background) = &mut command.background_command {
-            remap_opt(&mut background.command.line);
+            .any(|redirect| redirect.body.is_some());
+        layout_command(command, seed, boundaries, line, funcdef);
+        // Drain every boundary inside this command's raw span: boundaries
+        // that point at internal keywords (`do`, `done`, `then`, `fi`,
+        // `esac`) or at continuation words (a redirect target after a
+        // newline, probe g7) were consumed by the construct's own layout
+        // and must not bump the next sibling (probe g3: `done; follower`
+        // stays on the closer's canonical line).
+        if let (Some(start), Some(end)) = (raw_start, raw_end.or(raw_start)) {
+            boundaries.retain(|raw| *raw < start || *raw > end);
         }
     }
+}
+
+/// Number of newlines embedded in a simple command's printed text:
+/// print_cmd.c prints words, assignments and redirects on one canonical
+/// line, so a quoted multi-line word advances the layout by its newlines.
+/// Here-document bodies are accounted separately (they print as a block
+/// after the connector, print_cmd.c:1035-1043).
+fn simple_command_embedded_newlines(command: &crate::parser::CommandNode) -> usize {
+    let mut count = 0usize;
+    for word in &command.words {
+        count += word.matches('\n').count();
+    }
+    for (index, (_, value)) in command.assignments.iter().enumerate() {
+        let raw = command
+            .assignment_raws
+            .get(index)
+            .filter(|raw| !raw.is_empty())
+            .unwrap_or(value);
+        count += raw.matches('\n').count();
+    }
+    count
+}
+
+fn assign(line_field: &mut Option<usize>, seed: usize, canonical: usize) {
+    *line_field = Some(seed - 1 + canonical);
+}
+
+/// Layout one command node at canonical line `*line`, leaving `*line` at
+/// the construct's closing line (where `done`/`fi`/`esac`/`}`/`)` or the
+/// command's last word lands). `funcdef` is print_cmd.c's
+/// inside_function_def state, active for the whole subtree of a function
+/// definition's body (print_cmd.c:1362/1380).
+fn layout_command(
+    command: &mut crate::parser::CommandNode,
+    seed: usize,
+    boundaries: &mut std::collections::HashSet<usize>,
+    line: &mut usize,
+    funcdef: bool,
+) {
+    let start = *line;
+    assign(&mut command.line, seed, start);
+
+    if let Some(for_command) = command.for_command.as_deref_mut() {
+        // Head words may carry quoted newlines; `do` sits on head_end+1 and
+        // the body starts on the line after `do` (print_cmd.c:618-631).
+        // A brace-group for-body (`for v in x { body; }`) prints its braces
+        // on that same body line, so the fixed offset covers both forms.
+        let head_newlines = for_command
+            .words
+            .iter()
+            .map(|word| word.matches('\n').count())
+            .sum::<usize>();
+        *line = start + head_newlines + 2;
+        layout_command_list(&mut for_command.body, seed, boundaries, line, funcdef);
+        *line += 1; // `done` at body_end + 1
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(select_command) = command.select_command.as_deref_mut() {
+        let head_newlines = select_command
+            .words
+            .iter()
+            .map(|word| word.matches('\n').count())
+            .sum::<usize>();
+        *line = start + head_newlines + 2;
+        layout_command_list(&mut select_command.body, seed, boundaries, line, funcdef);
+        *line += 1; // `done`
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(loop_command) = command.loop_command.as_mut() {
+        // `while test; do` — `do` shares the condition's last line
+        // (print_cmd.c:826 ` do\n`).
+        layout_command_list(&mut loop_command.condition, seed, boundaries, line, funcdef);
+        *line += 1; // body at condition end + 1
+        layout_command_list(&mut loop_command.body, seed, boundaries, line, funcdef);
+        *line += 1; // `done`
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(if_command) = command.if_command.as_mut() {
+        // `if test; then` — `then` shares the condition's last line
+        // (print_cmd.c:850 ` then\n`).
+        layout_command_list(&mut if_command.condition, seed, boundaries, line, funcdef);
+        *line += 1; // then-body at condition end + 1
+        layout_command_list(&mut if_command.then_body, seed, boundaries, line, funcdef);
+        for elif in &mut if_command.elif_branches {
+            // An `elif` prints as a nested `else` + `if cond; then`
+            // (print_cmd.c:856-864 with the false case being an if node).
+            *line += 2;
+            layout_command_list(&mut elif.condition, seed, boundaries, line, funcdef);
+            *line += 1;
+            layout_command_list(&mut elif.body, seed, boundaries, line, funcdef);
+        }
+        if let Some(else_body) = &mut if_command.else_body {
+            *line += 2; // `else` then body at else line + 1
+            layout_command_list(else_body, seed, boundaries, line, funcdef);
+        }
+        // One `fi` per nesting level: innermost at body_end+1, one more
+        // line per elif level above it (e1/e2/e6 probes).
+        *line += 1 + if_command.elif_branches.len();
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(case_command) = command.case_command.as_deref_mut() {
+        let case_head_newlines = case_command.word.matches('\n').count();
+        // First clause patterns share the `case w in ` line
+        // (print_cmd.c:771 suppresses the newline when printing a comsub).
+        let mut patterns_line = start + case_head_newlines;
+        let mut terminator_line = patterns_line;
+        for clause in &mut case_command.clauses {
+            *line = patterns_line + 1; // `)\n` ends the patterns line
+            layout_command_list(&mut clause.body, seed, boundaries, line, funcdef);
+            *line += 1; // `;;` (or `;&`/`;;&`) at action end + 1
+            terminator_line = *line;
+            patterns_line = terminator_line + 1;
+        }
+        // `esac` at last terminator + 1 (or case line + 1 with no clauses).
+        *line = if case_command.clauses.is_empty() {
+            start + case_head_newlines + 1
+        } else {
+            terminator_line + 1
+        };
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(function_command) = command.function_command.as_deref_mut() {
+        // `name ()` at L, `{` at L+1, body from L+2, `}` at body_end+1
+        // (print_cmd.c:1347-1386). execute_cmd.c:5351 stamps the function
+        // environment with the `{` line (tc->line == function_bstart).
+        // Everything in the body prints with inside_function_def set
+        // (print_cmd.c:1362), so its list separators always end with a
+        // newline (print_cmd.c:309).
+        let brace_line = start + 1;
+        assign(&mut function_command.body_open_line, seed, brace_line);
+        *line = brace_line + 1;
+        layout_command_list(&mut function_command.body, seed, boundaries, line, true);
+        *line += 1; // closing `}`
+        assign(&mut function_command.body_end_line, seed, *line);
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(group) = command.brace_group.as_deref_mut() {
+        // Outside a function definition `{ ` and the first body command
+        // share the line (print_cmd.c:698-699 skip_this_indent), `; }`
+        // stays on the body's last line. Inside one the braces take their
+        // own lines (print_cmd.c:702-712: `cprintf ("\n")` before the body
+        // and before the `}`).
+        if funcdef {
+            *line += 1; // `{` on its own line
+            layout_command_list(&mut group.body, seed, boundaries, line, funcdef);
+            *line += 1; // closing `}` on its own line
+        } else {
+            layout_command_list(&mut group.body, seed, boundaries, line, funcdef);
+        }
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(subshell) = command.subshell_command.as_deref_mut() {
+        // `( ... )` keeps the body on the braces' line even inside a
+        // function definition (print_cmd.c:348-355 has no funcdef branch);
+        // only the body's own list separators funcdef-advance.
+        layout_command_list(&mut subshell.body, seed, boundaries, line, funcdef);
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(coproc) = command.coproc_command.as_deref_mut() {
+        *line = start
+            + coproc
+                .words
+                .iter()
+                .map(|word| word.matches('\n').count())
+                .sum::<usize>();
+        if let Some(body) = &mut coproc.body {
+            layout_command_list(body, seed, boundaries, line, funcdef);
+        }
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(pipeline) = command.pipeline_command.as_mut() {
+        // Stages join with ` | ` on one line (print_cmd.c:257-273).
+        for stage in &mut pipeline.stages {
+            assign(&mut stage.line, seed, *line);
+            *line += simple_command_embedded_newlines(stage);
+        }
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(and_or) = command.and_or_list.as_mut() {
+        // ` && `/` || ` join members on one line (print_cmd.c:276-286).
+        for member in &mut and_or.commands {
+            layout_command(member, seed, boundaries, line, funcdef);
+        }
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(background) = command.background_command.as_mut() {
+        layout_command(&mut background.command, seed, boundaries, line, funcdef);
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(inverted) = command.inverted_command.as_mut() {
+        layout_command(&mut inverted.command, seed, boundaries, line, funcdef);
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    if let Some(timed) = command.time_command.as_mut() {
+        layout_command(&mut timed.command, seed, boundaries, line, funcdef);
+        assign(&mut command.end_line, seed, *line);
+        return;
+    }
+    // Plain simple command: words, assignments and redirects print on one
+    // canonical line, advanced only by newlines embedded in the text. A
+    // here-document defers its body past the connector (print_cmd.c:120
+    // PRINT_DEFERRED_HEREDOCS): the canonical text is `cmd <<X`, then
+    // print_heredoc_bodies' leading `\n` (print_cmd.c:1035-1043), then each
+    // body's lines and its terminator on its own line — leaving `*line` ON
+    // the last terminator line; the follower's bump (layout_command_list)
+    // accounts the terminator's trailing newline.
+    *line += simple_command_embedded_newlines(command);
+    let heredocs = command
+        .heredoc_redirects
+        .iter()
+        .filter(|redirect| redirect.body.is_some())
+        .count();
+    if heredocs > 0 {
+        *line += 1; // print_heredoc_bodies' leading `\n`
+        let mut body_lines = 0usize;
+        for redirect in &command.heredoc_redirects {
+            if let Some(body) = &redirect.body {
+                body_lines += body.matches('\n').count();
+            }
+        }
+        // Every heredoc contributes its body lines plus its terminator
+        // line; the leading `\n` already moved past the first body's start.
+        *line += body_lines + heredocs - 1;
+    }
+    assign(&mut command.end_line, seed, *line);
 }
 
 impl Executor {
