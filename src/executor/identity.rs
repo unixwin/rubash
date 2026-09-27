@@ -52,12 +52,23 @@ pub fn current_identity() -> ShellIdentity {
 /// `$OSTYPE` default (variables.c:724 `set_if_not ("OSTYPE", OSTYPE)`):
 /// `msys` under the MSYS persona, `windows` under the native persona.
 pub fn ostype() -> String {
-    if !cfg!(windows) {
+    #[cfg(unix)]
+    {
+        // variables.c:724 `set_if_not ("OSTYPE", OSTYPE)`: OSTYPE is the
+        // configure triple's os-env suffix. GNU bash 5.3.0 built against
+        // glibc reports `linux-gnu` (WSL probe 2026-09-27: `echo $OSTYPE`).
+        // MACHTYPE's `native_machtype()` arm already mirrors the triple.
+        if cfg!(target_env = "gnu") {
+            return format!("{}-gnu", std::env::consts::OS);
+        }
         return std::env::consts::OS.to_string();
     }
-    match current_identity() {
-        ShellIdentity::Msys => "msys".to_string(),
-        ShellIdentity::Native => "windows".to_string(),
+    #[cfg(not(unix))]
+    {
+        match current_identity() {
+            ShellIdentity::Msys => "msys".to_string(),
+            ShellIdentity::Native => "windows".to_string(),
+        }
     }
 }
 
@@ -102,18 +113,43 @@ pub fn machine() -> &'static str {
     }
 }
 
+/// uname(2) utsname field reader for unix: the kernel utsname is the sole
+/// honest source for `uname -s/-n/-r/-v` — coreutils uname(1) prints the
+/// fields verbatim (WSL coreutils 9.4 probe 2026-09-27: `-s` Linux,
+/// `-r` 5.10.16.3-microsoft-standard-WSL2, `-v` "#1 SMP ... UTC 2021",
+/// `-n` the real hostname). Fields are NUL-terminated `c_char` arrays.
+#[cfg(unix)]
+fn unix_utsname_field(getter: fn(&libc::utsname) -> &[libc::c_char]) -> String {
+    unsafe {
+        let mut buf: libc::utsname = std::mem::zeroed();
+        if libc::uname(&mut buf) != 0 {
+            return "unknown".to_string();
+        }
+        let field = getter(&buf);
+        let end = field.iter().position(|&c| c == 0).unwrap_or(field.len());
+        let bytes = std::slice::from_raw_parts(field.as_ptr().cast::<u8>(), end);
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 /// `uname -s` (kernel name): `MSYS_NT-<ver>` under the MSYS persona, with
 /// the prefix chosen by the `MSYSTEM` environment variable the same way
 /// MSYS2 runtime does (`MINGW64` → `MINGW64_NT-...`, `UCRT64` →
 /// `UCRT64_NT-...`, `MSYS`/unset → `MSYS_NT-...`). Native persona reports
 /// `Windows_NT` (the native `%OS%` value).
 pub fn sysname() -> String {
-    if !cfg!(windows) {
-        return std::env::consts::OS.to_string();
+    #[cfg(unix)]
+    {
+        // coreutils uname -s prints uname(2) utsname.sysname verbatim
+        // ("Linux", capital L) — not the lowercase Rust target OS name.
+        return unix_utsname_field(|u| &u.sysname);
     }
-    match current_identity() {
-        ShellIdentity::Msys => format!("{}-{}", msystem_prefix(), windows_version()),
-        ShellIdentity::Native => "Windows_NT".to_string(),
+    #[cfg(not(unix))]
+    {
+        match current_identity() {
+            ShellIdentity::Msys => format!("{}-{}", msystem_prefix(), windows_version()),
+            ShellIdentity::Native => "Windows_NT".to_string(),
+        }
     }
 }
 
@@ -135,10 +171,19 @@ fn msystem_prefix() -> &'static str {
 /// `uname -r` (kernel release): the Windows version string (`10.0-19044`),
 /// the same string that finishes `uname -s` — the kernel the engine runs on.
 pub fn release() -> String {
-    if cfg!(windows) {
-        windows_version()
-    } else {
-        "unknown".to_string()
+    #[cfg(unix)]
+    {
+        // coreutils uname -r prints uname(2) utsname.release verbatim
+        // (WSL probe: 5.10.16.3-microsoft-standard-WSL2).
+        return unix_utsname_field(|u| &u.release);
+    }
+    #[cfg(not(unix))]
+    {
+        if cfg!(windows) {
+            windows_version()
+        } else {
+            "unknown".to_string()
+        }
     }
 }
 
@@ -147,49 +192,94 @@ pub fn release() -> String {
 /// runtime, so it prints its own build timestamp — the executable's
 /// modification time — in the same shape.
 pub fn kernel_version() -> String {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Ok(modified) = exe.metadata().and_then(|meta| meta.modified()) {
-            if let Some(text) = format_utc_timestamp(modified) {
-                return text;
+    #[cfg(unix)]
+    {
+        // coreutils uname -v prints uname(2) utsname.version verbatim
+        // (WSL probe: "#1 SMP Fri Apr 2 22:23:49 UTC 2021").
+        return unix_utsname_field(|u| &u.version);
+    }
+    #[cfg(not(unix))]
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Ok(modified) = exe.metadata().and_then(|meta| meta.modified()) {
+                if let Some(text) = format_utc_timestamp(modified) {
+                    return text;
+                }
             }
         }
+        "unknown".to_string()
     }
-    "unknown".to_string()
 }
 
 /// `uname -n` (nodename): the machine name.
 pub fn nodename() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or_else(|| "localhost".to_string())
+    #[cfg(unix)]
+    {
+        // coreutils uname -n prints uname(2) utsname.nodename (the kernel
+        // hostname, sethostname(2)) — HOSTNAME is an interactive-bash
+        // variable and is absent from non-interactive script environments.
+        return unix_utsname_field(|u| &u.nodename);
+    }
+    #[cfg(not(unix))]
+    {
+        std::env::var("HOSTNAME")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("COMPUTERNAME")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| "localhost".to_string())
+    }
 }
 
 /// `uname -p` (processor): MSYS2 reports `unknown`; keep the form.
+#[cfg(not(unix))]
 pub fn processor() -> &'static str {
     "unknown"
 }
 
+/// `uname -p` (processor) on unix: coreutils 9.4 on this WSL host prints
+/// the machine field (`x86_64`) — utsname has no separate processor slot,
+/// and the probe of `/usr/bin/uname -p` is the observed contract.
+#[cfg(unix)]
+pub fn processor() -> String {
+    unix_utsname_field(|u| &u.machine)
+}
+
 /// `uname -i` (hardware platform): MSYS2 reports `unknown`; keep the form.
+#[cfg(not(unix))]
 pub fn hardware_platform() -> &'static str {
     "unknown"
+}
+
+/// `uname -i` (hardware platform) on unix: same utsname.machine fallback
+/// as `uname -p` (WSL coreutils 9.4 probe: x86_64).
+#[cfg(unix)]
+pub fn hardware_platform() -> String {
+    unix_utsname_field(|u| &u.machine)
 }
 
 /// `uname -o` (operating system): `Msys` under the MSYS persona (the MSYS2
 /// uname value ecosystem scripts branch on), `Windows` under the native
 /// persona.
 pub fn operating_system() -> String {
-    if !cfg!(windows) {
+    #[cfg(unix)]
+    {
+        // coreutils uname -o on glibc Linux prints `GNU/Linux` (the
+        // configure-time UNAME_OS value; WSL coreutils 9.4 probe 2026-09-27).
+        if cfg!(target_os = "linux") {
+            return "GNU/Linux".to_string();
+        }
         return std::env::consts::OS.to_string();
     }
-    match current_identity() {
-        ShellIdentity::Msys => "Msys".to_string(),
-        ShellIdentity::Native => "Windows".to_string(),
+    #[cfg(not(unix))]
+    {
+        match current_identity() {
+            ShellIdentity::Msys => "Msys".to_string(),
+            ShellIdentity::Native => "Windows".to_string(),
+        }
     }
 }
 

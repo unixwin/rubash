@@ -1397,52 +1397,96 @@ impl Executor {
                 crate::executor::path::shell_path_to_windows(file, &self.shell_state.env_vars)
                     .to_string_lossy()
                     .to_string();
+            // Resolve the host path once: unix applies the mode to the real
+            // inode below, windows syncs the readonly attribute.
+            let host = if std::path::Path::new(&windows).is_absolute() {
+                std::path::PathBuf::from(&windows)
+            } else {
+                std::env::current_dir().unwrap_or_default().join(&windows)
+            };
+            // Base mode for symbolic clauses: unix reads the file's real
+            // inode mode (coreutils chmod(1) applies `+x`/`-w` clauses to
+            // the file's current mode via chmod(2)); windows keeps the
+            // emulated store, which is the only mode source there.
+            #[cfg(unix)]
+            let base = {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(&host)
+                    .map(|metadata| metadata.permissions().mode())
+                    .unwrap_or(0o644)
+            };
+            #[cfg(not(unix))]
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
             match apply_chmod_mode(base, mode) {
                 Some(new_mode) => {
-                    // DrvFs/WSL materializes exactly one POSIX permission
-                    // bit: stripping all write bits sets the Windows readonly
-                    // attribute, so `>file`/`>>file` fail EACCES like under
-                    // GNU-on-WSL (redir12.sub). Sync it for every real path —
-                    // relative names resolve against the drive-relative cwd.
-                    let host = if std::path::Path::new(&windows).is_absolute() {
-                        std::path::PathBuf::from(&windows)
-                    } else {
-                        std::env::current_dir().unwrap_or_default().join(&windows)
-                    };
-                    match std::fs::metadata(&host) {
-                        Ok(metadata) => {
-                            let readonly = new_mode & 0o222 == 0;
-                            let mut permissions = metadata.permissions();
-                            if permissions.readonly() != readonly {
-                                permissions.set_readonly(readonly);
+                    #[cfg(unix)]
+                    {
+                        // coreutils chmod(1) -> chmod(2): the real inode mode
+                        // is the single source of truth on unix; the readonly
+                        // attribute + emulated store below is the Windows
+                        // port (no POSIX mode bits there).
+                        match std::fs::metadata(&host) {
+                            Ok(metadata) => {
+                                use std::os::unix::fs::PermissionsExt;
+                                let mut permissions = metadata.permissions();
+                                permissions.set_mode(new_mode);
                                 if std::fs::set_permissions(&host, permissions).is_err() {
                                     failures += 1;
                                 }
                             }
-                        }
-                        Err(_) => {
-                            failures += 1;
-                            eprintln!("chmod: cannot access '{}': No such file or directory", file);
+                            Err(_) => {
+                                failures += 1;
+                                eprintln!(
+                                    "chmod: cannot access '{}': No such file or directory",
+                                    file
+                                );
+                            }
                         }
                     }
-                    // DrvFs does not support POSIX mode bits (GNU on WSL
-                    // leaves files 0777 after `chmod -x`), so only non-drive
-                    // paths get the emulated mode store; drive paths keep the
-                    // `test -x` existence fallback (posix2 negative -x).
-                    let is_drive = windows.len() >= 2
-                        && windows.as_bytes()[1] == b':'
-                        && windows.as_bytes()[0].is_ascii_alphabetic();
-                    if !is_drive
-                        && !windows.starts_with("\\\\wsl$")
-                        && !windows.starts_with("//wsl$")
+                    #[cfg(not(unix))]
                     {
-                        store_emulated_file_mode(
-                            &mut self.shell_state.env_vars,
-                            &windows,
-                            new_mode,
-                        );
+                        // DrvFs/WSL materializes exactly one POSIX permission
+                        // bit: stripping all write bits sets the Windows readonly
+                        // attribute, so `>file`/`>>file` fail EACCES like under
+                        // GNU-on-WSL (redir12.sub). Sync it for every real path —
+                        // relative names resolve against the drive-relative cwd.
+                        match std::fs::metadata(&host) {
+                            Ok(metadata) => {
+                                let readonly = new_mode & 0o222 == 0;
+                                let mut permissions = metadata.permissions();
+                                if permissions.readonly() != readonly {
+                                    permissions.set_readonly(readonly);
+                                    if std::fs::set_permissions(&host, permissions).is_err() {
+                                        failures += 1;
+                                    }
+                                }
+                            }
+                            Err(_) => {
+                                failures += 1;
+                                eprintln!(
+                                    "chmod: cannot access '{}': No such file or directory",
+                                    file
+                                );
+                            }
+                        }
+                        // DrvFs does not support POSIX mode bits (GNU on WSL
+                        // leaves files 0777 after `chmod -x`), so only non-drive
+                        // paths get the emulated mode store; drive paths keep the
+                        // `test -x` existence fallback (posix2 negative -x).
+                        let is_drive = windows.len() >= 2
+                            && windows.as_bytes()[1] == b':'
+                            && windows.as_bytes()[0].is_ascii_alphabetic();
+                        if !is_drive
+                            && !windows.starts_with("\\\\wsl$")
+                            && !windows.starts_with("//wsl$")
+                        {
+                            store_emulated_file_mode(
+                                &mut self.shell_state.env_vars,
+                                &windows,
+                                new_mode,
+                            );
+                        }
                     }
                 }
                 None => {
@@ -1458,6 +1502,8 @@ impl Executor {
     /// Default rwx bits for a file never chmod'd: readable and writable like
     /// a fresh Windows file; executable only for extension-based executables
     /// (GNU-on-Linux would say not executable for a fresh text file).
+    /// Windows-port-only: unix bases symbolic clauses on the real inode mode.
+    #[cfg_attr(unix, allow(dead_code))]
     fn default_emulated_mode(&self, windows: &str) -> u32 {
         let executable = std::path::Path::new(windows)
             .extension()
@@ -1544,6 +1590,9 @@ fn apply_chmod_mode(base: u32, mode: &str) -> Option<u32> {
     Some(current & 0o777)
 }
 
+/// Windows-port-only emulated mode store: unix chmod writes the real inode
+/// mode instead (PermissionsExt::set_mode above).
+#[cfg_attr(unix, allow(dead_code))]
 fn store_emulated_file_mode(env_vars: &mut HashMap<String, String>, windows: &str, mode: u32) {
     let key = crate::builtins::test::EMULATED_FILE_MODES;
     let entries = env_vars.get(key).cloned().unwrap_or_default();

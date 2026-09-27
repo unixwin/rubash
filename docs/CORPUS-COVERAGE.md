@@ -250,3 +250,30 @@ Environment-bound findings recorded (no rubash issue): modernish goodsh
 PPID-across-exec impossibility on Windows; bats bin/bats `exec env` exported
 function loss at the external env utility; nvm v0.40.8 `_win` node.exe
 mock mismatch (fails under Git Bash too).
+Context and full evidence: `docs/LINUX-RUN-STATUS.md`. Environment: both the
+shell-under-test (rubash Linux ELF, `RUB_OVERRIDE` +
+`RUBSIDE_PATH=$BASE:/usr/local/bin:/usr/bin:/bin`) and the baseline (GNU Bash
+5.3.0) ran inside the same WSL instance via `scripts/true-baseline.sh` —
+pure engine diffs, `env=0` on every suite.
+
+Coverage added by this lane:
+
+- **GNU suites (bounded slice, 24 suites)**: 17 byte-identical (arith,
+  arith-for, more-exp, exp, comsub, comsub2, dstack, dstack2, jobs, heredoc,
+  case, braces, cond, globstar, procsub, printf, set-e); trap and redir end
+  in hangs (rubash#225/#227, unkillable per #226); glob 40 / extglob 16
+  ordering (#235, plus #236); new-exp 6 (#239); read 2 (#238); ifs-posix
+  timeout (#237). Artifacts:
+  `target/issue-suites/results/true-baseline/<suite>/{gnu.out,rb.out,*.rc}`.
+- **Real-world script shape**: nvm.sh v0.40.3 (4661 lines) — `-n` parse
+  clean, `. nvm.sh --no-use` loads with byte-identical stderr, `nvm_version`
+  works. This is the first full-size real script verified end-to-shape on
+  the Linux target.
+- **Smoke matrix** (12 probe classes, `target/wslrun/`): all core classes
+  byte-identical after the lane's chmod/test -x/uname fixes; residual gaps
+  are the filed issues #228-#234.
+
+Not yet covered on Linux (next lanes): the remaining 59 GNU suites (notably
+coproc, vredir, lastpipe, dbg-support, history, complete, tilde, posixexp
+family), interactive/readline behavior (no tty exercised), locale variants
+beyond en_US.UTF-8, and the `--version`/banner policy decision (#240).

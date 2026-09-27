@@ -505,16 +505,31 @@ fn eval_unary(op: &str, operand: &str, env_vars: &HashMap<String, String>) -> Re
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false)),
         "-r" | "-w" | "-x" => {
-            // chmod through the emulated POSIX mode layer (Windows has no
-            // mode bits) takes precedence, like GNU stat'ing the real mode.
-            let bit = match op {
-                "-r" => 0o400,
-                "-w" => 0o200,
-                _ => 0o100,
-            };
-            match emulated_file_mode(operand, env_vars) {
-                Some(mode) => Ok(mode & bit != 0),
-                None => Ok(test_path(operand, env_vars).exists()),
+            // bash test.c:553/556/559 routes -r/-w/-x through sh_eaccess
+            // (lib/sh/eaccess.c:194 sh_eaccess), which on Linux glibc is
+            // faccessat(AT_FDCWD, path, mode, AT_EACCESS) — an effective-uid
+            // access() check against the REAL mode bits. The emulated-store
+            // path below is the Windows port (no POSIX mode bits there).
+            #[cfg(unix)]
+            {
+                let flag = match op {
+                    "-r" => libc::R_OK,
+                    "-w" => libc::W_OK,
+                    _ => libc::X_OK,
+                };
+                Ok(test_unix_eaccess(operand, env_vars, flag))
+            }
+            #[cfg(not(unix))]
+            {
+                let bit = match op {
+                    "-r" => 0o400,
+                    "-w" => 0o200,
+                    _ => 0o100,
+                };
+                match emulated_file_mode(operand, env_vars) {
+                    Some(mode) => Ok(mode & bit != 0),
+                    None => Ok(test_path(operand, env_vars).exists()),
+                }
             }
         }
         "-O" => Ok(file_owned_by_effective_user(operand, env_vars)),
@@ -778,6 +793,23 @@ fn file_mode_has_bit(path: &str, env_vars: &HashMap<String, String>, bit: u32) -
     metadata.permissions().mode() & bit != 0
 }
 
+/// test -r/-w/-x backend on unix: sh_eaccess (lib/sh/eaccess.c:194) is
+/// faccessat(AT_FDCWD, path, mode, AT_EACCESS) on Linux glibc builds —
+/// the effective-uid access check, so `test -x /etc/hostname` is false
+/// for the 644 file even when running as root (kernel X_OK rule).
+#[cfg(unix)]
+fn test_unix_eaccess(
+    operand: &str,
+    env_vars: &HashMap<String, String>,
+    mode: std::os::raw::c_int,
+) -> bool {
+    let path = test_path(operand, env_vars);
+    let Ok(cpath) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, cpath.as_ptr(), mode, libc::AT_EACCESS) == 0 }
+}
+
 #[cfg(not(unix))]
 fn file_mode_has_bit(_path: &str, _env_vars: &HashMap<String, String>, _bit: u32) -> bool {
     false
@@ -877,6 +909,9 @@ pub(crate) const EMULATED_FILE_MODES: &str = "__RUBASH_FILE_MODES";
 
 /// The mode recorded by the emulated chmod for this path, if any. Entries are
 /// stored as windows-path=octal pairs separated by the unit separator.
+/// Windows-port-only layer: unix reads the real inode mode (faccessat /
+/// PermissionsExt) and never consults this store.
+#[cfg_attr(unix, allow(dead_code))]
 pub(crate) fn emulated_file_mode(operand: &str, env_vars: &HashMap<String, String>) -> Option<u32> {
     let windows = test_path(operand, env_vars).to_string_lossy().to_string();
     let entries = env_vars.get(EMULATED_FILE_MODES)?;

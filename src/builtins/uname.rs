@@ -140,6 +140,15 @@ pub fn execute_uname(args: &[String]) -> IdentityToolOutput {
         push(&identity::release(), &mut first);
         push(&identity::kernel_version(), &mut first);
         push(identity::machine(), &mut first);
+        // On unix the p/i slots are populated (utsname.machine fallback —
+        // WSL coreutils 9.4 probe: `... x86_64 x86_64 x86_64 GNU/Linux`),
+        // so -a keeps all eight fields; the skip above is the Windows
+        // persona shape only.
+        #[cfg(unix)]
+        {
+            push(&identity::processor(), &mut first);
+            push(&identity::hardware_platform(), &mut first);
+        }
         push(&identity::operating_system(), &mut first);
     } else {
         if fields.sysname {
@@ -158,10 +167,10 @@ pub fn execute_uname(args: &[String]) -> IdentityToolOutput {
             push(identity::machine(), &mut first);
         }
         if fields.processor {
-            push(identity::processor(), &mut first);
+            push(&identity::processor(), &mut first);
         }
         if fields.hardware_platform {
-            push(identity::hardware_platform(), &mut first);
+            push(&identity::hardware_platform(), &mut first);
         }
         if fields.operating_system {
             push(&identity::operating_system(), &mut first);
@@ -354,6 +363,15 @@ mod uname_tests {
     #[test]
     fn processor_and_hardware_platform_report_unknown() {
         let out = execute_uname(&["-p".to_string(), "-i".to_string()]);
+        // MSYS2 persona reports `unknown` for both; unix reports the
+        // utsname.machine fallback (coreutils 9.4 on Linux prints the
+        // machine value for -p/-i, e.g. x86_64).
+        #[cfg(unix)]
+        assert_eq!(
+            stdout(&out),
+            format!("{} {}\n", identity::machine(), identity::machine())
+        );
+        #[cfg(not(unix))]
         assert_eq!(stdout(&out), "unknown unknown\n");
     }
 
