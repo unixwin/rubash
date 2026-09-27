@@ -59,3 +59,4 @@
 - redgate ✅ 回收（d929ce5a：nquote 回归=标记对拆裂（对=单元修复）；comsub2 瞬态自愈；printf=harness 假零+2 真 bug（shopt 多选项/跨度全括号计数）——regression 23/23 恢复、Linux comsub2/printf 0 差异；教训：diff 对 NUL 输出报 Binary 被账本计 0，harness 需 --text 或字节级比较）
 - audit 车道已发（wt5/audit）：GNU C 源码行级对照审计——6 大区（43 个 .def 内建选项表/redir.c 全形/subst.c 算子角表/parse.y 产生式/jobs-trap 显示/variables 属性），产出 docs/SOURCE-AUDIT.md + 差异逐个探针验证开单
 - omb ✅（e22fa3af：#251/#252/#253 关闭，第 59-61 单）；audit ✅（9d81ae68：SOURCE-AUDIT.md 336 行为、11 新单 #261-#272——参数算子 74/74 字节一致、ulimit 是壳、<&7 静默错输属于数据损坏级）；corpus3 ✅（14692f46：FFmpeg configure 全清/OpenSSH exec 清/git harness 2/92 端到端、新单 #260/#262）；cifix ✅（3281de73+HOME 修复：CI 三红全治——本地 23/23 两连绿）
+- perf2 ✅ 回收（70ee0dc3：cmdsub/spawn 1.0x 平价、readloop 106→38x、nvm 载入 -44%、-n -35%；#241/#242 留单——剩余=walker ${臂递归（需 SubXpassFrame memo 语义）+ 船长 continuation.rs 两处（has_unclosed_quotes 每个挂起 ${ 拷贝剩余输入 @762）待我应用）
