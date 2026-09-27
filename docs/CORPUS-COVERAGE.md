@@ -317,3 +317,18 @@ rubash#243.
 tracked for rubash-side regressions only. Probe 03 (`-i -c exit`) was retired:
 GNU bash hangs on interactive invocations without a tty in WSL.
 
+
+# ===== SECTION: source audit lane (wt5/audit, 2026-09-28) — APPENDED, DO NOT REORDER =====
+
+This lane ran a line-level GNU C source vs Rust owner gap audit (read-and-probe,
+no src/ changes) over six areas: builtins option tables, redir.c redirection
+forms, subst.c parameter operators, parse.y grammar productions, jobs/trap
+display, variables.c attribute semantics. 336 behaviors probed against WSL GNU
+Bash 5.3.0 script-file probes; 14 divergences + 1 missing family verified and
+filed (#261, #263-#272, plus a %5ld evidence comment on #233).
+
+Full per-area tables, C anchors, classifications and probe verdicts:
+**docs/SOURCE-AUDIT.md** (single source of truth for this lane).
+Probe harness: target/issue-suites/results/source-audit/cmp.sh; raw
+artifacts under target/issue-suites/results/source-audit/{probes,out}/;
+durable reproducers under tests/fixtures/audit/.
