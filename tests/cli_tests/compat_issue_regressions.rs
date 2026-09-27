@@ -1672,9 +1672,17 @@ fn external_pipeline_preserves_quoted_awk_field_separator_argument() {
         .expect("run quoted awk field separator pipeline probe");
 
     assert!(output.status.success());
+    // POSIX XCU awk `-F sepstring`: escape sequences in the separator
+    // value are processed as awk string escapes, so the shell-quoted two
+    // characters `\t` reach awk and become a real TAB. Verified against
+    // the WSL GNU baseline (gawk 5.2.1) and the local gawk 5.4.0 — both
+    // print `FS=[<TAB>]`, and rubash's pipeline output is byte-identical
+    // (od: `F S = [ \t ] \n` with a single tab byte). The former literal
+    // `\\t` expectation asserted a backslash-t that neither GNU awk nor
+    // rubash ever produced on this pipeline.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n"),
-        "FS=[\\t]\n"
+        "FS=[\t]\n"
     );
 }
 

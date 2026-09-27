@@ -25,7 +25,19 @@ impl Executor {
             for (key, value) in entries {
                 output.extend_from_slice(key.as_bytes());
                 output.push(b'=');
-                output.extend_from_slice(value.as_bytes());
+                // GNU coreutils env writes each exported value cell's raw
+                // bytes (variables.c:4850 make_env_array_from_var_list
+                // copies the cell verbatim via mk_env_string).
+                // Stored values carry raw bytes as U+E000 marker pairs
+                // (markers.rs Storage boundary); decode to the real bytes
+                // at this output boundary so `x=$(printf '\377'); export
+                // x; env` prints the byte, not the pair (matching the
+                // WSL GNU baseline ff for `env | grep '^x='`).
+                output.extend_from_slice(
+                    &crate::executor::substitution_metadata::decode_raw_byte_markers(
+                        value.as_bytes(),
+                    ),
+                );
                 output.push(if config.null_terminated { b'\0' } else { b'\n' });
             }
             self.write_default_stdout(&output)?;
@@ -930,25 +942,63 @@ impl Executor {
                 .position(|&byte| byte == b'\n')
                 .unwrap_or(sample.len());
             let line = String::from_utf8_lossy(&sample[2..line_end]);
-            if let Some(interp) = line.split_whitespace().next() {
+            let mut interp_words = line.split_whitespace();
+            if let Some(interp) = interp_words.next() {
+                // Kernel #! exec (execve(2)): the interpreter is the first
+                // word with one optional argument. `#!/usr/bin/env sh` makes
+                // the kernel exec /usr/bin/env with `sh` as its single
+                // argument, and env(1) then execs the first `sh` found on
+                // PATH (GNU baseline: `PATH=<dir>:$PATH tool alpha beta`
+                // prints script:<joined-path>:alpha:2, exit 0). GNU bash
+                // never sees that exchange on Linux — shell_execve
+                // (execute_cmd.c:6126) only reports "bad interpreter"
+                // (execute_cmd.c:6184) when the kernel's own execve failed,
+                // e.g. `#!/no/such/interp` -> 126. Windows has no kernel #!
+                // and no /usr/bin/env, so this mailbox stands in for both:
+                // an `env` launcher resolves through the FOLLOWING word —
+                // the program env would exec — and that target decides the
+                // refusal. When the target itself is missing, GNU's exit is
+                // env's 127 with env's own diagnostic, approximated here by
+                // the same refusal shape with env's message text.
+                let (effective_interp, env_launcher) = if std::path::Path::new(interp)
+                    .file_name()
+                    .is_some_and(|base| base == "env")
+                {
+                    match interp_words.next() {
+                        Some(target) => (target, true),
+                        None => (interp, false),
+                    }
+                } else {
+                    (interp, false)
+                };
                 // GNU execute_shell_script re-execs through the named
                 // interpreter; when it resolves, the shell-script fallback
                 // stands in for that exec here. The standard shells resolve
                 // through the fallback without a refusal.
-                let interp_resolves = matches!(interp, "sh" | "bash" | "dash" | "rubash")
-                    || interp.ends_with("/sh")
-                    || interp.ends_with("/bash")
-                    || crate::executor::path::find_user_command(interp, &self.shell_state.env_vars)
-                        .is_some();
+                let interp_resolves = matches!(effective_interp, "sh" | "bash" | "dash" | "rubash")
+                    || effective_interp.ends_with("/sh")
+                    || effective_interp.ends_with("/bash")
+                    || crate::executor::path::find_user_command(
+                        effective_interp,
+                        &self.shell_state.env_vars,
+                    )
+                    .is_some();
                 if !interp_resolves {
-                    return Some((
+                    // A missing env target is the env child's own failure
+                    // (GNU: `env: 'x': No such file or directory`, exit
+                    // 127, printed by /usr/bin/env itself); a missing
+                    // direct interpreter is the shell_execve refusal
+                    // (execute_cmd.c:6184, exit 126).
+                    let diagnostic = if env_launcher {
+                        format!("env: '{effective_interp}': No such file or directory")
+                    } else {
                         format!(
                             "bash: {}: {}: bad interpreter",
                             cmd.words.first().map(String::as_str).unwrap_or_default(),
                             interp
-                        ),
-                        126,
-                    ));
+                        )
+                    };
+                    return Some((diagnostic, if env_launcher { 127 } else { 126 }));
                 }
                 return None;
             }
@@ -1050,7 +1100,11 @@ fn apply_env_command_environment(
             let value = if cfg!(windows) && name.eq_ignore_ascii_case("PATH") {
                 shell_path_to_process(value, env_vars)
             } else {
-                value.clone()
+                // Raw-byte marker pairs in a stored value must map to byte
+                // chars at the child boundary (same rubash#141 contract as
+                // child_env_value / the argv boundary), never leak the
+                // U+E000 pair into the child's environment block.
+                crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(value)
             };
             process.env(name, value);
         }

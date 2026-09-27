@@ -887,7 +887,56 @@ pub(in crate::executor) fn substitution_result_visible_text(value: &str) -> Stri
     // it (unicode1.sub `$(printf '\x15')` in a heredoc body printed `\` —
     // the decoded 0x15 was read as PROTECTED_BACKSLASH).
     let restored = restore_command_substitution_output(value);
-    let visible = crate::locale::decode_to_visible_text(&restored);
+    // GNU keeps a command substitution's raw output bytes intact through
+    // word expansion into assignment storage: subst.c:7143
+    // command_substitute hands the child's bytes to expand_word_internal,
+    // and an assignment-shaped consumer (variables.c:3536 assign_in_env ->
+    // bind_variable, declare.def do_assignment for `local x=$(...)` /
+    // `declare x=$(...)` operands) copies them into the value cell
+    // verbatim — the byte decodes only at the output/child boundary.
+    // decode_to_visible_text collapses a live U+E000+payload pair to its
+    // visible char (E000 branch) and remaps the byte-0xFF payload U+E100
+    // as a byte-char (BYTE_CHAR_BASE zone, -> U+0000), which destroyed
+    // that byte identity before storage (`local x=$(printf '\377')` came
+    // back as UTF-8 C3 BF instead of the raw byte). Splice live pairs out
+    // of the char-level decode and re-merge them verbatim: a doubled
+    // introducer (E000 E000) is a literal user E000 and stays in the
+    // decoded run, so only real pairs bypass the decode. The byte-level
+    // decode + bytes_to_shell_text re-tag below keeps the pair in
+    // transport form for storage.
+    use crate::executor::substitution_metadata::{
+        RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+    };
+    let is_payload = |code: u32| (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&code);
+    let mut visible = String::with_capacity(restored.len());
+    let mut other = String::new();
+    let mut chars = restored.chars().peekable();
+    let flush = |other: &mut String, visible: &mut String| {
+        if !other.is_empty() {
+            visible.push_str(&crate::locale::decode_to_visible_text(other));
+            other.clear();
+        }
+    };
+    while let Some(ch) = chars.next() {
+        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.peek().copied() {
+                Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                    // Doubled introducer: literal user E000 -> decode run.
+                    other.push(ch);
+                }
+                Some(next) if is_payload(next as u32) => {
+                    // Live raw-byte pair: bypass the char-level decode.
+                    flush(&mut other, &mut visible);
+                    visible.push(ch);
+                    visible.push(chars.next().expect("payload char peeked"));
+                }
+                _ => other.push(ch),
+            }
+        } else {
+            other.push(ch);
+        }
+    }
+    flush(&mut other, &mut visible);
     let bytes = crate::executor::substitution_metadata::decode_raw_byte_markers(visible.as_bytes());
     crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
 }

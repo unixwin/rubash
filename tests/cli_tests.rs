@@ -1873,9 +1873,16 @@ fn windows_userprofile_supplies_home_when_home_is_absent() {
         .expect("run rubash");
 
     assert!(output.status.success());
+    // The synthesized HOME goes through the same Windows import
+    // normalization as an inherited HOME (src/executor/init.rs
+    // `initialize_fresh_shell_env_vars`, commit 1716f955): backslashes are
+    // escape syntax once $HOME lands in pattern/glob position (exp.tests
+    // `${x#$HOME}` corrupted to a never-matching prefix), and MSYS2's own
+    // USERPROFILE-derived HOME is likewise presented in slash form, never
+    // the verbatim `C:\...` drive spelling. Expect the forward-slash form.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "C:\\rubash-home-test\n"
+        "C:/rubash-home-test\n"
     );
 }
 
@@ -3004,9 +3011,15 @@ fn extensionless_shell_script_on_path_runs_without_external_sh() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    // GNU findcmd.c joins a PATH-resolved word as `<path-entry>/<name>`
+    // and execute_cmd.c:6252 passes that word as the script's $0; rubash
+    // keeps the same join in forward-slash form (src/executor/path.rs
+    // `script_zero_word`), so a Windows backslash PATH entry still yields
+    // a slash-separated $0 — matching the WSL GNU baseline
+    // `script:<entry>/tool:alpha:2`.
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        format!("script:{}:alpha:2\n", script_path.to_string_lossy())
+        format!("script:{}:alpha:2\n", shell_test_path(&script_path))
     );
 }
 

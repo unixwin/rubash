@@ -221,6 +221,16 @@ impl Executor {
                     .replace('\\', "/"),
             );
         }
-        value.to_string()
+        // GNU export puts the variable's raw bytes in the child's
+        // environment (variables.c:4850 make_env_array_from_var_list:
+        // line 4891 `value = value_cell (var)` then mk_env_string —
+        // the value cell bytes are copied verbatim, no re-encoding). A
+        // stored value carrying a raw-byte marker pair
+        // must not leak the pair itself into the child's env block — the
+        // child-argv boundary already maps each pair to its byte char
+        // (rubash#141, path.rs decode_raw_byte_markers_to_byte_chars);
+        // apply the same contract here so `x=$(printf '\377'); export x;
+        // env` prints the byte, not U+E000 U+E100.
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(value)
     }
 }
