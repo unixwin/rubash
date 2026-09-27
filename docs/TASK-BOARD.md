@@ -62,3 +62,4 @@
 - perf2 ✅ 回收（70ee0dc3：cmdsub/spawn 1.0x 平价、readloop 106→38x、nvm 载入 -44%、-n -35%；#241/#242 留单——剩余=walker ${臂递归（需 SubXpassFrame memo 语义）+ 船长 continuation.rs 两处（has_unclosed_quotes 每个挂起 ${ 拷贝剩余输入 @762）待我应用）
 - misc2 ✅（10361b52：#254/#255 修复+双执行顺带修，#236/#238 环境绑定证据关单——**ble.sh 全文件 -n rc=0 达成**；第 62-65 单）→ 三车道波 6 已发
 - fdio ✅（b6cc735a：#260/#263/#264/#265/#266 五单关闭——while-read 5/5 迭代+性能地板、move-fd、<> O_CREAT、空目标分流诊断、<&7 数据损坏级；第 66-70 单）
+- builtin2/shell2 撞配额墙（06:11 重置）→ 已直接复活（builtin2 dirty=21、shell2 dirty=17，续作协议）；若再次 1308 即等重置窗口
