@@ -320,7 +320,9 @@ fn test_ulimit_redirects_stderr() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // ulimit.def:382-384: an invalid option letter is sh_invalidopt +
+    // builtin_usage + EX_USAGE (2), like GNU bash.
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.contains("ulimit: -g: invalid option"));
     assert!(error.contains("ulimit: usage:"));

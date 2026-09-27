@@ -112,11 +112,15 @@ where
         index += 1;
     }
 
-    if index >= args.len() || print {
+    // GNU setattr.def set_or_show_attributes: the listing branch runs only
+    // when NO operand names remain (loptend == NULL, the `else` arm at
+    // setattr.def:291-345). With names present the -p flag is ignored —
+    // each name is marked/assigned silently (`export -p NAME` prints
+    // nothing), exactly like readonly.
+    if index >= args.len() {
+        let _ = print;
         print_exported(env_vars, stdout)?;
-        if index >= args.len() {
-            return Ok(EXECUTION_SUCCESS);
-        }
+        return Ok(EXECUTION_SUCCESS);
     }
 
     // Handle export -f: mark functions for export
@@ -195,9 +199,13 @@ where
         index += 1;
     }
 
-    if index >= args.len() || print {
-        // GNU setattr.def: without names, -a/-A restrict the printed set to
-        // readonly indexed/associative arrays; -p alone prints everything.
+    // GNU setattr.def set_or_show_attributes: with operand names the -p
+    // flag is ignored — the operand branch (setattr.def:174-291) only calls
+    // set_var_attribute, which never prints. Only the nameless invocation
+    // (the else arm at :291-345) lists; without names, -a/-A restrict the
+    // printed set to readonly indexed/associative arrays.
+    if index >= args.len() {
+        let _ = print;
         print_readonly(
             env_vars,
             array,
@@ -205,9 +213,7 @@ where
             env_vars.get("__RUBASH_POSIX_MODE").map(String::as_str) == Some("1"),
             stdout,
         )?;
-        if index >= args.len() {
-            return Ok(EXECUTION_SUCCESS);
-        }
+        return Ok(EXECUTION_SUCCESS);
     }
 
     let mut status = EXECUTION_SUCCESS;

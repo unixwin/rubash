@@ -260,6 +260,13 @@ impl Executor {
                 }
                 if self.evalerror_line.get().is_none() {
                     self.evalerror_line.set(self.reader_command_line.get());
+                    // GNU shell.c:1477 (jump catch, case DISCARD):
+                    // `return last_command_exit_value = 1;` — the reader
+                    // observes the unwound abort before anything else runs,
+                    // so $? is 1 no matter which compound shape carried the
+                    // failure (an `if` whose condition died never completes
+                    // and cannot leave its own 0).
+                    self.exit_code = 1;
                 }
                 let boundary = self.evalerror_line.get();
                 if std::env::var("RUBASH_DEBUG_EVALERR").is_ok() {

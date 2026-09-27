@@ -124,6 +124,11 @@ pub(crate) struct FdTable {
     /// Set when a bounded read expired mid-record — GNU still assigns the
     /// partial input and returns 128+SIGALRM (read.def:539-562).
     pub(crate) read_timed_out: bool,
+    /// Set when a record read exhausted its input before finding the
+    /// delimiter — GNU read.def:949 `retval = eof ? EXECUTION_FAILURE :
+    /// EXECUTION_SUCCESS` fails the builtin while still assigning the
+    /// partial record.
+    pub(crate) read_eof_no_delimiter: bool,
     /// dup2 snapshots for `FdWriteEndpoint::Stdout` markers (rubash#223):
     /// `N>&1` hands fd N the stdout OBJECT fd 1 held at dup time — the
     /// active capture buffer's generation when one was active, or the real
@@ -143,6 +148,7 @@ impl FdTable {
             next_dynamic_fd: 10,
             read_deadline: None,
             read_timed_out: false,
+            read_eof_no_delimiter: false,
             stdout_alias_generation: std::collections::HashMap::new(),
         };
         table.entries.insert(
@@ -402,9 +408,12 @@ impl FdTable {
         let slice = &input.data[input.offset..];
         let mut consumed = 0;
         let mut chars = 0;
+        let mut delimiter_found = false;
+        let mut limit_reached = false;
         for (index, byte) in slice.iter().copied().enumerate() {
             if !exact && byte == delimiter {
                 consumed = index + 1;
+                delimiter_found = true;
                 break;
             }
             if byte & 0xc0 != 0x80 {
@@ -412,12 +421,18 @@ impl FdTable {
             }
             consumed = index + 1;
             if char_limit.is_some_and(|limit| chars >= limit) {
+                limit_reached = true;
                 break;
             }
         }
+        // read.def:949 eof rule: the slice ran out without the delimiter
+        // (and without a -n/-N limit ending the record). Served-record
+        // invariant: only a returned record may set the eof flag (see
+        // read_file_bytes).
         if consumed == 0 {
             return None;
         }
+        self.read_eof_no_delimiter = !delimiter_found && !limit_reached;
         let result_len = if !exact && slice[consumed - 1] == delimiter {
             consumed - 1
         } else {
@@ -464,6 +479,8 @@ impl FdTable {
         let mut result = Vec::new();
         let mut chars = 0usize;
         let mut consumed = false;
+        let mut delimiter_found = false;
+        let mut limit_reached = false;
         loop {
             // read.def check_read_timeout + shtimer_select: each byte read
             // is bounded by the remaining deadline.
@@ -486,6 +503,7 @@ impl FdTable {
             let mut keep = true;
             if !exact && byte == delimiter {
                 keep = false; // delimiter is consumed but not returned
+                delimiter_found = true;
             }
             if byte & 0xc0 != 0x80 {
                 chars += 1;
@@ -493,15 +511,27 @@ impl FdTable {
             if keep {
                 result.push(byte);
             }
-            if !keep || char_limit.is_some_and(|limit| chars >= limit) {
+            if !keep {
+                break;
+            }
+            if char_limit.is_some_and(|limit| chars >= limit) {
+                limit_reached = true;
                 break;
             }
         }
         // EOF with zero bytes read must surface as None — `read` at EOF
         // exits 1, distinct from an empty line (delimiter consumed).
+        // read.def:949 eof rule: the stream ended without the delimiter
+        // (a -n/-N limit ending the record is not EOF). The flag is a
+        // property of the SERVED record only: a reader that yields no
+        // record must not leave it set, or a later fallback path's record
+        // (e.g. FUNCTION_STDIN after this endpoint was probed empty —
+        // `exec 0</dev/null; while read w; done <<EOF`) inherits a bogus
+        // EOF status and the loop exits after zero iterations.
         if !consumed {
             return None;
         }
+        self.read_eof_no_delimiter = !delimiter_found && !limit_reached && !self.read_timed_out;
         Some(result)
     }
 

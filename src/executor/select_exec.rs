@@ -143,7 +143,10 @@ impl Executor {
             self.write_default_stderr(&prompt)?;
 
             let Some(input) = self.read_select_input(has_stdin, &mut stdin_offset) else {
-                self.exit_code = 0;
+                // GNU execute_cmd.c:3574-3580: select_query's EOF (read
+                // failure) returns NULL and execute_select_command sets
+                // retval = EXECUTION_FAILURE.
+                self.exit_code = 1;
                 return Ok(());
             };
             if input.is_empty() {
@@ -212,7 +215,10 @@ impl Executor {
             };
             return match result {
                 Ok(0) => {
-                    eprintln!();
+                    // GNU execute_cmd.c:3468: on the read failure (EOF),
+                    // select_query does putchar('\n') — a STDOUT newline —
+                    // before returning NULL.
+                    let _ = self.write_default_stdout(b"\n");
                     None
                 }
                 Ok(_) => Some(
@@ -234,7 +240,8 @@ impl Executor {
             .cloned()
             .unwrap_or_default();
         if *stdin_offset >= stdin_content.len() {
-            eprintln!();
+            // Same execute_cmd.c:3468 putchar('\n') — stdout — on EOF.
+            let _ = self.write_default_stdout(b"\n");
             return None;
         }
         let remaining = &stdin_content[*stdin_offset..];

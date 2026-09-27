@@ -27,36 +27,50 @@ impl Executor {
             })
             .collect();
 
+        // GNU redir.c: `2>&N`/`2>&-`/`>&word` are NOT file opens — fd 2 is
+        // dup2'd (or closed) by the general redirect machinery before the
+        // builtin runs, so the diagnostic must flow through the command's
+        // BOUND fd 2 (the landed #250/#271 path below). Only a plain
+        // filename target may be opened directly here; a `&`-prefixed
+        // target would otherwise become a bogus file literally named `&1`
+        // (rubash#271: `unset rv 2>&1` wrote the readonly diagnostic into
+        // a file called `&1`).
         if let Some(redirect) = &cmd.redirect_err {
             let target = self.expand_redirect_target(redirect);
-            if is_null_device(&target) {
-                return self.execute_unset_with_stderr(
-                    &cmd.words[1..],
-                    &arrayref_flags,
-                    &mut std::io::sink(),
-                );
+            if !target.starts_with('&') {
+                if is_null_device(&target) {
+                    return self.execute_unset_with_stderr(
+                        &cmd.words[1..],
+                        &arrayref_flags,
+                        &mut std::io::sink(),
+                    );
+                }
+                let mut file =
+                    File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
             }
-            let mut file =
-                File::create(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-            return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_redirect_target(redirect);
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
-            return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
+            if !target.starts_with('&') {
+                let mut file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(shell_path_to_windows(&target, &self.shell_state.env_vars))?;
+                return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
+            }
         }
 
         // GNU execute_cmd.c: the diagnostic goes to the shell's CURRENTLY
-        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` or capture
-        // contains it (rubash#218/#222-era leak: the raw process stderr
-        // bypassed every redirect).
+        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null`, a dup
+        // (`2>&1`, the rubash#271 case), or a capture contains it. Route
+        // through the ordered builtin-output boundary, which resolves the
+        // command's redirect state (including dup targets that must not be
+        // opened as files).
         let mut stderr = Vec::new();
         let status = self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut stderr);
-        let _ = self.write_default_stderr(&stderr);
+        let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
         status
     }
 

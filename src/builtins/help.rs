@@ -329,6 +329,19 @@ where
     print_topic_longdoc(topic, stdout)
 }
 
+/// CASE_HELPOPT (builtins/common.h:31-36): a `--help` word in option
+/// position makes the builtin print its own help. Shared by builtins that
+/// run internal_getopt (the caller returns EX_USAGE, as the macro does).
+pub(crate) fn print_builtin_help<W>(name: &str, stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    if let Some(topic) = find_topic(name) {
+        print_topic_long(topic, stdout)?;
+    }
+    Ok(())
+}
+
 // help.def:245-283 show_desc: `name - <first doc line>'.
 fn show_desc<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
 where

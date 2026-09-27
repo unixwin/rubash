@@ -717,8 +717,17 @@ impl Executor {
             // abort already raised; GNU discards the rest of the list.
             Err(()) => return Ok(1),
         };
-        if declare_args_request_integer(&args) {
-            args = self.evaluate_declare_integer_assignment_args(&args);
+        // GNU variables.c:2920-2944 make_variable_value: an evalexp failure
+        // on an integer assignment (no ASS_NOLONGJMP here — that flag is
+        // only for internal rebinds) prints the evalerror, discards the
+        // failing operand and its successors, and jump_to_top_level(DISCARD)
+        // aborts the rest of the command list. Print mode never assigns, so
+        // `declare -ip x=8+2x` is a plain not-found lookup instead.
+        let mut arith_eval_failure = None;
+        if declare_args_request_integer(&args) && !declare_args_request_print(&args) {
+            let (evaluated, failure) = self.evaluate_declare_integer_assignment_args(&args);
+            args = evaluated;
+            arith_eval_failure = failure;
         }
         // GNU variables.c:2651-2665 (make_local_variable): a local may not
         // shadow a readonly binding at context 0 — "disallow local copies of
@@ -830,6 +839,20 @@ impl Executor {
                     self.diagnostic_prefix()
                 )?;
             }
+            // variables.c:2938-2944: the evalerror diagnostic carries the
+            // builtin's command name (`declare: 8+2x: value too great for
+            // base (error token is "2x")`), and the DISCARD abort is armed
+            // so the reader loop drops the rest of this command's line.
+            if let Some(message) = &arith_eval_failure {
+                if !message.is_empty() {
+                    writeln!(
+                        stderr,
+                        "{}{command_name}: {message}",
+                        self.diagnostic_prefix()
+                    )?;
+                }
+                self.raise_evalerror_abort();
+            }
             // Every operand blocked: GNU skips the operand loop entirely —
             // no list-mode output even though only option args remain.
             let status = if !local_blocked.is_empty() && local_names(&args).is_empty() {
@@ -940,6 +963,11 @@ impl Executor {
             }
         }
         self.finish_global_declare_for_local_names(global_local_values);
+        // The evalerror DISCARD makes the command fail (GNU $? = 1) even
+        // when the surviving prefix operands all bound cleanly.
+        if arith_eval_failure.is_some() {
+            return result.map(|_| 1);
+        }
         result
     }
 
@@ -990,8 +1018,21 @@ impl Executor {
                     Ok(args) => args,
                     Err(()) => return Ok(1),
                 };
-            if declare_args_request_integer(&args) {
-                args = self.evaluate_declare_integer_assignment_args(&args);
+            // Same variables.c:2920-2944 rule as execute_declare: an
+            // integer-RHS evalexp failure prints `local: <evalerror>`,
+            // drops the failing operand and its successors, and arms the
+            // DISCARD abort for the rest of the command list.
+            let mut arith_eval_failure = None;
+            if declare_args_request_integer(&args) && !declare_args_request_print(&args) {
+                let (evaluated, failure) = self.evaluate_declare_integer_assignment_args(&args);
+                args = evaluated;
+                arith_eval_failure = failure;
+            }
+            if let Some(message) = &arith_eval_failure {
+                if !message.is_empty() {
+                    writeln!(stderr, "{}local: {message}", self.diagnostic_prefix())?;
+                }
+                self.raise_evalerror_abort();
             }
             // GNU declare.def:443-455: a bare `-` operand creates a local `-`
             // variable whose value is the current `set -o` option bitmap;
@@ -1191,6 +1232,13 @@ impl Executor {
                     builtin_status
                 } else {
                     builtin_status.max(1)
+                };
+                // The evalerror DISCARD fails the whole local command (GNU
+                // $? = 1) even when the surviving prefix operands bound.
+                let status = if arith_eval_failure.is_some() {
+                    status.max(1)
+                } else {
+                    status
                 };
                 (status, builtin_status)
             };

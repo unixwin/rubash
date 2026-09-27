@@ -689,12 +689,27 @@ bash [GNU long option] [option] script-file ...
 fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let path = executor.resolve_shell_path(script);
     let Ok(contents) = rubash::script_driver::read_script_bytes(&path) else {
+        // Same open_shell_script exit matrix as the script-file driver:
+        // ENOENT -> 127 (EX_NOTFOUND), any other open error -> 126
+        // (EX_NOINPUT) — `bash -D missing` exits 127, not 1 (rubash#262).
+        let (message, code) = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => ("Is a directory".to_string(), 126),
+            Ok(_) => ("Permission denied".to_string(), 126),
+            Err(e) => {
+                let code = if e.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                };
+                (rubash::posix_errors::message(&e), code)
+            }
+        };
         let shell_name = executor
             .get_env("__RUBASH_SHELL_NAME")
             .or_else(|| executor.get_env("BASH_ARGV0"))
             .unwrap_or("bash");
-        eprintln!("{shell_name}: {script}: No such file or directory");
-        return 1;
+        eprintln!("{shell_name}: {script}: {message}");
+        return code;
     };
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let mut output = String::new();
@@ -854,9 +869,27 @@ fn run_script_file_with_init(
         }
     }
     let Some(bytes) = bytes else {
-        let message = std::fs::metadata(&path)
-            .map(|_| "Permission denied".to_string())
-            .unwrap_or_else(|e| rubash::posix_errors::message(&e));
+        // GNU shell.c:1572-1601 open_shell_script: on open failure,
+        // file_error(filename) prints the diagnostic and
+        // sh_exit ((e == ENOENT) ? EX_NOTFOUND : EX_NOINPUT) exits 127
+        // for a missing file and 126 for every other open error
+        // (shell.h:65-66 EX_NOINPUT=126, EX_NOTFOUND=127); the directory
+        // case (file_isdir, just below the open) prints "Is a directory"
+        // with the same EX_NOINPUT. Windows reports ERROR_ACCESS_DENIED
+        // when a directory is opened, so classify from metadata rather
+        // than the errno of the failed read (rubash#262).
+        let (message, code) = match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => ("Is a directory".to_string(), 126),
+            Ok(_) => ("Permission denied".to_string(), 126),
+            Err(e) => {
+                let code = if e.kind() == std::io::ErrorKind::NotFound {
+                    127
+                } else {
+                    126
+                };
+                (rubash::posix_errors::message(&e), code)
+            }
+        };
         // GNU error.c:90-117 get_name_for_error: in non-interactive mode,
         // $0 (dollar_vars[0]) is used as the error prefix. When running
         // `${THIS_SH} ./errors1.sub`, $0 is the full path of the shell
@@ -866,7 +899,7 @@ fn run_script_file_with_init(
             .or_else(|| executor.get_env("BASH_ARGV0"))
             .unwrap_or("bash");
         eprintln!("{shell_name}: {script}: {message}");
-        return 1;
+        return code;
     };
     // GNU shell.c:1685-1692 + general.c:718-741 (check_binary_file): a
     // script whose first line (two lines when it starts with a #!

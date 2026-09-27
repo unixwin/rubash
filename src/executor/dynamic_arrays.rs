@@ -414,43 +414,91 @@ impl Executor {
         expanded_args
     }
 
+    /// GNU variables.c:2920-2937 make_variable_value → 2938-2944: when the
+    /// RHS arithmetic evaluation fails (evalexp sets expok=0 and there is no
+    /// ASS_NOLONGJMP), the builtin prints the evalerror with its own
+    /// command name, the failing operand and every operand after it are
+    /// discarded, and jump_to_top_level(DISCARD) aborts the rest of the
+    /// command list. Returns the rewritten args (with the failing word and
+    /// its successors removed, so the builtin still binds the earlier words
+    /// — `declare -i a=1 b=8+2x c=3` binds a, skips c, rc=1) plus the
+    /// rendered evalerror diagnostic for the caller to emit.
+    fn integer_assignment_eval_failure(&self, value: &str) -> Option<String> {
+        if eval_conditional_arith_value(value, &self.shell_state.env_vars).is_some() {
+            return None;
+        }
+        let message = crate::executor::arithmetic::take_arith_eval_error()
+            .map(|record| record.render())
+            .or_else(|| {
+                crate::executor::arithmetic::arithmetic_error_message(
+                    value,
+                    false,
+                    &self.shell_state.env_vars,
+                )
+            });
+        // The abort is armed by the caller through raise_evalerror_abort
+        // (this helper is &self and shared with non-aborting re-use).
+        Some(message.unwrap_or_default())
+    }
+
     pub(in crate::executor) fn evaluate_declare_integer_assignment_args(
         &self,
         args: &[String],
-    ) -> Vec<String> {
-        args.iter()
-            .map(|arg| {
-                let Some((name, value)) = split_assignment_word(arg) else {
-                    return arg.clone();
-                };
-                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
-                    || value.starts_with('(') && value.ends_with(')')
-                {
-                    return arg.clone();
-                }
-                // GNU variables.c bind_variable_internal: the nameref cell
-                // check runs on the RAW operand text before
-                // bind_variable_value applies the integer evaluation, so
-                // `declare -i foo=7*6` on a valueless nameref reports
-                // `` `7*6': not a valid identifier `` — not `` `42' ``
-                // (nameref12.sub:58). Only a chain that resolves keeps the
-                // early evaluation; an unusable cell (Unresolved/MaxDepth)
-                // must reach declare.rs's valid_nameref_value check raw.
-                let base = name
-                    .strip_suffix('+')
-                    .unwrap_or(name)
-                    .split('[')
-                    .next()
-                    .unwrap_or(name);
-                if matches!(
-                    self.nameref_resolution(base),
-                    NamerefResolution::Unresolved | NamerefResolution::MaxDepth
-                ) {
-                    return arg.clone();
-                }
-                format!("{name}={}", self.eval_integer_assignment_value(value))
-            })
-            .collect()
+    ) -> (Vec<String>, Option<String>) {
+        let mut failure: Option<String> = None;
+        let mut evaluated: Vec<String> = Vec::with_capacity(args.len());
+        for arg in args {
+            if failure.is_some() {
+                // GNU's evalerror longjmp discards the failing operand and
+                // every remaining word of the command.
+                break;
+            }
+            let Some((name, value)) = split_assignment_word(arg) else {
+                evaluated.push(arg.clone());
+                continue;
+            };
+            if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                || value.starts_with('(') && value.ends_with(')')
+            {
+                evaluated.push(arg.clone());
+                continue;
+            }
+            // GNU variables.c bind_variable_internal: the nameref cell
+            // check runs on the RAW operand text before
+            // bind_variable_value applies the integer evaluation, so
+            // `declare -i foo=7*6` on a valueless nameref reports
+            // `` `7*6': not a valid identifier `` — not `` `42' ``
+            // (nameref12.sub:58). Only a chain that resolves keeps the
+            // early evaluation; an unusable cell (Unresolved/MaxDepth)
+            // must reach declare.rs's valid_nameref_value check raw.
+            let base = name
+                .strip_suffix('+')
+                .unwrap_or(name)
+                .split('[')
+                .next()
+                .unwrap_or(name);
+            if matches!(
+                self.nameref_resolution(base),
+                NamerefResolution::Unresolved | NamerefResolution::MaxDepth
+            ) {
+                evaluated.push(arg.clone());
+                continue;
+            }
+            if let Some(message) = self.integer_assignment_eval_failure(value) {
+                // GNU's word loop applied the attributes (and created the
+                // variable) before bind_variable_value's evalexp jumped:
+                // the failing name survives as a valueless declare operand
+                // (`declare -p nx` later prints `declare -i nx`).
+                evaluated.push(name.strip_suffix('+').unwrap_or(name).to_string());
+                failure = Some(message);
+                continue;
+            }
+            evaluated.push(format!(
+                "{name}={}",
+                self.eval_integer_assignment_value(value)
+            ));
+        }
+        (evaluated, failure)
     }
 
     /// GNU variables.c:3320-3345 bind_variable_value → make_variable_value
@@ -458,39 +506,59 @@ impl Executor {
     /// the integer attribute evaluates the RHS with evalexp. readonly and
     /// export share declare.def's operand handling (setattr.def), so
     /// `readonly i=100+42` on an int-attributed local binds 142
-    /// (varenv25.sub init_vars2).
+    /// (varenv25.sub init_vars2). An evaluation failure follows
+    /// variables.c:2938-2944: evalerror + jump_to_top_level(DISCARD) —
+    /// the failing word and its successors are removed and the rendered
+    /// diagnostic returned for the caller to emit.
     pub(in crate::executor) fn evaluate_integer_attribute_assignment_args(
         &self,
         args: &[String],
-    ) -> Vec<String> {
-        args.iter()
-            .map(|arg| {
-                let Some((name, value)) = split_assignment_word(arg) else {
-                    return arg.clone();
-                };
-                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
-                    || value.starts_with('(') && value.ends_with(')')
-                {
-                    return arg.clone();
+    ) -> (Vec<String>, Option<String>) {
+        let mut failure: Option<String> = None;
+        let mut evaluated: Vec<String> = Vec::with_capacity(args.len());
+        for arg in args {
+            if failure.is_some() {
+                break;
+            }
+            let Some((name, value)) = split_assignment_word(arg) else {
+                evaluated.push(arg.clone());
+                continue;
+            };
+            if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                || value.starts_with('(') && value.ends_with(')')
+            {
+                evaluated.push(arg.clone());
+                continue;
+            }
+            let base = name
+                .strip_suffix('+')
+                .unwrap_or(name)
+                .split('[')
+                .next()
+                .unwrap_or(name);
+            let target_is_integer = match self.nameref_resolution(base) {
+                NamerefResolution::Target(ref target) => {
+                    is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, target)
                 }
-                let base = name
-                    .strip_suffix('+')
-                    .unwrap_or(name)
-                    .split('[')
-                    .next()
-                    .unwrap_or(name);
-                let target_is_integer = match self.nameref_resolution(base) {
-                    NamerefResolution::Target(ref target) => {
-                        is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, target)
-                    }
-                    _ => is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base),
-                };
-                if target_is_integer {
-                    format!("{name}={}", self.eval_integer_assignment_value(value))
-                } else {
-                    arg.clone()
-                }
-            })
-            .collect()
+                _ => is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base),
+            };
+            if !target_is_integer {
+                evaluated.push(arg.clone());
+                continue;
+            }
+            if let Some(message) = self.integer_assignment_eval_failure(value) {
+                // Same variables.c word-loop rule as the declare path: the
+                // attributes were applied before the evalexp jump, so the
+                // failing name survives as a valueless operand.
+                evaluated.push(name.strip_suffix('+').unwrap_or(name).to_string());
+                failure = Some(message);
+                continue;
+            }
+            evaluated.push(format!(
+                "{name}={}",
+                self.eval_integer_assignment_value(value)
+            ));
+        }
+        (evaluated, failure)
     }
 }

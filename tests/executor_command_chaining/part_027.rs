@@ -14,7 +14,8 @@ fn test_ulimit_appends_stderr() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 1);
+    // ulimit.def:382-384: invalid option -> EX_USAGE (2), as in GNU bash.
+    assert_eq!(executor.last_exit_code(), 2);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
     assert!(error.contains("ulimit: -g: invalid option"));
@@ -37,7 +38,8 @@ fn test_ulimit_combined_invalid_resource_option() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
+    // ulimit.def:382-384: EX_USAGE (2) for the invalid letter after -H.
+    assert_eq!(fs::read_to_string(status_path).unwrap(), "2\n");
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.contains("ulimit: -g: invalid option"));
     assert!(error.contains("ulimit: usage:"));

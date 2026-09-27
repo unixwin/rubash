@@ -910,10 +910,29 @@ impl Executor {
         }
 
         if words.first().map(String::as_str) == Some("ulimit") {
-            return crate::builtins::ulimit::command_substitution(
+            // Run the real builtin engine (getrlimit/setrlimit on unix, the
+            // emulated table on Windows) instead of a canned lookup, so
+            // `$(ulimit -n)` cannot drift from `ulimit -n` (rubash#261).
+            // The env map is copied because a comsub is a fork: on Windows
+            // the emulated limit table lives in env_vars and a set inside
+            // `$(ulimit -n 2048)` must not leak into the parent (GNU
+            // setrlimit in a forked child never does). Diagnostics go to
+            // the shell's stderr; the comsub status is the builtin's own.
+            let mut comsub_env = self.shell_state.env_vars.clone();
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::builtins::ulimit::execute_with_io(
                 &words[1..],
-                &self.shell_state.env_vars,
-            );
+                &mut comsub_env,
+                &mut out,
+                &mut err,
+            )
+            .unwrap_or_else(|_| 1); // Vec<u8> writes are infallible
+            let _ = std::io::stderr().write_all(&err);
+            self.last_command_substitution_status.set(Some(status));
+            return String::from_utf8_lossy(&out)
+                .trim_capture_terminator()
+                .to_string();
         }
 
         if words.first().map(String::as_str) == Some("pwd") {
@@ -1343,6 +1362,7 @@ impl Executor {
             fd_var_external_undo: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
+            read_eof_no_delimiter: false,
             stdout_capture: None,
             stderr_capture: None,
             host_external_command_handler: None,

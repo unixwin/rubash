@@ -26,16 +26,30 @@ impl Executor {
         };
         // Same GNU variables.c:2920-2937 make_variable_value rule as the
         // readonly path: an operand whose target is integer-attributed
-        // evaluates the RHS arithmetic (`export i=3+4` binds 7).
-        let args = self.evaluate_integer_attribute_assignment_args(&args);
+        // evaluates the RHS arithmetic (`export i=3+4` binds 7). An evalexp
+        // failure follows variables.c:2938-2944: print `export: <evalerror>`,
+        // drop the failing operand and its successors, arm the DISCARD
+        // abort, and fail the command.
+        let (args, arith_eval_failure) = self.evaluate_integer_attribute_assignment_args(&args);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        if let Some(message) = &arith_eval_failure {
+            if !message.is_empty() {
+                writeln!(stderr, "{}export: {message}", self.diagnostic_prefix())?;
+            }
+            self.raise_evalerror_abort();
+        }
         let status = crate::builtins::setattr::export_with_io(
             args.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
+        let status = if arith_eval_failure.is_some() {
+            status.max(1)
+        } else {
+            status
+        };
         if status == 0 {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
             // Check for locale environment changes (LC_ALL, LC_CTYPE, LANG)

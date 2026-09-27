@@ -31,8 +31,17 @@ impl Executor {
         // make_variable_value: a `name=value` operand whose target carries
         // the integer attribute evaluates the RHS with evalexp (setattr.def
         // shares declare.def's operand handling) — `readonly int=100+42`
-        // on an int local binds 142 (varenv25.sub).
-        let args = self.evaluate_integer_attribute_assignment_args(&args);
+        // on an int local binds 142 (varenv25.sub). An evalexp failure
+        // follows variables.c:2938-2944: print `readonly: <evalerror>`,
+        // drop the failing operand and its successors, arm the DISCARD
+        // abort, and fail the command.
+        let (args, arith_eval_failure) = self.evaluate_integer_attribute_assignment_args(&args);
+        if let Some(message) = &arith_eval_failure {
+            if !message.is_empty() {
+                writeln!(stderr, "{}readonly: {message}", self.diagnostic_prefix())?;
+            }
+            self.raise_evalerror_abort();
+        }
         // GNU builtin_error_prolog prefixes readonly reassignment diagnostics
         // with `this_command_name`; while a function body runs, that name is
         // the enclosing function (execute_cmd.c run_builtin sets it on the
@@ -50,6 +59,11 @@ impl Executor {
             &mut stderr,
             context_name,
         )?;
+        let status = if arith_eval_failure.is_some() {
+            status.max(1)
+        } else {
+            status
+        };
         if status == 0 {
             self.sync_setattr_typed_assignments(cmd.words[1..].iter().map(String::as_str));
         }

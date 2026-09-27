@@ -38,10 +38,15 @@ pub(in crate::executor) fn print_time(
         return;
     }
 
-    let Some(format) = env_vars.get("TIMEFORMAT") else {
-        print_posix_time(metrics);
-        return;
-    };
+    // GNU execute_cmd.c:1245: without `time -p` the default format is
+    // BASH_TIMEFORMAT — a leading blank line, tab separators and the
+    // minute form (`\nreal\t%3lR\nuser\t%3lU\nsys\t%3lS`); only a set
+    // TIMEFORMAT overrides it (print_time_info, execute_cmd.c:1552-1557).
+    // POSIX_TIMEFORMAT (:1244) is exclusively the `time -p` format above.
+    let format = env_vars
+        .get("TIMEFORMAT")
+        .map(String::as_str)
+        .unwrap_or("\\nreal\\t%3lR\\nuser\\t%3lU\\nsys\\t%3lS");
 
     if format.is_empty() {
         return;
@@ -49,7 +54,10 @@ pub(in crate::executor) fn print_time(
 
     match expand_time_format(format, metrics) {
         Ok(output) => eprintln!("{output}"),
-        Err(invalid) => eprintln!("rubash: TIMEFORMAT: `{invalid}': invalid format character"),
+        Err(invalid) => eprintln!(
+            "{}TIMEFORMAT: `{invalid}': invalid format character",
+            crate::builtins::set::builtin_error_prefix(env_vars)
+        ),
     }
 }
 
@@ -325,9 +333,9 @@ pub(in crate::executor) fn read_stdin_until(
     delimiter: char,
     char_limit: Option<usize>,
     exact_char_limit: bool,
-) -> std::io::Result<(usize, String)> {
+) -> std::io::Result<(usize, String, bool)> {
     if char_limit == Some(0) {
-        return Ok((0, String::new()));
+        return Ok((0, String::new(), false));
     }
 
     // GNU builtins/read.def reads fd 0 through zread (lib/sh/zread.c) — one
@@ -387,9 +395,12 @@ pub(in crate::executor) fn read_stdin_until(
     if eof {
         decoder.flush(&mut output);
     }
+    // Third element: read.def:949 eof — the handle closed before the
+    // delimiter (a char-limit break or timeout is not EOF).
     Ok((
         read,
         trim_read_input(output, delimiter, char_limit, exact_char_limit),
+        eof,
     ))
 }
 

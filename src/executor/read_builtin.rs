@@ -1977,6 +1977,16 @@ impl Executor {
             }
         }
 
+        // GNU read.def:331-336: `-i text` only fills the readline edit
+        // buffer — `itext = list_optarg` is consumed exclusively by the
+        // edit path (-e/-E set `edit`, read.def:316-327), which itself only
+        // engages on an interactive terminal. Without a real readline
+        // editor the initial text never reaches the variable
+        // (`printf '\n' | { read -i init v; }` leaves v empty). Rubash's
+        // read builtin has no readline editor, so the option parses and
+        // stays inert (rubash#270).
+        initial_text = None;
+
         // Bash displays read -p prompts only for interactive stdin.
         if prompt.is_some() && self.read_prompt_should_display(cmd, read_fd) {
             let expanded = self.expand_word(prompt.as_deref().unwrap_or_default());
@@ -2148,6 +2158,7 @@ impl Executor {
                 None => None,
             };
             let read_timed_out = self.take_read_timed_out();
+            let read_eof = self.take_read_eof_no_delimiter();
             let final_line = match (&line, &initial_text) {
                 (Some(line), _) => line.clone(),
                 (None, Some(text)) => text.clone(),
@@ -2185,6 +2196,10 @@ impl Executor {
                 self.finish_read_error(cmd, &stderr, 1)
             } else if read_timed_out {
                 142
+            } else if read_eof {
+                // read.def:949: partial record at EOF still assigns but
+                // fails the builtin.
+                1
             } else {
                 0
             };
@@ -2223,21 +2238,22 @@ impl Executor {
                 } else {
                     line
                 };
-                let line = if line.is_empty() && initial_text.is_some() {
-                    initial_text.as_deref().unwrap()
-                } else {
-                    &line
-                };
                 let assign_status = self.assign_read_scalar_names_with_field_count(
                     &scalar_names,
-                    line,
+                    &line,
                     raw,
                     scalar_field_count,
                 );
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
-                0
+                // read.def:949: eof (input exhausted before the delimiter)
+                // still assigns the partial record but returns failure.
+                if self.take_read_eof_no_delimiter() {
+                    1
+                } else {
+                    0
+                }
             } else if command_closes_stdin(cmd) || self.fd_table.is_closed(0) {
                 let assign_status = self.assign_read_scalar_names(
                     &scalar_names,
@@ -2305,7 +2321,7 @@ impl Executor {
                 142
             } else {
                 match read_stdin_until(delimiter, char_limit, exact_char_limit) {
-                    Ok((0, _)) => {
+                    Ok((0, _, _)) => {
                         let assign_status = self.assign_read_scalar_names(
                             &scalar_names,
                             initial_text.as_deref().unwrap_or(""),
@@ -2320,7 +2336,8 @@ impl Executor {
                             0
                         }
                     }
-                    Ok((_, line)) => {
+                    Ok((_, line, stdin_eof)) => {
+                        self.read_eof_no_delimiter |= stdin_eof;
                         let line = if !raw
                             && delimiter == '\n'
                             && char_limit.is_none()
@@ -2330,16 +2347,18 @@ impl Executor {
                         } else {
                             line
                         };
-                        let line = if line.is_empty() && initial_text.is_some() {
-                            initial_text.as_deref().unwrap()
-                        } else {
-                            &line
-                        };
-                        let assign_status = self.assign_read_scalar_names(&scalar_names, line, raw);
+                        let assign_status =
+                            self.assign_read_scalar_names(&scalar_names, &line, raw);
                         if assign_status != 0 {
                             return self.finish_read_error(cmd, &stderr, assign_status);
                         }
-                        0
+                        // read.def:949: input exhausted before the delimiter
+                        // still assigns the partial record but fails.
+                        if self.take_read_eof_no_delimiter() {
+                            1
+                        } else {
+                            0
+                        }
                     }
                     Err(_) => 1,
                 }
@@ -2527,6 +2546,16 @@ impl Executor {
         self.fd_table.read_deadline = None;
         self.fd_table.read_timed_out = false;
         timed_out
+    }
+
+    /// Merge and clear the read.def:949 eof flag: the record read exhausted
+    /// its input before the delimiter. The caller still assigns the partial
+    /// record but returns EXECUTION_FAILURE.
+    fn take_read_eof_no_delimiter(&mut self) -> bool {
+        let eof = self.read_eof_no_delimiter || self.fd_table.read_eof_no_delimiter;
+        self.read_eof_no_delimiter = false;
+        self.fd_table.read_eof_no_delimiter = false;
+        eof
     }
 
     /// GNU read.def:499-505: `fstat(fd)` S_ISREG turns the timeout off —

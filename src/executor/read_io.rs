@@ -55,6 +55,11 @@ impl Executor {
         char_limit: Option<usize>,
         exact_char_limit: bool,
     ) -> Option<String> {
+        // read.def:949 eof bookkeeping: each fresh record read starts with
+        // the delimiter unsatisfied; the leaf readers below set the flag
+        // when they exhaust their input before finding it.
+        self.read_eof_no_delimiter = false;
+        self.fd_table.read_eof_no_delimiter = false;
         // read.def check_read_timeout runs at the top of every read-loop
         // iteration — including before the first byte — so a deadline that
         // already expired during setup reports timeout even on buffered
@@ -70,16 +75,20 @@ impl Executor {
         // an earlier `<&fd`. An explicit `read -u N` still owns the input fd.
         if read_fd.is_none() {
             if cmd.heredoc_body.is_some() {
+                let input = self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body);
+                self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
                 return Some(trim_read_input(
-                    self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body),
+                    input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                 ));
             }
             if let Some(heredoc) = &cmd.heredoc {
+                let input = self.expand_heredoc_body_mut(heredoc);
+                self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
                 return Some(trim_read_input(
-                    self.expand_heredoc_body_mut(heredoc),
+                    input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
@@ -96,6 +105,7 @@ impl Executor {
             if let Some(output) =
                 self.read_coproc_stdout(fd, delimiter, char_limit, exact_char_limit)
             {
+                self.read_eof_no_delimiter |= !output.contains(&read_delimiter_needle(delimiter));
                 return Some(trim_read_input(
                     output,
                     delimiter,
@@ -123,6 +133,8 @@ impl Executor {
                 .and_then(|target| target.strip_suffix(')'))
             {
                 if let Some(output) = self.process_substitution_output(source) {
+                    self.read_eof_no_delimiter |=
+                        !output.contains(&read_delimiter_needle(delimiter));
                     return Some(trim_read_input(
                         output,
                         delimiter,
@@ -215,6 +227,7 @@ impl Executor {
             if input.is_empty() {
                 return None;
             }
+            self.read_eof_no_delimiter |= !input.contains(&read_delimiter_needle(delimiter));
             return Some(trim_read_input(
                 input,
                 delimiter,
@@ -228,6 +241,7 @@ impl Executor {
         // does not advance the shared fd cursor.
         if cmd.here_string.is_some() {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
+                self.read_eof_no_delimiter |= !line.contains(&read_delimiter_needle(delimiter));
                 return Some(trim_read_input(
                     line,
                     delimiter,
@@ -334,6 +348,11 @@ impl Executor {
             }
         }
 
+        // read.def:949 eof: the pipe drained (or errored) before the
+        // delimiter arrived; a timeout break is not EOF.
+        if ended && !self.read_timed_out && !bytes.is_empty() {
+            self.read_eof_no_delimiter = !bytes.contains(&(delimiter as u8));
+        }
         if ended
             && matches!(
                 self.fd_table.read_endpoint(fd),
@@ -493,17 +512,20 @@ impl Executor {
             return Some(String::new());
         }
 
-        let (output, consumed) = {
+        let (output, consumed, delimiter_found, limit_reached) = {
             let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?;
             let slice = &input[offset..];
             let mut output = String::new();
             let mut consumed = 0usize;
             let mut took_any = false;
+            let mut delimiter_found = false;
+            let mut limit_reached = false;
             let delimiter_needle = read_delimiter_needle(delimiter);
             for (index, ch) in slice.char_indices() {
                 if !exact_char_limit && slice[index..].starts_with(&delimiter_needle) {
                     consumed = index + delimiter_needle.len();
                     took_any = true;
+                    delimiter_found = true;
                     break;
                 }
 
@@ -511,15 +533,19 @@ impl Executor {
                 consumed = index + ch.len_utf8();
                 took_any = true;
                 if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
+                    limit_reached = true;
                     break;
                 }
             }
             if !took_any {
                 return None;
             }
-            (output, consumed)
+            (output, consumed, delimiter_found, limit_reached)
         };
 
+        // read.def:949 eof: the buffered stdin ran out before the
+        // delimiter (a -n/-N limit break is not EOF).
+        self.read_eof_no_delimiter = !delimiter_found && !limit_reached;
         self.shell_state.env_vars.insert(
             FUNCTION_STDIN_OFFSET.to_string(),
             (offset + consumed).to_string(),
@@ -597,10 +623,14 @@ impl Executor {
         if eof {
             decoder.flush(&mut output);
         }
-
         if output.is_empty() {
             return None;
         }
+        // read.def:949 eof: the handle closed before the delimiter.
+        // Served-record invariant: only a returned record may set the eof
+        // flag — a None-returning probe must leave it untouched so a later
+        // fallback path's record is not poisoned with a bogus EOF status.
+        self.read_eof_no_delimiter = eof;
 
         Some(trim_read_input(
             output,

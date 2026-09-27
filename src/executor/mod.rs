@@ -754,6 +754,12 @@ pub struct Executor {
     /// A bounded read expired mid-line: GNU assigns the partial input and
     /// returns 128+SIGALRM=142 (read.def:539-562 `goto assign_vars`).
     pub(crate) read_timed_out: bool,
+    /// GNU read.def:949 `retval = eof ? EXECUTION_FAILURE : SUCCESS`: the
+    /// record read exhausted its input before the delimiter (`read -d ''`
+    /// over a NUL-free stream, `read v` without a trailing newline). The
+    /// partial record is still assigned; only the status becomes 1. Merged
+    /// with the fd-table copy by `take_read_eof_no_delimiter`.
+    pub(crate) read_eof_no_delimiter: bool,
     stdout_capture: Option<Vec<u8>>,
     stderr_capture: Option<Vec<u8>>,
     host_external_command_handler: Option<HostExternalCommandHandler>,

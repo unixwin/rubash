@@ -610,12 +610,22 @@ impl Executor {
         }
 
         if cmd.here_string_carrier.is_some() {
-            return Some(self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier));
+            // GNU redir.c here_document_to_fd: a here-string's word is
+            // written to the pipe with a trailing newline — the compound's
+            // staged stdin must end with it, like the direct-read path in
+            // stdin_string_for_command_mut (rubash#270: without it,
+            // `while read v; done <<< alpha` stages "alpha" and the read
+            // ends at EOF-without-delimiter).
+            let mut input = self.expand_here_string_mut_from_carrier(&cmd.here_string_carrier);
+            input.push('\n');
+            return Some(input);
         }
         if let Some(here_string) = cmd.here_string.clone() {
             // Here-string content already had quote removal applied by the
             // parser; expand only substitutions with quotes-as-data semantics.
-            return Some(self.expand_here_string_mut(&here_string));
+            let mut input = self.expand_here_string_mut(&here_string);
+            input.push('\n');
+            return Some(input);
         }
 
         if cmd.heredoc_body.is_some() {
