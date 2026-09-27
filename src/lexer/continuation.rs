@@ -688,6 +688,30 @@ pub(super) fn has_unclosed_quotes(input: &str) -> bool {
             continue;
         }
 
+        // GNU parse.y:5546-5558 read_token_word → parse_matched_pair
+        // (parse.y:3877) with P_ALLOWESC: inside `$'...'` a `\` escapes the
+        // next byte (parse.y:3992 sets LEX_PASSNEXT, so `\'` never closes)
+        // and the closing `'` is the ONLY other special character — the
+        // nesting arms (parse.y:4052 shellquote → backtick/`$(`/quote
+        // recursion) run only when `open != close`, so a backtick or `$(` in
+        // an ANSI-C body is string data. Without this arm the backtick-skip
+        // below fired mid-`$'...'` and consumed through the span's closing
+        // quote into a following comment's backtick, leaving a dangling
+        // ansi_single that held the line open to EOF (rubash#215:
+        // `w=$'a\'b`c' # bug `>` reported "unexpected end of file").
+        // Same arm shape as has_unclosed_compound_assignment below and
+        // comsub_residuals further down.
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            comment_start = false;
+            index += 1;
+            continue;
+        }
+
         if ch == '\n' && !single && !double && !ansi_single {
             comment_start = true;
             index += 1;
