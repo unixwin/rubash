@@ -275,14 +275,29 @@ fn extra_operand(tool: &str, operand: &str) -> IdentityToolOutput {
     }
 }
 
-/// `--version`: the coreutils banner shape, naming the engine instead of
-/// fabricating a coreutils release.
+/// `--version`: the exact GNU coreutils 9.4 banner (rubash#240). The
+/// compatibility contract names the baseline build — coreutils 9.4 on the
+/// WSL reference — the same stance `bash --version` line 1 already takes;
+/// an engine-naming banner leaks a nonexistent coreutils version to
+/// scripts scraping tool output.
 fn version_banner(tool: &str) -> IdentityToolOutput {
+    // Tool-specific author line (coreutils 9.4: uname is MacKenzie alone,
+    // arch credits Karel Zak as well).
+    let authors = if tool == "arch" {
+        "David MacKenzie and Karel Zak"
+    } else {
+        "David MacKenzie"
+    };
     IdentityToolOutput {
         status: 0,
         stdout: format!(
-            "{tool} (niubash engine builtin) {}\n",
-            identity::ENGINE_BUILTIN_VERSION
+            "{tool} (GNU coreutils) 9.4\n\
+             Copyright (C) 2023 Free Software Foundation, Inc.\n\
+             License GPLv3+: GNU GPL version 3 or later <https://gnu.org/licenses/gpl.html>.\n\
+             This is free software: you are free to change and redistribute it.\n\
+             There is NO WARRANTY, to the extent permitted by law.\n\
+             \n\
+             Written by {authors}.\n"
         )
         .into_bytes(),
         stderr: Vec::new(),

@@ -286,6 +286,32 @@ where
         }
         let mut status = 0;
         for value in &args[1..] {
+            // GNU builtins/common.c:795-810 display_signal_list: a numeric
+            // argument is range-checked against NSIG; an IN-RANGE number
+            // whose slot has no name (glibc's reserved RT slots 32/33 —
+            // bash's signames array holds SIGJUNK there) prints NOTHING and
+            // keeps rc 0. Only an out-of-range number is an error
+            // (rubash#230: `kill -l 32` must be silent rc=0).
+            if let Ok(mut number) = value.parse::<i32>() {
+                if number > 128 {
+                    number -= 128;
+                }
+                if number == 0 {
+                    // signal_name slot 0 is bash's EXIT (signames.c), and
+                    // common.c prints it for `kill -l 0`.
+                    writeln!(stdout, "EXIT")?;
+                } else if !(0..=64).contains(&number) {
+                    writeln!(
+                        stderr,
+                        "{}kill: {value}: invalid signal specification",
+                        diagnostic_prefix()
+                    )?;
+                    status = 1;
+                } else if let Some(translation) = signal_name(number) {
+                    writeln!(stdout, "{translation}")?;
+                }
+                continue;
+            }
             if let Some(translation) = translate_signal(value) {
                 writeln!(stdout, "{translation}")?;
             } else {
@@ -466,6 +492,24 @@ pub fn list_first_signal_for_sed() -> &'static str {
 
 pub fn signal_number_for_spec(value: &str) -> Option<i32> {
     signal_number_from_spec(value)
+}
+
+/// strsignal(3) text for a signal-death notice (rubash#229). GNU jobs.c
+/// printable_job_status renders a dead pipeline with j_strsignal, which
+/// resolves to strsignal(3) ("Terminated", "Killed", "User defined signal
+/// 1", ...). glibc's strsignal uses per-thread storage, so calling it from
+/// the shell's main thread is safe.
+pub fn signal_death_description(signal: i32) -> String {
+    #[cfg(unix)]
+    {
+        let text = unsafe { libc::strsignal(signal) };
+        if !text.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(text) }
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    format!("Signal {signal}")
 }
 
 pub fn translate_signal(value: &str) -> Option<&'static str> {
@@ -1073,12 +1117,24 @@ impl KillResultExt for Result<(), &'static str> {
 
 /// Real kernel signal backend (the unix half of the signal-delivery seam).
 ///
-/// GNU sig.c:102 initialize_signals installs handlers for the
-/// terminating-signal set (the table at sig.c:133 -- SIGINT, SIGTERM, SIGHUP,
-/// SIGQUIT, ...); each arrival is queued and dispatched at command
-/// boundaries by trap_exec::run_pending_signal_traps. The dispatch side is
-/// platform-shared: this backend and the Windows file mailbox both surface
-/// as the same `Vec<i32>` from take_pending_signals.
+/// GNU model (rubash#226): a NON-INTERACTIVE script shell installs no handler
+/// for a terminating signal until a `trap` names it. sig.c:102
+/// initialize_signals -> sig.c:313 initialize_shell_signals: every shell sets
+/// `SIGQUIT -> SIG_IGN` (sig.c:333), but initialize_terminating_signals --
+/// which installs termsig_sighandler for the whole terminating set
+/// (sig.c:127-260) -- runs only when `interactive` (sig.c:315-316) or when an
+/// EXIT trap / `trap` display forces it (sig.c:226-229). Everything else
+/// stays SIG_DFL, so the KERNEL kills a blocked script shell on delivery --
+/// there is no unkillable state. The `trap` builtin then installs one
+/// handler per named signal (trap.c trap_builtin -> sig.c:830
+/// set_signal_handler with `act.sa_flags = 0`, sig.c:835 -- NO SA_RESTART:
+/// the handler may interrupt blocking syscalls exactly like GNU's), `trap ''`
+/// sets SIG_IGN (trap.def: ignore), and `trap -` restores the entry
+/// disposition. Arrivals under an installed handler are queued (the
+/// record-while-blocked contract, trap.c:537-543 set_trap_state) and
+/// dispatched at command boundaries by trap_exec::run_pending_signal_traps.
+/// The dispatch side is platform-shared: this backend and the Windows file
+/// mailbox both surface as the same `Vec<i32>` from take_pending_signals.
 ///
 /// Deliberately NOT registered:
 /// - SIGCHLD: the reap-point dispatcher
@@ -1093,23 +1149,200 @@ impl KillResultExt for Result<(), &'static str> {
 #[cfg(unix)]
 mod kernel_signals {
     use signal_hook::iterator::Signals;
+    use std::io;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     static KERNEL_SIGNALS: OnceLock<Mutex<Signals>> = OnceLock::new();
 
-    pub(super) fn install() -> std::io::Result<()> {
+    /// The six signals the backend manages dispositions for (the
+    /// signal_hook-catchable subset of GNU's terminating set that a trap can
+    /// name and the executor can dispatch).
+    const MANAGED: [i32; 6] = [
+        libc::SIGHUP as i32,
+        libc::SIGINT as i32,
+        libc::SIGQUIT as i32,
+        libc::SIGTERM as i32,
+        libc::SIGUSR1 as i32,
+        libc::SIGUSR2 as i32,
+    ];
+
+    /// Bitmask (1 << index into MANAGED) of signals currently routed to the
+    /// signal_hook handler.
+    static HANDLER_SET: AtomicU64 = AtomicU64::new(0);
+
+    /// Packed per-signal disposition state (2 bits each: 0=Default, 1=Ignore,
+    /// 2=Handler) so the per-boundary reconcile skips unchanged signals —
+    /// no sigaction traffic on the steady-state command path.
+    static DISPOSITION_STATE: AtomicU64 = AtomicU64::new(0);
+
+    fn state_bits(sig: i32) -> u64 {
+        let index = MANAGED
+            .iter()
+            .position(|&m| m == sig)
+            .expect("managed signal");
+        2 * index as u64
+    }
+
+    fn current_state(sig: i32) -> u8 {
+        ((DISPOSITION_STATE.load(Ordering::Relaxed) >> state_bits(sig)) & 0b11) as u8
+    }
+
+    fn store_state(sig: i32, state: u8) {
+        let bits = state_bits(sig);
+        let mask = 0b11u64 << bits;
+        let previous = DISPOSITION_STATE.fetch_and(!mask, Ordering::SeqCst);
+        DISPOSITION_STATE.fetch_or((state as u64) << bits, Ordering::SeqCst);
+        let _ = previous;
+    }
+
+    /// Bitmask of signals that were SIG_IGN when this process was exec'd.
+    /// POSIX 2.11: a non-interactive shell keeps entry-ignored signals
+    /// ignored (GNU sig.c:273-277 marks them hard-ignored).
+    static ENTRY_IGNORED: AtomicU64 = AtomicU64::new(0);
+
+    fn bit(sig: i32) -> u64 {
+        1 << MANAGED
+            .iter()
+            .position(|&m| m == sig)
+            .expect("managed signal")
+    }
+
+    fn current_disposition_is_ignored(sig: i32) -> bool {
+        // sigaction(nullptr) queries without installing; the returned
+        // sa_handler distinguishes SIG_IGN.
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigaction(sig, std::ptr::null(), &mut current) };
+        current.sa_sigaction == libc::SIG_IGN
+    }
+
+    /// Install the handler for `sig` and clear SA_RESTART from its flags.
+    /// signal_hook's registry hardcodes SA_RESTART; GNU installs trap
+    /// handlers with sa_flags = 0 (sig.c:835), so a caught signal interrupts
+    /// a blocked read/wait exactly like GNU's does.
+    fn ensure_handler(signals: &Signals, sig: i32) -> io::Result<()> {
+        if HANDLER_SET.load(Ordering::Relaxed) & bit(sig) == 0 {
+            signals.add_signal(sig)?;
+            HANDLER_SET.fetch_or(bit(sig), Ordering::SeqCst);
+        }
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        if unsafe { libc::sigaction(sig, std::ptr::null(), &mut current) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if current.sa_flags & libc::SA_RESTART != 0 {
+            current.sa_flags &= !libc::SA_RESTART;
+            // The whole struct is copied (incl. glibc's sa_restorer), so
+            // re-installing it only flips the flag.
+            if unsafe { libc::sigaction(sig, &current, std::ptr::null_mut()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    fn set_kernel_handler(sig: i32, handler: usize) {
+        let action = libc::sigaction {
+            sa_sigaction: handler,
+            sa_flags: 0,
+            sa_mask: unsafe { std::mem::zeroed() },
+            #[cfg(target_os = "linux")]
+            sa_restorer: None,
+        };
+        unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) };
+    }
+
+    /// Effective disposition for one managed signal, derived from the trap
+    /// table: a real action -> handler, `trap ''` -> SIG_IGN, no trap ->
+    /// entry disposition (SIG_DFL, or SIG_IGN for entry-ignored signals and
+    /// SIGQUIT -- sig.c:333 sets SIGQUIT to SIG_IGN for every shell).
+    pub(super) enum Disposition {
+        Handler,
+        Ignore,
+        Default,
+    }
+
+    pub(super) fn reconcile(dispositions: &[(i32, Disposition)]) {
+        let Some(mutex) = KERNEL_SIGNALS.get() else {
+            return;
+        };
+        let Ok(signals) = mutex.lock() else {
+            return;
+        };
+        for &(sig, ref want) in dispositions {
+            let target = match want {
+                Disposition::Handler => 2u8,
+                Disposition::Ignore => 1u8,
+                Disposition::Default => 0u8,
+            };
+            if current_state(sig) == target {
+                continue; // steady state: no sigaction traffic
+            }
+            match want {
+                Disposition::Handler => {
+                    if ensure_handler(&signals, sig).is_err() {
+                        continue;
+                    }
+                }
+                Disposition::Ignore => {
+                    set_kernel_handler(sig, libc::SIG_IGN);
+                    HANDLER_SET.fetch_and(!bit(sig), Ordering::SeqCst);
+                }
+                Disposition::Default => {
+                    let entry_ignored = ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0;
+                    let base = if entry_ignored || sig == libc::SIGQUIT as i32 {
+                        libc::SIG_IGN
+                    } else {
+                        libc::SIG_DFL
+                    };
+                    set_kernel_handler(sig, base);
+                    HANDLER_SET.fetch_and(!bit(sig), Ordering::SeqCst);
+                    // A delivery that raced the flip may have left the
+                    // registry flag set; the boundary dispatch drops such
+                    // entries via handler_installed() instead of acting on
+                    // them (draining here would swallow OTHER signals'
+                    // pending deliveries).
+                }
+            }
+            store_state(sig, target);
+        }
+    }
+
+    /// True when `sig` is currently routed to the signal_hook handler. A
+    /// pending-queue entry for a signal that is NOT handler-installed is a
+    /// stale registry flag from a delivery that raced a disposition flip
+    /// (trap cleared): SIG_DFL would have killed the process and SIG_IGN
+    /// swallows, so neither can produce a legitimate pending entry.
+    pub(super) fn handler_installed(sig: i32) -> bool {
+        MANAGED.contains(&sig) && HANDLER_SET.load(Ordering::Relaxed) & bit(sig) != 0
+    }
+
+    pub(super) fn install() -> io::Result<()> {
         if KERNEL_SIGNALS.get().is_some() {
             return Ok(());
         }
-        let signals = Signals::new([
-            signal_hook::consts::SIGINT,
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGHUP,
-            signal_hook::consts::SIGQUIT,
-            signal_hook::consts::SIGUSR1,
-            signal_hook::consts::SIGUSR2,
-        ])?;
+        // Capture entry dispositions BEFORE changing anything: signals
+        // ignored on entry must stay ignored (POSIX 2.11, GNU sig.c:273).
+        for sig in MANAGED {
+            if current_disposition_is_ignored(sig) {
+                ENTRY_IGNORED.fetch_or(bit(sig), Ordering::SeqCst);
+            }
+        }
+        // Empty initial set: no kernel handler exists until a trap names a
+        // signal (GNU leaves non-interactive terminating signals SIG_DFL,
+        // sig.c:315-316).
+        let signals = Signals::new([] as [i32; 0])?;
         let _ = KERNEL_SIGNALS.set(Mutex::new(signals));
+        // sig.c:102 initialize_signals -> sig.c:333: every shell ignores
+        // SIGQUIT (script shells do not die on ^\).
+        set_kernel_handler(libc::SIGQUIT as i32, libc::SIG_IGN);
+        store_state(libc::SIGQUIT as i32, 1);
+        // Entry-ignored signals stay ignored (captured above); record their
+        // state so the first reconcile does not "restore" them to SIG_DFL.
+        for sig in MANAGED {
+            if ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0 {
+                store_state(sig, 1);
+            }
+        }
         Ok(())
     }
 
@@ -1122,6 +1355,132 @@ mod kernel_signals {
         };
         signals.pending().collect()
     }
+
+    /// Fork-child disposition restore (rubash#229). GNU's forked
+    /// disk-command child runs trap.c:1489 restore_original_signals
+    /// between fork and exec (execute_cmd.c:4224): every trapped signal
+    /// returns to its ENTRY disposition (reset_signal -> original_signals,
+    /// SIG_DFL unless it was SIG_IGN on entry), a `trap ''`-ignored signal
+    /// STAYS ignored (trap.c:1451-1455 keeps IGNORE_SIG at SIG_IGN), and
+    /// the shell-policy SIGQUIT ignore (sig.c:333) never crosses exec —
+    /// without the restore, `sh -c 'kill -QUIT $$'` children inherit the
+    /// SIG_IGN and exit 0 instead of dying with 131. Runs in pre_exec:
+    /// sigaction and atomic loads are async-signal-safe.
+    pub(super) fn pre_exec_child_dispositions() -> io::Result<()> {
+        for &sig in MANAGED.iter() {
+            let action = if ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0 {
+                // Ignored at shell entry: POSIX keeps it ignored for children.
+                libc::SIG_IGN
+            } else if sig == libc::SIGQUIT as i32 {
+                // The sig.c:333 policy ignore is shell-only; the entry
+                // disposition (SIG_DFL here, entry-ignored handled above)
+                // is what children exec with.
+                libc::SIG_DFL
+            } else if current_state(sig) == 1 {
+                // trap '' ignore (trap.c:1451-1455): survives into children.
+                libc::SIG_IGN
+            } else {
+                // Trapped (handler) or default: children get the entry
+                // disposition, which is SIG_DFL for a plain script shell.
+                libc::SIG_DFL
+            };
+            set_kernel_handler(sig, action);
+        }
+        Ok(())
+    }
+}
+
+/// Map the executor's trap table onto the kernel dispositions (unix arm of
+/// rubash#226). Mirrors GNU's per-signal rules: `trap 'action' SIG` installs
+/// the handler (sig.c:830, sa_flags=0), `trap '' SIG` sets SIG_IGN, no trap
+/// restores the entry disposition (SIG_DFL for a plain script). Called from
+/// the `trap` builtin's mutation paths and the command-boundary poll so the
+/// kernel state can never lag the trap table by more than one command.
+#[cfg(unix)]
+pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<String, String>) {
+    use kernel_signals::Disposition;
+    // Single pass over the six trap keys (runs on the per-command boundary
+    // poll, so six HashMap gets + one reset-list scan is the whole cost —
+    // get_trap_action's per-call BTreeSet build would multiply that by six).
+    let reset = env_vars
+        .get("__RUBASH_TRAP_RESET")
+        .map(|value| value.as_str())
+        .unwrap_or("");
+    let dispositions: Vec<(i32, Disposition)> = [
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTERM,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+    ]
+    .iter()
+    .map(|&raw| {
+        let sig = raw as i32;
+        let short = signal_short_name(sig);
+        let want = match env_vars.get(&format!("__RUBASH_TRAP_SIG{short}")) {
+            // A real action and not reset-listed -> handler (trap.c
+            // trap_builtin -> sig.c:830 set_signal_handler).
+            Some(action) if !action.is_empty() && !reset_contains(reset, short) => {
+                Disposition::Handler
+            }
+            // Reset-listed (subshell reset, trap.c:1480 reset_signal_handlers
+            // restores the original disposition) behaves like no trap.
+            Some(_) if reset_contains(reset, short) => Disposition::Default,
+            // trap '' SIG: ignored (trap.def ignore path, kernel SIG_IGN).
+            Some(_) => Disposition::Ignore,
+            None => Disposition::Default,
+        };
+        (sig, want)
+    })
+    .collect();
+    kernel_signals::reconcile(&dispositions);
+}
+
+/// Short signal name (TERM) for the __RUBASH_TRAP_SIG* key family, matching
+/// signal_trap_name's SIG{name} form minus the SIG prefix.
+#[cfg(unix)]
+fn signal_short_name(signal: i32) -> &'static str {
+    const HUP: i32 = libc::SIGHUP as i32;
+    const INT: i32 = libc::SIGINT as i32;
+    const QUIT: i32 = libc::SIGQUIT as i32;
+    const TERM: i32 = libc::SIGTERM as i32;
+    const USR1: i32 = libc::SIGUSR1 as i32;
+    const USR2: i32 = libc::SIGUSR2 as i32;
+    match signal {
+        HUP => "HUP",
+        INT => "INT",
+        QUIT => "QUIT",
+        TERM => "TERM",
+        USR1 => "USR1",
+        USR2 => "USR2",
+        _ => "",
+    }
+}
+
+#[cfg(unix)]
+fn reset_contains(reset: &str, short: &str) -> bool {
+    // Reset entries carry the table's SIG-prefixed name (trap.rs
+    // normalize_signal keeps the SIG prefix, e.g. "SIGTERM").
+    let full = format!("SIG{short}");
+    reset.split(':').any(|entry| entry == full)
+}
+
+/// Whether `sig` is currently caught by the kernel backend (unix arm). A
+/// pending entry whose signal is not caught is stale (see
+/// kernel_signals::handler_installed) and must be dropped, not dispatched.
+#[cfg(unix)]
+pub fn kernel_handler_installed(signal: i32) -> bool {
+    kernel_signals::handler_installed(signal)
+}
+
+/// pre_exec hook for spawned child processes (unix arm of rubash#229):
+/// restore GNU's child signal dispositions between fork and exec. A no-op
+/// when the backend was never installed (the process then still holds its
+/// entry dispositions everywhere).
+#[cfg(unix)]
+pub fn child_pre_exec_reset() -> std::io::Result<()> {
+    kernel_signals::pre_exec_child_dispositions()
 }
 
 #[cfg(all(test, unix))]
@@ -1129,6 +1488,13 @@ mod kernel_signal_tests {
     #[test]
     fn kernel_signal_reaches_pending_queue() {
         super::register_signal_mailbox(std::process::id()).unwrap();
+        // rubash#226 model: no handler exists until a trap names the signal
+        // (GNU leaves non-interactive terminating signals SIG_DFL), so the
+        // test must install one first or the raise below would kill the test
+        // process through the kernel default action.
+        let sig = libc::SIGUSR1 as i32;
+        super::kernel_signals::reconcile(&[(sig, super::kernel_signals::Disposition::Handler)]);
+        assert!(super::kernel_signals::handler_installed(sig));
         unsafe { libc::kill(std::process::id() as libc::pid_t, libc::SIGUSR1) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
@@ -1136,6 +1502,12 @@ mod kernel_signal_tests {
                 .unwrap()
                 .contains(&libc::SIGUSR1)
             {
+                // Restore the default disposition so later tests in this
+                // process are not affected by the caught handler.
+                super::kernel_signals::reconcile(&[(
+                    sig,
+                    super::kernel_signals::Disposition::Default,
+                )]);
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));

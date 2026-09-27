@@ -198,9 +198,19 @@ pub(in crate::executor) fn safe_temp_dir_string() -> String {
         }
     }
 
-    env::current_dir()
-        .map(|path| path.join("target").to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string())
+    // GNU coreutils temp-dir resolution (rubash#232): TMPDIR or /tmp on
+    // POSIX. The cwd/target fallback keeps the Windows-side habit of
+    // keeping scratch files inside the workspace (no /tmp on raw Windows).
+    #[cfg(unix)]
+    {
+        "/tmp".to_string()
+    }
+    #[cfg(not(unix))]
+    {
+        env::current_dir()
+            .map(|path| path.join("target").to_string_lossy().into_owned())
+            .unwrap_or_else(|_| ".".to_string())
+    }
 }
 
 pub(in crate::executor) fn set_marked_var(

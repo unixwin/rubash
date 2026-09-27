@@ -579,8 +579,26 @@ impl Executor {
             return Ok(());
         }
 
+        // Unix kernel-disposition reconcile (rubash#226): mirror GNU's
+        // per-signal handler state before dispatching. trap.c trap_builtin
+        // installs one handler per trapped signal (sig.c:830, sa_flags=0 --
+        // no SA_RESTART); every other terminating signal stays SIG_DFL
+        // (sig.c:315-316: initialize_terminating_signals is
+        // interactive-only), so an untrapped signal kills the process at the
+        // KERNEL, never through this queue. The boundary poll (and the trap
+        // builtin's own mutation path) keeps the two in lockstep.
+        #[cfg(unix)]
+        crate::builtins::kill::reconcile_kernel_trap_dispositions(&self.shell_state.env_vars);
+
         let signals = crate::builtins::kill::take_pending_signals(std::process::id())?;
         for signal in signals {
+            // Stale registry flag from a disposition flip (trap cleared while
+            // a delivery raced): a signal the kernel no longer routes here
+            // cannot be a legitimate pending trap.
+            #[cfg(unix)]
+            if !crate::builtins::kill::kernel_handler_installed(signal) {
+                continue;
+            }
             let Some(signal_name) = signal_trap_name(signal) else {
                 continue;
             };
@@ -735,6 +753,12 @@ impl Executor {
         }
         let mut trapped = Vec::new();
         for &signal in &signals {
+            // Stale registry flag from a disposition flip: drop it (see
+            // run_pending_signal_traps above).
+            #[cfg(unix)]
+            if !crate::builtins::kill::kernel_handler_installed(signal) {
+                continue;
+            }
             let Some(signal_name) = signal_trap_name(signal) else {
                 continue;
             };

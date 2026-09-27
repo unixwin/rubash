@@ -3,6 +3,15 @@ use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 fn materialize_expanded_command_word(word: &str) -> String {
+    // rubash#237 perf: when no carrier-family byte is present, every marker
+    // replace below (CTLESC, carriers, protected/data backslash, ANSI-C
+    // markers) is an identity copy, and restore_pathname_escape_markers'
+    // \u{1c}-prefix strips cannot match — only the comsub payload decode,
+    // whose `__RUBASH_CSB1_` prefix is plain ASCII, still has work to do.
+    // One scan replaces ten allocations per plain word.
+    if !crate::executor::markers::contains_word_marker_bytes(word) {
+        return decode_command_substitution_payload(word);
+    }
     // Strip CTLESC (\x11) markers — they protect glob metacharacters during
     // expansion and must not reach argv (find -name "*.txt" received \x11*
     // and matched nothing).
@@ -991,6 +1000,32 @@ impl Executor {
             return vec![self.expand_embedded_parameters_mut_with_context(
                 inner,
                 SubstitutionQuoteContext::DoubleQuoted,
+            )];
+        }
+        // rubash#239: the same GNU rule covers the MIXED-quoted operand
+        // `eval name=("\${!${var}[@]}")` — the raw token is still just an
+        // argument word, so it expands as an ordinary mixed-quoted word
+        // (quote chars stay text for the reparse; `\$` inside the
+        // double-quoted segment is quote removal to a literal $, which
+        // eval_source_for_reparse then hands to the re-parse as live
+        // input). The fully-quoted shape above keeps its own inner
+        // expansion; this arm takes the whole raw text through the
+        // quote-aware walker.
+        if cmd.words.first().map(String::as_str) == Some("eval")
+            && index > 0
+            && raw.is_some_and(|raw| {
+                raw.split_once('=').is_some_and(|(name, value)| {
+                    !name.is_empty()
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && value.starts_with('(')
+                        && value.ends_with(')')
+                }) && !(raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"'))
+            })
+        {
+            let raw = raw.unwrap();
+            return vec![self.expand_embedded_parameters_mut_with_context(
+                raw,
+                SubstitutionQuoteContext::Unquoted,
             )];
         }
         // GNU subst.c materializes a complete quoted arithmetic expansion before

@@ -322,7 +322,11 @@ pub(crate) fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> 
 fn state_contains(env_vars: &HashMap<String, String>, name: &str) -> bool {
     match env_vars.get(SHOPT_STATE) {
         Some(value) => value.split(DATA_DOLLAR).any(|entry| entry == name),
-        None => default_state().contains(name),
+        // rubash#237: while the serialized state is unset (a script that
+        // never ran `shopt`), this arm runs on EVERY option_enabled call —
+        // use the allocation-free equivalent instead of rebuilding the
+        // 63-entry HashSet per lookup.
+        None => support::default_state_contains(name),
     }
 }
 

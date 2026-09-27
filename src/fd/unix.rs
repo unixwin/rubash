@@ -124,9 +124,16 @@ fn set_inheritable(fd: HANDLE, on: bool) -> std::io::Result<()> {
 
 pub fn handle_to_file(h: HANDLE) -> std::fs::File {
     // Takes ownership of the fd, mirroring the Windows side where
-    // handle_to_file wraps the raw handle into an owned File.
-    let owned = duplicate_handle(h).expect("handle_to_file: dup");
-    unsafe { std::fs::File::from_raw_fd(owned) }
+    // handle_to_file wraps the raw handle into an owned File (no duplicate).
+    // The old unix body dup'd and owned the COPY, leaking the caller's
+    // original: BackgroundCapture::duplicate_write (shell_options.rs) hands
+    // its fresh write-end dup in here, and the leaked intermediate kept the
+    // capture pipe's write end open in the parent forever, so
+    // BackgroundCapture::drain's close-then-read-to-EOF could never see EOF
+    // -- the redir7.sub backquote-comsub hang (rubash#225), where GNU's
+    // comsub read (subst.c:7434-7443: parent closes fildes[1], then
+    // read_comsub) completes once every inherited writer exits.
+    unsafe { std::fs::File::from_raw_fd(h) }
 }
 
 /// Anonymous pipe for background-job output capture (rubash#169); both ends
@@ -408,6 +415,11 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
                     return Err(std::io::Error::last_os_error());
                 }
             }
+            // GNU's forked children restore the entry signal dispositions
+            // between fork and exec (trap.c:1489 restore_original_signals,
+            // rubash#229): a policy/trap ignore in the shell must not make
+            // exec'd children unkillable by SIGQUIT et al.
+            crate::builtins::kill::child_pre_exec_reset()?;
             Ok(())
         });
     }

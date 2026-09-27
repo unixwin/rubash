@@ -148,7 +148,9 @@ impl Executor {
             return None;
         }
         let mut directory = false;
-        let mut template = "rubash-mktemp.XXXXXX";
+        // coreutils default template: tmp.XXXXXXXXXX (10 X's, gnulib
+        // __gen_tempname base "tmp").
+        let mut template = "tmp.XXXXXXXXXX";
         let mut index = 1;
         while index < words.len() {
             match words[index].as_str() {
@@ -181,20 +183,40 @@ impl Executor {
         let dir = shell_path_to_windows(&dir, &self.shell_state.env_vars);
         std::fs::create_dir_all(&dir).ok()?;
         let mut path = None;
-        for attempt in 0..32 {
-            let unique = format!(
-                "{}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_nanos())
-                    .unwrap_or(0),
-                attempt
-            );
-            let filename = if template.contains("XXXXXX") {
-                template.replace("XXXXXX", &unique)
+        // coreutils mktemp name generation (gnulib try_tempname_len /
+        // mktemp(1)): the trailing run of X's in the template (minimum 3)
+        // is replaced character-by-character from the 62-char
+        // [a-zA-Z0-9] alphabet — never a pid/timestamp string (rubash#232:
+        // `mktemp /tmp/t.XXXXXX` output must look like `TnVGKu`, and
+        // scripts parse/validate the shape). Randomness comes from a
+        // splitmix of (nanos, pid, attempt); the create_new retry loop
+        // below is the collision backstop.
+        let x_run = template.chars().rev().take_while(|c| *c == 'X').count();
+        for attempt in 0..32u64 {
+            let mut state = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos() as u64)
+                .unwrap_or(0)
+                ^ ((std::process::id() as u64) << 32)
+                ^ attempt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut random_suffix = |state: &mut u64| {
+                *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let mut z = *state;
+                z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                const ALPHABET: &[u8; 62] =
+                    b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+                ALPHABET[(z ^ (z >> 31)) as usize % 62] as char
+            };
+            let suffix: String = (0..x_run).map(|_| random_suffix(&mut state)).collect();
+            let filename = if x_run >= 3 {
+                format!("{}{}", &template[..template.len() - x_run], suffix)
             } else {
-                format!("{template}.{unique}")
+                // No X-run in the template: GNU mktemp appends its own
+                // 10-char random suffix (`tmp.XXXXXXXXXX` shape); keep the
+                // historical dotted-append with the same alphabet.
+                let dot_suffix: String = (0..10).map(|_| random_suffix(&mut state)).collect();
+                format!("{template}.{dot_suffix}")
             };
             let candidate = dir.join(filename);
             let created = if directory {

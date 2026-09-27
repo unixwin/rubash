@@ -351,6 +351,13 @@ pub(crate) const GROUP_REDIRECT_INJECTED_MARK: &str = "\u{1e}group-redirect";
 /// content, strmatch subject — and have no later quote-removal pass, so
 /// leaving the carriers encoded leaks \x17/\x1a into output.
 pub(in crate::executor) fn decode_word_position_carriers(value: &str) -> String {
+    // rubash#237 perf: the plain-word case (no marker byte present) is the
+    // overwhelming majority — every `.replace` below would then be an
+    // identity copy with a fresh String allocation per call. One scan
+    // answers it.
+    if !contains_word_marker_bytes(value) {
+        return value.to_string();
+    }
     value
         .replace(DATA_SQUOTE, "'")
         .replace(DATA_DQUOTE, "\"")
@@ -362,6 +369,18 @@ pub(in crate::executor) fn decode_word_position_carriers(value: &str) -> String 
         // escape pair in the raw word reaches this decoder as marker + '.
         .replace(ANSI_C_QUOTE_MARKER, "'")
         .replace(ANSI_C_DQUOTE_MARKER, "\"")
+}
+
+/// Whether `value` contains any byte of the in-band carrier family: the C0
+/// range 0x11..=0x1f hosting every CTLESC/CTLNUL-port marker (see the
+/// constants above) or the UTF-8 lead byte 0xEE of the U+E000..U+EFFF PUA
+/// plane hosting the ANSI-C markers. A false positive only costs the
+/// un-guarded slow path; a false negative is impossible because no marker
+/// can be encoded without one of these bytes.
+pub(in crate::executor) fn contains_word_marker_bytes(value: &str) -> bool {
+    value
+        .bytes()
+        .any(|byte| (0x11..=0x1f).contains(&byte) || byte == 0xEE)
 }
 
 /// Field separator inside the `__RUBASH_DIR_STACK` env serialization

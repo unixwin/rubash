@@ -15,6 +15,11 @@ fn shell_pwd_display(path: &str) -> String {
     }
     path.to_string()
 }
+/// Process-global flag: this process is a respawned internal `rubash -c`
+/// child (the __RUBASH_SHELL_PID/__RUBASH_COPROC_CHILD marker was seen at
+/// Executor::new). Read by main.rs apply_startup_job_control.
+pub static RESPAWNED_CHILD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 impl Executor {
     pub fn new() -> Self {
@@ -115,6 +120,14 @@ impl Executor {
         let internal_respawn = env_vars.get("__RUBASH_COPROC_CHILD").map(String::as_str)
             == Some("1")
             || env_vars.contains_key("__RUBASH_SHELL_PID");
+        // Rubash#234: a respawned `rubash -c` child is GNU's forked child —
+        // it inherits the parent's job_control state and never re-runs
+        // initialize_job_control. The env marker is stripped below, so
+        // record it in a process global for main.rs's startup job-control
+        // gate (which must not print the terminal-grab diagnostics here).
+        if internal_respawn {
+            RESPAWNED_CHILD.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
             // dollar_vars[0] slot reset at script entry (shell.c:1613) —
@@ -252,6 +265,7 @@ impl Executor {
             signal_trap_running: false,
             error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
+            pending_signal_notices: std::cell::RefCell::new(Vec::new()),
             source_debug_suppressed: false,
             host_internal_depth: std::cell::Cell::new(0),
             debug_trap_function_line: None,

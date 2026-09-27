@@ -600,6 +600,17 @@ impl Executor {
         }
 
         for (name, value) in &saved_env {
+            // rubash#237 perf: every map mutation that reaches the process
+            // environment went through set_process_env/sync (they update
+            // both stores), so a variable whose current map value already
+            // equals the saved value never changed in the process env
+            // either — skip the setenv. A flat-subshell exit used to
+            // rewrite the whole environ (dozens of locked libc setenv
+            // calls) per pipeline stage, hundreds of thousands of times
+            // across ifs-posix.
+            if self.shell_state.env_vars.get(name) == Some(value) {
+                continue;
+            }
             if is_valid_process_env(name, value) {
                 set_process_env(name, value);
             } else {

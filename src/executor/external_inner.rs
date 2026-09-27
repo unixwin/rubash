@@ -854,6 +854,15 @@ impl Executor {
             // fork); the dup above is what the child holds.
             drop(file);
         }
+        // rubash#229: restore GNU's child signal dispositions between fork
+        // and exec (trap.c:1489 restore_original_signals) — without this a
+        // policy/trap SIG_IGN in the shell survives exec and makes children
+        // unkillable by that signal (sh -c 'kill -QUIT $$' exited 0).
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
+        }
         match process.spawn() {
             Ok(mut child) => {
                 for dup in parent_side_dups {
@@ -878,9 +887,23 @@ impl Executor {
                 }
 
                 if self.external_needs_fd_copy_capture(cmd) {
+                    let foreground_pid = child.id();
                     match child.wait_with_output() {
                         Ok(output) => {
                             self.exit_code = 0;
+                            // rubash#229: a foreground child killed by a
+                            // signal gets the jobs.c notify_of_job_status
+                            // stderr notice at the reader boundary.
+                            if let Some(signal) =
+                                crate::executor::wait_status::exit_status_signal(&output.status)
+                            {
+                                self.note_child_signal_death(
+                                    foreground_pid,
+                                    signal,
+                                    self.signal_notice_command_text(cmd),
+                                    true,
+                                );
+                            }
                             // A reaped foreground child delivers SIGCHLD in
                             // GNU bash; a set trap runs once at this
                             // boundary (trap8.sub).
@@ -896,11 +919,24 @@ impl Executor {
                                 );
                             }
                         }
-                        Err(error) => self.report_external_spawn_error(cmd, error)?,
+                        Err(error) => self.report_external_spawn_error(cmd, program, error)?,
                     }
                 } else {
+                    let foreground_pid = child.id();
                     match self.wait_external_child(&mut child) {
                         Ok(status) => {
+                            // rubash#229: queue the signal-death notice for
+                            // the reader boundary.
+                            if let Some(signal) =
+                                crate::executor::wait_status::exit_status_signal(&status)
+                            {
+                                self.note_child_signal_death(
+                                    foreground_pid,
+                                    signal,
+                                    self.signal_notice_command_text(cmd),
+                                    true,
+                                );
+                            }
                             self.exit_code =
                                 crate::executor::wait_status::process_exit_status(&status);
                             // A reaped foreground child delivers SIGCHLD in
@@ -909,7 +945,7 @@ impl Executor {
                             self.run_sigchld_trap_for_reaped_child()?;
                         }
                         Err(ExecuteError::IoError(error)) => {
-                            self.report_external_spawn_error(cmd, error)?
+                            self.report_external_spawn_error(cmd, program, error)?
                         }
                         // An untrapped terminating signal observed mid-wait:
                         // GNU's SIG_DFL kills the shell while it is still
@@ -971,7 +1007,7 @@ impl Executor {
                         );
                     }
                 }
-                self.report_external_spawn_error(cmd, error)?;
+                self.report_external_spawn_error(cmd, program, error)?;
             }
         }
 
@@ -1073,13 +1109,23 @@ impl Executor {
     fn report_external_spawn_error(
         &mut self,
         cmd: &CommandNode,
+        program: &PathBuf,
         error: io::Error,
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
+        // GNU report_prolog (errors.c:75-120): a script-context exec failure
+        // prints `$0: line N: word: message` — the same prolog every other
+        // diagnostic uses (rubash#231: the bare `rubash:` prefix dropped the
+        // script/line attribution GNU prints).
+        // GNU shell_execve (execute_cmd.c:6126-6159) reports the execve
+        // failure against the RESOLVED pathname (findcmd.c file_to_lose_on
+        // fallback included), not the typed word — `noexec.sh` found via
+        // PATH prints the full candidate path (rubash#231).
         writeln!(
             &mut stderr,
-            "rubash: {}: {}",
-            cmd.words[0],
+            "{}{}: {}",
+            self.diagnostic_prefix(),
+            program.display(),
             crate::posix_errors::message(&error)
         )?;
         self.finish_external_error(cmd, &stderr, 126)

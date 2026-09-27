@@ -329,6 +329,8 @@ where
         //   else: list = list->next; if list == 0: builtin_usage; return EX_USAGE
         if let Some(signal) = normalize_signal(action) {
             remove_trap(env_vars, signal);
+            #[cfg(unix)]
+            crate::builtins::kill::reconcile_kernel_trap_dispositions(env_vars);
             return Ok(0);
         }
         print_usage(stderr)?;
@@ -344,12 +346,21 @@ where
         if action == "0" {
             remove_trap(env_vars, "EXIT");
         }
+        #[cfg(unix)]
+        crate::builtins::kill::reconcile_kernel_trap_dispositions(env_vars);
         return Ok(i32::from(signals.invalid));
     }
 
     for signal in signals.signals {
         set_trap(env_vars, &signal, action);
     }
+    // GNU trap.c trap_builtin installs/removes the kernel disposition
+    // synchronously inside the builtin (sig.c:830 set_signal_handler for a
+    // new action; restore_original_signal on reset). Keep the unix kernel
+    // state in lockstep with the trap table (rubash#226): the very next
+    // blocking command must see the new disposition.
+    #[cfg(unix)]
+    crate::builtins::kill::reconcile_kernel_trap_dispositions(env_vars);
     Ok(i32::from(signals.invalid))
 }
 

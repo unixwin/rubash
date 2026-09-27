@@ -75,6 +75,17 @@ pub(super) fn default_state() -> HashSet<String> {
         .collect()
 }
 
+/// Allocation-free membership test against the default state
+/// (`default_state().contains(name)` without building the set): a name is
+/// default-on exactly when it is a known option AND on the fixed default-on
+/// list. shopt.rs state_contains hits this on EVERY option_enabled call
+/// while `$__RUBASH_SHOPT_STATE` is unset (a plain script that never runs
+/// `shopt`), and the per-call HashSet rebuild (63 String allocations +
+/// hashing) was ~40% of the ifs-posix profile (rubash#237 perf wall).
+pub(super) fn default_state_contains(name: &str) -> bool {
+    default_enabled(name) && SHOPT_OPTIONS.contains(&name)
+}
+
 pub(super) fn print_all_shopts<W>(
     env_vars: &HashMap<String, String>,
     reusable: bool,

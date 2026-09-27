@@ -538,6 +538,119 @@ impl Executor {
         self.refresh_background_jobs_with_protected_coprocs(&[])
     }
 
+    /// Queue the stderr notice for a child that died by a signal
+    /// (rubash#229). The notice itself prints at the next reader-command
+    /// boundary (report_pending_signal_notices), mirroring GNU eval.c:355
+    /// notify_and_cleanup -> jobs.c:4543 notify_of_job_status.
+    pub(crate) fn note_child_signal_death(
+        &self,
+        pid: u32,
+        signal: i32,
+        command: String,
+        foreground: bool,
+    ) {
+        if signal <= 0 {
+            return;
+        }
+        self.pending_signal_notices
+            .borrow_mut()
+            .push((pid, signal, command, foreground));
+    }
+
+    /// Command text for a foreground child's signal-death notice
+    /// (rubash#229). GNU prints the job's `command` string — the pipeline
+    /// text as typed (jobs.c make_job stores the_printed_command), not a
+    /// re-quoted argv. __RUBASH_LAST_COMMAND holds exactly that source text
+    /// for the command currently executing (public_accessors
+    /// set_current_command); the expanded `cmd`'s words no longer match
+    /// their WordMetadata (the raw-vs-value filter fails and every word
+    /// falls into the single-quote fallback), so prefer it and keep
+    /// bash_command_source_text as the shape-preserving fallback.
+    pub(crate) fn signal_notice_command_text(&self, cmd: &CommandNode) -> String {
+        let text = if let Some(text) = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_LAST_COMMAND")
+            .filter(|text| !text.is_empty())
+        {
+            text.clone()
+        } else {
+            bash_command_source_text(cmd)
+        };
+        // GNU's job for a `( ... )` is the subshell pipeline itself, so the
+        // notice prints `( <inner text> )` (jobs.c pretty_print_job wraps
+        // the subshell's stored command). Rubash runs the subshell flat, and
+        // the notice fires for the inner child — wrap when one is open. The
+        // single-pipeline subshell (the shape the notices occur in) matches
+        // byte-for-byte; a multi-command subshell reports its last member's
+        // text inside the parens.
+        if self.shell_state.subshell_depth.get() > 0 && !text.starts_with('(') {
+            format!("( {text} )")
+        } else {
+            text
+        }
+    }
+
+    /// Print queued signal-death notices to stderr (GNU jobs.c:4625-4652
+    /// notify_of_job_status JDEAD handling, driven at the reader boundary by
+    /// eval.c:355 notify_and_cleanup). Shapes, with config-top.h defining
+    /// both DONT_REPORT_SIGPIPE and DONT_REPORT_SIGTERM:
+    /// - untrapped, not INT/TERM/PIPE (branch 1): `name: line N: ` +
+    ///   pretty_print_job(JLIST_NONINTERACTIVE) -> `%5ld pid`, one space,
+    ///   signal description padded to LONGEST_SIGNAL_DESC (jobs.h:43 = 27),
+    ///   command;
+    /// - otherwise, FOREGROUND jobs (branch 2): print_pipeline
+    ///   JLIST_STANDARD -> description padded to 27, command (this is where
+    ///   a foreground TERM death lands);
+    /// - background TERM/INT/PIPE or trapped deaths: silent.
+    pub(crate) fn report_pending_signal_notices(&mut self) -> Result<(), ExecuteError> {
+        // Signal numbers are the invariant Linux/MSVC values (libc is a
+        // unix-only dependency, and job_builtins.rs compiles on both).
+        const SIGINT: i32 = 2;
+        const SIGPIPE: i32 = 13;
+        const SIGTERM: i32 = 15;
+        let notices = std::mem::take(&mut *self.pending_signal_notices.borrow_mut());
+        if notices.is_empty() {
+            return Ok(());
+        }
+        let mut out = String::new();
+        for (pid, signal, command, foreground) in notices {
+            // jobs.c:4628-4638: INT is never reported; PIPE via
+            // DONT_REPORT_SIGPIPE (config-top.h:46).
+            if signal == SIGINT || signal == SIGPIPE {
+                continue;
+            }
+            let trapped = super::trap_exec::signal_trap_name(signal).is_some_and(|name| {
+                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &name)
+                    .is_some_and(|action| !action.is_empty())
+            });
+            let description = crate::builtins::kill::signal_death_description(signal);
+            let padding = 27usize.saturating_sub(description.chars().count());
+            if !trapped && signal != SIGTERM {
+                // Branch 1 (jobs.c:4625-4641): the "name: line N: PID desc
+                // cmd" shape. The line at notify time is the command that
+                // just finished (the boundary runs before the next command
+                // sets its own line), matching GNU's line_number.
+                out.push_str(&self.diagnostic_prefix());
+                out.push_str(&format!("{pid:>5} {description}"));
+                out.push_str(&" ".repeat(padding));
+                out.push_str(&command);
+                out.push('\n');
+            } else if foreground {
+                // Branch 2 (jobs.c:4640-4651): bare description + command.
+                out.push_str(&description);
+                out.push_str(&" ".repeat(padding));
+                out.push_str(&command);
+                out.push('\n');
+            }
+            // Background TERM/trapped deaths print nothing.
+        }
+        if !out.is_empty() {
+            crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
+        }
+        Ok(())
+    }
+
     pub(in crate::executor) fn refresh_background_jobs_with_protected_coprocs(
         &mut self,
         protected_coprocs: &[u32],
@@ -554,6 +667,21 @@ impl Executor {
 
         for (pid, status) in finished {
             self.background_children.remove(&pid);
+            // rubash#229: a background child killed by a signal gets the
+            // jobs.c:4625 notify_of_job_status notice at the reader
+            // boundary; the command text must be read before the job entry
+            // is removed below.
+            if status > 128 {
+                let command = self
+                    .shell_state
+                    .job_table
+                    .pid_to_job
+                    .get(&pid)
+                    .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                    .map(|job| job.command.clone())
+                    .unwrap_or_default();
+                self.note_child_signal_death(pid, status - 128, command, false);
+            }
             // rubash#169: the reaped child no longer holds a capture pipe
             // write end — retire it from the writer set (drain when last).
             let drained = crate::executor::shell_options::retire_background_capture_writer(pid);
@@ -735,6 +863,17 @@ impl Executor {
         pid: u32,
         _retain_for_explicit_wait: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
+        // GNU trap.c:604-611: a trapped signal arriving while the wait
+        // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
+        // the signal wins over the child's exit even when both are pending
+        // (the killer child sends before it exits, so the delivery always
+        // precedes the exit in wall time). Poll-loop equivalent: drain the
+        // pending queue BEFORE consulting the completed-status cache and
+        // before try_wait, so the signal's earlier arrival is observed
+        // first (rubash#228).
+        if let Some(interrupt) = self.wait_pending_signal_status()? {
+            return Ok(WaitPidOutcome::Interrupted(interrupt));
+        }
         if let Some(status) = self
             .shell_state
             .job_table
@@ -761,12 +900,27 @@ impl Executor {
         // and drain pending signals between polls; on interruption put the
         // handle back so the job remains waitable and reportable.
         let status = loop {
-            if let Some(done) = child.try_wait()? {
-                break crate::executor::wait_status::process_exit_status(&done);
-            }
+            // Signal queue first (see trap.c:604-611 note above): a trap
+            // delivered before the child exited must win the race.
             if let Some(interrupt) = self.wait_pending_signal_status()? {
                 self.background_children.insert(pid, child);
                 return Ok(WaitPidOutcome::Interrupted(interrupt));
+            }
+            if let Some(done) = child.try_wait()? {
+                // rubash#229: queue the signal-death notice (the job entry
+                // still exists here, so its command text is available).
+                if let Some(signal) = crate::executor::wait_status::exit_status_signal(&done) {
+                    let command = self
+                        .shell_state
+                        .job_table
+                        .pid_to_job
+                        .get(&pid)
+                        .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                        .map(|job| job.command.clone())
+                        .unwrap_or_default();
+                    self.note_child_signal_death(pid, signal, command, false);
+                }
+                break crate::executor::wait_status::process_exit_status(&done);
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
@@ -970,9 +1124,14 @@ impl Executor {
 "
                 ));
             } else if options.long {
+                // jobs.c:2207 pretty_print_job prints `[%d]%c ` (one space
+                // after the flag), then jobs.c:2065 print_pipeline formats
+                // the pid with `%5ld` followed by one space — a 3-digit pid
+                // gets `[1]-   492` (flag + 4 spaces), a 5-digit pid
+                // `[1]+ 17063` (rubash#233: the old `{marker}  {pid}` shape
+                // printed a fixed two spaces with a left-aligned pid).
                 output.push_str(&format!(
-                    "[{job_number}]{marker}  {pid} {state_text:<27}{source}{async_suffix}
-"
+                    "[{job_number}]{marker} {pid:>5} {state_text:<27}{source}{async_suffix}\n"
                 ));
             } else {
                 output.push_str(&format!(

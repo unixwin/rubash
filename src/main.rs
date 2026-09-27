@@ -480,6 +480,15 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
 /// (empirical WSL 5.3.0: `bash -i -c 'echo $-'` -> `himBHc`, `bash -m -c
 /// 'echo $-'` -> the two diagnostics + `hBc`).
 fn apply_startup_job_control(executor: &mut Executor) {
+    // A respawned `rubash -c` background child (marked with
+    // __RUBASH_SHELL_PID by the background-spawn path) is GNU's forked
+    // child: it inherits the parent's job_control state and NEVER re-runs
+    // initialize_job_control, so the terminal-grab diagnostics cannot fire
+    // there (rubash#234: a monitored `sleep 0.1 &` printed the two-line
+    // noise from the child's startup while GNU's exec'd sleep is silent).
+    if rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     if interactive {
         // jobs.c:4869 `change_flag ('m', job_control ? '-' : '+')` keeps the
@@ -614,6 +623,15 @@ fn parse_long_options(
                     "GNU bash, version {version} ({})",
                     rubash::executor::machtype_value()
                 );
+                // version.c:91-104: the fsf copyright/license block follows
+                // the version line (rubash#240 — the banner was line 1 only).
+                println!("Copyright (C) 2025 Free Software Foundation, Inc.");
+                println!(
+                    "License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>"
+                );
+                println!();
+                println!("This is free software; you are free to change and redistribute it.");
+                println!("There is NO WARRANTY, to the extent permitted by law.");
                 return (index, Some(0));
             }
             "login" => {

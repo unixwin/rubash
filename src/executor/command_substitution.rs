@@ -1271,6 +1271,10 @@ impl Executor {
             signal_trap_running: false,
             error_trap_running: false,
             sigchld_notifications_pending: std::cell::Cell::new(0),
+            // jobs.c:4607-4612: a comsub child (startup_state 2 +
+            // SUBSHELL_COMSUB) never prints job-status notices, so the
+            // fork copy starts with an empty notice list.
+            pending_signal_notices: std::cell::RefCell::new(Vec::new()),
             source_debug_suppressed: false,
             host_internal_depth: std::cell::Cell::new(self.host_internal_depth.get()),
             debug_trap_function_line: None,

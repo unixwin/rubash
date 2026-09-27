@@ -90,6 +90,8 @@ mod function_locals;
 mod getopts_enable;
 pub mod identity;
 mod init;
+
+pub use init::RESPAWNED_CHILD;
 mod job_builtins;
 mod limit_builtins;
 mod lookup_paths;
@@ -500,6 +502,16 @@ pub struct Executor {
     /// re-runs the trap once per pending notification — trap.tests expects
     /// three "caught a child death" lines for three reaped background jobs).
     sigchld_notifications_pending: std::cell::Cell<usize>,
+    /// Children killed by a signal, awaiting the reader-boundary stderr
+    /// notice (rubash#229). GNU jobs.c:4625-4652 notify_of_job_status runs
+    /// from eval.c:355 notify_and_cleanup after each top-level command:
+    /// non-INT/TERM/PIPE untrapped signal deaths print
+    /// `name: line N: %5ld <desc padded to 27> <cmd>` (JLIST_NONINTERACTIVE),
+    /// TERM (config-top.h DONT_REPORT_SIGTERM) and trapped-signal deaths of
+    /// FOREGROUND jobs print the bare `<desc padded to 27><cmd>` shape
+    /// (print_pipeline JLIST_STANDARD), everything else is silent.
+    /// (pid, signal, command text, foreground).
+    pending_signal_notices: std::cell::RefCell<Vec<(u32, i32, String, bool)>>,
     /// GNU builtins/source.def:208-216 unsets the DEBUG trap for the
     /// duration of a sourced file when function_trace_mode is off; the
     /// unwind-protect only restores it after source_file's run_return_trap

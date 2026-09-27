@@ -289,6 +289,12 @@ impl Executor {
                 let protected_coprocs = self.coprocs_referenced_by_command(command);
                 self.refresh_background_jobs_with_protected_coprocs(&protected_coprocs)?;
                 self.run_pending_signal_traps()?;
+                // GNU eval.c:355 runs notify_and_cleanup after each top-level
+                // command: children killed by a signal get their stderr
+                // notice here (rubash#229, jobs.c:4625 notify_of_job_status).
+                // At this point __RUBASH_CURRENT_LINE is still the previous
+                // command's line, matching GNU's line_number at notify time.
+                self.report_pending_signal_notices()?;
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
             // GNU `line_number` advances only while the reader parses each
