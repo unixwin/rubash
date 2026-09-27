@@ -375,6 +375,28 @@ pub(crate) fn get_trap_action(env_vars: &HashMap<String, String>, signal: &str) 
     env_vars.get(&trap_key(signal)).cloned()
 }
 
+/// rubash#186: non-cloning `get_trap_action(...).is_some_and(|a| !a.is_empty())`
+/// for the per-command hot path. get_trap_action builds a BTreeSet from the
+/// reset list and clones the whole action string on every call; the ast_exec
+/// preamble only needs the presence test, so share its exact semantics
+/// (reset-list signals are absent; empty actions count as unset) without the
+/// allocations.
+pub(crate) fn has_active_trap_action(
+    env_vars: &HashMap<String, String>,
+    signal: &str,
+    action_key: &str,
+) -> bool {
+    if env_vars
+        .get(TRAP_RESET)
+        .is_some_and(|value| value.split(':').any(|reset| reset == signal))
+    {
+        return false;
+    }
+    env_vars
+        .get(action_key)
+        .is_some_and(|action| !action.is_empty())
+}
+
 struct NormalizedSignals {
     signals: Vec<String>,
     invalid: bool,

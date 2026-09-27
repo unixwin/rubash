@@ -2,6 +2,29 @@ use super::*;
 
 impl Executor {
     fn coprocs_referenced_by_command(&self, command: &CommandNode) -> Vec<u32> {
+        // rubash#186: the filter at the bottom can only admit a pid when the
+        // command is a coproc itself or some considered source string both
+        // contains the coproc name and contains '[' — i.e. at least one
+        // source must contain '['. For the overwhelmingly common case (no
+        // coproc command, no bracket-bearing redirect/word) skip building
+        // redirect_sources and scanning the entire environment per command.
+        if command.coproc_command.is_none() {
+            let mut sources = command
+                .redirect_in
+                .iter()
+                .chain(command.redirect_out.iter())
+                .chain(command.append.iter())
+                .chain(command.redirect_err.iter())
+                .chain(command.redirect_err_append.iter())
+                .chain(command.redirects.iter())
+                .map(|redirect| redirect.target.as_str());
+            if !sources.any(|source| source.contains('['))
+                && !(command.words.first().map(String::as_str) == Some("wait")
+                    && command.words.iter().any(|word| word.contains('[')))
+            {
+                return Vec::new();
+            }
+        }
         let mut redirect_sources = command
             .redirect_in
             .iter()
@@ -376,9 +399,11 @@ impl Executor {
                 || command.coproc_command.is_some()
                 || command.background_command.is_some()
                 || command_is_time_prefixed_compound(command);
-            let debug_trap_active =
-                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty());
+            let debug_trap_active = crate::builtins::trap::has_active_trap_action(
+                &self.shell_state.env_vars,
+                "DEBUG",
+                "__RUBASH_TRAP_DEBUG",
+            );
             // Do not fire for commands inside the trap action itself: Bash
             // does not re-enter the DEBUG trap while an action runs, and
             // firing would let the action's commands overwrite LINENO with
@@ -388,10 +413,12 @@ impl Executor {
             // (execute_cmd.c:5270); extdebug reaches that state solely through
             // the functrace it enables (shopt.def:621), so a later set +T
             // disables inheritance even with extdebug active.
-            let debug_trap_in_scope = self.debug_trap_in_scope();
+            // rubash#186: debug_trap_in_scope() is folded into the condition
+            // after debug_trap_active so the common no-trap run never pays it
+            // (both are pure reads, so the reordering is behavior-neutral).
             if !skips_debug_trap
-                && debug_trap_in_scope
                 && debug_trap_active
+                && self.debug_trap_in_scope()
                 && !self.debug_trap_running
             {
                 // Bash exposes the about-to-run command's line via LINENO
@@ -405,16 +432,57 @@ impl Executor {
                 }
             }
 
+            // rubash#186: combined admission for the whole alias-introduced
+            // probe family below (compound_source, inversion, time, function,
+            // brace_group, subshell, for, select, case, coproc, heredoc).
+            // GNU has no such probes — they exist because rubash expands
+            // aliases at execution instead of in the parser stream
+            // (parse.y:3013 alias_expand_token). Each probe's admission is
+            // exactly: expand_aliases(words) must turn the first word into a
+            // compound marker, or alias_parser_source must resolve the first
+            // word through the alias table. With ZERO defined aliases,
+            // expand_aliases is provably the identity (expand_alias_word:
+            // aliases.get(word) miss returns the word unchanged) and
+            // alias_parser_source_inner returns None at its aliases.get(word)?
+            // — so every probe's outcome collapses to a raw-first-word
+            // marker test. Evaluate those markers in one pass here and skip
+            // the 11 per-command probe bodies (each re-scanning the shopt
+            // state and the alias table) when none can fire. `for`/`select`
+            // may advance past empty-word commands before their marker test,
+            // so an empty-words command keeps the chain.
+            let alias_chain_applicable = if self.shell_state.aliases.is_empty() {
+                command.words.is_empty()
+                    || matches!(
+                        command.words.first().map(String::as_str),
+                        Some(
+                            "!" | "("
+                                | "{"
+                                | "function"
+                                | "time"
+                                | "case"
+                                | "coproc"
+                                | "select"
+                                | "for"
+                        )
+                    )
+            } else {
+                true
+            };
+
             if let Some(next_index) = self.execute_time_prefixed_command_sequence(ast, index)? {
                 index = next_index;
                 close_subshell_region_if_ended!(command);
                 continue;
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_compound_source(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) =
+                    self.execute_alias_introduced_compound_source(ast, index)?
+                {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
             if let Some(next_index) = crate::builtins::source::execute_simple_if(self, ast, index)?
@@ -444,64 +512,84 @@ impl Executor {
                 continue;
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_inversion(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_inversion(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_time(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_time(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_function(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_function(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_brace_group(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_brace_group(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_subshell(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_subshell(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_for(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_select(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_select(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_case(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_case(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_introduced_coproc(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_introduced_coproc(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
-            if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
-                index = next_index;
-                close_subshell_region_if_ended!(command);
-                continue;
+            if alias_chain_applicable {
+                if let Some(next_index) = self.execute_alias_heredoc(ast, index)? {
+                    index = next_index;
+                    close_subshell_region_if_ended!(command);
+                    continue;
+                }
             }
 
             if let Some(next_index) = self.execute_inverted_pipeline(ast, index)? {
