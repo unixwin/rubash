@@ -106,3 +106,147 @@ bashdb/dstack/new-exp/as_fn shapes (mission's explicit already-covered list).
 ble.sh itself is not pinned (29,601 lines / ~700 KB): fetch the nightly tarball pinned
 in `corpora/SOURCES.txt`, or use the `ansi_c_escaped_quote_backtick.sh` fixture which
 carries the full failure semantics.
+> NOTE (wt4/ecosuite, 2026-09-27): this file is owned by the wt4/corpus2 lane.
+> The ecosuite lane appends its dedicated mixed-suite coverage ONLY in the
+> clearly-marked section at the end of this file and does not touch entries
+> above. If corpus2 has not written its header/entries yet, they will be
+> merged by the captain; treat everything between this note and the ecosuite
+> divider as corpus2's territory.
+
+---
+
+# ===== SECTION: ecosuite lane (wt4/ecosuite, 2026-09-27) — APPENDED, DO NOT REORDER =====
+
+Dedicated MIXED evaluation suites run by lane wt4/ecosuite (worktree base
+9bf2df9e, rubash built from that commit). Oracle: WSL GNU Bash 5.3.0 script
+file runs. Artifacts: `target/issue-suites/results/ecosuite/`; pinned
+fixtures + per-case manifest: `tests/fixtures/ecosuite/`.
+
+## 1. modernish use test suite — BLOCKED AT INIT (rubash-caused)
+
+- Source: https://github.com/modernish/modernish @ 63bdae02 (0.17.23-dev),
+  run as `bin/modernish --test -q -e`.
+- GNU baseline: 389 tests — 384 succeeded, 5 skipped, 0 warnings, 0 xfail,
+  0 unexpected failures. (gnu.out/gnu.err)
+- rubash: cannot complete initialisation; the .t test bodies are unreachable
+  until the blockers below are fixed.
+- Blockers, in order:
+  1. rubash-caused — rubash#218: unquoted parameter expansion in assignment
+     RHS collapses `\\` to `\` (fatal.sh FTL_NOFSPLIT builds its comparison
+     string via `t=${#},${1-U},...`; $6 `'\\fo\u\r'` loses its backslashes,
+     the case misses both accepted patterns, fatal.sh exits, the comsub
+     verification trap yields `fatalbug` instead of `$PPID`,
+     `_Msh_initExit "Fatal shell bug(s) detected"` -> exit 128).
+     Workaround for harvesting: `MSH_IGNORE_FATAL_BUGS=1`.
+  2. env-bound — goodsh.sh requires `$PPID` continuity across an exec'd
+     candidate shell; on Windows every native child reports PPID=1, so no
+     candidate can ever match `$$` and modernish aborts with "Can't find any
+     suitable POSIX-compliant shell!". This cannot pass on Windows with ANY
+     engine (probed: `$(exec /d/Git/usr/bin/sh.exe -c 'echo $PPID')` -> 1).
+     Harvest workaround: patched copy `target/ecosuite/modernish-harvest`
+     accepting the first candidate (GNU on the same patched copy: still
+     389/384 green, so the patch is inert for the oracle).
+  3. rubash-caused — rubash#219: `{ case...esac; cmd # comment }` spurious
+     syntax error; `rubash -n bin/modernish` rejects the whole launcher
+     (rc=2) where GNU accepts. Even past blockers 1-2 the launcher refuses
+     to parse. This is the current hard stop for the 389-test harvest.
+- Verdict: suite NOT runnable under rubash today; 2 rubash-caused bugs filed
+  (#218, #219) with minimal reproducers + full reduction chain under
+  `target/issue-suites/results/ecosuite/modernish/probes/` (p9, p37 and
+  p11a..p45 bisect artifacts).
+
+## 2. mvdan/sh (shfmt) parser corpus — RUN COMPLETE: 559 snippets, 16 divergences
+
+- Source: syntax/filetests_test.go `fileTest(...)` input strings extracted
+  from https://github.com/mvdan/sh @ aebdf2b8 (HEAD has the corpus inline in
+  Go; older tags no longer carry .txt filetests — extraction script kept at
+  `target/ecosuite/extract_mvdan.py`).
+- Method: `rubash -n` vs `wsl bash -n` per snippet, exit-code parity
+  (matrix.txt / diverge.txt / per-file stderr under results/ecosuite/mvdan-n/).
+- 543/559 parity. Divergences (all GNU-as-oracle):
+  - rubash#220 (8): accepts mksh/zsh-only operators GNU rejects — `&|`,
+    `&>|`, `&>>|`, `>>|` chains, case `;|` fallthrough, `<->`, `<5-10>`.
+  - rubash#221 (4): accepts GNU-invalid input — `( )` empty subshell,
+    `while false; do; done`, `foo=([)`, `[[ a == (b|c)* ]]` without extglob.
+  - rubash#222 (5): rejects GNU-valid input — `((# 1 + 2))`, `{ foo } }; }`,
+    `${foo/$a/$'\''}`, heredoc after `cat <<EOF ;;` in a case arm,
+    `[[ a =~ ( ]]<>;&) ]]`.
+- All 16 snippets pinned under `tests/fixtures/ecosuite/mvdan-n/` for CI.
+- Verdict: parse-conformance 97.1% on this corpus; both over-lax and
+  over-strict families live.
+
+## 3. nvm own test suite — RUN (bounded 12-test slice): 6 pass / 6 fail
+
+- Source: https://github.com/nvm-sh/nvm @ a885b885 (v0.40.8). NOTE: current
+  nvm master no longer uses bats; test/fast entries are plain executable
+  /bin/sh scripts run per-file (the mission's "bats suite" premise is
+  outdated for nvm HEAD — documented here).
+- Method: first 12 test/fast plain files, each under `wsl bash` (index-based
+  WSL-side runner; wsl.exe passthrough corrupts spacey/`$` filenames) and
+  under rubash from the same cwd, 60s per test. Classification cross-checked
+  against Git Bash real bash 5.3.15 on the same files.
+- GNU: 12/12 pass. rubash: 6 pass / 6 fail.
+  - 4 fails environment-bound (Windows platform detection in nvm.sh
+    v0.40.8: `NVM_NODE_BINARY=node.exe` vs mock's plain `node` in
+    `nvm_is_version_installed`; identical failure under Git Bash bash).
+    Not counted against rubash. Affects: deactivate, install
+    --reinstall-packages-from, uninstall clean-up-aliases, uninstall
+    remove-directory.
+  - 2 fails rubash-caused — rubash#223: "nvm exec/run warn fallback" and
+    "nvm uninstall inferred version" leak `/c/Program Files/nodejs/node.exe`
+    and fail their assertions under rubash while Git Bash passes the same
+    files. Root cause not isolated in this lane (no src/ fixes allowed).
+- Verdict: nvm suite usable as a rubash smoke suite on Windows at a ~50%
+  pass rate after subtracting platform-bound noise; #223 is the actionable
+  rubash bug.
+
+## 4. bats-core self-suite — ENTRY CHAIN RUNS, TEST EXECUTION BLOCKED
+
+- Source: https://github.com/bats-core/bats-core @ 52439ebf.
+- `rubash bin/bats --version` works (Bats 1.14.0) after two workarounds;
+  baseline GNU runs green on cat-formatter/tagging/filter slices (3 files,
+  21 tests) both pristine and on the patched copy.
+- Blockers:
+  1. env-bound (winuxsh env): `export -f` + `exec env BATS_ROOT=... bats`
+     (bin/bats:89-90) loses the exported function at the external `env`
+     boundary -> `bats_readlinkf: command not found` (libexec bats:119).
+     rubash exports `BASH_FUNC_f%%=...` correctly and direct rubash
+     children import it; the loss is in the env utility. Harvest workaround:
+     patched copy `target/ecosuite/bats-harvest` (patch: drop `env` from the
+     exec, identity `bats_readlinkf` normalizing `D:/` to `/d/`; GNU green
+     on the same patch).
+  2. rubash-caused — rubash#224: `$0`/`BASH_SOURCE` of scripts invoked by
+     absolute /d/-style path is rewritten to `D:/` form while `$PWD` stays
+     `/d/`; downstream `${BATS_TEST_FILENAME##*/}` fails on backslash paths
+     producing the invalid redirect target
+     `.../1-D:\repo\...\tagging.bats.src` -> every test file dies
+     `not ok 1 bats-gather-tests` (rc=1). Instrumented argv logs saved
+     (exec-suite receives /d/ form; gather-tests receives D:\ form; the
+     isolated repros of the intermediate steps are clean — exact conversion
+     point not pinned; see issue for the matrix).
+- Verdict: self-suite not harvestable until #224 lands; the runner chain up
+  to gather-tests is otherwise functional under rubash.
+
+## 5. Fallbacks — SKIPPED as already covered
+
+- mksh check.t: covered by earlier rounds (rubash#23/#24 note 153+ and 436+
+  DIFF ledgers).
+- busybox ash tests: covered by wt-busybox workspace (rubash#32..#57).
+- Both skipped per the "already covered" rule; no reruns in this lane.
+
+## Issue ledger from this lane
+
+| issue | suite | class |
+| --- | --- | --- |
+| rubash#218 | modernish | rubash-caused (assignment-RHS `\\` collapse) |
+| rubash#219 | modernish | rubash-caused (parser: brace group + case + trailing comment) |
+| rubash#220 | mvdan/sh | rubash-caused (over-lax: mksh/zsh operators) |
+| rubash#221 | mvdan/sh | rubash-caused (over-lax: GNU-invalid constructs) |
+| rubash#222 | mvdan/sh | rubash-caused (over-strict: GNU-valid constructs) |
+| rubash#223 | nvm | rubash-caused (nvm exec/run/uninstall system-node leak) |
+| rubash#224 | bats-core | rubash-caused ($0/BASH_SOURCE D:/ vs $PWD /d/ path domains) |
+
+Environment-bound findings recorded (no rubash issue): modernish goodsh
+PPID-across-exec impossibility on Windows; bats bin/bats `exec env` exported
+function loss at the external env utility; nvm v0.40.8 `_win` node.exe
+mock mismatch (fails under Git Bash too).
