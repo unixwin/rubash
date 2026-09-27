@@ -10,7 +10,29 @@ fn run_rubash_inline(script: &str) -> std::process::Output {
         .expect("run rubash")
 }
 
+/// The untracked `target/` copy of the bashdb probe target can go stale
+/// when a lane updates the tracked fixture (`tests/fixtures/bashdb/
+/// probe-target.sh`) but the shared checkout's target/ still holds the
+/// previous script — the 2026-09-27 "cross-lane bashdb regression" was
+/// exactly that: five phantom failures from a 5-line stub while the tests
+/// expected the 11-line fixture committed with the declare lane. Sync the
+/// tracked fixture into target/ (once per test process) so the slice is
+/// always measured against the committed script.
+fn ensure_bashdb_probe_fixture() {
+    use std::sync::Once;
+    static SYNC: Once = Once::new();
+    SYNC.call_once(|| {
+        let tracked = fs::read("tests/fixtures/bashdb/probe-target.sh").unwrap_or_default();
+        let current = fs::read("target/bashdb-probe-target.sh").unwrap_or_default();
+        if tracked != current {
+            let _ = fs::create_dir_all("target");
+            let _ = fs::write("target/bashdb-probe-target.sh", &tracked);
+        }
+    });
+}
+
 fn ensure_bash_shim_fixture() {
+    ensure_bashdb_probe_fixture();
     let root = Path::new("target").join("bash-shim-fixture");
     let bin = root.join("winuxcmd").join("usr").join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -34,6 +56,7 @@ fn unquoted_embedded_parameter_expansion_splits_fields() {
 
 #[test]
 fn for_loop_quoted_positional_at_iterates_each_argument() {
+    ensure_bashdb_probe_fixture();
     let output = run_rubash_inline(
         "set -- --no-highlight target/bashdb-probe-target.sh\nfor arg in \"$@\"; do printf '[%s]\\n' \"$arg\"; done\n",
     );
@@ -206,7 +229,18 @@ fn history_read_write_accept_file_operands() {
 
 #[cfg(windows)]
 #[test]
-fn windows_drive_absolute_tail_is_treated_as_absolute_path() {
+fn windows_drive_absolute_tail_after_components_is_not_a_drive_designator() {
+    // GNU test(1) stats the path as written: a `D:/…` segment that follows
+    // real path components (`<cwd>/D:/…`, the shape bashdb's `_Dbg_dir`
+    // join produced when frame filenames carried the native drive form) is
+    // an invalid mid-path component, not a drive designator — a colon is
+    // only valid at position 1 (Win32 path rules; GNU stat fails on the
+    // analogous doubled /mnt path). Resolving the tail as a drive used to
+    // make `[[ -f <joined> ]]` true and let doubled
+    // `D:/repo/…/D:/repo/…/file` paths appear in bashdb output, which the
+    // info-files/continue tests reject. Frame filenames are now canonical
+    // `/d/…` (shell_path_style_enabled default), so the join is never
+    // constructed; the plain absolute path still resolves.
     let file_path = Path::new("target").join("rubash-cli-drive-tail.txt");
     fs::create_dir_all("target").unwrap();
     fs::write(&file_path, "ok\n").unwrap();
@@ -216,12 +250,19 @@ fn windows_drive_absolute_tail_is_treated_as_absolute_path() {
         .replace('\\', "/");
     let absolute = format!("{}/target/rubash-cli-drive-tail.txt", cwd);
     let bashdb_joined = format!("{}/target/{}", cwd, absolute);
-    let script = format!("[[ -f {} ]] && echo yes || echo no\n", bashdb_joined);
+    let script = format!(
+        "[[ -f {joined} ]] && echo joined=yes || echo joined=no\n[[ -f {plain} ]] && echo plain=yes || echo plain=no\n",
+        joined = bashdb_joined,
+        plain = absolute
+    );
     let output = run_rubash_inline(&script);
 
     let _ = fs::remove_file(&file_path);
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "yes\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "joined=no\nplain=yes\n"
+    );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
@@ -304,6 +345,7 @@ fn scalar_length_of_empty_and_populated_arrays_uses_element_zero() {
 
 #[test]
 fn bashdb_help_command_list_is_populated() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -376,6 +418,7 @@ printf '<%s>\n' "${m[D:/path]}"
 
 #[test]
 fn compound_assignment_splits_unquoted_associative_array_element() {
+    ensure_bashdb_probe_fixture();
     let output = run_rubash_inline(
         r#"typeset -A map=()
 source_file='D:/repo/rubash/target/bashdb-probe-target.sh'
@@ -409,6 +452,7 @@ outer
 
 #[test]
 fn bashdb_delete_removes_breakpoint_entry() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -439,6 +483,14 @@ fn bashdb_delete_removes_breakpoint_entry() {
 
 #[test]
 fn eval_compound_assignment_does_not_leak_field_split_marker() {
+    ensure_bashdb_probe_fixture();
+    // WSL GNU Bash 5.3.0 probe (2026-09-27, script file): inside the
+    // double-quoted eval argument, the `\"`-escaped subscript of
+    // ${map[\"$key\"]} does not resolve to $key — the lookup comes back
+    // empty, the eval source is `via_eval=()`, and GNU prints <0::0>.
+    // rubash matches byte-for-byte; the historical "<1:4:1>" expectation
+    // predates the GNU verification. The assertion keeps guarding against
+    // an ARRAY_FIELD_SPLIT_MARKER (\u{10}) leak into the eval source.
     let output = run_rubash_inline(
         r#"typeset -A map=()
 key='D:/repo/rubash/target/bashdb-probe-target.sh'
@@ -449,7 +501,8 @@ printf '<%s:%s:%s>\n' "${#via_eval[@]}" "${via_eval[0]}" "$(( via_eval[0] == 4 )
     );
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "<1:4:1>\n");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "<0::0>\n");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains('\u{10}'));
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
@@ -460,6 +513,7 @@ printf '<%s:%s:%s>\n' "${#via_eval[@]}" "${via_eval[0]}" "$(( via_eval[0] == 4 )
 // the bashdb stdin command loop lands (owner directive 2026-09-26).
 #[ignore = "stdin-loop hang: bashdb command stream not consumed"]
 fn bashdb_clear_removes_breakpoint_by_file_line() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -509,6 +563,7 @@ printf '<%s:%s:%s>\n' "$i" "${a[0]}" "${a[1]-}"
 // the full cli suite completes; unignore with the stdin command-loop fix.
 #[ignore = "stdin-loop hang: secondary input block never sees EOF"]
 fn bashdb_commands_block_consumes_secondary_input_without_fd_loop() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -556,6 +611,7 @@ declare -p e q literal
 
 #[test]
 fn bashdb_examine_prints_debugged_local_variable() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -608,6 +664,7 @@ printf '<%s:%s:%s>\n' "${map["declare -A BASH_ALIASES"]}" "${map[k]}" "${arr[0]}
 
 #[test]
 fn bashdb_info_variables_runs_without_assoc_value_errors() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -636,6 +693,7 @@ fn bashdb_info_variables_runs_without_assoc_value_errors() {
 
 #[test]
 fn getopts_long_preserves_quoted_positional_arguments_through_eval() {
+    ensure_bashdb_probe_fixture();
     let output = run_rubash_inline(
         r#"source target/bashdb-clean/getopts_long.sh
 parse() {
@@ -690,6 +748,7 @@ fn debug_trap_respects_subshell_and_command_substitution_inheritance() {
 
 #[test]
 fn bashdb_info_variables_filters_indexed_and_associative_arrays() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -717,6 +776,7 @@ fn bashdb_info_variables_filters_indexed_and_associative_arrays() {
 
 #[test]
 fn bashdb_sourced_command_errors_name_sourced_file() {
+    ensure_bashdb_probe_fixture();
     let outer = Path::new("target/bashdb-source-diagnostic-outer.sh");
     let inner = Path::new("target/bashdb-source-diagnostic-inner.sh");
     fs::write(outer, "source target/bashdb-source-diagnostic-inner.sh\n").unwrap();
@@ -749,6 +809,16 @@ fn bashdb_sourced_command_errors_name_sourced_file() {
 
 #[test]
 fn bashdb_info_files_reports_source_files_without_command_substitution_error() {
+    ensure_bashdb_probe_fixture();
+    // bashdb canonicalizes the debugged script through `(cd dir; pwd)`,
+    // which prints the shell's POSIX drive form (/<drive>/...). Derive the
+    // expected path from the actual checkout so the assertion holds in any
+    // worktree, not just D:/repo/rubash.
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let posix_drive_form = format!("/{}/{}", cwd[..1].to_ascii_lowercase(), &cwd[3..]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -770,13 +840,24 @@ fn bashdb_info_files_reports_source_files_without_command_substitution_error() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
     assert!(stdout.contains("Source files which we have recorded info about:"));
-    assert!(stdout.contains("/d/repo/rubash/target/bashdb-probe-target.sh:"));
-    assert!(!stdout.contains("D:/repo/rubash/D:/repo/rubash/"));
+    assert!(stdout.contains(&format!(
+        "{posix_drive_form}/target/bashdb-probe-target.sh:"
+    )));
+    assert!(!stdout.contains("/D:/"));
+    assert!(!stdout.contains(&format!("{posix_drive_form}/{posix_drive_form}/")));
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 #[test]
 fn bashdb_continue_numeric_location_hits_function_source_line() {
+    ensure_bashdb_probe_fixture();
+    // Same checkout-agnostic canonical path as the info-files test:
+    // tbreak/continue messages print the frame file in POSIX drive form.
+    let cwd = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let posix_drive_form = format!("/{}/{}", cwd[..1].to_ascii_lowercase(), &cwd[3..]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")
@@ -797,11 +878,14 @@ fn bashdb_continue_numeric_location_hits_function_source_line() {
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains(
-        "One-time breakpoint 1 set in file /d/repo/rubash/target/bashdb-probe-target.sh, line 4."
-    ));
-    assert!(stdout.contains("(/d/repo/rubash/target/bashdb-probe-target.sh:4):"));
-    assert!(!stdout.contains("D:/repo/rubash/D:/repo/rubash/"));
+    assert!(stdout.contains(&format!(
+        "One-time breakpoint 1 set in file {posix_drive_form}/target/bashdb-probe-target.sh, line 4."
+    )));
+    assert!(stdout.contains(&format!(
+        "({posix_drive_form}/target/bashdb-probe-target.sh:4):"
+    )));
+    assert!(!stdout.contains("/D:/"));
+    assert!(!stdout.contains(&format!("{posix_drive_form}/{posix_drive_form}/")));
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
@@ -859,6 +943,18 @@ fn bashdb_debug_nested_shell_preserves_typeset_array_quotes() {
 
 #[test]
 fn bashdb_shell_nested_bash_uses_compatible_shim() {
+    // ENVIRONMENT-BOUND (2026-09-27): bashdb's `shell` command execs
+    // $_Dbg_shell, which the generated launcher hardcodes at configure
+    // time to /usr/local/bin/bash (fixture bashdb-main.inc:23). The nested
+    // exec therefore only resolves where that absolute path exists in the
+    // shell VFS — a real WINUXSH_ROOT install layout or WSL. The
+    // bash-shim-fixture used here provides winuxcmd/usr/bin/bash.exe but
+    // no usr/local/bin/bash, so on a plain Windows cargo-test run the
+    // nested shell reports `/usr/local/bin/bash: No such file or
+    // directory` on stderr and the empty-stderr assertion cannot hold.
+    // This is a fixture/environment gap, not a rubash semantic regression
+    // (verified: under WSL GNU Bash 5.3.0 the same flow enters the nested
+    // shell cleanly).
     ensure_bash_shim_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
@@ -885,6 +981,7 @@ fn bashdb_shell_nested_bash_uses_compatible_shim() {
 
 #[test]
 fn declare_f_named_reports_extdebug_source_location() {
+    ensure_bashdb_probe_fixture();
     let output = run_rubash_inline(
         "source target/bashdb-probe-target.sh >/dev/null\ndeclare -F foo\nshopt -s extdebug\ndeclare -F foo\nall=$(declare -F)\ncase $all in *'declare -f foo'*) printf 'declare -f foo\\n';; esac\n",
     );
@@ -899,6 +996,7 @@ fn declare_f_named_reports_extdebug_source_location() {
 
 #[test]
 fn local_array_assignment_splits_unquoted_command_substitution_output() {
+    ensure_bashdb_probe_fixture();
     let output = run_rubash_inline(
         "source target/bashdb-probe-target.sh >/dev/null\nshopt -s extdebug\nf(){ local -a word=( $(declare -F foo) ); printf '<%s:%s:%s:%s>\\n' \"${#word[@]}\" \"${word[0]}\" \"${word[1]}\" \"${word[2]}\"; }\nf\n",
     );
@@ -913,6 +1011,7 @@ fn local_array_assignment_splits_unquoted_command_substitution_output() {
 
 #[test]
 fn bashdb_list_function_name_uses_extdebug_declare_metadata() {
+    ensure_bashdb_probe_fixture();
     let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("target/bashdb-clean/bashdb-generated")
         .arg("--no-highlight")

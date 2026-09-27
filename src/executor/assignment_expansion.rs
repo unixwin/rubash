@@ -1341,10 +1341,36 @@ impl Executor {
                     .shell_state
                     .positional_params
                     .join(&self.ifs_first_char_separator())));
+            } else if let Some(indirect_keys_name) = whole_word_braced_parameter_body(&token)
+                .or_else(|| whole_word_braced_parameter_body(token.trim_matches('\u{E302}')))
+                .filter(|body| body.starts_with('!'))
+                .and_then(|body| {
+                    let name = &body[1..];
+                    (name.ends_with("[@]") || name.ends_with("[*]")).then_some(name)
+                })
+            {
+                // GNU subst.c:10017-10046 parameter_brace_expand's
+                // `${!ARRAY[@]}` / `${!ARRAY[*]}` arm -> arrayfunc.c:1669
+                // array_keys (assoc_keys_to_word_list /
+                // array_keys_to_word_list) -> string_list_pos_params: `@`
+                // sets W_DOLLARAT (subst.c:10034-10040), so a quoted
+                // `"${!h[@]}"` compound element is ONE WORD PER KEY — the
+                // same quoted-$@ split inside double quotes — while `*` is
+                // string_list_dollar_star's single IFS[0]-joined word.
+                // indirect_compound_assignment_values implements that
+                // fan-out (and the nameref / indirection fallthrough).
+                match self.indirect_compound_assignment_values(indirect_keys_name, true) {
+                    Some(mut expanded) => {
+                        changed = true;
+                        values.append(&mut expanded);
+                    }
+                    None => values.push(store!(&token, token_raw)),
+                }
             } else if let Some(array_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
                 .and_then(|body| body.strip_suffix("[@]"))
+                .filter(|name| !name.starts_with('!'))
                 .or_else(|| {
                     // The atomic lexer path (skip_word_at) preserves the
                     // element's wrapping quotes as raw text, so the hoist
@@ -1352,9 +1378,11 @@ impl Executor {
                     // \u{E302}${a[@]}\u{E302} with no \x1d quoted-RHS
                     // marker; the [@] list must still fan out per element
                     // (array.tests: local v=("${foo[@]}") keeps 'b c' one
-                    // element).
+                    // element). A `!`-prefixed body is the keys form
+                    // (`${!h[@]}`), never a variable named `!h`.
                     whole_word_braced_parameter_body(token.trim_matches('\u{E302}'))
                         .and_then(|body| body.strip_suffix("[@]"))
+                        .filter(|name| !name.starts_with('!'))
                 })
             {
                 if let Some(storage) = self.parameter_array_storage(array_name) {

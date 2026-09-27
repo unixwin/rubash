@@ -1584,3 +1584,77 @@ wait -p、unset 操作数）+ 标量 `(...)` RHS 误走复合赋值拆分 + 下�
 **边界规则执行**：本批未新增任何哨兵字节/PUA 码点/命名标记串；仅做了
 既有载体的消费点补齐（`\x02` ARRAYREF_FLAG 在 read/wait/unset/printf-v
 的剥离）与碰撞修复，符合 typed-carrier 迁移边界约定。
+
+## bashdb 命令语义批次（wt2/bashdbcmd 车道，2026-09-27）
+
+**基线澄清（跨车道"回归"复查结论）**：declare 车道报告的 bashdb_compat
+39/6/2 与 master 表观差异不是代码回归——用 d9fb8522 与 62c7e5fd 在同一
+干净夹具下对比，失败集完全一致。表观多出的 5 个失败全部来自
+`target/bashdb-probe-target.sh` 陈旧 5 行桩（d9fb8522 提交了 11 行新版夹具
+`tests/fixtures/bashdb/probe-target.sh`，但共享 checkout 的 target/ 未刷新），
+另 2 个为硬编码 `/d/repo/rubash/` 主仓路径期望。7ddae9e9（signal）无罪：
+其测试 `grouped_background_trap_receives_kill_from_parent` 与 bashdb 切片
+同绿。测试侧已加 `ensure_bashdb_probe_fixture()`（target/ 拷贝与 tracked
+夹具不同则自动同步），根除该类幻影。历史上 help 列表翻转点 306436d7
+实为"两个旧 bug 互相抵消"被其中之一修复后暴露（见下）。
+
+**五个根因修复（全部 WSL GNU Bash 5.3.0 脚本文件探针双壳比对）**：
+
+1. `"${!assoc[@]}"` 复合赋值元素并成一元（help 列表平铺）：
+   subst.c:10017-10046 parameter_brace_expand 的 `${!ARRAY[@]}` 臂 →
+   arrayfunc.c:1669 array_keys → string_list_pos_params 设 W_DOLLARAT
+   （subst.c:10034-10040），`[@]` 键列表在引号内仍一元素一键。 Owners:
+   `assignment_expansion.rs` 引号元素 walker 新增键枚举臂（复用
+   indirect_compound_assignment_values）+ 值臂拒认 `!` 前缀体。
+   306436d7 前是"键并元 + 引号元素误再切分"两 bug 抵消出正确输出；
+   306436d7 修掉后者后暴露前者。
+2. `eval "w=($r)"` 引号实参走赋值复合展开、ARRAY_FIELD_SPLIT_MARKER
+   加转义引号泄漏进 eval 源（bashdb `break` 的 "I can't resolve
+   filename"）：GNU builtins/eval.def:55 evalstring(string_list(list))
+   ——实参按普通词展开（general.c:479 assignment() 只认未引号原始
+   token），引号内 `name=(...)` 是数据。 Owner:
+   `command_prepare.rs` expand_command_word 新增全引号赋值形实参门
+   （DoubleQuoted 上下文单次展开，无标记无转义）。
+3. PWD 形态分裂（启动 `/d/…`、cd 后 `D:/…`；bashdb `_Dbg_is_file` 按
+   前导 `/` 分流 → 走 `_Dbg_dir` 拼接出 `D:/…/D:/…` 双盘路径）：
+   GNU cd.def:136-175 bindpwd 存唯一规范 PWD，pwd.def 原样回显。
+   Owners: `executor/path.rs` 新居 `shell_pwd_display_path`（受
+   `shell_path_style_enabled` 门控：默认 POSIX `/<盘>/…`，导出
+   WINUXSH_SHELL_PATH_STYLE 的宿主保持 D:/ 原生形）；`builtins/cd.rs`
+   逻辑/物理与 CDPATH 打印统一走该门；`builtins/pwd.rs` 逻辑回显与
+   `-P` 输出同门。
+4. 中路径盘符尾巴被当盘符（`Z:/nope/D:/…` 解析成 `D:/…`，使双盘路径
+   `[[ -f ]]` 为真）：Win32 冒号仅位置 1 合法；GNU stat 对应双拼
+   /mnt 路径失败。 Owner: `path.rs` windows_drive_absolute_tail_index
+   仅认前导斜杠后的盘符前缀。bashdb 帧文件名现为 `/d/…` 规范形，
+   `_Dbg_is_file` 绝对路径臂直命中（break/continue/tbreak/info files
+   与 GNU 逐字节同构，仅平台前缀 /d vs /mnt 差异）。
+5. `$_` 存原始复合词 `w=__RUBASH_CA1__()` → 裸 `declare` 全列表渲染
+   时 COMPOUND_ASSIGNMENT_MARKER 泄漏（debug 断言 panic，bashdb
+   `info variables` 触发）：execute_cmd.c:4188 bind_lastarg 绑的是
+   去引号后的纯文本。 Owner: `command_words.rs`
+   update_underscore_parameter 剥标记后入库。
+
+**陈旧测试期望更正（GNU 探针为证）**：
+- `eval_compound_assignment_does_not_leak_field_split_marker`：GNU
+  5.3.0 对该精确脚本打印 `<0::0>`（`\"` 转义下标在双引号内不解析成
+  $key），rubash 逐字节一致；期望 `<1:4:1>` 改为 `<0::0>` 并加 \u{10}
+  不泄漏断言。
+- `windows_drive_absolute_tail…`：改为断言双盘拼接 `[[ -f ]]` 为 no、
+  纯绝对路径为 yes（原测试把错误层 workaround 当语义）。
+- continue/info-files 两测试改为从当前 checkout 推导期望路径（不再
+  硬编码 /d/repo/rubash，任意 worktree 可跑）。
+- pwd/path 三个单测更新到门控后语义（含 `/D:/…` 前缀盘符正例）。
+
+**bashdb 切片计数**：48 测试（含 scripts::1）修复前 38 过/8 败/2 忽
+（夹具正确时）→ 修复后 **45 过/1 败/2 忽**。唯一残留
+`bashdb_shell_nested_bash_uses_compatible_shim` 为环境束缚：launcher
+硬编码 configure 期 SHELL=/usr/local/bin/bash（fixture
+bashdb-main.inc:23），嵌套 shell 仅在真实 WINUXSH_ROOT 布局或 WSL 下
+可解析；shim 夹具只提供 winuxcmd/usr/bin/bash.exe，无 usr/local/bin/
+bash，故普通 Windows cargo-test 下 stderr 必有 "No such file or
+directory"。已在测试内注释文档化，非 rubash 语义回归（WSL GNU 同流
+程正常进入嵌套 shell）。全量 cli_tests：458/15（修前，含同批前序修复）
+→ 466/7，零新增失败；cargo test --lib 479 全绿；cargo check --tests
+x86_64-unknown-linux-gnu 与 aarch64-apple-darwin 零警告；signal 车道
+grouped_background_trap_receives_kill_from_parent 保持绿。

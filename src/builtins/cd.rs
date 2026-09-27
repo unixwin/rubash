@@ -189,7 +189,18 @@ where
     };
 
     let pwd_value = match mode {
-        Mode::Logical => new_pwd_display.clone(),
+        // GNU builtins/cd.def:136-175 bindpwd stores ONE canonical logical
+        // PWD string that `pwd` then echoes verbatim (pwd.def). Rubash's
+        // canonical form is selected by shell_path_style_enabled
+        // (executor/path.rs): the default (style unset) is the POSIX
+        // /<drive>/... spelling the startup PWD already uses, so the
+        // logical destination must pass through the same style gate as
+        // the physical value. Without it a session mixes "/d/..."
+        // (startup) with "D:/..." (after the first cd), and downstream
+        // tools that classify paths by a leading '/' (bashdb
+        // _Dbg_is_file's absolute-name branch) misroute. Hosts that
+        // exported WINUXSH_SHELL_PATH_STYLE keep the native display.
+        Mode::Logical => shell_pwd_display_path(&new_pwd_display),
         Mode::Physical => shell_pwd_display_path(&new_pwd.to_string_lossy()),
     };
     // GNU builtins/cd.def:136-175 bindpwd: if PWD or OLDPWD is readonly,
@@ -228,8 +239,10 @@ where
     env_vars.remove("__RUBASH_PHYSICAL_PWD");
 
     match target.print {
-        PrintPath::Always => writeln!(stdout, "{}", new_pwd_display)?,
-        PrintPath::CdPath => writeln!(stdout, "{}", new_pwd_display)?,
+        // GNU cd.def prints the new directory exactly as bindpwd stored it
+        // in PWD — one canonical form (see the pwd_value gate above).
+        PrintPath::Always => writeln!(stdout, "{}", shell_pwd_display_path(&new_pwd_display))?,
+        PrintPath::CdPath => writeln!(stdout, "{}", shell_pwd_display_path(&new_pwd_display))?,
         _ => {}
     }
 

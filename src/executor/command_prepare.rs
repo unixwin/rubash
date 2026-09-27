@@ -928,6 +928,39 @@ impl Executor {
                 }
             }
         }
+        // A fully double-quoted assignment-shaped eval operand —
+        // `eval "w=($r)"` / bashdb's `eval "word=($(_Dbg_parse_linespec
+        // $linespec))"`. GNU builtins/eval.def evalstring expands
+        // arguments as NORMAL words (execute_cmd.c execute_builtin ->
+        // expand_words_no_vars): a quoted word keeps W_QUOTED and never
+        // gains W_ASSIGNMENT — general.c:480 assignment() is consulted on
+        // raw UNQUOTED tokens only — so the `name=(...)` text is DATA.
+        // Embedded parameters expand exactly once in the quoted context,
+        // quote characters inside an expansion result stay literal, and no
+        // compound-array field markers (ARRAY_FIELD_SPLIT_MARKER) or
+        // quote-escaping are inserted. eval then joins its argv and
+        // re-parses the string, where those quote characters become
+        // syntax again — `w=(4 0 "D:/x")` yields w[2]=D:/x, not
+        // "D:/x". Without this gate the general path routes the word
+        // through expand_assignment_word's compound machinery, which
+        // serializes marker-tagged escaped fields into the eval source.
+        if cmd.words.first().map(String::as_str) == Some("eval")
+            && index > 0
+            && !word.contains(COMPOUND_ASSIGNMENT_MARKER)
+            && raw.is_some_and(|raw| raw.len() >= 2 && raw.starts_with('"') && raw.ends_with('"'))
+            && word.split_once('=').is_some_and(|(name, value)| {
+                crate::executor::assignment_helpers::split_assignment_word(word)
+                    .is_some_and(|(checked, _)| checked == name)
+                    && value.starts_with('(')
+                    && value.ends_with(')')
+            })
+        {
+            let inner = &raw.unwrap()[1..raw.unwrap().len() - 1];
+            return vec![self.expand_embedded_parameters_mut_with_context(
+                inner,
+                SubstitutionQuoteContext::DoubleQuoted,
+            )];
+        }
         // GNU subst.c materializes a complete quoted arithmetic expansion before
         // word splitting. Keep it out of the legacy `$()` materializer, which
         // otherwise treats the inner `+` as a command word.

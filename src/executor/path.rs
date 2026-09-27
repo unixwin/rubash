@@ -1692,7 +1692,19 @@ fn windows_drive_absolute_tail_index(path: &str) -> Option<usize> {
             && (index == 0 || bytes[index - 1] == b'/')
         {
             if index > 0 {
-                return Some(index);
+                // A drive designator is only valid as a path PREFIX: `X:/…`
+                // or `/X:/…` (optional leading slashes). An `X:/` pattern
+                // that follows real path components — bashdb's `_Dbg_dir`
+                // join produces `D:/repo/wt/D:/repo/wt/target/x.sh` — is an
+                // invalid mid-path component, not a drive: Win32 only
+                // accepts a colon at position 1. Mapping the tail as a
+                // drive silently resolves the joined text to a REAL file,
+                // so `[[ -f <cdir>/<absolute-drive-path> ]]` returned true
+                // where GNU's stat() fails on the doubled path.
+                if bytes[..index].iter().all(|byte| *byte == b'/') {
+                    return Some(index);
+                }
+                continue;
             }
             leading_drive = Some(index);
         }
@@ -2319,12 +2331,23 @@ mod tests {
             shell_path_to_windows("C:/Users/example", &env_vars),
             PathBuf::from(r"C:/Users/example")
         );
+        // A drive pattern after real path components is an invalid mid-path
+        // component (Win32: a colon is only valid at position 1; GNU stat
+        // fails on the analogous doubled /mnt path), not a drive designator
+        // — the joined text stays relative to the Z: root so `[[ -f ]]`
+        // fails like bashdb's `_Dbg_dir` join does on GNU.
         assert_eq!(
             shell_path_to_windows(
                 "Z:/nope/D:/repo/rubash/target/bashdb-probe-target.sh",
                 &env_vars
             ),
-            PathBuf::from(r"D:/repo/rubash/target/bashdb-probe-target.sh")
+            PathBuf::from(r"Z:\nope\D:\repo\rubash\target\bashdb-probe-target.sh")
+        );
+        // A drive pattern directly after the leading slash IS a prefix
+        // drive designator (the `/D:/…` spelling).
+        assert_eq!(
+            shell_path_to_windows("/D:/repo/rubash/target/bashdb-probe-target.sh", &env_vars),
+            PathBuf::from(r"D:\repo\rubash\target\bashdb-probe-target.sh")
         );
         assert_eq!(
             shell_path_to_windows("/dev/null", &env_vars),
@@ -3307,5 +3330,43 @@ mod tests {
         } else {
             value
         }
+    }
+}
+
+/// The canonical PWD display form: `D:/…` when the host enabled the
+/// shell-native path style (`shell_path_style_enabled`, e.g. WINUXSH
+/// exporting WINUXSH_SHELL_PATH_STYLE), otherwise the POSIX `/<drive>/…`
+/// spelling that matches the startup PWD and GNU's single canonical form
+/// (builtins/cd.def:136-175 bindpwd stores one value; pwd.def echoes it).
+/// A `D:/…/D:/…` doubled-drive artifact is collapsed in native mode.
+pub(crate) fn shell_pwd_display_path(path: &str) -> String {
+    let value = path.replace('\\', "/");
+    if shell_path_style_enabled() {
+        if value.len() >= 5
+            && value.as_bytes()[1] == b':'
+            && value.as_bytes()[2] == b'/'
+            && value.as_bytes()[3].to_ascii_lowercase() == value.as_bytes()[0].to_ascii_lowercase()
+            && value.as_bytes()[4] == b'/'
+        {
+            return format!("{}{}", &value[..3], &value[5..]);
+        }
+        return if value.is_empty() {
+            "/".to_string()
+        } else {
+            value
+        };
+    }
+    if cfg!(windows)
+        && value.len() >= 3
+        && value.as_bytes()[1] == b':'
+        && value.as_bytes()[2] == b'/'
+    {
+        let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
+        return format!("/{drive}/{}", &value[3..]);
+    }
+    if value.is_empty() {
+        "/".to_string()
+    } else {
+        value
     }
 }

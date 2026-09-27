@@ -108,37 +108,7 @@ pub(super) fn logical_pwd_var_display(path: &Path) -> String {
     }
 }
 
-pub(super) fn shell_pwd_display_path(path: &str) -> String {
-    let value = path.replace('\\', "/");
-    if crate::executor::path::shell_path_style_enabled() {
-        if value.len() >= 5
-            && value.as_bytes()[1] == b':'
-            && value.as_bytes()[2] == b'/'
-            && value.as_bytes()[3].to_ascii_lowercase() == value.as_bytes()[0].to_ascii_lowercase()
-            && value.as_bytes()[4] == b'/'
-        {
-            return format!("{}{}", &value[..3], &value[5..]);
-        }
-        return if value.is_empty() {
-            "/".to_string()
-        } else {
-            value
-        };
-    }
-    if cfg!(windows)
-        && value.len() >= 3
-        && value.as_bytes()[1] == b':'
-        && value.as_bytes()[2] == b'/'
-    {
-        let drive = (value.as_bytes()[0] as char).to_ascii_lowercase();
-        return format!("/{drive}/{}", &value[3..]);
-    }
-    if value.is_empty() {
-        "/".to_string()
-    } else {
-        value
-    }
-}
+pub(super) use crate::executor::path::shell_pwd_display_path;
 
 fn windows_slash_drive_display_to_native(path: &str) -> Option<String> {
     if !cfg!(windows) {

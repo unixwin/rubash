@@ -4,9 +4,17 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 impl Executor {
     pub(in crate::executor) fn update_underscore_parameter(&mut self, cmd: &CommandNode) {
         if let Some(value) = cmd.words.last() {
-            self.shell_state
-                .env_vars
-                .insert("_".to_string(), value.clone());
+            // GNU execute_cmd.c:4188 bind_lastarg binds `$_` to the last
+            // word's text — a plain string with internal quoting already
+            // removed; GNU has no in-band carriers. Rubash's parse-time
+            // word for a compound-assignment operand (`w=()`) still
+            // carries the COMPOUND_ASSIGNMENT_MARKER flag
+            // (`w=__RUBASH_CA1__()`), which must never reach a variable
+            // cell: `declare`'s full listing renders `$_` verbatim and the
+            // marker would leak into output (bashdb `info variables` runs
+            // a bare `declare` inside a process substitution).
+            let visible = value.replace(COMPOUND_ASSIGNMENT_MARKER, "");
+            self.shell_state.env_vars.insert("_".to_string(), visible);
         }
     }
 
