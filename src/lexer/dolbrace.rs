@@ -51,12 +51,64 @@ pub(crate) fn scan_braced_parameter_body(input: &str, options: BraceContext) -> 
     Some(scan)
 }
 
+/// Zero-allocation body scan over a char slice that starts *after* the
+/// `${` prefix (the whole-buffer continuation scanner's hot path,
+/// rubash#185: the &str API above would re-collect the rest of a
+/// multi-kilobyte accumulated script buffer for every `${`).
+/// `end`/`offsets` are CHAR indices into `chars`, matching the caller's
+/// slice indexing.
+pub(crate) fn scan_braced_parameter_body_chars(
+    chars: &[char],
+    options: BraceContext,
+) -> Option<BracedScan> {
+    let mut scan = scan_braced_chars_from(chars, 0, options)?;
+    for event in &mut scan.quote_events {
+        event.offset = event.offset.saturating_sub(2);
+    }
+    scan.end = scan.end.saturating_sub(2);
+    Some(scan)
+}
+
 pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Option<BracedScan> {
     if !input.starts_with("${") {
         return None;
     }
-    let chars: Vec<(usize, char)> = input.char_indices().collect();
-    let mut cursor = 2usize;
+    let chars: Vec<char> = input.chars().collect();
+    let scan = scan_braced_chars_from(&chars, 0, options)?;
+    // Translate char indices to byte offsets for the &str API contract.
+    let mut char_to_byte = Vec::with_capacity(scan.end + 1);
+    let mut max_event = scan.end;
+    for event in &scan.quote_events {
+        max_event = max_event.max(event.offset);
+    }
+    for (byte, (index, _)) in input.char_indices().enumerate() {
+        if index > max_event {
+            break;
+        }
+        char_to_byte.push(byte);
+    }
+    let translate =
+        |index: usize| -> usize { char_to_byte.get(index).copied().unwrap_or(input.len()) };
+    let mut scan = scan;
+    scan.end = translate(scan.end);
+    for event in &mut scan.quote_events {
+        event.offset = translate(event.offset);
+    }
+    Some(scan)
+}
+
+/// The state machine shared by both entry points: GNU-style scanning of a
+/// `${...}` span whose opening `${` sits at `start` of `chars`. Returns
+/// CHAR indices (the closing-`}` position plus one, quote-event offsets).
+fn scan_braced_chars_from(
+    chars: &[char],
+    start: usize,
+    options: BraceContext,
+) -> Option<BracedScan> {
+    if chars.get(start) != Some(&'$') || chars.get(start + 1) != Some(&'{') {
+        return None;
+    }
+    let mut cursor = start + 2usize;
     let mut depth = 1usize;
     let mut state = options.initial_state;
     let mut states = Vec::new();
@@ -69,33 +121,31 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
     let mut quote_stack: Vec<(bool, bool)> = Vec::new();
     let mut quote_events = Vec::new();
     while cursor < chars.len() {
-        let (offset, ch) = chars[cursor];
+        let ch = chars[cursor];
         cursor += 1;
         if ch == '\\' && !single {
             cursor = cursor.saturating_add(1);
             continue;
         }
         if ch == '`' && !single {
-            cursor = skip_backtick(&chars, cursor);
+            cursor = skip_backtick(chars, cursor);
             continue;
         }
-        if (ch == '<' || ch == '>')
-            && chars.get(cursor).is_some_and(|(_, next)| *next == '(')
-            && !single
+        if (ch == '<' || ch == '>') && chars.get(cursor).is_some_and(|next| *next == '(') && !single
         {
-            cursor = skip_parenthesized(&chars, cursor + 1);
+            cursor = skip_parenthesized(chars, cursor + 1);
             continue;
         }
-        if ch == '$' && chars.get(cursor).is_some_and(|(_, next)| *next == '(') && !single {
-            let open = if chars.get(cursor + 1).is_some_and(|(_, next)| *next == '(') {
+        if ch == '$' && chars.get(cursor).is_some_and(|next| *next == '(') && !single {
+            let open = if chars.get(cursor + 1).is_some_and(|next| *next == '(') {
                 cursor + 1
             } else {
                 cursor
             };
-            cursor = skip_parenthesized(&chars, open + 1);
+            cursor = skip_parenthesized(chars, open + 1);
             continue;
         }
-        if ch == '$' && chars.get(cursor).is_some_and(|(_, next)| *next == '{') && !single {
+        if ch == '$' && chars.get(cursor).is_some_and(|next| *next == '{') && !single {
             cursor += 1;
             states.push(state);
             quote_stack.push((double, single));
@@ -113,14 +163,10 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
         // $'...' ANSI-C quoting: skip the entire string (handling \' escapes)
         // so the closing ' is not mistaken for a single-quote toggle, which
         // would prevent the real closing } from being found (nquote2.sub).
-        if ch == '$'
-            && chars.get(cursor).is_some_and(|(_, next)| *next == '\'')
-            && !single
-            && !double
-        {
+        if ch == '$' && chars.get(cursor).is_some_and(|next| *next == '\'') && !single && !double {
             cursor += 1; // skip the '
             while cursor < chars.len() {
-                let (_, quoted_ch) = chars[cursor];
+                let quoted_ch = chars[cursor];
                 cursor += 1;
                 if quoted_ch == '\\' {
                     cursor = cursor.saturating_add(1); // skip escaped char
@@ -136,7 +182,7 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
             depth -= 1;
             if depth == 0 {
                 return Some(BracedScan {
-                    end: offset + ch.len_utf8(),
+                    end: cursor,
                     final_state: state,
                     quote_events,
                 });
@@ -147,7 +193,7 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
         }
         if ch == '\'' && !double {
             quote_events.push(QuoteEvent {
-                offset,
+                offset: cursor - 1,
                 kind: QuoteEventKind::Single,
                 state,
             });
@@ -165,7 +211,7 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
         }
         if ch == '"' && !single {
             quote_events.push(QuoteEvent {
-                offset,
+                offset: cursor - 1,
                 kind: QuoteEventKind::Double,
                 state,
             });
@@ -193,11 +239,11 @@ pub(crate) fn scan_braced_parameter(input: &str, options: BraceContext) -> Optio
     None
 }
 
-fn skip_backtick(chars: &[(usize, char)], mut cursor: usize) -> usize {
+fn skip_backtick(chars: &[char], mut cursor: usize) -> usize {
     while cursor < chars.len() {
-        if chars[cursor].1 == '\\' {
+        if chars[cursor] == '\\' {
             cursor = cursor.saturating_add(2);
-        } else if chars[cursor].1 == '`' {
+        } else if chars[cursor] == '`' {
             return cursor + 1;
         } else {
             cursor += 1;
@@ -206,11 +252,11 @@ fn skip_backtick(chars: &[(usize, char)], mut cursor: usize) -> usize {
     chars.len()
 }
 
-fn skip_parenthesized(chars: &[(usize, char)], mut cursor: usize) -> usize {
+fn skip_parenthesized(chars: &[char], mut cursor: usize) -> usize {
     let mut depth = 1usize;
     let mut quote = None;
     while cursor < chars.len() {
-        let ch = chars[cursor].1;
+        let ch = chars[cursor];
         cursor += 1;
         if ch == '\\' {
             cursor = cursor.saturating_add(1);
