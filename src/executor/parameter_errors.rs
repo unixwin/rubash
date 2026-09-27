@@ -1160,12 +1160,31 @@ impl Executor {
                     .then(|| core.to_string());
             }
             if is_shell_name(base) {
-                // GNU subst.c: `${a[k]}` (and the `#a[k]` length form) is
-                // unbound when the element itself does not exist, reporting
-                // the full `a[k]` reference (nameref25.sub ok 1 reports
-                // `a[k]: unbound variable` for an empty array).
+                // GNU subst.c: the VALUE form `${a[k]}` is unbound when the
+                // element itself does not exist, reporting the full `a[k]`
+                // reference (nameref25.sub ok 1 reports `a[k]: unbound
+                // variable` for an empty array). The LENGTH form `${#a[k]}`
+                // is owned by array_length_reference (subst.c:7488-7519)
+                // instead: a real array never reports unbound there — unset
+                // elements have length 0 (subst.c:7538-7539 and 7571-7574;
+                // `${#a[5]}` with a=(x) and `${#h[missing]}` with a set
+                // assoc both print `0` under nounset, probes 2026-09-27) —
+                // while an absent, declared-unset, or scalar base IS unbound
+                // (subst.c:7502-7508) via the fatal INTMAX_MIN route
+                // (subst.c:9945-9951, e.g. `b[0]: unbound variable` for a
+                // set scalar under nounset).
                 if let Some((abase, sub)) = parse_array_subscript(core) {
-                    return self.nounset_array_element_unbound(abase, sub, core);
+                    if core.len() == name.len() {
+                        return self.nounset_array_element_unbound(abase, sub, core);
+                    }
+                    if sub == "@" || sub == "*" {
+                        // The `@`/`*` subscript takes array_length_reference's
+                        // non-fatal ksh93 branch (subst.c:7510-7516), which
+                        // expand_braced_indexed_parameter reports with the
+                        // expansion-error rails; never fatal from here.
+                        return None;
+                    }
+                    return self.nounset_length_reference_unbound(abase, core);
                 }
                 return (!self.dynamic_parameter_is_set(base)
                     && !self.shell_state.env_vars.contains_key(base)
@@ -1272,6 +1291,29 @@ impl Executor {
     /// GNU subst.c check_unbound_variable: whether an `a[sub]` element
     /// reference is unbound -- `[@]`/`[*]` are never unbound, an absent
     /// element reports the whole `a[k]` reference text.
+    /// GNU subst.c:7502-7508 array_length_reference: in the `${#base[sub]}`
+    /// length form, an absent (var == 0), declared-unset (att_invisible ->
+    /// DECLARED_UNSET_VARS), or non-array (assoc_p == 0 && array_p == 0,
+    /// i.e. a plain scalar) base under nounset returns INTMAX_MIN, which the
+    /// caller (subst.c:9945-9951 parameter_brace_expand) turns into a fatal
+    /// `base[sub]: unbound variable`. A real array/assoc base never reaches
+    /// that branch: unset elements report length 0 (subst.c:7538-7539).
+    fn nounset_length_reference_unbound(&self, base: &str, reported: &str) -> Option<String> {
+        let storage = self.parameter_array_storage(base);
+        let resolved = self
+            .resolved_variable_name(base)
+            .unwrap_or_else(|| base.to_string());
+        let is_array = storage.as_deref().is_some_and(is_array_storage)
+            || is_marked_array_var(&self.shell_state.env_vars, &resolved);
+        // FUNCNAME is att_invisible outside functions (variables.c:1812),
+        // so it is in the unbound class at function_depth == 0 here too.
+        let unbound = storage.is_none()
+            || (base == "FUNCNAME" && self.shell_state.function_depth == 0)
+            || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, &resolved)
+            || !is_array;
+        unbound.then(|| reported.to_string())
+    }
+
     fn nounset_array_element_unbound(
         &self,
         base: &str,

@@ -345,12 +345,53 @@ impl Executor {
             if array_name == "GROUPS" {
                 return Some(self.groups_words().len().to_string());
             }
+            let storage = self.parameter_array_storage(array_name);
+            let resolved = self
+                .resolved_variable_name(array_name)
+                .unwrap_or_else(|| array_name.to_string());
+            let is_array = storage.as_deref().is_some_and(is_array_storage)
+                || is_marked_array_var(&self.shell_state.env_vars, &resolved);
+            // GNU subst.c:7502-7517 array_length_reference: with nounset
+            // active, an absent (var == 0), declared-unset
+            // (att_invisible -> DECLARED_UNSET_VARS), or non-array
+            // (assoc_p == 0 && array_p == 0, i.e. a plain scalar) variable
+            // is an error in the all-elements length form. Because the
+            // subscript IS `@'/`*', the ksh93 branch applies (subst.c:7510-
+            // 7516): err_unboundvar prints `name: unbound variable` (the
+            // subscript is temporarily NUL'd at subst.c:7512-7513, so the
+            // message carries only the bare name), set_exit_status(1) runs
+            // (subst.c:7504), and the returned -1 becomes &expand_wdesc_error
+            // (subst.c:9955-9956): the enclosing command is abandoned but
+            // the script continues with $? == 1. The non-fatal
+            // expansion-error rails below mirror the err_badarraysub path
+            // (subst.c:7568) already used by expand_braced_length_parameter.
+            // FUNCNAME carries att_invisible outside any function
+            // (variables.c:1812 make_funcname_visible), so it joins the
+            // unbound class at function_depth == 0 even though the init
+            // marks it in ARRAY_VARS (probe 2026-09-27: set -u;
+            // echo ${#FUNCNAME[@]} at top level errors non-fatally, the
+            // other dynamic arrays do not).
+            let unbound_class = storage.is_none()
+                || (array_name == "FUNCNAME" && self.shell_state.function_depth == 0)
+                || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, &resolved)
+                || !is_array;
+            if unbound_class
+                && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+            {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}{array_name}: unbound variable\n",
+                        self.diagnostic_prefix()
+                    )
+                    .as_bytes(),
+                );
+                self.shell_state.arithmetic_nonfatal_error.set(true);
+                return Some(String::new());
+            }
             return Some(
-                self.parameter_array_storage(array_name)
+                storage
                     .map(|value| {
-                        if is_marked_array_var(&self.shell_state.env_vars, array_name)
-                            || is_array_storage(&value)
-                        {
+                        if is_array {
                             self.array_length(array_name)
                         } else {
                             1

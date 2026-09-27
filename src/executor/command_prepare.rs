@@ -405,6 +405,38 @@ impl Executor {
                 // (GNU Bash 5.2: `y=$((1 ? 20 : x+=2))` continues).
                 self.exit_code = 1;
             }
+            if !assignment_result.arithmetic_error && assignment_result.arithmetic_nonfatal_error {
+                // GNU subst.c:7502-7516 array_length_reference: the ksh93
+                // `[@]`/`[*]` unbound diagnostic (and err_badarraysub,
+                // subst.c:7568) returns -1, which parameter_brace_expand maps
+                // to &expand_wdesc_error (subst.c:9955-9956). The word
+                // expansion fails, so no assignment is installed; set_exit_
+                // status(EXECUTION_FAILURE) (subst.c:7504) leaves $? == 1 and
+                // exp_jump_to_top_level(DISCARD) abandons the remaining
+                // same-line commands while the script continues (probe
+                // 2026-09-27: `v=${#b[@]}; echo $?` prints the diagnostic and
+                // 1, v stays unset). A compound `a=(${#b[@]})` still binds a
+                // brand-new a as an empty indexed array: assign_array_from_
+                // string (arrayfunc.c:507-517) runs find_or_make_array_
+                // variable BEFORE assign_array_var_from_string expands the
+                // elements — same contract as fail_compound_array_assignment
+                // (failglob, niubash #121).
+                self.exit_code = 1;
+                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                    let stripped = name.strip_suffix('+').unwrap_or(name);
+                    let base = stripped.split_once('[').map_or(stripped, |(base, _)| base);
+                    if !self.shell_state.env_vars.contains_key(base)
+                        && !is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base)
+                    {
+                        self.shell_state.env_vars.insert(
+                            base.to_string(),
+                            format_indexed_array_storage(BTreeMap::new()),
+                        );
+                        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
+                    }
+                }
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
             if let Some(substitution_status) = substitution_status {
                 status = substitution_status;
             }
