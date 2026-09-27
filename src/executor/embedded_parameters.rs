@@ -332,6 +332,42 @@ impl Executor {
                 }
                 Some('{') => {
                     chars.next();
+                    // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: a
+                    // `${` followed by a blank, newline or `|` introduces a
+                    // bash-5.3 nofork command substitution (`${ cmd; }` /
+                    // valsub `${| cmd; }`), handled by function_substitute
+                    // (subst.c:6917). Extract the balanced body before the
+                    // parameter-name collector sees it.
+                    if let Some(&introducer) = chars.peek() {
+                        if crate::executor::command_substitution::funsub_introducer(introducer)
+                            .is_some()
+                        {
+                            if let Some((body, valsub)) =
+                                crate::executor::command_substitution::extract_funsub_body(
+                                    &mut chars,
+                                )
+                            {
+                                if crate::executor::command_substitution::funsub_body_is_terminated(
+                                    &body,
+                                ) {
+                                    let value = protect_command_substitution_output(
+                                        &substitution_result_visible_text(
+                                            &self.function_substitute(&body, valsub),
+                                        ),
+                                    );
+                                    if preserve_quotes && !in_double {
+                                        output.push_str(&mark_expansion_whitespace(
+                                            &value,
+                                            preserve_quotes,
+                                        ));
+                                    } else {
+                                        output.push_str(&value);
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     // GNU param_expand resolves one `${}` expansion once:
                     // memoize array-element fetches for this fragment so a
                     // subscript's side effects run once (AEPV_MEMO).

@@ -1,6 +1,5 @@
 use super::*;
 use crate::executor::markers::DATA_DOLLAR;
-use crate::executor::path::shell_directory_entries;
 
 /// Normalize error-line attribution across a parsed command-substitution
 /// body so diagnostics match GNU's comsub line namespace (rubash#136).
@@ -265,24 +264,36 @@ impl Executor {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
-        if let Some(path) = source.strip_prefix('<') {
-            let raw_path = path.trim();
-            let allow_glob = !readfile_path_is_quoted(raw_path);
-            let expanded = self.expand_word(raw_path);
-            let path = strip_matching_quotes(&expanded);
-            if let Some(path) = self.command_substitution_read_path(&path, allow_glob) {
-                return fs::read_to_string(path)
-                    .map(|value| {
-                        self.last_command_substitution_status.set(Some(0));
-                        value.trim_capture_terminator().to_string()
-                    })
-                    .unwrap_or_else(|_| {
-                        self.last_command_substitution_status.set(Some(1));
-                        String::new()
-                    });
+        if let Some(rest) = source.strip_prefix('<') {
+            // GNU subst.c:7162-7179 command_substitute: a body whose first
+            // non-blank character is `<` (not followed by `<`, `>`, or `&`)
+            // is parsed with parse_string_to_command (y.tab.c:7191,
+            // SEVAL_ONECMD, whole-string consumption) and admitted by
+            // can_optimize_cat_file (builtins/evalstring.c:199): exactly one
+            // simple command with no words and exactly one fd-0
+            // r_input_direction. Then optimize_cat_file (subst.c:6665) opens
+            // the operand via open_redir_file (builtins/evalstring.c:759) —
+            // a failed open reports
+            // internal_error ("%s: %s", fn, strerror (errno)) there and the
+            // substitution yields empty output with EXECUTION_FAILURE
+            // (subst.c:7169-7173); an operand that redirection_expand
+            // (redir.c:298) resolves to zero or several words is
+            // AMBIGUOUS_REDIRECT (redir.c:200). Any other body — trailing
+            // words, extra redirections, lists, parse errors — is an
+            // ordinary subshell body that must reach the real
+            // parser/executor below, never be read as one long filename
+            // (rubash#196). Admission is decided by the real parser (the
+            // rubash#117 whitelist discipline), not by a text heuristic.
+            let heredoc_or_fdop_prefix =
+                matches!(rest.chars().next(), Some('<' | '>' | '&') | None);
+            let cat_file_target = if heredoc_or_fdop_prefix {
+                None
+            } else {
+                self.comsub_cat_file_target(source)
+            };
+            if let Some((target, raw_word)) = cat_file_target {
+                return self.comsub_cat_file_substitute(&target, &raw_word);
             }
-            self.last_command_substitution_status.set(Some(1));
-            return String::new();
         }
         // GNU trap.c reset_or_restore_signal_handlers (~1588): a command
         // substitution child keeps the DEBUG trap only when
@@ -913,28 +924,384 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn command_substitution_read_path(
-        &self,
-        path: &str,
-        allow_glob: bool,
-    ) -> Option<PathBuf> {
-        if !allow_glob || !path.contains('*') || self.posix_mode_enabled() {
-            return Some(shell_path_to_windows(path, &self.shell_state.env_vars));
+    /// subst.c:6917 function_substitute: the bash-5.3 nofork command
+    /// substitution `${ cmd; }` (funsub) runs the body with fd 1 captured
+    /// to an anonymous file whose contents — trailing newlines stripped by
+    /// read_comsub — become the substitution text
+    /// (subst.c:7100-7107/7133-7136). `${| cmd; }` (valsub) captures
+    /// nothing: the body's fd 1 stays the shell's own stdout and the
+    /// substitution value is the body's final $REPLY (subst.c:7041-7045
+    /// make_local_variable("REPLY"), 7112-7115 — the local binding dies
+    /// with the unwind frame). Status in both forms:
+    /// last_command_subst_status = the body's parse_and_execute result,
+    /// and last_command_exit_value follows it outside POSIX mode
+    /// (subst.c:7120-7122).
+    ///
+    /// Persistence: GNU runs the body in the CURRENT shell, so variable
+    /// assignments, unsets and function definitions inside the body
+    /// outlive the substitution. rubash's subshell executor forwards those
+    /// mutations back (verified against WSL GNU Bash 5.3.0, probes
+    /// target/p196/fresh/f4a.sh: `x=1; r=${ x=7; }` -> x=7,
+    /// `${ unset y; }` -> y unset, `${ f2() {...}; }` -> f2 defined —
+    /// all byte-identical to GNU). The parser-level admission
+    /// (parser.h:85 FUNSUB_CHAR, and the required `;`/newline terminator
+    /// before `}`) is enforced exactly; an escaped quote inside the body
+    /// when the whole word is double-quoted (`"${ echo \"}\"; }"`) still
+    /// mis-scans (documented gap).
+    pub(in crate::executor) fn function_substitute(&self, body: &str, valsub: bool) -> String {
+        let body = body.trim();
+        if body.is_empty() {
+            // subst.c:6931-6935: a body of only blanks is no command to
+            // run; the substitution is empty with success status.
+            self.last_command_substitution_status.set(Some(0));
+            return String::new();
         }
-
-        let normalized = path.replace('\\', "/");
-        let (dir, pattern) = normalized
-            .rsplit_once('/')
-            .map(|(dir, pattern)| (if dir.is_empty() { "/" } else { dir }, pattern))
-            .unwrap_or((".", normalized.as_str()));
-        let mut matches = shell_directory_entries(dir, &self.shell_state.env_vars)
-            .ok()?
-            .into_iter()
-            .filter_map(|entry| case_pattern_matches(pattern, &entry.name).then_some(entry.path))
-            .collect::<Vec<_>>();
-        matches.sort();
-        matches.into_iter().next()
+        let start_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|line| line.parse::<usize>().ok())
+            .filter(|line| *line > 0)
+            .unwrap_or(1);
+        let tokens =
+            crate::lexer::tokenize_comsub_body(body, self.posix_mode_enabled(), start_line, true);
+        let mut ast = crate::parser::parse(&tokens);
+        normalize_comsub_body_statement_lines(&mut ast, &tokens);
+        if ast.commands.iter().any(command_has_parse_error) {
+            if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
+                self.report_command_parse_error(command);
+            }
+            self.last_command_substitution_parse_error.set(true);
+            self.last_command_substitution_status.set(Some(2));
+            return String::new();
+        }
+        let saved_dir = env::current_dir().ok();
+        let mut subshell = self.command_substitution_executor();
+        let posix_mode = self.posix_mode_enabled();
+        let inherit_errexit =
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "inherit_errexit");
+        let run_body = |subshell: &mut Executor| -> Result<(), ExecuteError> {
+            if posix_mode || inherit_errexit {
+                subshell.execute_ast(&ast)
+            } else {
+                // subst.c:7023-7029: without inherit_errexit the funsub
+                // clears the -e flag for the body (same adjustment as
+                // command_substitute's fork).
+                subshell.suppress_errexit = 0;
+                subshell.shell_state.env_vars.remove("__RUBASH_ERREXIT");
+                crate::builtins::set::set_shell_option(
+                    &mut subshell.shell_state.env_vars,
+                    "errexit",
+                    false,
+                );
+                subshell.execute_ast(&ast)
+            }
+        };
+        let (result, captured) = if valsub {
+            (run_body(&mut subshell), None)
+        } else {
+            subshell.stdout_capture = Some(Vec::new());
+            let (thread_captured, result) =
+                crate::executor::shell_options::capture_stdout(|| run_body(&mut subshell));
+            let mut output = subshell.stdout_capture.take().unwrap_or_default();
+            output.extend_from_slice(&thread_captured);
+            (result, Some(output))
+        };
+        if subshell.parse_error_occurred {
+            self.last_command_substitution_parse_error.set(true);
+        }
+        let status = command_substitution_result_status(result, subshell.exit_code);
+        if let Some(saved_dir) = saved_dir {
+            let _ = env::set_current_dir(saved_dir);
+        }
+        self.last_command_substitution_status.set(Some(status));
+        match captured {
+            Some(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
+                .trim_capture_terminator()
+                .to_string(),
+            // valsub: the value is the body's final $REPLY, quote-protected
+            // the way comsub output is (subst.c:7113 comsub_quote_string).
+            None => protect_command_substitution_output(&substitution_result_visible_text(
+                subshell
+                    .shell_state
+                    .env_vars
+                    .get("REPLY")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            )),
+        }
     }
+
+    /// y.tab.c:7191 parse_string_to_command (SEVAL_ONECMD, whole-string
+    /// consumption) plus builtins/evalstring.c:199 can_optimize_cat_file:
+    /// the `$(< file)` shortcut admits only a body that parses as exactly
+    /// one simple command with no words, no assignments, and exactly one
+    /// fd-0 r_input_direction. Anything else (trailing words, extra or
+    /// non-input redirections, `;` lists, parse errors) returns None so the
+    /// body reaches the real parser/executor below. The admission parse
+    /// uses the real lexer/parser, not a text heuristic, so nested
+    /// substitutions in the operand (`$(< $(echo f))`) and comment quirks
+    /// (`$(< f # c)` is a read-time EOF error, not a cat) behave exactly as
+    /// the fallback parse would. Returns the dequoted redirect target word
+    /// and the raw (quote-carrying) form used for quote-state decisions.
+    fn comsub_cat_file_target(&self, source: &str) -> Option<(String, String)> {
+        let start_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|line| line.parse::<usize>().ok())
+            .filter(|line| *line > 0)
+            .unwrap_or(1);
+        let tokens =
+            crate::lexer::tokenize_comsub_body(source, self.posix_mode_enabled(), start_line, true);
+        let ast = crate::parser::parse(&tokens);
+        let [command] = ast.commands.as_slice() else {
+            return None;
+        };
+        if command_has_parse_error(command) {
+            return None;
+        }
+        if !command.words.is_empty() || !command.assignments.is_empty() {
+            return None;
+        }
+        let [redirect] = command.redirects.as_slice() else {
+            return None;
+        };
+        if redirect.kind != crate::parser::RedirectKind::Input {
+            return None;
+        }
+        if redirect.fd.is_some_and(|fd| fd != 0) {
+            return None;
+        }
+        Some((
+            redirect.target.clone(),
+            redirect.target_metadata.raw.clone(),
+        ))
+    }
+
+    /// Runs the admitted `$(< file)` body: builtins/evalstring.c:759
+    /// open_redir_file on the redirect operand. Expansion follows
+    /// redir.c:298 redirection_expand — expand_words_no_vars on the single
+    /// word: an unquoted expansion field-splits its output, unquoted glob
+    /// characters (or glob characters produced by an unquoted expansion)
+    /// pathname-expand, and zero or several resulting words return NULL,
+    /// which open_redir_file reports as redirection_error (r,
+    /// AMBIGUOUS_REDIRECT, 0) with the dequoted word text (redir.c:168-174
+    /// redirection_error falls back to redirectee.filename->word). A single
+    /// word is opened with open(2); failure prints internal_error
+    /// ("%s: %s", fn, strerror (errno)) and the substitution yields empty
+    /// output with EXECUTION_FAILURE (subst.c:7169-7173).
+    fn comsub_cat_file_substitute(&self, target: &str, raw_word: &str) -> String {
+        let ambiguity = |word: &str| -> String {
+            let diagnostic = format!("{}{}: ambiguous redirect\n", self.diagnostic_prefix(), word);
+            self.write_diagnostic_fd2(diagnostic.as_bytes());
+            self.last_command_substitution_status.set(Some(1));
+            String::new()
+        };
+        // redirection_expand materializes a process-substitution operand
+        // as /dev/fd/N (subst.c process_substitute); the cat then reads the
+        // substitution's output. Mirror that by running the substitution
+        // and reading its captured stdout.
+        if let Some(source) = target
+            .strip_prefix("<(")
+            .or_else(|| target.strip_prefix(">("))
+            .and_then(|target| target.strip_suffix(')'))
+        {
+            let mut subshell = self.command_substitution_executor();
+            let content = subshell
+                .process_substitution_output(source)
+                .unwrap_or_default();
+            self.last_command_substitution_status.set(Some(0));
+            return content.trim_capture_terminator().to_string();
+        }
+        let posix_no_glob = self.posix_mode_enabled();
+        let quote_state = RedirectionWordQuotes::scan(raw_word);
+        let expanded = strip_matching_quotes(&self.expand_word(target)).to_string();
+        // Field split only output that came from an unquoted expansion; a
+        // quoted or literal word is one field even when it contains IFS
+        // characters.
+        let fields = if quote_state.unquoted_expansion {
+            self.field_split_values(&expanded)
+        } else {
+            vec![expanded]
+        };
+        // Pathname expansion: unquoted glob characters in the word, or glob
+        // characters produced by an unquoted expansion (pathexp.c
+        // unquoted_glob_pattern_p walks the word's quoting); posixly_correct
+        // disables globbing for the operand (evalstring.c:763-766
+        // open_redir_file sets disallow_filename_globbing).
+        let glob_allowed =
+            !posix_no_glob && (quote_state.unquoted_glob_char || quote_state.unquoted_expansion);
+        let mut words: Vec<String> = Vec::new();
+        for field in fields {
+            if glob_allowed && !field.is_empty() {
+                words.extend(self.apply_command_substitution_pathname_expansion(&field));
+            } else {
+                words.push(field);
+            }
+        }
+        // redirection_expand returned NULL: zero words (empty unquoted
+        // expansion) or several words (field split / glob match).
+        let [file_word] = words.as_slice() else {
+            return ambiguity(strip_matching_quotes(target));
+        };
+        // Model the Linux open(dir, O_RDONLY)+read dance: open succeeds and
+        // the first zread fails EISDIR, so read_comsub (subst.c:6700-6712)
+        // returns NULL with EXECUTION_SUCCESS — a directory operand is
+        // silent, empty, rc 0. Windows CreateFile on a directory would
+        // surface "Permission denied" instead.
+        let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        if read_path.is_dir() {
+            self.last_command_substitution_status.set(Some(0));
+            return String::new();
+        }
+        match fs::read_to_string(&read_path) {
+            Ok(value) => {
+                self.last_command_substitution_status.set(Some(0));
+                value.trim_capture_terminator().to_string()
+            }
+            Err(error) => {
+                // path_error already formats "<word>: <strerror>" (and maps
+                // the Windows wildcard-path EINVAL to the ENOENT text
+                // Linux open(2) reports — posix_errors.rs), so it is the
+                // whole internal_error payload.
+                let payload = crate::posix_errors::message(&crate::posix_errors::path_error(
+                    file_word, error,
+                ));
+                let diagnostic = format!("{}{}\n", self.diagnostic_prefix(), payload);
+                self.write_diagnostic_fd2(diagnostic.as_bytes());
+                self.last_command_substitution_status.set(Some(1));
+                String::new()
+            }
+        }
+    }
+}
+
+/// Quote-state scan of a raw (quote-carrying) redirection word: mirrors the
+/// lexer-level quoting that GNU expand_words_no_vars sees — an unquoted `$`
+/// or backtick starts an expansion whose output field-splits and
+/// pathname-expands, and an unquoted `*`/`?`/`[` makes the word a glob
+/// pattern (pathexp.c:66 unquoted_glob_pattern_p). Escaped and quoted
+/// characters never count.
+struct RedirectionWordQuotes {
+    unquoted_expansion: bool,
+    unquoted_glob_char: bool,
+}
+
+impl RedirectionWordQuotes {
+    fn scan(raw_word: &str) -> Self {
+        let mut state = Self {
+            unquoted_expansion: false,
+            unquoted_glob_char: false,
+        };
+        let mut single_quoted = false;
+        let mut double_quoted = false;
+        let mut escaped = false;
+        for ch in raw_word.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && !single_quoted {
+                escaped = true;
+                continue;
+            }
+            match ch {
+                '\'' if !double_quoted => single_quoted = !single_quoted,
+                '"' if !single_quoted => double_quoted = !double_quoted,
+                '$' | '`' if !single_quoted && !double_quoted => {
+                    state.unquoted_expansion = true;
+                }
+                '*' | '?' | '[' if !single_quoted && !double_quoted => {
+                    state.unquoted_glob_char = true;
+                }
+                _ => {}
+            }
+        }
+        state
+    }
+}
+
+/// parser.h:85 FUNSUB_CHAR: the characters that may follow `${` to
+/// introduce a bash-5.3 nofork command substitution. `|` selects the valsub
+/// form (`${| cmd; }`), the others the funsub form (`${ cmd; }`).
+pub(in crate::executor) fn funsub_introducer(ch: char) -> Option<bool> {
+    match ch {
+        ' ' | '\t' | '\n' => Some(false),
+        '|' => Some(true),
+        _ => None,
+    }
+}
+
+/// Extract a `${ body; }` nofork-substitution body from `chars`, which is
+/// positioned right after the introducer character following `{`. Returns
+/// the body text and whether the form was valsub, with the closing `}`
+/// consumed. Scanning mirrors the walker's `$()` arm: quotes and backslash
+/// escapes are opaque, `(`/`)` nest (a `}` inside a nested substitution
+/// never closes the construct), and `{`/`}` nest so an inner `${...}` or
+/// brace group does not terminate the body. `None` (closing `}` never
+/// found) falls through to the existing parameter diagnostics.
+pub(in crate::executor) fn extract_funsub_body(
+    chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
+) -> Option<(String, bool)> {
+    let introducer = *chars.peek()?;
+    let valsub = funsub_introducer(introducer)?;
+    chars.next();
+    let mut body = String::new();
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    while let Some(ch) = chars.next() {
+        if escaped {
+            body.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !single {
+            body.push(ch);
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            body.push(ch);
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            body.push(ch);
+            continue;
+        }
+        if !single && !double {
+            match ch {
+                '(' => paren_depth += 1,
+                ')' => paren_depth = paren_depth.saturating_sub(1),
+                '{' if paren_depth == 0 => brace_depth += 1,
+                '}' if paren_depth == 0 => {
+                    if brace_depth == 0 {
+                        return Some((body, valsub));
+                    }
+                    brace_depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        body.push(ch);
+    }
+    None
+}
+
+/// parse.y:4475-4516 (parse_comsub / xparse_dolparen SX_FUNSUB,
+/// parse.y:4713-4743): the funsub body must be a terminated command list —
+/// a `;` or newline immediately before the closing `}` (after optional
+/// blanks). `${ echo 6 }` is a read-time "unexpected EOF" error in GNU, not
+/// a substitution; rubash's executor cannot raise that read-time error, so
+/// unterminated bodies fall back to the existing parameter diagnostics
+/// instead of silently substituting.
+pub(in crate::executor) fn funsub_body_is_terminated(body: &str) -> bool {
+    body.trim_end_matches([' ', '\t']).ends_with(';') || body.ends_with('\n')
 }
 
 fn command_has_parse_error(command: &CommandNode) -> bool {

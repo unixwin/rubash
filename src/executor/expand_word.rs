@@ -88,7 +88,25 @@ impl Executor {
             .strip_prefix("${")
             .and_then(|rest| rest.strip_suffix('}'))
         {
-            // When this word IS the `${}` fragment being expanded (no
+            // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: `${` +
+            // blank/newline/`|` is a bash-5.3 nofork command substitution
+            // (`${ cmd; }` / `${| cmd; }`), executed by function_substitute
+            // (subst.c:6917) rather than the parameter machinery. The body
+            // must be a terminated command list (`;`/newline before `}`).
+            if let Some(introducer) = name.chars().next() {
+                if crate::executor::command_substitution::funsub_introducer(introducer).is_some() {
+                    let body = &name[1..];
+                    if crate::executor::command_substitution::funsub_body_is_terminated(body) {
+                        let valsub = introducer == '|';
+                        return protect_command_substitution_output(
+                            &substitution_result_visible_text(
+                                &self.function_substitute(body, valsub),
+                            ),
+                        );
+                    }
+                }
+            }
+            // When the word IS the `${}` fragment being expanded (no
             // enclosing fragment site), record site (word, 0) so the
             // `:=`/`-=` layered re-checks dedup subscript side effects
             // (SUB_RES_XPASS). An active site means the `${` walker arm
