@@ -1,0 +1,152 @@
+a
+b
+c
+a
+$PS4
+
+
+
+there
+one - alpha
+two - beta
+three - gamma
+hi\
+there$a
+stuff
+hi\
+there
+EO\
+F
+line 1line 2
+hi
+hi
+nextEOF
+tab 1
+tab 2
+tab 3
+abc
+def ghi
+jkl mno
+echo "
+echo \"
+fff is a function
+fff () 
+{ 
+    ed ${TMPDIR}/foo <<ENDOFINPUT > /dev/null
+/^name/d
+w
+q
+ENDOFINPUT
+
+    aa=1
+}
+fff is a function
+fff () 
+{ 
+    ed ${TMPDIR}/foo <<ENDOFINPUT > /dev/null
+/^name/d
+w
+q
+ENDOFINPUT
+
+    aa=1
+}
+foo is a function
+foo () 
+{ 
+    echo;
+    cat <<END
+bar
+END
+
+    cat <<EOF
+qux
+EOF
+
+}
+
+bar
+qux
+
+bar
+qux
+abc def geh
+= here is the text =
+this paren ) is not a problem
+these balanced parens ( ) are not a problem
+quoted balanced parens \( ) are not a problem either
+more text in a subshell
+some more text in a different subshell
+end
+hello
+hello
+ENDEND
+end ENDEND
+hello
+end hello
+end x*x
+helloEND
+end helloEND
+hello
+\END
+end hello<NL>\END
+heredoc1
+EOF
+Ok:0
+argv[1] = <onetwo>
+argv[2] = <threefour>
+argv[1] = <two>
+argv[2] = <threefi>
+argv[3] = <ve>
+1: OK
+2: OK
+3: OK
+4: OK
+5: OK
+6: OK
+7: OK
+1: OK
+2: OK
+3: OK
+4: OK
+5: OK
+5: OK
+1: ${x#$'no\t'}
+2: O${x#$'no\t'O}
+3: ${x#n$'o\t'}
+4: ${x#'no	'}
+5: ${x#$pat}
+6: ${y#$'not'}
+7: ${y#'not'}
+foo bar
+foo () 
+{ 
+    echo begin;
+    if cat <<HERE
+contents
+HERE
+    then
+        echo 1 2;
+        echo 3 4;
+    fi
+}
+foo () 
+{ 
+    echo begin;
+    while read var <<HERE
+contents
+HERE
+    do
+        echo 1 2;
+        echo 3 4;
+    done
+}
+hello
+world
+hello
+here-document
+here-document
+comsub here-string
+hi
+there
+''

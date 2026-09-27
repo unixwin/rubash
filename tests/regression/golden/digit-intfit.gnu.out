@@ -1,0 +1,13 @@
+== d1 i64 overflow inside comsub
+[]
+rc=0
+== d2 i32 boundary+1 adjacency
+rc=127
+== d4 normal fd redirect still works
+fd3-ok
+rc3=0
+ten-ok
+rc10=0
+fd4=body
+rc4=0
+done

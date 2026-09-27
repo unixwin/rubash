@@ -1,0 +1,10 @@
+catfile-comsub.sh: line 34: ./no-such-file-probe: No such file or directory
+catfile-comsub.sh: line 36: ./missing*: No such file or directory
+catfile-comsub.sh: line 38: : No such file or directory
+catfile-comsub.sh: line 42: ./nosuch: No such file or directory
+catfile-comsub.sh: line 44: $uf: ambiguous redirect
+catfile-comsub.sh: line 46: g*.txt: ambiguous redirect
+bash: -c: line 2: unexpected EOF while looking for matching `)'
+catfile-comsub.sh: line 60: $d: ambiguous redirect
+catfile-comsub.sh: line 74: : No such file or directory
+catfile-comsub.sh: line 84: no/such/dir/f: No such file or directory

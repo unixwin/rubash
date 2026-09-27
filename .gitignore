@@ -45,3 +45,6 @@ agents.md
 
 .tmpwork/
 .zcodeignore
+
+# regression GNU goldens: *.gnu.out must not be swallowed by the *.out rule
+!tests/regression/golden/**

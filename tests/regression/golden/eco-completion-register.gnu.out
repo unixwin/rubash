@@ -1,0 +1,16 @@
+== registration
+complete -o default -F _comp_myprog myprog
+== invoke for --m
+compreply=[--mode]
+== invoke for --mode fa
+compreply=[fast]
+== compgen wordlist
+alpha
+== compgen files
+reg-a.one
+reg-b.two
+== compgen -A directory
+reg-dir
+== load leaves stderr empty
+function
+done

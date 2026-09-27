@@ -1,0 +1,34 @@
+== grp-term-wait
+got TERM
+rc=0
+== grp-int-wait
+got INT
+rc=0
+== sub-term-wait
+sub TERM
+rc=0
+== sub-int-wait
+sub INT
+rc=0
+== fn-term-wait
+fn TERM
+rc=0
+== fn-int-wait
+fn INT
+rc=0
+== untrapped-term-143
+rc=143
+== trap-empty-survives
+survived
+rc=0
+== trap-exit-status
+bye
+rc=7
+== trap-before-next-command
+T
+B
+rc=0
+== grp-term-nowait
+nw
+after
+done

@@ -1,0 +1,10 @@
+Provenance (vendored test corpus, do not edit):
+- corpus/nvm/nvm.sh: nvm-sh/nvm master, 5226 lines, MIT (license block in
+  file header). Source of record: D:/repo/rubash/target-ecosys5/tools/nvm
+  (ecosys5 lane clone, 2026-09-27).
+- corpus/ruby-build/ruby-build + LICENSE: rbenv/ruby-build master bin script,
+  MIT. Source: D:/repo/rubash/target-ecosys5/tools/ruby-build. Used only as
+  a parse/perf canary; not executed against the network.
+GPL-licensed corpora (bash_completion, git-completion.bash) are NOT vendored
+per target-ecosys/REPORT.md license guidance; their verified shapes are
+codified as minimal license-clean fixtures instead.

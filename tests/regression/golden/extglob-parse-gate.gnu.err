@@ -1,0 +1,8 @@
+bash: -c: line 1: syntax error near unexpected token `('
+bash: -c: line 1: `opt=-abc; case $opt in -?(\[)+([a-z])) echo bundled ;; *) echo other ;; esac'
+bash: -c: line 1: syntax error near unexpected token `('
+bash: -c: line 1: `shopt -s extglob; opt=-abc; case $opt in -?(\[)+([a-z])) echo bundled ;; *) echo other ;; esac'
+mini-extglob.sh: line 1: syntax error near unexpected token `('
+mini-extglob.sh: line 1: `case $o in -?([x])) echo y ;; esac'
+bash: -c: line 1: syntax error near unexpected token `('
+bash: -c: line 1: `shopt -s extglob; case $o in -?([x])) echo on ;; esac; shopt -u extglob; case $o in -?([x])) echo off ;; esac'

@@ -1,0 +1,16 @@
+== plain word
+rc=127
+== arith as argument
+rc=127
+== arith as assignment
+rc=127
+== arith command
+rc=127
+== colon-msg
+rc=127
+== script mode
+rc=1
+== bound is fine
+set
+rc=0
+done

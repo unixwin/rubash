@@ -1,0 +1,36 @@
+== f1 basic value
+[4] rc=0
+== f2 trailing newlines stripped
+[a]
+== f3 array element repro
+n=4: 1 2 3 4
+== f4 body status visible
+rc=1
+rc2=0
+== f5 valsub reply
+[hello]
+== f6 valsub body stdout passes through
+direct
+[r]
+== f7 funsub captures stdout
+[cap]
+== f8 funsub runs in a function context
+[none]
+== f9 unterminated body
+rc=2
+== f10 missing separator before brace
+rc=2
+== f11 side effect: assignment persists
+sv=9
+== f12 side effect: unset persists
+pv=unset
+== f13 side effect: function def persists
+inner
+== f14 errexit cleared for body
+[alive] rc=0
+== f15 inherit_errexit keeps body failure
+after
+rc=0
+== f16 unquoted result splits
+n=2
+done

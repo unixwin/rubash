@@ -67,6 +67,35 @@ jobs:
       - name: Run Rust library tests
         run: cargo test --lib
 
+  regression:
+    name: GNU regression goldens and canaries
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # wt4/ci lane (2026-09-27): byte-pinned regression suite.
+      # - tests/regression/golden/*.gnu.{out,err} are GNU Bash 5.3.0
+      #   captures (WSL, /usr/local/bin/bash) of the fixture scripts under
+      #   tests/regression/fixtures/; the runner has no WSL, so the
+      #   recorded bytes are the baseline (the re-capture command is
+      #   documented in each fixture header).
+      # - tests/regression/snapshots/*.snap are TODAY's-rubash snapshots
+      #   of GNU upstream suite slices; a diff means a semantic shift and
+      #   requires a conscious re-record with
+      #   RUBASH_REGRESSION_RECORD=1 cargo test --test regression.
+      # Runs on windows because the snapshots were recorded against the
+      # Windows environment (tests/gnu-compat/helpers-win PE helpers,
+      # emulated-coreutils paths); per-test bounds are enforced inside
+      # the suite (60-360s), the job timeout is the outer backstop.
+      - name: Run regression suite (goldens, snapshots, perf canaries)
+        run: cargo test --test regression
+
   cross-target-check:
     name: Cross-target check (linux/darwin)
     runs-on: ubuntu-latest

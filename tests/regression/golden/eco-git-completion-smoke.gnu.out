@@ -1,0 +1,13 @@
+== registration
+complete -o bashdefault -o default -o nospace -F __git_main git
+== complete st
+compreply=[stash status]
+== complete re
+compreply=[rebase reset revert]
+== helper with prefix and sentinel
+compreply=[pre-a pre-b pre-abc]
+== nested library call through function name
+function
+function
+function
+done

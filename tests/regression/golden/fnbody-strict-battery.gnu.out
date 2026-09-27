@@ -1,0 +1,42 @@
+== stray: brace body
+rc=2
+== stray: multiline body
+rc=2
+== stray: keyword form
+rc=2
+== stray: subshell body
+rc=2
+== stray: double-semi in body
+rc=2
+== stray: top-level double-semi
+rc=2
+== valid: case body
+case-ok
+== valid: if body
+if-ok
+== valid: for body
+for-1
+for-2
+== valid: while body
+while-line1
+== valid: subshell body
+sub-ok
+== valid: nested braces
+brace-ok
+== valid: heredoc body
+h:heredoc-ok
+== valid: arith body
+arith-ok
+== valid: quoted parens
+quoted-(parens)-ok
+== valid: comment in body
+comment-ok
+== valid: command-sub subshell body
+csub-ok
+== valid: nested def
+nested-ok
+== valid: keyword form
+keyword-form-ok
+== valid: array body
+array-y
+done

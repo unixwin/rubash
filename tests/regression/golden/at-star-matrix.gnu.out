@@ -1,0 +1,41 @@
+== at-default
+n=4
+[a][b][c][d]
+== at-default-empty
+n=2
+[a][d]
+== at-colon
+n=3
+[a][b c][d]
+== at-colon-empty
+n=3
+[a][][d]
+== at-colon-sepinside
+n=3
+[a][b][c]
+== at-mixed-ifs
+n=3
+[a][b][c]
+== at-null-ifs
+n=3
+[a][b c][d]
+== star-default
+n=4
+[a][b][c][d]
+== star-colon-empty
+n=3
+[a][][d]
+== at-newexp-modified
+n=0
+[]
+== at-newexp-nonempty
+n=2
+[a][b]
+== at-arg-with-glob
+n=2
+[*.c][b]
+== for-at-default
+<a>
+<b>
+== cmd-arg-at
+(a)(b)

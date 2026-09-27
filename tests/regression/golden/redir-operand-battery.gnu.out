@@ -1,0 +1,21 @@
+== var-two-fields
+rc=1
+== brace-two-words
+rc=1
+== brace-seq-three
+rc=1
+== glob-two-hits
+rc=1
+== brace-empty-alt
+rc=1
+== glob-one-hit-opens
+rc=0 content=one
+== brace-seq-one
+rc=0 content=two
+== quoted-brace-literal
+rc=0 content=three
+== nullglob-zero
+rc=1
+== posix-cat-literal-pattern
+rc=1
+done

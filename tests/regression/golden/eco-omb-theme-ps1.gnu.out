@@ -1,0 +1,11 @@
+== ps1 literal
+[theme] (main) ${glyph} 
+== ps1 rendered
+[theme] (main)  
+== lib call
+lib-ok
+== function survives
+function
+function
+function
+done

@@ -1,0 +1,50 @@
+== p1 missing file
+rc=1
+== p2 glob no match
+rc=1
+== p3 quoted empty var
+rc=1
+== p4 whole file minus trailing newlines
+[a
+b] rc=0
+== p5 extra word runs as command
+rc=1
+== p6 unquoted empty var ambiguous
+rc=1
+== p7 glob two hits
+rc=1
+== p8 no space after <
+[a
+b] rc=0
+== p9 trailing comment (inner shell: the comment swallows the closing paren)
+rc=2
+== p10 nested substitution
+[nested] rc=0
+== p11 directory operand
+rc=0
+== p12 quoted space filename
+[sp ace] rc=0
+== q1 one-glob hit
+[A] rc=0
+== q2 two words from var
+rc=1
+== q3 process substitution operand
+[hi] rc=0
+== q4 part-quoted glob
+[A] rc=0
+== q5 backslash-escaped glob char
+[A] rc=0
+== q6 extra redirect wins
+[] rc=0
+== q7 second command after redirect
+[hi] rc=0
+== q8 temp-assignment argument
+[] rc=0
+== q9 quoted empty operand
+rc=1
+== q10 brace two words (known gap: excluded)
+== q11 read twice
+[AA] rc=0
+== q12 missing directory
+rc=1
+done

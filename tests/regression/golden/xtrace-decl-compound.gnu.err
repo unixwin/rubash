@@ -1,0 +1,21 @@
++ x=([a]=1)
++ z=(1 2)
++ v=([k]="s p")
++ echo hi
++ w='([b]=2)'
++ echo hi
++ w='()'
++ echo hi
++ m=(['q']='r')
++ a=1
++ declare -A m
++ mm=(['q']='r')
++ declare -A mm
++ n=('1' '2' 'x y')
++ declare -a n
++ d=('a	b')
++ declare -a d
++ s+=(['k2']='v2')
++ declare -A s
++ echo v2
++ echo done

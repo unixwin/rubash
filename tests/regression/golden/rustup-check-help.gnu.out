@@ -1,0 +1,7 @@
+== unquoted help text must not match the quoted pattern
+category=none
+rc=0
+== quoted help text must match
+category=all
+rc=0
+done

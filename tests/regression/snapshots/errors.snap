@@ -1,0 +1,114 @@
+declare -fr func
+after f
+1
+1
+1
+after f
+1
+TEST
+TEST
+1
+2
+after readonly assignment
+after for readonly assignment
+after posix for readonly variable
+after posix select readonly variable
+after loop
+1
+2
+after readonly assignment
+after for readonly assignment
+after posix for readonly variable
+after posix select readonly variable
+after loop
+0
+
+after 1: 1
+after 2: 1
+after 3: 1
+4
+array after 1: 0
+
+array after 2: 0
+
+after indir: 1
+-3
+unset
+unset
+
+after 1: 1
+after 2: 1
+after 3: 1
+4
+array after 1: 0
+
+array after 2: 0
+
+after indir: 1
+-3
+unset
+unset
+
+after no such command: 127
+echo builtin
+after non-special builtin: 0
+after special builtin: 0
+after assignment error: 1
+after assignment statement error: 1
+variable assignment error
+after no such command: 127
+echo builtin
+after non-special builtin: 0
+after special builtin: 0
+after assignment error: 1
+after assignment statement error: 1
+variable assignment error
+ok 1
+ok 2
+ok 3
+ok 4
+DEBUG
+DEBUG
+DEBUG
+invalid numeric argument
+after exit: 2
+after break: 1
+after continue: 1
+after shift: 1
+after return: 2
+after exit: 2
+after break: 1
+after continue: 1
+after shift: 1
+after return: 2
+after history: 2
+after history: 2
+too many arguments
+after exit: 1
+after return: 2
+after shift: 1
+after break: 1
+after continue: 1
+after exit: 1
+after shift: 1
+after break: 1
+after continue: 1
+after: 1
+after: 1
+after: 1
+after: 1
+after: 1
+after: 1
+after: 1
+after: 1
+command: 1
+command: 1
+command: 1
+command: 1
+array: 1
+array: 1
+array: 1
+array: 1
+after return
+after trap
+end

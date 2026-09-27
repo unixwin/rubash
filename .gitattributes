@@ -20,3 +20,9 @@ docs/builtins.md eol=lf
 third_party/bash/** text eol=lf
 third_party/bash/po/*.gmo -text
 scripts/git-hooks/* text eol=lf
+
+# tests/regression golden files: GNU 5.3.0 captures and rubash snapshots
+# are byte-pinned with LF endings; never let autocrlf smudge them.
+tests/regression/golden/** -text
+tests/regression/snapshots/** -text
+tests/regression/corpus/** -text

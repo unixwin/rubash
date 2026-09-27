@@ -1,0 +1,9 @@
+== gate off (default): case pattern is a syntax error
+rc=2
+== gate on: same pattern parses and matches
+rc=2
+== bash -n form (the bash_completion line-1820 shape)
+rc=2
+== top-level shopt flips the gate for later lines
+rc=2
+done
