@@ -7,7 +7,16 @@ impl Executor {
         // ${parameter:=word}, and ${parameter+word} has quote-aware expansion
         // flags. This covers tilde2.tests while the lexer still discards most
         // quote state.
-        let expanded = self.expand_embedded_parameters(word);
+        //
+        // GNU subst.c:4462 expand_string_for_rhs (quoted == 0) +
+        // posixexp2 37: whitespace that was quoted inside the rhs keeps its
+        // quoted status through field splitting. The protect-ifs walk is the
+        // designated engine (it marks quoted whitespace with the \x1c
+        // sentinel while bare spaces stay splittable); the plain walk lost
+        // that distinction and made `a=(${v:-"a b"})` two elements where GNU
+        // stores ONE (rubash#212; arrayfunc.c:610 expand_words_no_vars
+        // splits only unquoted expansion whitespace).
+        let expanded = self.expand_embedded_parameters_protect_ifs(word);
         // GNU subst.c:4807 dequote_string: quote removal ran inside the
         // expansion pass, so `'`/`"` left in its output are
         // expansion-produced data, not syntax. Mark them \x17/\x18 before

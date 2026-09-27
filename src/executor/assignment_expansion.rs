@@ -2061,7 +2061,10 @@ impl Executor {
             // parse.y:5781/5387): one element, never split (probe
             // 2026-09-27: `R=( a"$v"b )` with v='x:y', IFS=: stores
             // [ax:yb], GNU 5.3.0). A raw-quoted element's delimiters were
-            // preserved by the walker — drop the one outer pair.
+            // preserved by the walker — drop the one outer pair. The
+            // IFS_GLUE sentinel is field-splitting state (posixexp2 37): a
+            // quoted element never splits, so it strips here like GNU's
+            // dequote drops CTLESC (subst.c:4807).
             let text = if token_raw.starts_with('"')
                 && token_raw.ends_with('"')
                 && text.starts_with('"')
@@ -2072,6 +2075,7 @@ impl Executor {
             } else {
                 text
             };
+            let text = text.replace(crate::executor::markers::IFS_GLUE, "");
             return vec![quote_array_value(&text)];
         }
         // Fully unquoted word WITH an expansion: GNU field-splits the whole

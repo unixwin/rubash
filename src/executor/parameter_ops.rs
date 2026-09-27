@@ -68,6 +68,13 @@ pub(in crate::executor) fn unescape_unquoted_rhs_escapes(word: &str) -> String {
 }
 
 pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
+    // GNU posixexp2 37 (subst.c:4462 expand_string_for_rhs): whitespace that
+    // was quoted inside the rhs keeps its quoted status through field
+    // splitting, so the decoder emits the IFS_GLUE sentinel before every
+    // whitespace character inside a quoted region. Without it
+    // `a=(${v:-"a b"})` split into two elements where GNU stores ONE
+    // (rubash#212; arrayfunc.c:610 expand_words_no_vars splits only
+    // unquoted expansion whitespace).
     let mut output = String::new();
     let chars = word.chars().collect::<Vec<_>>();
     let mut index = 0;
@@ -89,6 +96,9 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
                     if ch == '"' {
                         break;
                     }
+                    if matches!(ch, ' ' | '\t' | '\n') {
+                        output.push(crate::executor::markers::IFS_GLUE);
+                    }
                     output.push(ch);
                 }
             }
@@ -96,6 +106,9 @@ pub(in crate::executor) fn decode_parameter_word_quotes(word: &str) -> String {
                 if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
                     let close = index + 1 + close_offset;
                     for ch in &chars[index + 1..close] {
+                        if matches!(ch, ' ' | '\t' | '\n') {
+                            output.push(crate::executor::markers::IFS_GLUE);
+                        }
                         output.push(*ch);
                     }
                     index = close + 1;

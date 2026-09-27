@@ -51,7 +51,21 @@ pub(in crate::executor) fn mark_expansion_whitespace(value: &str, preserve_quote
         return mark_alternate_whitespace(value);
     }
     let mut marked = String::with_capacity(value.len());
-    for ch in value.chars() {
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        // An IFS_GLUE pair is whitespace that was QUOTED inside the
+        // expansion result (the alternate-rhs walker's marking, posixexp2
+        // 37): it must stay glued — GNU arrayfunc.c:610 expand_words_no_vars
+        // field-splits only unquoted expansion whitespace, so
+        // `${v:-"a b"}` as a compound element is ONE field (rubash#212).
+        // Tag only bare whitespace with the splitting tag.
+        if ch == crate::executor::markers::IFS_GLUE {
+            marked.push(ch);
+            if let Some(next) = chars.next() {
+                marked.push(next);
+            }
+            continue;
+        }
         if matches!(ch, ' ' | '\t' | '\n') {
             marked.push(COMPOUND_EXPANSION_WS_TAG);
         }

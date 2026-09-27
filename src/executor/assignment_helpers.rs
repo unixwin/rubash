@@ -515,23 +515,34 @@ pub(in crate::executor) fn split_storage_words(value: &str) -> impl Iterator<Ite
 }
 
 /// GNU arrayfunc.c:610 expand_words_no_vars field-splits every indexed
-/// compound element's expansion, so the \x1c-tagged expansion whitespace
-/// (embedded_mutations expansion_ws_marked) is a split boundary for
-/// indexed arrays even though the same bytes stay glued for associative
-/// words (arrayfunc.c:652/865 expand_assignment_string_to_string never
-/// field-splits). Empty fields drop like GNU's field splitting.
+/// compound element's UNQUOTED expansion whitespace (the \x1d9 COMPOUND_
+/// EXPANSION_WS_TAG bytes, embedded_mutations expansion_ws_marked), so the
+/// tag is a split boundary for indexed arrays. Whitespace that was QUOTED
+/// inside the expansion result (the \x1c IFS_GLUE pairs the alternate-rhs
+/// walker emits, posixexp2 37) stays glued — `${v:-"a b"}` is ONE element
+/// (rubash#212) — exactly like assoc words (arrayfunc.c:652/865
+/// expand_assignment_string_to_string never field-splits). Empty fields
+/// drop like GNU's field splitting.
 pub(in crate::executor) fn split_indexed_tagged_token(token: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let mut chars = token.chars().peekable();
     while let Some(ch) = chars.next() {
-        if (ch == crate::executor::markers::IFS_GLUE
-            || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG)
+        if ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
             && matches!(chars.peek(), Some(' ' | '\t' | '\n'))
         {
             chars.next();
             if !current.is_empty() {
                 parts.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        // Quoted whitespace rides as an IFS_GLUE pair — keep it in the
+        // current field (the storage unquote pass strips the sentinel).
+        if ch == crate::executor::markers::IFS_GLUE {
+            current.push(ch);
+            if let Some(next) = chars.next() {
+                current.push(next);
             }
             continue;
         }
