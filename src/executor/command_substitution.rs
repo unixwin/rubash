@@ -801,7 +801,20 @@ impl Executor {
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,
-            process_env_snapshot: self.process_env_snapshot.clone(),
+            // GNU subst.c:7143 command_substitute forks: the child's process
+            // environment is the parent's CURRENT exported env at fork time,
+            // and nothing the child does (or its exit) can alter the parent's
+            // environment — a variable the parent unset stays unset
+            // (variables.c unbind_variable is permanent for the session).
+            // The Drop restore models "the child leaves the parent's process
+            // env untouched", so its restore point must be the fork-time env,
+            // NOT the parent's startup snapshot: propagating the startup
+            // snapshot here made every comsub subshell's drop resurrect
+            // startup values the parent had unset (rubash#182 —
+            // `unset LANG; Y="$(dirname "D:/x")"` revived LANG, read back
+            // through the bare-$NAME std::env::var fallback in
+            // embedded_parameters.rs).
+            process_env_snapshot: std::env::vars().collect(),
             history_provider: self.history_provider.clone(),
         }
     }
