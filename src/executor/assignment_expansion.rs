@@ -352,6 +352,63 @@ pub(in crate::executor) fn hoist_data_backslashes(value: &str, marker: &str) -> 
 }
 
 impl Executor {
+    /// Assignment expansion with the parser-preserved verbatim RHS available.
+    ///
+    /// GNU subst.c:11349-11378 (`expand_word_internal`): an unquoted `<(`/`>(`
+    /// in the word runs as a process substitution — in assignment position
+    /// exactly like argument position — and `extract_process_subst`
+    /// (subst.c:1311) hands the body to `process_substitute` (subst.c:6362)
+    /// VERBATIM, with its quoting intact, before quote removal touches the
+    /// rest of the word. Rubash's assignment value arrives already de-quoted
+    /// by the lexer, so the substitution body must be re-derived from the raw
+    /// RHS (`CommandNode::assignment_raws`) here; the replacement path is
+    /// plain text, and the remaining raw text keeps its quoting for the
+    /// normal expansion chain below. A `<(`/`>(` that is quoted in the raw
+    /// text is data (GNU `add_character` branch) and never takes this path.
+    pub(in crate::executor) fn expand_assignment_value_with_raw(
+        &mut self,
+        name: &str,
+        value: &str,
+        raw: Option<&str>,
+    ) -> String {
+        if let Some(raw) = raw.filter(|raw| {
+            (value.contains("<(") || value.contains(">("))
+                && crate::parser::raw_word_has_unquoted_process_substitution(raw)
+        }) {
+            if let Ok(materialized) =
+                self.materialize_assignment_process_substitutions_from_raw(raw)
+            {
+                let materialized = if value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE) {
+                    format!("{}{materialized}", tilde_expand::QUOTED_ASSIGNMENT_VALUE)
+                } else {
+                    materialized
+                };
+                return self.expand_assignment_value(name, &materialized);
+            }
+        }
+        self.expand_assignment_value(name, value)
+    }
+
+    pub(in crate::executor) fn expand_assignment_value_result_with_raw(
+        &mut self,
+        name: &str,
+        value: &str,
+        raw: Option<&str>,
+    ) -> AssignmentExpansionResult {
+        self.last_command_substitution_status.set(None);
+        let expanded = self.expand_assignment_value_with_raw(name, value, raw);
+        let substitution_status = self.last_command_substitution_status.get();
+        self.last_command_substitution_status.set(None);
+        let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
+        let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        AssignmentExpansionResult {
+            value: expanded,
+            substitution_status,
+            arithmetic_error,
+            arithmetic_nonfatal_error,
+        }
+    }
+
     pub(in crate::executor) fn expand_assignment_value_result(
         &mut self,
         name: &str,

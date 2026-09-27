@@ -8,12 +8,18 @@ impl Executor {
     pub(in crate::executor) fn apply_permanent_assignments(
         &mut self,
         assignments: &[(String, String)],
+        raw_rhs: Option<&[String]>,
     ) {
-        for (name, value) in assignments {
+        let raws_aligned = raw_rhs.is_some_and(|raws| raws.len() == assignments.len());
+        for (index, (name, value)) in assignments.iter().enumerate() {
+            let raw = raws_aligned
+                .then(|| raw_rhs.and_then(|raws| raws.get(index)))
+                .flatten()
+                .map(String::as_str);
             if std::env::var("RUBASH_DEBUG_ASSIGN").is_ok() {
                 eprintln!("ASSIGN {name}={value:?}");
             }
-            let expanded_value = self.expand_assignment_value(name, value);
+            let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
             // GNU subst.c:10404+ expand_word_error -> DISCARD: a failed
             // assignment word (failglob no-match, readonly violation, ...)
             // abandons the rest of this command's assignment list.
@@ -63,9 +69,11 @@ impl Executor {
         false
     }
 
+    #[allow(clippy::type_complexity)]
     pub(in crate::executor) fn apply_temporary_assignments(
         &mut self,
         assignments: &[(String, String)],
+        raw_rhs: Option<&[String]>,
     ) -> Vec<(
         String,
         Option<String>,
@@ -124,8 +132,13 @@ impl Executor {
                 .env_vars
                 .insert("__RUBASH_TEMP_PATH".to_string(), "1".to_string());
         }
-        for (name, value) in assignments {
-            let expanded_value = self.expand_assignment_value(name, value);
+        let raws_aligned = raw_rhs.is_some_and(|raws| raws.len() == assignments.len());
+        for (index, (name, value)) in assignments.iter().enumerate() {
+            let raw = raws_aligned
+                .then(|| raw_rhs.and_then(|raws| raws.get(index)))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = self.expand_assignment_value_with_raw(name, value, raw);
             let (base_name, _) = assignment_name_and_append(name);
             let saved_env = self.shell_state.env_vars.get(base_name).cloned();
             let saved_typed = self.shell_state.variables.get(base_name).cloned();

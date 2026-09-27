@@ -341,8 +341,17 @@ impl Executor {
             }
         }
         let mut status = 0;
-        for (name, value) in &cmd.assignments {
-            let assignment_result = self.expand_assignment_value_result(name, value);
+        // assignment_raws stays index-aligned with assignments when every
+        // binding came through insert_assignment_with_raw (the normal
+        // parse path); sentinel inserts without raw break alignment, so
+        // only pair them when the lengths agree.
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        for (index, (name, value)) in cmd.assignments.iter().enumerate() {
+            let raw = raws_aligned
+                .then(|| cmd.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let assignment_result = self.expand_assignment_value_result_with_raw(name, value, raw);
             // GNU subst.c:10277-10288: a bad substitution raised while
             // expanding the assignment RHS is an expand_word_error. The
             // flag is checked after word expansion in execute_command, but
@@ -648,6 +657,11 @@ impl Executor {
             },
             word_kinds: Vec::new(),
             assignments: cmd.assignments.clone(),
+            // Keep the verbatim RHS aligned with the cloned assignments: the
+            // assignment-procsub materialization (GNU subst.c:11349-11378
+            // extract_process_subst) re-derives the substitution body from
+            // this raw text after the lexer de-quoted the token value.
+            assignment_raws: cmd.assignment_raws.clone(),
             compound_assignments: cmd.compound_assignments.clone(),
             array_element_assignments: cmd.array_element_assignments.clone(),
             process_substitutions: cmd.process_substitutions.clone(),
@@ -2126,7 +2140,11 @@ impl Executor {
                 Ok(materialized) => materialized,
                 Err(error) => return Some(Err(error)),
             };
-        let temporary_assignments = self.apply_temporary_assignments(&materialized_cmd.assignments);
+        let assignment_raws = (materialized_cmd.assignment_raws.len()
+            == materialized_cmd.assignments.len())
+        .then(|| materialized_cmd.assignment_raws.as_slice());
+        let temporary_assignments =
+            self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
         // GNU variables.c push_context: the function-call tempenv becomes the
         // function's variable context — recorded so a posix special builtin's
         // merged tempenv inside the function (att_propagate,

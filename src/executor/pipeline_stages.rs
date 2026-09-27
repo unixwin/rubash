@@ -103,9 +103,14 @@ impl Executor {
             .shell_state
             .env_vars
             .insert(FUNCTION_STDIN_OFFSET.to_string(), "0".to_string());
-        for (name, value) in &command.assignments {
+        let raws_aligned = command.assignment_raws.len() == command.assignments.len();
+        for (index, (name, value)) in command.assignments.iter().enumerate() {
             let (base_name, _) = assignment_name_and_append(name);
-            let expanded_value = subshell.expand_assignment_value(name, value);
+            let raw = raws_aligned
+                .then(|| command.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = subshell.expand_assignment_value_with_raw(name, value, raw);
             subshell
                 .shell_state
                 .env_vars
@@ -607,9 +612,14 @@ impl Executor {
         );
 
         self.apply_child_environment(&mut process);
-        for (var_name, var_value) in &command.assignments {
+        let raws_aligned = command.assignment_raws.len() == command.assignments.len();
+        for (index, (var_name, var_value)) in command.assignments.iter().enumerate() {
             let (base_name, _) = assignment_name_and_append(var_name);
-            let expanded_value = self.expand_assignment_value(var_name, var_value);
+            let raw = raws_aligned
+                .then(|| command.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = self.expand_assignment_value_with_raw(var_name, var_value, raw);
             if is_valid_process_env(base_name, &expanded_value) {
                 process.env(base_name, expanded_value);
             }

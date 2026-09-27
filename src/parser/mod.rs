@@ -38,6 +38,7 @@ mod tests;
 
 pub use nodes::*;
 pub use parse_loop::{parse, parse_with_options, ParseLoopOptions};
+pub(crate) use process_substitution::raw_word_has_unquoted_process_substitution;
 
 use arithmetic_command::*;
 use arithmetic_expansion::*;

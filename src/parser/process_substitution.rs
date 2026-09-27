@@ -75,7 +75,13 @@ pub(super) fn process_substitutions_in_word_with_raw(
     substitutions
 }
 
-fn raw_word_has_unquoted_process_substitution(raw: &str) -> bool {
+/// Whether the raw word text contains a process-substitution opener that is
+/// unquoted at its position. Mirrors GNU subst.c:11349-11378
+/// (`expand_word_internal` cases '<' and '>'): a `<(`/`>(` inside single or
+/// double quotes (or a here-document) is data — `add_character` — while an
+/// unquoted one is extracted by `extract_process_subst` (subst.c:1311) and
+/// executed by `process_substitute` (subst.c:6362).
+pub(crate) fn raw_word_has_unquoted_process_substitution(raw: &str) -> bool {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     let mut single = false;

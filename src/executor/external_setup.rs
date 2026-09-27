@@ -593,6 +593,56 @@ impl Executor {
         Ok(())
     }
 
+    /// Materialize the process substitutions of an assignment RHS from its
+    /// VERBATIM raw text.
+    ///
+    /// GNU subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): an
+    /// unquoted `<(`/`>(` in a word is extracted by `extract_process_subst`
+    /// (subst.c:1311, via `xparse_dolparen` — the body keeps its own quoting
+    /// because the span is pulled out of the word string before any quote
+    /// removal) and executed by `process_substitute` (subst.c:6362), whose
+    /// `/dev/fd/N` result replaces the span in the expanding word. This runs
+    /// in assignment position exactly like argument position (W_NOPROCSUB is
+    /// never set for assignment words).
+    ///
+    /// Rubash's lexer de-quotes the whole `name=<(...)` token at once
+    /// (`finish_word_token`), so the executor's assignment value arrives with
+    /// the substitution body's quotes already stripped; the parser keeps the
+    /// verbatim RHS in `CommandNode::assignment_raws`. Running the body from
+    /// the de-quoted text corrupts it (`x=<(printf '\377')` would execute
+    /// `printf \377` and print `377`); this entry re-derives the body from
+    /// the raw RHS so the substitution sees the same text GNU extracts.
+    /// Everything outside the span keeps its raw quoting, which the normal
+    /// assignment-expansion chain then processes as usual.
+    pub(in crate::executor) fn materialize_assignment_process_substitutions_from_raw(
+        &mut self,
+        raw: &str,
+    ) -> Result<String, ExecuteError> {
+        let substitutions = crate::parser::WordMetadata::new(0, raw.to_string(), raw.to_string())
+            .process_substitutions;
+
+        let mut word = raw.to_string();
+        for substitution in substitutions {
+            let path = if substitution.output {
+                let path = self.empty_process_substitution_temp()?;
+                self.assignment_output_process_substitutions.insert(
+                    shell_display_path(&path.to_string_lossy()),
+                    substitution.source,
+                );
+                path
+            } else {
+                let Some(output) = self.process_substitution_output_bytes(&substitution.source)
+                else {
+                    continue;
+                };
+                self.write_process_substitution_temp_bytes(&output)?
+            };
+            let display_path = shell_display_path(&path.to_string_lossy());
+            word = word.replacen(&substitution.target, &display_path, 1);
+        }
+        Ok(word)
+    }
+
     pub(in crate::executor) fn materialize_assignment_process_substitutions(
         &mut self,
         value: &str,

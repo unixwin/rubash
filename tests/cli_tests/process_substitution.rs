@@ -48,6 +48,10 @@ fn coproc_input_move_marks_array_endpoint_closed() {
         .expect("run rubash");
 
     assert!(output.status.success());
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "x=hi arr=-1 11\n");
+    // GNU coproc pairs land on high fds below 64 (jobs.c move_to_high_fd
+    // policy; `coproc C { echo hi; }` binds 63 60, so after `exec 4<&${C[0]}-`
+    // moves+closes the read end the array reads `-1 60`). WSL GNU Bash 5.3.0
+    // probe 2026-09-27: `x=hi arr=-1 60`.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "x=hi arr=-1 60\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }

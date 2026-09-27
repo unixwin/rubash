@@ -524,9 +524,14 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Option<HostExternalCommandOutput> {
         let mut env_vars = self.shell_state.env_vars.clone();
-        for (var_name, var_value) in &cmd.assignments {
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, _) = assignment_name_and_append(var_name);
-            let expanded_value = self.expand_assignment_value(var_name, var_value);
+            let raw = raws_aligned
+                .then(|| cmd.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = self.expand_assignment_value_with_raw(var_name, var_value, raw);
             // GNU variables.c:3564-3578 assign_in_env -> bind_variable: a
             // prefix assignment to a nameref binds the referenced variable,
             // so the child env carries the TARGET name and the nameref's
@@ -625,7 +630,8 @@ impl Executor {
         process: &mut Command,
     ) {
         self.apply_child_environment(process);
-        for (var_name, var_value) in &cmd.assignments {
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
+        for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
             if append {
                 // execute_cmd.c: prefix assignment words are applied to the
@@ -636,7 +642,11 @@ impl Executor {
                 // not 5).
                 continue;
             }
-            let expanded_value = self.expand_assignment_value(var_name, var_value);
+            let raw = raws_aligned
+                .then(|| cmd.assignment_raws.get(index))
+                .flatten()
+                .map(String::as_str);
+            let expanded_value = self.expand_assignment_value_with_raw(var_name, var_value, raw);
             // GNU variables.c assign_in_env binds a compound `name=(...)`
             // tempenv word as the literal list text; the internal
             // COMPOUND_ASSIGNMENT_MARKER must not leak into the child's

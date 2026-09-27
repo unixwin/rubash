@@ -55,6 +55,24 @@ impl Executor {
     /// (`$((n+=1))`, `$(cmd)`) in a target run once per command execution;
     /// the memo is cleared at each execute_command entry.
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
+        // GNU redir.c:298 redirection_expand → expand_words_no_vars →
+        // subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): a
+        // redirect word that IS a process substitution expands to the
+        // substitution's /dev/fd filename — the body is extracted verbatim
+        // (extract_process_subst, subst.c:1311) and forked
+        // (process_substitute, subst.c:6362); generic word expansion never
+        // sees the body. Rubash carries the substitution as the verbatim
+        // `>(...)` target text (the persistent-fd owners — e.g.
+        // open_persistent_output_process_substitution — execute the body
+        // later), so return it unchanged. Running expand_word here would
+        // strip the body's quoting and expand its parameters at redirect
+        // time (`exec 9> >(printf 'a%sb\n' "$v")` mangled to `printf a%snb`
+        // before the body ever ran).
+        if (redirect.target.starts_with(">(") || redirect.target.starts_with("<("))
+            && redirect.target.ends_with(')')
+        {
+            return redirect.target.clone();
+        }
         let key = format!(
             "{:?}\x1f{}\x1f{:?}\x1f{}",
             redirect.kind, redirect.operator, redirect.fd, redirect.target

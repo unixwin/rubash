@@ -27,11 +27,13 @@ impl Executor {
         // before apply_temporary_assignments — seeds the redirect-target memo
         // with the correct pre-binding values; the apply sites reuse them.
         let ambiguous_redirect = self.reject_ambiguous_redirects(cmd)?;
+        let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
+            .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
-            self.apply_permanent_assignments(&cmd.assignments);
+            self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
             Vec::new()
         } else {
-            self.apply_temporary_assignments(&cmd.assignments)
+            self.apply_temporary_assignments(&cmd.assignments, assignment_raws)
         };
         if self.xtrace_enabled() && cmd.arithmetic_command.is_none() {
             // GNU dispatches `(( ))` to execute_arith_command, whose own
