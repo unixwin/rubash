@@ -497,16 +497,14 @@ fn crlf_line_terminator_stripped_on_windows() {
 #[cfg(unix)]
 #[test]
 fn crlf_line_terminator_kept_as_data_on_unix() {
-    use crate::executor::markers::DATA_DOLLAR_STR;
     let tokens = tokenize("cat <<EOF\r\nbody\r\nEOF\r\n");
     let body = tokens
         .iter()
         .find(|token| token.kind == TokenKind::HereDocBody)
         .map(|token| token.value.as_str())
         .expect("heredoc body token");
-    assert!(
-        body.starts_with(DATA_DOLLAR_STR),
-        "unterminated heredoc keeps the EOF marker: {body:?}"
-    );
+    // On unix the delimiter itself carries the CR (EOF\r matches EOF\r),
+    // so the heredoc IS terminated and the body keeps the CR from the
+    // content line — GNU semantics: CR is literal data (make_cmd.c).
     assert!(body.contains("body\r\n"), "CR stays in the body: {body:?}");
 }
