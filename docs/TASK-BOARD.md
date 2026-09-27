@@ -52,3 +52,4 @@
 - ecofix ✅ 回收（d3e8affa：#218-#224 七单，两处冲突=deep201签名+ecofix空体检查融合）；**红门禁待查**：nquote 快照失败=recho command not found（harness PATH 或 #218/#220/#224 副作用，下一轮最高优先）；#252/#253 新单；t0286 continuation.rs 船长 diff 待审应用
 - linuxfix ✅ 回收（5de3d1d2：14 单关闭，Linux 平价 17→19；#236 CTLESC glob 族、#238 环境绑定留单；线索：comsub2/printf Linux 侧回归系 9bf2df9e→4d648499 间引入——并入 nquote 红门禁同族调查）
 - misc ✅ 回收（733d79c2：#247-#250 四单关闭+v=$(f) 双执行顺带修；新单 #254 builtin comsub 赋值位 xtrace 缺行排队）
+- ble ✅ 回收（32d1458e：#244/#245/#246 三单关闭；ble.sh source 与 GNU 一致、-n 推进至 28570→新单 #255 排队）
