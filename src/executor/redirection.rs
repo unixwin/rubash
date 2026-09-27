@@ -10,6 +10,14 @@ use super::*;
 enum OutputTarget {
     Stdout,
     Stderr,
+    /// GNU dup2 snapshot (rubash#170): an fd_table `Stdout` endpoint on any
+    /// fd OTHER than 1 means "the process stdout / active capture object as
+    /// bound" — a later rebinding of fd 1 (`exec > f` inside
+    /// `( ... ) 2>&1`) must NOT move it, exactly as a dup2'd descriptor
+    /// keeps pointing at the original open file description. Resolves at
+    /// write time to the active capture or the raw process stdout, never
+    /// through the live fd_table[1].
+    ProcessStdout,
     Null,
     CoprocStdin(u32),
     Path(String),
@@ -323,7 +331,17 @@ impl Executor {
                 OutputTarget::Closed
             } else {
                 match entry.write.as_ref().expect("checked above") {
-                    FdWriteEndpoint::Stdout => OutputTarget::Stdout,
+                    FdWriteEndpoint::Stdout => {
+                        // fd 1's live alias stays live (an `exec > f` inside
+                        // the body must retarget plain stdout writes); every
+                        // OTHER fd's Stdout endpoint is a dup2 snapshot of
+                        // the original stdout object (rubash#170).
+                        if *fd == 1 {
+                            OutputTarget::Stdout
+                        } else {
+                            OutputTarget::ProcessStdout
+                        }
+                    }
                     FdWriteEndpoint::Stderr => OutputTarget::Stderr,
                     FdWriteEndpoint::File(file_fd) => {
                         let path = shell_display_path(&file_fd.path.to_string_lossy());
@@ -647,6 +665,19 @@ impl Executor {
         let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(output);
         match target {
             OutputTarget::Stdout | OutputTarget::Stderr => {}
+            OutputTarget::ProcessStdout => {
+                // Snapshot of the original stdout object (rubash#170): the
+                // stream goes to the default stdout resolution — active
+                // capture or raw process stdout — never a rebound fd 1.
+                if crate::executor::shell_options::stdout_capture_active() {
+                    crate::executor::shell_options::stdout_capture_write(&bytes)?;
+                } else if let Some(capture) = self.stdout_capture.as_mut() {
+                    use std::io::Write;
+                    capture.write_all(&bytes)?;
+                } else {
+                    write_stdout_bytes(&bytes)?;
+                }
+            }
             OutputTarget::Null => {}
             OutputTarget::Closed => {
                 if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
@@ -773,6 +804,27 @@ impl OutputFdState {
                     Ok(())
                 } else {
                     executor.write_default_stdout(output)
+                }
+            }
+            OutputTarget::ProcessStdout => {
+                // Snapshot of the original stdout object (see the variant):
+                // resolve exactly like write_fd_endpoint's Stdout arm —
+                // active thread capture first, then the executor's field
+                // capture, then the raw process stdout — but NEVER through
+                // the live fd_table[1], which `exec > f` may have rebound.
+                if self.defer_stdout_writes {
+                    self.deferred_stdout.borrow_mut().extend_from_slice(output);
+                    Ok(())
+                } else if crate::executor::shell_options::stdout_capture_active() {
+                    crate::executor::shell_options::stdout_capture_write(output)?;
+                    Ok(())
+                } else if let Some(capture) = executor.stdout_capture.as_mut() {
+                    use std::io::Write;
+                    capture.write_all(output)?;
+                    Ok(())
+                } else {
+                    write_stdout_bytes(output)?;
+                    Ok(())
                 }
             }
             OutputTarget::Stderr => executor.write_default_stderr(output),

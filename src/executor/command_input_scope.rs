@@ -364,7 +364,31 @@ impl Executor {
                         // GNU dup2 copies the whole descriptor — the group's
                         // fd takes the source's open file description, shared
                         // offset included (fd_table dup_entry).
-                        let _ = self.fd_table.dup_output(fd, source_fd);
+                        if self.fd_table.dup_output(fd, source_fd).is_err()
+                            && source_fd <= 2
+                            && !self.fd_table.entries.contains_key(&source_fd)
+                        {
+                            // The source is an IMPLICIT std fd (no fd-table
+                            // entry — the shell's own stdout/stderr). GNU
+                            // redir.c dup2 still succeeds: the duplicate
+                            // snapshots the process stdio AT ENTRY, so a
+                            // later `exec > f` inside the body rebinds fd 1
+                            // only and writes to fd 2 keep going to the
+                            // original stdout (rubash#170 nest4:
+                            // `( exec > f; echo x >&2 ) 2>&1` must print x,
+                            // not write f). The FdWriteEndpoint::Stdout /
+                            // ::Stderr markers carry exactly that meaning —
+                            // they resolve to the process stdio (or the
+                            // active capture), never to a later fd-1
+                            // rebinding.
+                            let endpoint = if source_fd == 1 {
+                                FdWriteEndpoint::Stdout
+                            } else {
+                                FdWriteEndpoint::Stderr
+                            };
+                            self.fd_table.open_output(fd, endpoint, false);
+                            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                        }
                         self.record_output_fd_ledger(fd);
                         if move_source {
                             self.fd_table.close(source_fd);

@@ -912,33 +912,37 @@ impl Executor {
             // the propagated per-leaf redirect, which opens later and must
             // survive a `cd` inside the body (niubash#118).
             let expanded = self.expand_redirect_target(redirect);
-            if prepare_targets
-                && !is_closed_redirect_target(&expanded)
-                && redirect_target_fd(&expanded).is_none()
-            {
-                self.create_redirect_output(&expanded, redirect.clobber)?;
+            // fd-dup targets (`>&1`) are entry-time dup2s — see the
+            // redirect_err guard above (rubash#170).
+            if redirect_target_fd(&expanded).is_none() {
+                if prepare_targets
+                    && !is_closed_redirect_target(&expanded)
+                    && redirect_target_fd(&expanded).is_none()
+                {
+                    self.create_redirect_output(&expanded, redirect.clobber)?;
+                }
+                let target = self.anchor_compound_redirect_target(&expanded);
+                let append_redirect = Redirect {
+                    fd: redirect.fd,
+                    fd_var: redirect.fd_var.clone(),
+                    operator: ">>".to_string(),
+                    operator_metadata: Box::new(crate::parser::WordMetadata::new(
+                        0,
+                        ">>".to_string(),
+                        ">>".to_string(),
+                    )),
+                    kind: crate::parser::RedirectKind::Append,
+                    target_metadata: Box::new(crate::parser::WordMetadata::new(
+                        0,
+                        target.clone(),
+                        target.clone(),
+                    )),
+                    target,
+                    append: true,
+                    clobber: false,
+                };
+                apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
             }
-            let target = self.anchor_compound_redirect_target(&expanded);
-            let append_redirect = Redirect {
-                fd: redirect.fd,
-                fd_var: redirect.fd_var.clone(),
-                operator: ">>".to_string(),
-                operator_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    ">>".to_string(),
-                    ">>".to_string(),
-                )),
-                kind: crate::parser::RedirectKind::Append,
-                target_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    target.clone(),
-                    target.clone(),
-                )),
-                target,
-                append: true,
-                clobber: false,
-            };
-            apply_stdout_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = cmd.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
             let target =
                 self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
@@ -962,57 +966,72 @@ impl Executor {
 
         if let Some(redirect) = cmd.redirect_err.as_ref().filter(|r| r.fd.unwrap_or(2) == 2) {
             let expanded = self.expand_redirect_target(redirect);
-            if prepare_targets
-                && !is_closed_redirect_target(&expanded)
-                && redirect_target_fd(&expanded).is_none()
-                && !is_null_device(&expanded)
-            {
-                self.create_redirect_output(&expanded, redirect.clobber)?;
+            // An fd-dup target (`2>&1`) is a dup2 GNU applies ONCE at
+            // compound entry (redir.c do_redirection_internal), snapshotted
+            // by open_compound_output_redirects' scoped fd-table binding.
+            // Splicing a per-leaf re-dup instead re-evaluates fd 1 at every
+            // leaf — after the body's own `exec > f` rebound it, `>&2`
+            // writes land in f while GNU keeps them on the original stdout
+            // (rubash#170 nest4). Same guard on every stdio mirror branch
+            // below.
+            if redirect_target_fd(&expanded).is_none() {
+                if prepare_targets
+                    && !is_closed_redirect_target(&expanded)
+                    && redirect_target_fd(&expanded).is_none()
+                    && !is_null_device(&expanded)
+                {
+                    self.create_redirect_output(&expanded, redirect.clobber)?;
+                }
+                let target = self.anchor_compound_redirect_target(&expanded);
+                let append_redirect = Redirect {
+                    fd: redirect.fd,
+                    fd_var: redirect.fd_var.clone(),
+                    operator: "2>>".to_string(),
+                    operator_metadata: Box::new(crate::parser::WordMetadata::new(
+                        0,
+                        "2>>".to_string(),
+                        "2>>".to_string(),
+                    )),
+                    kind: crate::parser::RedirectKind::Append,
+                    target_metadata: Box::new(crate::parser::WordMetadata::new(
+                        0,
+                        target.clone(),
+                        target.clone(),
+                    )),
+                    target,
+                    append: true,
+                    clobber: false,
+                };
+                apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
             }
-            let target = self.anchor_compound_redirect_target(&expanded);
-            let append_redirect = Redirect {
-                fd: redirect.fd,
-                fd_var: redirect.fd_var.clone(),
-                operator: "2>>".to_string(),
-                operator_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    "2>>".to_string(),
-                    "2>>".to_string(),
-                )),
-                kind: crate::parser::RedirectKind::Append,
-                target_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    target.clone(),
-                    target.clone(),
-                )),
-                target,
-                append: true,
-                clobber: false,
-            };
-            apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
         } else if let Some(redirect) = cmd
             .redirect_err_append
             .as_ref()
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
-            let target =
-                self.anchor_compound_redirect_target(&self.expand_redirect_target(redirect));
-            let append_redirect = Redirect {
-                fd: redirect.fd,
-                fd_var: redirect.fd_var.clone(),
-                operator: redirect.operator.clone(),
-                operator_metadata: redirect.operator_metadata.clone(),
-                kind: redirect.kind.clone(),
-                target_metadata: Box::new(crate::parser::WordMetadata::new(
-                    0,
-                    target.clone(),
-                    target.clone(),
-                )),
-                target,
-                append: true,
-                clobber: false,
-            };
-            apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
+            let expanded = self.expand_redirect_target(redirect);
+            // fd-dup targets (`2>>&1` is still a dup2 in GNU — the append
+            // marker on an fd target is ignored) bind at entry; see the
+            // redirect_err guard above (rubash#170).
+            if redirect_target_fd(&expanded).is_none() {
+                let target = self.anchor_compound_redirect_target(&expanded);
+                let append_redirect = Redirect {
+                    fd: redirect.fd,
+                    fd_var: redirect.fd_var.clone(),
+                    operator: redirect.operator.clone(),
+                    operator_metadata: redirect.operator_metadata.clone(),
+                    kind: redirect.kind.clone(),
+                    target_metadata: Box::new(crate::parser::WordMetadata::new(
+                        0,
+                        target.clone(),
+                        target.clone(),
+                    )),
+                    target,
+                    append: true,
+                    clobber: false,
+                };
+                apply_stderr_append_redirect(&mut ast.commands, &append_redirect);
+            }
         }
 
         // Numbered (fd-prefixed) output redirects — `3>&1`, `10>f` — bind
