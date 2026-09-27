@@ -33,7 +33,23 @@ pub(super) fn execute_text_maybe_redirected(
 
 fn parse_source_ast(source: &str) -> Ast {
     let tokens = crate::lexer::tokenize(source);
-    crate::parser::parse(&tokens)
+    // GNU builtins/evalfile.c:296: a sourced file runs through
+    // parse_and_execute — the SAME parser as the top-level driver, not a
+    // lenient reparse. A stray `)` / `;;` at command position is a syntax
+    // error that aborts the remaining sourced text (rubash#203: `echo )`
+    // was silently accepted, the argument swallowed, rc=0, and the rest of
+    // the file still ran). parse.y yyerror reports
+    // `syntax error near unexpected token `)''; source_text is supplied so
+    // the diagnostic can echo the offending physical line (parse.y:6866
+    // print_offending_line).
+    crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(source.to_string()),
+            ..Default::default()
+        },
+    )
 }
 
 fn execute_ast_with_args(
@@ -167,6 +183,18 @@ fn execute_ast_with_args(
 
     match result {
         Err(ExecuteError::Return(status)) => {
+            executor.set_exit_code(status);
+            Ok(())
+        }
+        // GNU builtins/evalstring.c:585-606 (parse_and_execute): a syntax
+        // error aborts the remaining string (`break` — "syntax errors in a
+        // script abort the execution of the script") and the caller gets
+        // EX_BADUSAGE (shell.h:56 = 2) as an ORDINARY return value — no
+        // longjmp, so the sourcing script continues (rubash#203). `exit N`
+        // inside the file is a different unwinder (jump_to_top_level
+        // EXITPROG) and must still propagate, hence the parse-error flag
+        // gate rather than catching every ExitCode.
+        Err(ExecuteError::ExitCode(status)) if executor.take_parse_error() => {
             executor.set_exit_code(status);
             Ok(())
         }

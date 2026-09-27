@@ -408,6 +408,15 @@ fn parse_sed_substitutions(script: &str) -> Option<Vec<(&str, &str, bool)>> {
 #[derive(Clone, Debug, PartialEq)]
 enum BreAtom {
     Char(char),
+    /// Backslash-escaped ordinary char. POSIX.1-2017 §9.3.4/§9.3.6 BREs and
+    /// GNU sed (regexec(3), RE grammar): a `<backslash>` removes any special
+    /// meaning from the following ordinary character, so an escaped `*` is a
+    /// literal asterisk and NEVER the `*` duplication operator. Verified
+    /// against WSL GNU Bash 5.3.0 / GNU sed: `echo 'a*b' | sed 's/a\*/X/'`
+    /// prints `Xb`, and aliasconv.bash's `s/\!\*/...` matches the two-char
+    /// `!*` (a quantifier reading would degenerate to an empty match at
+    /// every position).
+    EscapedChar(char),
     Any,
     Class {
         negated: bool,
@@ -499,10 +508,10 @@ fn parse_bre_atoms(
                             atoms: vec![last],
                         });
                     }
-                    'n' => atoms.push(BreAtom::Char('\n')),
-                    't' => atoms.push(BreAtom::Char('\t')),
+                    'n' => atoms.push(BreAtom::EscapedChar('\n')),
+                    't' => atoms.push(BreAtom::EscapedChar('\t')),
                     '{' | '|' => return None,
-                    other => atoms.push(BreAtom::Char(other)),
+                    other => atoms.push(BreAtom::EscapedChar(other)),
                 }
             }
             '[' => {
@@ -563,6 +572,10 @@ fn parse_bre_atoms(
 fn atoms_to_pieces(atoms: &[BreAtom]) -> Vec<BrePiece> {
     let mut pieces = Vec::new();
     for atom in atoms {
+        // Only an UNescaped `*` is the BRE duplication operator
+        // (POSIX.1-2017 §9.3.6); `\*` arrives as EscapedChar('*') and stays
+        // literal. An unescaped leading `*` (no preceding piece) is also
+        // literal per GNU regexec.
         if *atom == BreAtom::Char('*') {
             if let Some(last) = pieces.last_mut() {
                 let last: &mut BrePiece = last;
@@ -591,7 +604,9 @@ fn bre_atom_match(
     captures: &BreCaptures,
 ) -> Option<usize> {
     match atom {
-        BreAtom::Char(expected) => (text.get(pos) == Some(expected)).then_some(pos + 1),
+        BreAtom::Char(expected) | BreAtom::EscapedChar(expected) => {
+            (text.get(pos) == Some(expected)).then_some(pos + 1)
+        }
         BreAtom::Any => text.get(pos).is_some().then_some(pos + 1),
         BreAtom::Class { negated, ranges } => {
             let ch = *text.get(pos)?;

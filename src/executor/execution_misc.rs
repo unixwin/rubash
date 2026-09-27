@@ -866,6 +866,14 @@ pub(in crate::executor) fn restore_command_substitution_output(value: &str) -> S
         .replace(DATA_DOLLAR, "$")
         .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
         .replace(crate::executor::markers::DATA_BACKSLASH, "\\")
+        // A `"` that was data inside single quotes travels as DATA_DQUOTE
+        // (lexer quotes.rs single-quote arm; registry: Output boundary).
+        // The sequential pipeline stage / argv paths decode carriers here,
+        // so without this a fully single-quoted awk script argument
+        // (`awk -F '\t' 'BEGIN { print "..." }'`) reached the child with a
+        // raw 0x18 byte. GNU: subst.c:11882-11886 (case '\'') copies the
+        // span verbatim — the child argv gets a real `"`.
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
 }
 
 /// The command-substitution dispatchers return transport text; a body that
