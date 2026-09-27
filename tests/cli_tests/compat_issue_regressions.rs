@@ -1510,7 +1510,13 @@ fn unquoted_heredoc_backslash_and_parameter_errors_match_bash() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "ab\nc\\\nd\n<>\nstatus=1\nafter\n"
+        // GNU 5.3.0 probe (2026-09-27, WSL script-file fed to bash -c):
+        // a fatal `${D?msg}` in an external command's heredoc body is
+        // confined to the forked child (execute_cmd.c:5884 child
+        // do_redirections; the child inherits top_level, exits with the
+        // mode's FORCE_EOF status), so `-c` reports status=127 (script
+        // mode 1) and the remaining commands still run.
+        "ab\nc\\\nd\n<>\nstatus=127\nafter\n"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("D: ERR"));
 }

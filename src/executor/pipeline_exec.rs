@@ -380,7 +380,39 @@ impl Executor {
         let time_prefix_started = time_prefix.as_ref().map(|_| time_command_started());
         let mut input = String::new();
         let mut statuses = Vec::new();
-        for (stage_index, command) in commands.iter().enumerate() {
+        let mut first_stage = 0usize;
+        // GNU execute_cmd.c:2620 execute_pipeline connects the left
+        // elements with real pipes before the rightmost command runs, so a
+        // producer is never fully materialized inside the shell (issue
+        // #206: `yes | head -100000 | while read` hung at stage 0 while
+        // rubash slurped yes's unbounded output). When the pipeline has a
+        // shell-side tail, run the leading external members concurrently
+        // here and continue the sequential loop from the tail with the
+        // bounded captured output as its input.
+        if time_prefix.is_none() {
+            if let Some((prefix_len, prefix_output, prefix_stderr, prefix_statuses)) =
+                self.execute_external_prefix_concurrently(&commands)?
+            {
+                let prefix_last = commands[prefix_len - 1];
+                if prefix_last.pipe == Some(2)
+                    || self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
+                {
+                    input = prefix_output;
+                    input.push_str(&prefix_stderr);
+                } else if !prefix_stderr.is_empty() {
+                    std::io::stderr().write_all(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
+                            &prefix_stderr,
+                        ),
+                    )?;
+                } else {
+                    input = prefix_output;
+                }
+                statuses = prefix_statuses;
+                first_stage = prefix_len;
+            }
+        }
+        for (stage_index, command) in commands.iter().enumerate().skip(first_stage) {
             let stage = time_prefix
                 .as_ref()
                 .filter(|_| stage_index == 0)
@@ -881,71 +913,163 @@ impl Executor {
         }
 
         let mut specs = Vec::with_capacity(commands.len());
-        for command in commands {
-            if command.words.is_empty() {
-                return Ok(None);
-            }
-            // rubash#205: expand the member's words with the same per-word
-            // machinery as the sequential stage executor
-            // (pipeline_stages.rs expand_stage_argv). The old text-layer
-            // `expand_word` re-parsed the already-dequoted word text and its
-            // generic walker stripped embedded `"` characters as quote
-            // syntax, so `grep -q '"--help all"'` handed grep a bare
-            // `--help all` that parsed as an option. GNU never re-parses
-            // argv text between pipeline elements:
-            // execute_cmd.c:2620 execute_pipeline forks every element and
-            // runs execute_simple_command -> expand_words on the parsed
-            // WORD structs exactly once; the final dequote
-            // (subst.c:4807 dequote_string) removes only CTLESC escapes,
-            // leaving a bare `"` data character for execve verbatim.
-            let mut first_fields = self.expand_stage_first_word(command);
-            let expanded_name = first_fields.first().cloned().unwrap_or_default();
-            // GNU runs every pipeline member through execute_disk_command
-            // (execute_cmd.c:5789), so a restricted shell refuses members
-            // exactly like plain commands. A member that would be refused
-            // must take the sequential stage path, where
-            // restricted_command_error reports it and the remaining stages
-            // still run against the (empty) pipe input.
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
-                && self
-                    .restricted_command_error(command, &expanded_name)
-                    .is_some()
-            {
-                return Ok(None);
-            }
-            if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
-                return Ok(None);
-            }
-            let Some(program) = find_user_command(&expanded_name, &self.shell_state.env_vars)
-                .or_else(|| {
-                    matches!(expanded_name.as_str(), "yes" | "head" | "wc")
-                        .then(|| internal_pipeline_program(&expanded_name))
-                })
+        for (index, command) in commands.iter().enumerate() {
+            let Some(spec) =
+                self.concurrent_external_stage_spec(command, index, index + 1 == commands.len())
             else {
                 return Ok(None);
             };
-            // GNU execute_cmd.c:6139-6233 (shell_execve): a member the OS
-            // cannot exec natively is classified by its first bytes before
-            // any shell-script fallback. A refusal must not run the member
-            // through the fast path; bail out so the sequential stage
-            // executor reports it (it applies the same classification).
-            if crate::executor::path::should_run_with_shell(&program)
-                && self.exec_format_refusal(command, &program).is_some()
-            {
-                return Ok(None);
-            }
-            let mut args: Vec<String> = first_fields.into_iter().skip(1).collect();
-            args.extend(self.expand_stage_tail_words(command));
-            // Same child-argv contract as the sequential spawn path
-            // (pipeline_stages.rs execute_external_pipeline_stage_inner):
-            // decode the lexer's C0 data carriers exactly once so the
-            // spawned program receives visible argv text.
-            for arg in &mut args {
-                *arg = super::execution_misc::restore_command_substitution_output(arg);
-            }
-            specs.push((program, expanded_name, args));
+            specs.push(spec);
         }
 
+        let results = self.spawn_wait_concurrent_external_stages(commands, specs)?;
+        let (_, stderr, _) = results.last().unwrap();
+        self.write_pipeline_output(
+            commands[commands.len() - 1],
+            &results.last().unwrap().0,
+            false,
+        )?;
+        if !stderr.is_empty() {
+            std::io::stderr().write_all(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(stderr),
+            )?;
+        }
+        let statuses = results
+            .iter()
+            .map(|(_, _, status)| *status)
+            .collect::<Vec<_>>();
+        self.exit_code = self.pipeline_exit_status(&statuses);
+        self.set_pipestatus(statuses);
+        Ok(Some(results))
+    }
+
+    /// Admission and argv expansion for one concurrent external pipeline
+    /// member (execute_cmd.c:5789 execute_disk_command runs every member
+    /// through the full expand_words sequence, so the member's arguments
+    /// are pathname-expanded here). Returns None when the member must take
+    /// the shell-aware sequential stage path instead: builtins, restricted
+    /// refusals, redirects the OS-pipe plumbing cannot express, `|&`, or a
+    /// program that would be refused by exec classification.
+    #[cfg(windows)]
+    fn concurrent_external_stage_spec(
+        &mut self,
+        command: &CommandNode,
+        index: usize,
+        is_last_member: bool,
+    ) -> Option<(std::path::PathBuf, String, Vec<String>)> {
+        if command.time_command.is_some()
+            || command.brace_group.is_some()
+            || command.subshell
+            || command_has_non_concurrent_pipeline_redirects(
+                command,
+                index,
+                if is_last_member {
+                    index + 1
+                } else {
+                    usize::MAX
+                },
+            )
+            || command.redirect_in.is_some()
+            || command.redirect_err.is_some()
+            || command.redirect_err_append.is_some()
+            || command
+                .redirects
+                .iter()
+                .any(|redirect| redirect.is_list_only_redirect())
+            || ((command.redirect_out.is_some() || command.append.is_some()) && !is_last_member)
+            || ((command.heredoc.is_some()
+                || !command.heredoc_redirects.is_empty()
+                || command.here_string.is_some())
+                && index != 0)
+            // GNU execute_cmd.c:4617 execute_simple_command runs a pipeline
+            // element with a `VAR=value` tempenv prefix as an ordinary
+            // forked member whose child environment carries the assignment;
+            // the concurrent OS-pipe path supports it
+            // (apply_external_environment in spawn_wait below). Only the
+            // forms that need the sequential executor's shell-table
+            // handling bail: `name+=value` appends and PATH= (command
+            // resolution must observe the new PATH) — rubash#192.
+            || command
+                .assignments
+                .iter()
+                .any(|(name, _)| {
+                    let (base, append) = assignment_name_and_append(name);
+                    append || base == "PATH"
+                })
+            || !command.process_substitutions.is_empty()
+            || command_has_pipeline_process_substitution(command)
+            || command.pipe == Some(2)
+            || command_is_compound_pipeline_stage(command)
+        {
+            return None;
+        }
+        // rubash#205: expand the member's words with the same per-word
+        // machinery as the sequential stage executor
+        // (pipeline_stages.rs expand_stage_argv). The old text-layer
+        // `expand_word` re-parsed the already-dequoted word text and its
+        // generic walker stripped embedded `"` characters as quote
+        // syntax. GNU never re-parses argv text between pipeline elements
+        // (execute_cmd.c:2620 -> expand_words once; subst.c:4807
+        // dequote_string removes only CTLESC escapes).
+        let mut first_fields = self.expand_stage_first_word(command);
+        let expanded_name = first_fields.first().cloned().unwrap_or_default();
+        // GNU runs every pipeline member through execute_disk_command
+        // (execute_cmd.c:5789), so a restricted shell refuses members
+        // exactly like plain commands. A member that would be refused
+        // must take the sequential stage path, where
+        // restricted_command_error reports it and the remaining stages
+        // still run against the (empty) pipe input.
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "restricted")
+            && self
+                .restricted_command_error(command, &expanded_name)
+                .is_some()
+        {
+            return None;
+        }
+        if crate::executor::builtin_names::is_shell_builtin_name(&expanded_name) {
+            return None;
+        }
+        let program =
+            find_user_command(&expanded_name, &self.shell_state.env_vars).or_else(|| {
+                matches!(expanded_name.as_str(), "yes" | "head" | "wc")
+                    .then(|| internal_pipeline_program(&expanded_name))
+            })?;
+        // GNU execute_cmd.c:6139-6233 (shell_execve): a member the OS
+        // cannot exec natively is classified by its first bytes before
+        // any shell-script fallback. A refusal must not run the member
+        // through the fast path; bail out so the sequential stage
+        // executor reports it (it applies the same classification).
+        if crate::executor::path::should_run_with_shell(&program)
+            && self.exec_format_refusal(command, &program).is_some()
+        {
+            return None;
+        }
+        let mut args: Vec<String> = first_fields.into_iter().skip(1).collect();
+        args.extend(self.expand_stage_tail_words(command));
+        // Same child-argv contract as the sequential spawn path
+        // (pipeline_stages.rs execute_external_pipeline_stage_inner):
+        // decode the lexer's C0 data carriers exactly once so the
+        // spawned program receives visible argv text.
+        for arg in &mut args {
+            *arg = super::execution_misc::restore_command_substitution_output(arg);
+        }
+        Some((program, expanded_name, args))
+    }
+
+    /// Spawn the already-admitted external pipeline members on real OS
+    /// pipes (GNU execute_cmd.c:2620 execute_pipeline forks every left
+    /// element connected by pipe(2) as it walks the connection list —
+    /// execute_cmd.c:2641,2648-2707 — so a producer blocked on a full pipe
+    /// runs concurrently with its consumer instead of being slurped into
+    /// the shell's memory). The last member's stdout is captured and
+    /// returned in the last results entry; the caller owns writing the
+    /// final output and the exit/pipestatus bookkeeping.
+    #[cfg(windows)]
+    fn spawn_wait_concurrent_external_stages(
+        &mut self,
+        commands: &[&CommandNode],
+        specs: Vec<(std::path::PathBuf, String, Vec<String>)>,
+    ) -> Result<Vec<(String, String, i32)>, ExecuteError> {
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
             Vec::with_capacity(commands.len() - 1);
         for _ in 0..commands.len() - 1 {
@@ -1154,25 +1278,87 @@ impl Executor {
                 self.write_default_stdout(&output)?;
             }
         }
-        self.write_pipeline_output(
-            commands[commands.len() - 1],
-            &results.last().unwrap().0,
-            false,
-        )?;
-        if let Some((_, stderr, _)) = results.last() {
-            if !stderr.is_empty() {
-                std::io::stderr().write_all(
-                    &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stderr),
-                )?;
-            }
+        Ok(results)
+    }
+
+    /// Run the maximal leading run of concurrent-eligible external stages
+    /// on real OS pipes and hand its captured output to the sequential
+    /// stage loop for the shell-side remainder (issue #206).
+    ///
+    /// GNU execute_cmd.c:2620 execute_pipeline forks EVERY left element
+    /// connected by pipe(2) (execute_cmd.c:2641 pipe(), 2705-2707
+    /// execute_command_internal on Connection->first) before the rightmost
+    /// command runs — elements execute concurrently and a producer like
+    /// `yes` blocks on a full pipe until its consumer reads, dying on
+    /// SIGPIPE once a bounding consumer such as `head -N` exits. The
+    /// sequential stage loop instead materializes each stage's whole
+    /// output in memory before the next stage starts, so
+    /// `yes | head -100000 | while read` never got past stage 0 (rubash
+    /// read yes's infinite stream into one Vec — 8+ GB RSS, no
+    /// termination). When the all-external concurrent path above declined
+    /// the pipeline (a compound/builtin tail), the leading external
+    /// members still get the OS-pipe treatment here; only the bounded
+    /// output of the last external member is captured for the tail.
+    /// Returns (prefix length, captured output, captured stderr,
+    /// per-member statuses) or None when no >=2-member run precedes a
+    /// shell-side tail.
+    #[cfg(windows)]
+    fn execute_external_prefix_concurrently(
+        &mut self,
+        commands: &[&CommandNode],
+    ) -> Result<Option<(usize, String, String, Vec<i32>)>, ExecuteError> {
+        if commands.len() < 3
+            || self.stderr_capture.is_some()
+            // Same DEBUG-trap bail-out as the all-external path: the
+            // sequential loop owns per-element run_debug_trap fires.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
+                    .is_some_and(|action| !action.is_empty()))
+            || commands.first().is_some_and(|command| command.time_command.is_some())
+        {
+            return Ok(None);
         }
+        let mut specs = Vec::new();
+        let mut prefix_len = 0usize;
+        for (index, command) in commands.iter().enumerate() {
+            // No prefix member is the pipeline's last stage, so none may
+            // carry a final output redirect; `is_last_member` is false.
+            let Some(spec) = self.concurrent_external_stage_spec(command, index, false) else {
+                break;
+            };
+            specs.push(spec);
+            prefix_len = index + 1;
+        }
+        // A single admitted member gains nothing over the sequential
+        // executor's own spawn-and-wait; only a >=2-member run gets real
+        // inter-member pipes. The whole pipeline being external was
+        // already handled (or declined with its own write-out semantics)
+        // by execute_external_pipeline_concurrently before this runs.
+        if prefix_len < 2 || prefix_len >= commands.len() {
+            return Ok(None);
+        }
+        let commands = &commands[..prefix_len];
+        let results = self.spawn_wait_concurrent_external_stages(commands, specs)?;
+        let Some((output, stderr, _)) = results.last().cloned() else {
+            return Ok(None);
+        };
         let statuses = results
             .iter()
             .map(|(_, _, status)| *status)
             .collect::<Vec<_>>();
-        self.exit_code = self.pipeline_exit_status(&statuses);
-        self.set_pipestatus(statuses);
-        Ok(Some(results))
+        Ok(Some((prefix_len, output, stderr, statuses)))
+    }
+
+    /// Unix port: the OS-pipe prefix machinery above is Windows-only for
+    /// now (os_pipe spawn plumbing); on Unix the sequential stage loop
+    /// keeps handling mixed pipelines. Full-materialization avoidance for
+    /// Unix is the #206 follow-up.
+    #[cfg(not(windows))]
+    fn execute_external_prefix_concurrently(
+        &mut self,
+        _commands: &[&CommandNode],
+    ) -> Result<Option<(usize, String, String, Vec<i32>)>, ExecuteError> {
+        Ok(None)
     }
 
     #[cfg(not(windows))]

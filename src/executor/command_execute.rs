@@ -53,7 +53,9 @@ impl Executor {
         if let Some((name, message, status)) = self.parameter_heredoc_expansion_error(cmd) {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_default_stderr(line.as_bytes())?;
-            self.exit_code = status;
+            if let Err(error) = self.finish_heredoc_expansion_error(cmd, status) {
+                return Err(error);
+            }
             return Ok(());
         }
         drop(_t_heredoc);
@@ -93,7 +95,9 @@ impl Executor {
                 message
             )?;
             self.write_default_stderr(&stderr)?;
-            self.exit_code = status;
+            if let Err(error) = self.finish_heredoc_expansion_error(cmd, status) {
+                return Err(error);
+            }
             return Ok(());
         }
 
@@ -724,6 +728,80 @@ impl Executor {
             }
         }
         None
+    }
+
+    /// Map a heredoc-body expansion-error status into the exit status the
+    /// command reports (diagnostic already printed by the caller).
+    ///
+    /// GNU anchor: redir.c:348 heredoc_expand() runs the body through
+    /// expand_string_to_string (redir.c:374-377) inside the command's
+    /// do_redirections. Where those redirects run decides the blast
+    /// radius of the resulting FORCE_EOF jump
+    /// (subst.c:4020-4032 call_expand_word_internal: `w->word = NULL;
+    /// last_command_exit_value = EXECUTION_FAILURE;
+    /// exp_jump_to_top_level(... FORCE_EOF)`):
+    ///
+    /// - External command: execute_cmd.c:5884+ (execute_disk_command
+    ///   child) does do_redirections AFTER fork, in the child. The child
+    ///   inherits the parent's top_level setjmp, so the jump exits the
+    ///   CHILD with the parent-mode fatal status — script mode exits
+    ///   EXECUTION_FAILURE (1) via last_command_exit_value, `-c` mode
+    ///   exits 127 via shell.c:1471 run_one_command's FORCE_EOF arm.
+    ///   The parent observes only the child's status and the script
+    ///   continues (WSL 5.3.0 probes: `M=ERR; cat <<EOF; printf
+    ///   'status=%s\n' "$?"` with body `${D?$M}` prints status=1 in
+    ///   script mode, status=127 under -c, `after` in both, rc 0).
+    /// - Builtin/function: execute_cmd.c:5606
+    ///   (execute_builtin_or_function) applies do_redirections in the
+    ///   MAIN shell, so the jump reaches the main shell's setjmp and the
+    ///   noninteractive script dies (probes: `: <<EOF`/`read X <<EOF`
+    ///   with the same body print nothing further, rc 1 script / 127 -c).
+    ///
+    /// Rubash runs the heredoc expansion before dispatch, so the class is
+    /// decided here by the command's first word. A `$var` command word is
+    /// expanded only at dispatch and predicts as external (contained):
+    /// a false-contained only keeps a script running that GNU would have
+    /// killed, while a false-fatal would kill one GNU keeps running.
+    fn finish_heredoc_expansion_error(
+        &mut self,
+        cmd: &CommandNode,
+        status: i32,
+    ) -> Result<(), ExecuteError> {
+        if status != Self::FATAL_PARAMETER_EXPANSION_STATUS {
+            // Non-fatal statuses (bad substitution = 1, EOF = 2) already
+            // carry their GNU DISCARD-style values.
+            self.exit_code = status;
+            return Ok(());
+        }
+        let code = self.expansion_fatal_status();
+        self.exit_code = code;
+        if self.heredoc_error_command_runs_in_main_shell(cmd) {
+            // Builtin/function target: the FORCE_EOF jump lands in the
+            // main shell (execute_cmd.c:5606) and the script exits.
+            return Err(ExecuteError::ExitCode(code));
+        }
+        // External target: the forked child contains the jump; the
+        // command reports the mode's fatal status and the script
+        // continues.
+        Ok(())
+    }
+
+    /// True when the command carrying a failing heredoc would dispatch to
+    /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
+    /// rather than a forked external child (execute_cmd.c:5884+).
+    fn heredoc_error_command_runs_in_main_shell(&mut self, cmd: &CommandNode) -> bool {
+        let Some(first) = cmd.words.first() else {
+            return false;
+        };
+        // Expansion of the first word can run substitutions with side
+        // effects; only classify the literal-word forms where expansion is
+        // inert.
+        if first.contains('$') || first.contains('`') {
+            return false;
+        }
+        let expanded = self.expand_word(first);
+        crate::executor::builtin_names::is_shell_builtin_name(&expanded)
+            || self.function_name_for_command_word(&expanded).is_some()
     }
 
     /// Latched expansion-error flags, checked after word expansion and

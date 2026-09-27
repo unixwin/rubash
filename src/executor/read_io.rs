@@ -453,7 +453,13 @@ impl Executor {
         exact_char_limit: bool,
     ) -> Option<String> {
         self.apply_comsub_stdin_writeback();
-        let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?.clone();
+        // GNU read builtin: one zread record off the shared fd-0 cursor
+        // (builtins/read.def:731-738) — O(record), never a copy of the
+        // remaining stream. The FUNCTION_STDIN mirror must match that
+        // cost: borrowing here keeps `while read` over an S-byte pipeline
+        // input at O(S) total instead of the O(S) clone per record that
+        // made 100k-line loops take minutes and ballooned RSS (rubash
+        // issue #206 consumer side).
         let offset = self
             .shell_state
             .env_vars
@@ -461,35 +467,44 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
 
-        if offset >= input.len() {
+        if self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN)
+            .is_none_or(|input| offset >= input.len())
+        {
             return None;
         }
         if char_limit == Some(0) {
             return Some(String::new());
         }
 
-        let slice = &input[offset..];
-        let mut output = String::new();
-        let mut consumed = 0usize;
-        let mut took_any = false;
-        let delimiter_needle = read_delimiter_needle(delimiter);
-        for (index, ch) in slice.char_indices() {
-            if !exact_char_limit && slice[index..].starts_with(&delimiter_needle) {
-                consumed = index + delimiter_needle.len();
-                took_any = true;
-                break;
-            }
+        let (output, consumed) = {
+            let input = self.shell_state.env_vars.get(FUNCTION_STDIN)?;
+            let slice = &input[offset..];
+            let mut output = String::new();
+            let mut consumed = 0usize;
+            let mut took_any = false;
+            let delimiter_needle = read_delimiter_needle(delimiter);
+            for (index, ch) in slice.char_indices() {
+                if !exact_char_limit && slice[index..].starts_with(&delimiter_needle) {
+                    consumed = index + delimiter_needle.len();
+                    took_any = true;
+                    break;
+                }
 
-            output.push(ch);
-            consumed = index + ch.len_utf8();
-            took_any = true;
-            if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
-                break;
+                output.push(ch);
+                consumed = index + ch.len_utf8();
+                took_any = true;
+                if char_limit.is_some_and(|limit| output.chars().count() >= limit) {
+                    break;
+                }
             }
-        }
-        if !took_any {
-            return None;
-        }
+            if !took_any {
+                return None;
+            }
+            (output, consumed)
+        };
 
         self.shell_state.env_vars.insert(
             FUNCTION_STDIN_OFFSET.to_string(),
