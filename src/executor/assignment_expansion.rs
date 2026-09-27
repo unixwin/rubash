@@ -1245,7 +1245,25 @@ impl Executor {
             // delivers "$@" either as a bare `$@` (split-form path) or as
             // \u{E302}$@\u{E302} (atomic lexer path, DQ_DATA markers).
             let token_stripped = token.trim_matches('\u{E302}');
-            if token_stripped == "$@" || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}") {
+            // GNU arrayfunc.c:557 expand_compound_array_assignment splits
+            // the RHS text with parse_string_to_word_list FIRST (each word
+            // keeps its W_QUOTED flag) and only then runs
+            // expand_words_no_vars on every word (arrayfunc.c:609), so a
+            // quoted positional element keeps one word per parameter: the
+            // braced "${@}" is the same $@ list ($@ and ${@} are the same
+            // parameter — subst.c:7600 chk_atstar sets quoted_dollar_at
+            // for `@` under Q_DOUBLE_QUOTES, and subst.c:3025
+            // string_list_pos_params dispatches both spellings identically).
+            // The atomic-lexer shape (\u{E302}${@}\u{E302}) previously fell
+            // through to the plain-element path, whose joined text the
+            // storage tokenizer then re-split on IFS whitespace —
+            // `R=( "${@}" )` with params 'a b' 'a c' 'x z' stored six
+            // elements instead of three (sort-pos-params example).
+            let token_is_quoted_wrap = token != token_stripped;
+            if token_stripped == "$@"
+                || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}")
+                || (token_is_quoted_wrap && token_stripped == "${@}")
+            {
                 changed = true;
                 values.extend(
                     self.shell_state
@@ -1253,6 +1271,19 @@ impl Executor {
                         .iter()
                         .map(|value| store!(value)),
                 );
+            } else if (token_is_quoted_wrap && (token_stripped == "${*}" || token_stripped == "$*"))
+                || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${*}")
+            {
+                // GNU subst.c:3043-3048 string_list_pos_params: a quoted
+                // $* / ${*} is ONE word — the parameters joined with the
+                // first character of IFS (string_list_dollar_star). The
+                // joined element must be quote-wrapped for storage or the
+                // storage tokenizer re-splits it on IFS whitespace.
+                changed = true;
+                values.push(store!(&self
+                    .shell_state
+                    .positional_params
+                    .join(&self.ifs_first_char_separator())));
             } else if let Some(array_name) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)
@@ -1642,7 +1673,11 @@ impl Executor {
                     changed = true;
                     values.append(&mut fields);
                 } else {
-                    values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                    values.extend(self.compound_plain_element_value_fields(
+                        &token_raw,
+                        bare,
+                        &mut changed,
+                    ));
                 }
             } else {
                 // GNU expand_words_no_vars -> shell_expand_word_list expands
@@ -1687,6 +1722,19 @@ impl Executor {
                             // Preserve [N]= subscript form without
                             // quote_array_value wrapping so both indexed
                             // and assoc storage recognize [key]=value.
+                            // A quoted bare element (`"$1"`, delivered as
+                            // \u{E302}$1\u{E302}) is ONE word in GNU —
+                            // arrayfunc.c:557 parse_string_to_word_list
+                            // keeps W_QUOTED, so expand_words_no_vars
+                            // (arrayfunc.c:609) never splits it — and must
+                            // be quote-wrapped for storage or the storage
+                            // tokenizer re-splits its IFS whitespace
+                            // (`R=( "$1" )` with $1='a b' stored two
+                            // elements, sort-pos-params family).
+                            if prefix.is_none() && token != core {
+                                values.push(store!(&value));
+                                continue;
+                            }
                             let stored = if let Some(p) = prefix {
                                 format!("{p}={value}")
                             } else {
@@ -1735,7 +1783,18 @@ impl Executor {
                     values.push(word);
                     continue;
                 }
-                values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                // A `[subscript]=` element keeps its prefix glued to the first
+                // stored field; only the bare-element form takes the GNU
+                // per-word quoted/split treatment above.
+                if core.starts_with('[') {
+                    values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                } else {
+                    values.extend(self.compound_plain_element_value_fields(
+                        &token_raw,
+                        bare,
+                        &mut changed,
+                    ));
+                }
             }
         }
         changed.then(|| format!("({})", values.join(" ")))
@@ -1856,6 +1915,82 @@ impl Executor {
     /// `changed`). The compound walker's preserve-quotes contract keeps
     /// literal tokens byte-identical, so routing through it only differs
     /// where expansion actually applies.
+    ///
+    /// GNU splits the result per word, not per joined string:
+    /// parse_string_to_word_list (arrayfunc.c:585) runs FIRST and gives each
+    /// word its W_QUOTED flag (parse.y:5781 read_token_word sets W_QUOTED for
+    /// any quoted segment; parse.y:5387 sets `quoted = 1` for any backslash
+    /// escape), then expand_words_no_vars (arrayfunc.c:609) ->
+    /// subst.c:13219 expand_word_list_internal: "Words with the W_QUOTED or
+    /// W_NOSPLIT bits set, or for which no expansion is done, do not undergo
+    /// word splitting" — every other word is field-split on the CURRENT IFS
+    /// (isifs() tests the live IFS, subst.c:11397+). The old implementation
+    /// pushed the walker's joined text and let the storage boundary
+    /// (split_indexed_tagged_token) split at every U+E309-marked whitespace
+    /// char regardless of IFS, so `R=( $v )` with v=$'a b\na c' under
+    /// IFS=$'\n' stored four elements instead of GNU's two, an empty IFS
+    /// still split, a quoted `"$v"` element split, and non-whitespace IFS
+    /// chars never split (probes 2026-09-27, WSL GNU Bash 5.3.0).
+    fn compound_plain_element_value_fields(
+        &self,
+        token_raw: &str,
+        bare: bool,
+        changed: &mut bool,
+    ) -> Vec<String> {
+        if bare {
+            // Bare (eval-argument) flatten keeps the raw token verbatim.
+            return vec![token_raw.to_string()];
+        }
+        let expanded = self.expand_embedded_parameters_compound(token_raw);
+        if expanded == token_raw {
+            // No expansion ran: a literal element word never undergoes word
+            // splitting (subst.c:13219 — "for which no expansion is done").
+            return vec![token_raw.to_string()];
+        }
+        *changed = true;
+        let text = compound_element_expansion_text(&expanded);
+        if compound_element_word_is_quoted(token_raw) {
+            // W_QUOTED (any quote or backslash escape in the word,
+            // parse.y:5781/5387): one element, never split (probe
+            // 2026-09-27: `R=( a"$v"b )` with v='x:y', IFS=: stores
+            // [ax:yb], GNU 5.3.0). A raw-quoted element's delimiters were
+            // preserved by the walker — drop the one outer pair.
+            let text = if token_raw.starts_with('"')
+                && token_raw.ends_with('"')
+                && text.starts_with('"')
+                && text.ends_with('"')
+                && text.len() > 1
+            {
+                text[1..text.len() - 1].to_string()
+            } else {
+                text
+            };
+            return vec![quote_array_value(&text)];
+        }
+        // Fully unquoted word WITH an expansion: GNU field-splits the whole
+        // expansion string on the current IFS — literal IFS chars of the
+        // word participate too (probe 2026-09-27: `R=( x$v )` with
+        // v=$'a b\na c' under IFS=$'\n' stores [xa b][a c]). Each field is
+        // ARRAY_FIELD_SPLIT_MARKER-tagged like the whole-word path
+        // (expand_unquoted_parameter_compound_assignment) so storage keeps
+        // it one element AND pathname-expands it per field
+        // (arrays.rs append_array_value marker arm — GNU
+        // expand_word_list_internal globs each field after splitting).
+        field_split_values_with_ifs(
+            &text,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+        )
+        .into_iter()
+        .map(|field| {
+            format!(
+                "{}{}",
+                crate::executor::markers::ARRAY_FIELD_SPLIT_MARKER,
+                quote_array_value(&field)
+            )
+        })
+        .collect()
+    }
+
     fn compound_plain_element_value(
         &self,
         token_raw: &str,
@@ -2150,6 +2285,103 @@ impl Executor {
         let result = self.expand_assignment_value_result(name, value);
         (result.value, result.substitution_status)
     }
+}
+
+/// Whether a compound-assignment element word carries ANY quoting or escape
+/// — GNU parse.y:5781 read_token_word sets W_QUOTED for a quoted segment and
+/// parse.y:5387 sets `quoted = 1` for every backslash escape, and
+/// subst.c:13219 expand_word_list_internal never field-splits a W_QUOTED
+/// word. Quoting inside an expansion body does NOT set the outer word's
+/// W_QUOTED — `${...}` is consumed by parse.y:3877 parse_matched_pair,
+/// `$(...)`/`<(...)`/`>(...)` by parse.y:4451 parse_comsub, and a backtick
+/// body by its own matcher — so those spans are skipped. The element's own
+/// quoting arrives encoded as: the atomic lexer's U+E302 DQ_DATA wrap, the
+/// hoist pass's \x1d quoted-RHS marker, raw `"`/`'` quote characters, a
+/// raw backslash escape, or the \x17/\x18 escaped-quote carriers.
+fn compound_element_word_is_quoted(token_raw: &str) -> bool {
+    if token_raw.starts_with(STORAGE_WORD_PREFIX) || token_raw.starts_with('\u{E302}') {
+        return true;
+    }
+    let mut offset = 0usize;
+    while offset < token_raw.len() {
+        let ch = token_raw[offset..]
+            .chars()
+            .next()
+            .expect("offset on char boundary");
+        let after = &token_raw[offset + ch.len_utf8()..];
+        match ch {
+            '$' if after.starts_with('{') => {
+                match crate::executor::parameter_ops::matching_parameter_brace(&after[1..]) {
+                    Some(end) => offset += 1 + 1 + end + 1,
+                    // Unterminated `${`: the rest is the parameter body.
+                    None => return false,
+                }
+                continue;
+            }
+            '$' | '<' | '>' if after.starts_with('(') => {
+                // $(...) / $((...)) / <(...) / >(...): skip the balanced
+                // body — its quotes belong to the substitution, not this
+                // word.
+                offset += 2;
+                let mut depth = 1usize;
+                while offset < token_raw.len() && depth > 0 {
+                    let body_ch = token_raw[offset..].chars().next().expect("char boundary");
+                    match body_ch {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    offset += body_ch.len_utf8();
+                }
+                continue;
+            }
+            '`' => {
+                offset += 1;
+                while offset < token_raw.len() {
+                    let body_ch = token_raw[offset..].chars().next().expect("char boundary");
+                    match body_ch {
+                        '\\' => {
+                            offset += 1;
+                            if let Some(escaped) = token_raw[offset..].chars().next() {
+                                offset += escaped.len_utf8();
+                            }
+                        }
+                        '`' => {
+                            offset += 1;
+                            break;
+                        }
+                        _ => offset += body_ch.len_utf8(),
+                    }
+                }
+                continue;
+            }
+            '"' | '\'' | '\\' | '\u{E302}' => return true,
+            ch if ch == crate::executor::markers::DATA_SQUOTE
+                || ch == crate::executor::markers::DATA_DQUOTE =>
+            {
+                return true
+            }
+            _ => {}
+        }
+        offset += ch.len_utf8();
+    }
+    false
+}
+
+/// The visible expansion text of a compound element: strip the walker's
+/// U+E309 expansion-whitespace tags (embedded_mutations
+/// mark_expansion_whitespace), the U+E302 wrap, and the \x17/\x18
+/// data-quote carriers (embedded_parameters.rs expand_..._inner,
+/// preserve_quotes arms). Field splitting and element storage both consume
+/// visible text; quote DELIMITERS the walker preserved are the caller's to
+/// strip (only a raw-quoted element carries them).
+fn compound_element_expansion_text(expanded: &str) -> String {
+    expanded
+        .replace(crate::executor::COMPOUND_EXPANSION_WS_TAG, "")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+        .trim_matches('\u{E302}')
+        .to_string()
 }
 
 /// Byte ranges `[start, end)` of every top-level `${...}` braced-parameter

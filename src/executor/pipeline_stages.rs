@@ -376,15 +376,36 @@ impl Executor {
     /// (execute_cmd.c execute_simple_command -> expand_words). Computed once
     /// per stage so substitution side effects in arguments do not run twice.
     fn expand_stage_argv(&mut self, command: &CommandNode) -> (String, Vec<String>) {
+        let mut first_fields = self.expand_stage_first_word(command).into_iter().peekable();
+        let expanded_name = first_fields.next().unwrap_or_default();
+        let mut args: Vec<String> = first_fields.collect();
+        args.extend(self.expand_stage_tail_words(command));
+        (expanded_name, args)
+    }
+
+    /// The stage's expanded first word, field-split like GNU
+    /// execute_simple_command's dispatch word (`v="echo hi"; $v | cat` runs
+    /// two fields). Every field after the first becomes a leading argument.
+    /// Shared by the sequential stage executor and the concurrent native
+    /// pipeline path so both produce byte-identical argv: the text-layer
+    /// `expand_word` re-reads already-dequoted quote characters as syntax
+    /// and strips embedded `"` data (rubash#205 — GNU never re-parses argv
+    /// text between pipeline elements; execute_cmd.c:2620 execute_pipeline
+    /// forks each element with words expanded once from the parsed WORD
+    /// structs, and subst.c:4807 dequote_string only removes CTLESC
+    /// escapes, leaving bare `"` data characters for execve verbatim).
+    pub(in crate::executor) fn expand_stage_first_word(
+        &mut self,
+        command: &CommandNode,
+    ) -> Vec<String> {
         let Some(name) = command.words.first() else {
-            return (String::new(), Vec::new());
+            return Vec::new();
         };
         let first_raw = command
             .word_metadata
             .first()
             .map(|metadata| metadata.raw.as_str());
-        let mut first_fields = self
-            .expand_command_word(command, 0, name, first_raw)
+        self.expand_command_word(command, 0, name, first_raw)
             .into_iter()
             .map(|word| {
                 crate::executor::command_prepare::restore_pathname_escape_markers(
@@ -392,15 +413,25 @@ impl Executor {
                         .replace(crate::executor::markers::PROTECTED_BACKSLASH, "\\")
                         .replace(crate::executor::markers::DATA_BACKSLASH, "\\"),
                 )
-            });
-        let expanded_name = first_fields.next().unwrap_or_default();
-        let mut args: Vec<String> = first_fields.collect();
+            })
+            .collect()
+    }
+
+    /// The stage's argument words (words[1..]), expanded with the same
+    /// per-word machinery as the sequential stage executor: marker restore,
+    /// quoted-word glob suppression, and pathname expansion for unquoted
+    /// words (execute_cmd.c execute_simple_command -> expand_words).
+    pub(in crate::executor) fn expand_stage_tail_words(
+        &mut self,
+        command: &CommandNode,
+    ) -> Vec<String> {
         // GNU execute_simple_command runs pathname expansion on every
         // argument of an external command in a pipeline element, so
         // `ls *` hands ls the directory listing rather than a literal
         // `*`. Without this the pattern reached the host binary verbatim
         // (probe 2026-09-09: `ls * | wc -c` gave 2 bytes instead of 15,
         // while `ls -1 | wc -c` was correct).
+        let mut args: Vec<String> = Vec::new();
         for (offset, word) in command.words[1..].iter().enumerate() {
             let index = offset + 1;
             let raw = command
@@ -440,7 +471,7 @@ impl Executor {
                 }
             }
         }
-        (expanded_name, args)
+        args
     }
 
     fn execute_external_pipeline_stage_inner(

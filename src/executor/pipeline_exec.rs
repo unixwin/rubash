@@ -867,10 +867,24 @@ impl Executor {
 
         let mut specs = Vec::with_capacity(commands.len());
         for command in commands {
-            let Some(name) = command.words.first() else {
+            if command.words.is_empty() {
                 return Ok(None);
-            };
-            let expanded_name = self.expand_word(name);
+            }
+            // rubash#205: expand the member's words with the same per-word
+            // machinery as the sequential stage executor
+            // (pipeline_stages.rs expand_stage_argv). The old text-layer
+            // `expand_word` re-parsed the already-dequoted word text and its
+            // generic walker stripped embedded `"` characters as quote
+            // syntax, so `grep -q '"--help all"'` handed grep a bare
+            // `--help all` that parsed as an option. GNU never re-parses
+            // argv text between pipeline elements:
+            // execute_cmd.c:2620 execute_pipeline forks every element and
+            // runs execute_simple_command -> expand_words on the parsed
+            // WORD structs exactly once; the final dequote
+            // (subst.c:4807 dequote_string) removes only CTLESC escapes,
+            // leaving a bare `"` data character for execve verbatim.
+            let mut first_fields = self.expand_stage_first_word(command);
+            let expanded_name = first_fields.first().cloned().unwrap_or_default();
             // GNU runs every pipeline member through execute_disk_command
             // (execute_cmd.c:5789), so a restricted shell refuses members
             // exactly like plain commands. A member that would be refused
@@ -905,40 +919,16 @@ impl Executor {
             {
                 return Ok(None);
             }
-            // GNU execute_simple_command pathname-expands every argument
-            // of an external pipeline member, so `ls *` gets the
-            // directory listing, not a literal `*` (probe 2026-09-09:
-            // `ls * | wc -c` gave 2 bytes instead of 15, while
-            // `ls -1 | wc -c` was correct).
-            let mut args: Vec<String> = Vec::new();
-            for (arg_index, word) in command.words[1..].iter().enumerate() {
-                let word_index = arg_index + 1;
-                let value = self.expand_word(word);
-                // \x1d marks a fully quoted word and \x1b a quoted
-                // tilde; both stay literal.
-                if value.starts_with(STORAGE_WORD_PREFIX)
-                    || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
-                {
-                    args.push(value.replace(crate::executor::markers::CTLESC, ""));
-                    continue;
-                }
-                // Quoted words (e.g. "*.txt") must not be glob-expanded.
-                let metadata = command.word_metadata.get(word_index);
-                let raw = metadata.map(|metadata| metadata.raw.as_str());
-                if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
-                    raw, metadata,
-                ) {
-                    args.push(value.replace(crate::executor::markers::CTLESC, ""));
-                    continue;
-                }
-                match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
-                    glob::PathnameExpansion::Matches(matches) => args.extend(matches),
-                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                        args.push(value.replace(crate::executor::markers::CTLESC, ""))
-                    }
-                }
+            let mut args: Vec<String> = first_fields.into_iter().skip(1).collect();
+            args.extend(self.expand_stage_tail_words(command));
+            // Same child-argv contract as the sequential spawn path
+            // (pipeline_stages.rs execute_external_pipeline_stage_inner):
+            // decode the lexer's C0 data carriers exactly once so the
+            // spawned program receives visible argv text.
+            for arg in &mut args {
+                *arg = super::execution_misc::restore_command_substitution_output(arg);
             }
-            specs.push((program, args));
+            specs.push((program, expanded_name, args));
         }
 
         let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
@@ -972,7 +962,7 @@ impl Executor {
         let capture_intermediate_stderr =
             self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout);
         let mut intermediate_stderr = Vec::new();
-        for (index, (program, args)) in specs.iter().enumerate() {
+        for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             // The stage's fd 0/1 are OS pipes owned by this loop, not fd
             // table endpoints — a `/dev/stdin` operand drains the incoming
             // reader into a temp file and a `/dev/stdout` operand flushes
@@ -1027,9 +1017,14 @@ impl Executor {
                 process.arg(format!("--internal-{name}")).args(&dev_args);
                 (process, false)
             } else {
+                // command_name is the already-expanded first field from the
+                // spec above (the sequential path passes the same
+                // expanded_name); re-reading words[0] with expand_word would
+                // re-strip data quotes (rubash#205) and re-run its
+                // substitution side effects a second time.
                 external_command_for_named_program(
                     program,
-                    Some(&self.expand_word(&commands[index].words[0])),
+                    Some(expanded_name),
                     &dev_args,
                     &self.shell_state.env_vars,
                 )
@@ -1213,10 +1208,19 @@ impl Executor {
 
         let mut specs = Vec::with_capacity(commands.len());
         for command in commands {
-            let Some(name) = command.words.first() else {
+            if command.words.is_empty() {
                 return Ok(None);
-            };
-            let expanded_name = self.expand_word(name);
+            }
+            // rubash#205 (non-Windows twin of the first concurrent path):
+            // expand the member's words with the per-word machinery the
+            // sequential stage executor uses; `expand_word` re-parses
+            // dequoted text and strips embedded `"` data characters. GNU
+            // expands each element's words once from the parsed WORD
+            // structs (execute_cmd.c:2620 execute_pipeline ->
+            // execute_simple_command -> expand_words; subst.c:4807
+            // dequote_string drops only CTLESC escapes).
+            let mut first_fields = self.expand_stage_first_word(command);
+            let expanded_name = first_fields.first().cloned().unwrap_or_default();
             // Same restricted-member bail-out as the first concurrent path:
             // refused members are reported (and the rest of the pipeline
             // keeps running) by the sequential stage executor.
@@ -1234,40 +1238,13 @@ impl Executor {
             else {
                 return Ok(None);
             };
-            // GNU execute_simple_command pathname-expands every argument
-            // of an external pipeline member, so `ls *` gets the
-            // directory listing, not a literal `*` (probe 2026-09-09:
-            // `ls * | wc -c` gave 2 bytes instead of 15, while
-            // `ls -1 | wc -c` was correct).
-            let mut args: Vec<String> = Vec::new();
-            for (arg_index, word) in command.words[1..].iter().enumerate() {
-                let word_index = arg_index + 1;
-                let value = self.expand_word(word);
-                // \x1d marks a fully quoted word and \x1b a quoted
-                // tilde; both stay literal.
-                if value.starts_with(STORAGE_WORD_PREFIX)
-                    || value.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
-                {
-                    args.push(value.replace(crate::executor::markers::CTLESC, ""));
-                    continue;
-                }
-                // Quoted words (e.g. "*.txt") must not be glob-expanded.
-                let metadata = command.word_metadata.get(word_index);
-                let raw = metadata.map(|metadata| metadata.raw.as_str());
-                if crate::executor::command_prepare::raw_word_suppresses_pathname_expansion(
-                    raw, metadata,
-                ) {
-                    args.push(value.replace(crate::executor::markers::CTLESC, ""));
-                    continue;
-                }
-                match glob::pathname_expand_word(&value, &self.shell_state.env_vars) {
-                    glob::PathnameExpansion::Matches(matches) => args.extend(matches),
-                    glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => {
-                        args.push(value.replace(crate::executor::markers::CTLESC, ""))
-                    }
-                }
+            let mut args: Vec<String> = first_fields.into_iter().skip(1).collect();
+            args.extend(self.expand_stage_tail_words(command));
+            // Same child-argv carrier decode as the sequential spawn path.
+            for arg in &mut args {
+                *arg = super::execution_misc::restore_command_substitution_output(arg);
             }
-            specs.push((program, args));
+            specs.push((program, expanded_name, args));
         }
 
         let (stage0_input, stage0_stdin_base) = self.initial_pipeline_input(commands[0]);
@@ -1290,10 +1267,13 @@ impl Executor {
         let mut previous_stdout: Option<std::process::ChildStdout> = None;
         let mut first_stdin: Option<std::process::ChildStdin> = None;
 
-        for (index, (program, args)) in specs.iter().enumerate() {
+        for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             let (mut process, _) = external_command_for_named_program(
                 &program,
-                Some(&self.expand_word(&commands[index].words[0])),
+                // The spec's already-expanded first field; re-reading
+                // words[0] with expand_word would re-strip data quotes
+                // (rubash#205) and re-run side effects.
+                Some(expanded_name),
                 &args,
                 &self.shell_state.env_vars,
             );
