@@ -241,17 +241,41 @@ pub(crate) fn shell_option_names() -> impl Iterator<Item = &'static str> {
 }
 
 pub(crate) fn shell_option_enabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
+    // The option key (`__RUBASH_SETOPT_<name>` with `-` folded to `_`) is
+    // short ASCII; build it in a stack buffer so the per-command/per-word
+    // consults (is_brace_expand_enabled during word expansion, the
+    // errexit/xtrace/noexec preambles) do not allocate a String per probe.
+    // Same key bytes and same lookups as shell_option_key — names longer
+    // than the buffer (none in SHELL_OPTIONS) fall back to it.
+    const PREFIX: &str = "__RUBASH_SETOPT_";
+    let mut buf = [0u8; 48];
+    if PREFIX.len() + name.len() <= buf.len() {
+        buf[..PREFIX.len()].copy_from_slice(PREFIX.as_bytes());
+        let mut end = PREFIX.len();
+        for &byte in name.as_bytes() {
+            buf[end] = if byte == b'-' { b'_' } else { byte };
+            end += 1;
+        }
+        if let Some(key) = std::str::from_utf8(&buf[..end]).ok() {
+            return match env_vars.get(key) {
+                Some(value) => value == "1",
+                None => shell_option_default(name),
+            };
+        }
+    }
     let key = shell_option_key(name);
     env_vars
         .get(&key)
         .map(|value| value == "1")
-        .unwrap_or_else(|| {
-            SHELL_OPTIONS
-                .iter()
-                .find(|option| option.name == name)
-                .map(|option| option.default_enabled)
-                .unwrap_or(false)
-        })
+        .unwrap_or_else(|| shell_option_default(name))
+}
+
+fn shell_option_default(name: &str) -> bool {
+    SHELL_OPTIONS
+        .iter()
+        .find(|option| option.name == name)
+        .map(|option| option.default_enabled)
+        .unwrap_or(false)
 }
 
 pub(crate) fn shellopts_value(env_vars: &HashMap<String, String>) -> String {

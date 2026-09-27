@@ -927,6 +927,55 @@ impl Executor {
         word: &str,
         raw: Option<&str>,
     ) -> Vec<String> {
+        // Provably-trivial literal word (rubash#117 whitelist admission, not
+        // a blacklist guard): when the cooked token is byte-identical to its
+        // raw source text and every character of both sits in a set that
+        // excludes ALL syntax the expansion pipeline reacts to, the word
+        // expands to itself. GNU subst.c:11229 expand_word_internal walks
+        // such a word pushing every character unchanged (no CTLESC is
+        // produced without quoting/expansion introducers), braces.c
+        // find_first_valid_brace finds no brace, pathexp.c unquoted_glob_
+        // pattern_p finds no metacharacter, and subst.c field splitting
+        // never sees an expansion result — so `vec![word]` is byte-for-byte
+        // what the full pipeline below produces for this class.
+        //
+        // The excluded classes, each mapped to the branch below that owns
+        // it: `$` and `` ` `` (every substitution/parameter arm, incl. the
+        // embedded walker's `$` dispatch and its recursive
+        // expand_word_mut_with_context call), `'` `"` `\` (quote removal /
+        // DATA_* carriers / escape handling / raw_word_is_fully_single_
+        // quoted), `{` `}` (brace expansion incl. raw_has_braces), `~`
+        // (tilde), `*` `?` `[` (pathname expansion), `(` `)` `<` `>` and any
+        // byte outside printable ASCII (process substitutions, storage/PUA
+        // and C0 carrier prefixes — QUOTED_WORD_PREFIX \x1b, STORAGE \x1d,
+        // CTLESC \x11, IFS_GLUE \x1c, DATA_DOLLAR \x1f are all non-printing
+        // and fail the set test on the first byte), `=` (assignment-shaped
+        // word arms: eval compound flattening, array-element assignment
+        // re-splitting, declaration-builtin operands), and whitespace (a
+        // token equal to its raw text cannot contain any). With raw == word
+        // the optional-raw arms (`"$((...))"` / `"$(...)"` fast paths,
+        // simple-substitution fragments) cannot engage because their
+        // admissions all require one of the excluded bytes in `raw`.
+        // A false admission is impossible (the class is closed under the
+        // exclusions); a word outside the class simply falls through to the
+        // full pipeline unchanged.
+        if raw == Some(word)
+            && !word.is_empty()
+            && cmd.process_substitutions.is_empty()
+            && cmd
+                .word_metadata
+                .get(index)
+                .is_none_or(|metadata| metadata.process_substitutions.is_empty())
+            && word.bytes().all(|b| {
+                b.is_ascii_alphanumeric()
+                    || matches!(
+                        b,
+                        b'_' | b'.' | b'/' | b':' | b',' | b'-' | b'+' | b'%' | b'@'
+                    )
+            })
+        {
+            return vec![word.to_string()];
+        }
         // One cross-pass subscript-eval memo scope per command word —
         // covers this pre-scan and the real expansion below so one `${}`
         // fragment's subscript side effects run once (GNU param_expand).
@@ -1295,7 +1344,12 @@ impl Executor {
         // that are unquoted in the raw text, so GNU brace-expands it to
         // `"${letters["2"]}" … "${letters["6"]}"`. Check the raw form for
         // unquoted brace expansion even when the word is quote-marked.
-        let raw_has_braces = raw.is_some_and(|r| crate::expand::braces::expand_braces(r).len() > 1);
+        // `find_first_valid_brace` (braces.c) requires a `{` in the text;
+        // without one, expand_braces returns the single-word vec, so the
+        // `.contains('{')` admission is equivalence-preserving and keeps the
+        // Vec+String allocation off words that can never brace-expand.
+        let raw_has_braces = raw
+            .is_some_and(|r| r.contains('{') && crate::expand::braces::expand_braces(r).len() > 1);
         if (!quoted_whole_word || raw_has_braces) && raw.is_some() && self.is_brace_expand_enabled()
         // GNU runs brace expansion before parameter expansion, so a
         // dollar-brace in the word does not suppress it: the dollar-brace

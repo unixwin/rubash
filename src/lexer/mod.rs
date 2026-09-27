@@ -303,6 +303,21 @@ fn tokenize_with_heredocs_inner(
     // construct takes the fast path below and skips the O(buffer)
     // re-tokenization and re-scans entirely.
     let mut brace_join_active = false;
+    // rubash#241 (perf2): checkpoint for the per-line `has_unclosed_quotes`
+    // rescan, same append-only discipline as `brace_cache`. The captain's
+    // scanner (continuation.rs:663) answers `single || double || ansi_single`
+    // from a state whose ONLY quote-state transitions are the bytes
+    // `\ " ' $ \`` (`$` pairing with `{`, `(`, `'` via one-byte lookahead;
+    // `${`/`$(`/backtick spans never cross the text end — an unclosed span
+    // falls through and toggles quotes within the already-scanned text).
+    // Appending "\n" + an inert physical line therefore cannot change the
+    // answer: `\n`, `#` and whitespace only move the comment sub-state, and
+    // every other byte falls to the no-op arm. A line accepted by
+    // `brace_join_fast_path_line` is inert under a SUPERSET of this byte
+    // set, so the brace fast-path `continue` keeps the checkpoint valid.
+    // Invalidated at every non-append mutation of `logical_line` (IFS_GLUE
+    // insert, backslash pop, comsub-heredoc rotation, flush).
+    let mut unclosed_quotes_cache: Option<bool> = None;
 
     while let Some(raw_line) = lines.next() {
         // niubash #106: a '\r' immediately before the '\n' belongs to the
@@ -419,6 +434,7 @@ fn tokenize_with_heredocs_inner(
                             .insert(delim_end + rel_pos, crate::executor::markers::IFS_GLUE);
                         // Mid-string rewrite: positional scan cache invalid.
                         brace_cache.clear();
+                        unclosed_quotes_cache = None;
                     }
                 }
             }
@@ -449,6 +465,7 @@ fn tokenize_with_heredocs_inner(
             // The popped byte changes the text every later offset depends
             // on: positional scan cache invalid.
             brace_cache.clear();
+            unclosed_quotes_cache = None;
             continued_line = true;
             brace_join_active = false;
             continue;
@@ -477,7 +494,15 @@ fn tokenize_with_heredocs_inner(
             header_scan_from = logical_line.len();
         }
 
-        if has_unclosed_quotes(&logical_line) {
+        let hq = match unclosed_quotes_cache.filter(|_| line_is_quote_inert(line)) {
+            Some(cached) => cached,
+            _ => {
+                let value = has_unclosed_quotes(&logical_line);
+                unclosed_quotes_cache = Some(value);
+                value
+            }
+        };
+        if hq {
             brace_join_active = false;
             continue;
         }
@@ -502,6 +527,7 @@ fn tokenize_with_heredocs_inner(
             logical_line = rotated;
             // Rotation rewrites the middle of the line: cache invalid.
             brace_cache.clear();
+            unclosed_quotes_cache = None;
         }
         // GNU reads tokens sequentially (parse.y read_token): the reader
         // state feeding reserved_word_acceptable (parse.y:5899) is the state
@@ -602,6 +628,7 @@ fn tokenize_with_heredocs_inner(
         // the same line-start state (see the comment at tokenize_plain).
         lexer_parse_state = line_lex_state;
         logical_line.clear();
+        unclosed_quotes_cache = None;
         // Offsets restart for the next logical line: cache invalid.
         brace_cache.clear();
         header_scan_from = 0;
@@ -1060,6 +1087,20 @@ fn brace_join_fast_path_line(line: &str) -> bool {
         return false;
     }
     !line.contains("posix")
+}
+
+/// True when the physical line contains no byte that can move the quote
+/// state of `has_unclosed_quotes` (continuation.rs:663): the scanner's only
+/// quote-state transitions are `\ " ' $ \`` (with `$` pairing via one-byte
+/// lookahead); everything else — including `#`, whitespace and newlines —
+/// only touches the comment sub-state, which the answer ignores. The
+/// checkpoint `unclosed_quotes_cache` reuses its previous
+/// `has_unclosed_quotes` answer exactly when the appended physical line is
+/// inert under this predicate (rubash#241).
+fn line_is_quote_inert(line: &str) -> bool {
+    !line
+        .bytes()
+        .any(|b| matches!(b, b'\\' | b'"' | b'\'' | b'$' | b'`'))
 }
 
 thread_local! {

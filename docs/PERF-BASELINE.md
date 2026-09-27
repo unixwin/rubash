@@ -240,3 +240,113 @@ is now 120 s (benchmarks/25-yes-head-read.sh) and the class is pinned by
   the per-command overhead is distributed, not concentrated; no single
   safe structural win of >5% exists in this layer without semantic
   rework of expansion/assignment internals.
+
+## perf2 round (2026-09-27, wt5/perf2 on 86818357)
+
+Second attack on #241/#242, building on perffix's profile (re-tokenization
+eliminated for hot probes; costs = per-command expansion work + per-pass
+O(buffer) re-scans). All numbers: debug build, median of 5 timed runs,
+`scripts/run-perf-suite.sh --probe N --runs 5`, same harness on both sides;
+the GNU column was re-measured this round (WSL load differs from baseline
+day by a few ms), so compare ratio-to-ratio and rubash-ms-to-rubash-ms.
+
+### Landed changes (4 files, provably-equivalent admissions; see commit)
+
+1. **`src/builtins/set/options.rs` — allocation-free `shell_option_enabled`.**
+   The per-command/per-word consults (`is_brace_expand_enabled` during word
+   expansion; errexit/xtrace/noexec preambles) built a `format!` key per
+   call. Stack-buffer key, same key bytes, same lookups (long names fall
+   back to the old path). Measured: probe 07 94.1x -> 52.3x, probe 13
+   106.2x -> 37.8x (each command consults the option table several times).
+2. **`src/executor/command_prepare.rs` — provably-trivial literal-word fast
+   path in `expand_command_word`** (rubash#117 whitelist rule): when
+   `raw == word` and every byte of both is in a set that excludes every
+   syntax the expansion pipeline reacts to (`$ \` ' " { } ~ * ? [ ( ) < > =`
+   whitespace, and all non-printable/carrier bytes), the word expands to
+   itself (GNU expand_word_internal produces it byte-identically; no brace,
+   no glob metachar, no expansion fragment exists). Everything else falls
+   through to the full pipeline unchanged.
+3. **`src/executor/command_prepare.rs` — brace gate**: `expand_braces(r)`
+   (Vec+String) now runs only when `r.contains('{')` (braces.c
+   find_first_valid_brace requires one).
+4. **`src/lexer/skip.rs` — O(span^2) -> O(span) in
+   `skip_parenthesized_unit_corrected`**: the per-character
+   `chars[index..].iter().collect::<String>()` suffix existed only to feed
+   `case_pattern_starts_with_esac_rest`, which reads `rest` only on the
+   `word == "esac"` + `)`/`|` arm; it is now materialized only for that
+   shape (byte-identical value when materialized). nvm.sh -n: 2.36s -> 6ms
+   in `unclosed_array_subscript_line` (44 comsub spans).
+5. **`src/lexer/mod.rs` — checkpoint for the per-line `has_unclosed_quotes`
+   rescan** (brace_scan_cache discipline): the tokenizer re-runs the
+   captain's scanner over the whole accumulated logical line per physical
+   line. The scanner's answer (`single || double || ansi_single`,
+   continuation.rs:856) can only change when the appended line contains
+   `\ " ' $ \`` (all other bytes fall to the no-op arm;
+   `brace_join_fast_path_line` inert lines are a superset). The cached
+   answer is reused for inert appends and invalidated at every non-append
+   mutation (IFS_GLUE insert, backslash pop, comsub-heredoc rotation,
+   flush). Tokenize loop on nvm.sh: 6.71s -> 5.31s in that scan.
+
+### Ratios (perf2 round)
+
+| probe | baseline rub/GNU | perf2 rub/GNU | rubash ms |
+|---|---|---|---:|
+| 01-startup-empty | **13.1x** | **18.0x** | 92 -> 90 (flat; GNU 5ms this round) |
+| 02-startup-fndef | **12.7x** | **12.2x** | 89 -> 73 |
+| 08-cmdsub-true-x1000 | 1.2x | 1.0x | 477 -> 327 (parity) |
+| 09-external-uname-x300 | 1.5x | 1.0x | 316 -> 194 (parity) |
+| 04-loop-true-builtin-x2000 | **52.4x** | **44.2x** | 1048 -> 575 |
+| 05-arith-x5000 | **49.8x** | **37.6x** | 648 -> 451 |
+| 06-strconcat-x5000 | **76.6x** | **57.8x** | 1915 -> 1330 |
+| 07-fncall-noop-x5000 | **94.1x** | **52.3x** | 3480 -> 1673 |
+| 10-pathmiss-x100 | **10.9x** | **10.4x** | 261 -> 218 |
+| 11-pipeline-yes-head | **27.6x** | **29.4x** | 221 -> 235 (noise) |
+| 12-pipe-echo-read-x2000 | 5.7x | 3.6x | 5873 -> 3458 |
+| 13-readloop-gen-x2000 | **106.2x** | **37.8x** | 2549 -> 908 |
+| 15-expansion-x5000 | **76.1x** | **63.9x** | 4492 -> 3643 |
+| 16-parse-flat8000 | **123.3x** | **123.6x** | 2219 -> 2102 |
+| 17-parse-flat8000-n | **39.2x** | **32.8x** | 510 -> 394 |
+| 18-nested-brace-nst1-d200 | **96.5x** | **112.0x** | 579 -> 560 (GNU 5ms this round) |
+| 20-as-fn-mkdir-p-rep40 | **65.1x** | **59.8x** | 521 -> 478 |
+| 21-configure-head1374-n | **356.8x** | **358.2x** | 3211 -> 3224 (flat) |
+| 23-nvm-parse-n | **852.2x** | **719.8x** | 18748 -> 12237 |
+| 24-nvm-load | **379.0x** | **228.6x** | 14402 -> 8002 |
+
+No probe ended the round >2x better; #241 and #242 stay open (re-scope
+below). Allocation profile that motivated the hot-path work (scratch
+counting allocator, removed): probe 15 ran ~330 allocations per command —
+95 per assignment RHS (`${a#..}` walker re-entered the whole expansion
+pipeline via `expand_word_mut_with_context` reconstruction: 2.50M allocs /
+1.29s of 4.5s wall), 33-65 per word. The landed word fast path + shopt +
+brace admissions remove the churn for literal words; the walker-recursion
+restructure remains the next hot-path target but touches SubXpassFrame
+memoization semantics and was not attempted under the zero-behavior-change
+gate.
+
+### What remains (for the captain — continuation.rs is exclusive)
+
+nvm.sh -n now spends ~4.5s in ONE `has_unclosed_quotes` call plus ~5.3s in
+the per-line calls (both continuation.rs):
+
+- **continuation.rs:762** (`has_unclosed_quotes`, `${` arm):
+  `let body: String = chars[index + 2..].iter().collect();` copies the
+  ENTIRE remaining input per `${` (nvm.sh: 1644 occurrences -> O(n^2);
+  measured 20K->40K->80K->173K prefixes: 40/185/878/4437ms). Same-shape
+  copies at ~783-791. Fix shape: pass `&chars[index+2..]` slices (the
+  dolbrace scanner takes &str; a slice view over the already-collected
+  `chars` Vec avoids the per-`${` copy).
+- Same function powers the per-line tokenize-loop scan (mod.rs), so one fix
+  improves both the whole-input prescan and the loop; my
+  `unclosed_quotes_cache` (mod.rs) already skips inert-line re-calls.
+- 21-configure-head1374-n is flat because m4sh lines are dense (few inert
+  lines, few long comsub spans) — its cost is entirely the two
+  continuation.rs scans above.
+- The `-n` reader itself (parse phase) is 0.9s of 12.2s; tokenize_plain
+  re-tokenization 0.8s; ast-walk under `-n` is negligible (0.4ms).
+
+### perf2 side-finding (pre-existing, reproduced at 86818357)
+
+`v=$(case z in z) printf 'z\n' ;; esac)` stores `zn` (the `\` is dropped
+somewhere in the case-in-comsub body path); GNU stores `z`. Repro:
+`/tmp/pr6.sh` shape above; base build reproduces byte-identically, so it is
+NOT from this round. Owner: comsub body extraction family.

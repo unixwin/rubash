@@ -1502,7 +1502,21 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             index += 1;
             continue;
         }
-        let rest: String = chars[index..].iter().collect();
+        // The suffix is consulted ONLY by update_command_substitution_case_
+        // depth's `esac` arm via case_pattern_starts_with_esac_rest — and
+        // that function returns (false, false) without reading `rest`
+        // unless the terminating char is `)` or `|`. Materialize the suffix
+        // just for that rare shape; collecting it per character made this
+        // scan O(span^2) (nvm.sh -n: 2.4s over 44 comsub spans, rubash#241).
+        // When materialized, the value is byte-identical to the old
+        // unconditional collect sliced by ch's UTF-8 width.
+        let owned_rest: String;
+        let rest: &str = if word == "esac" && matches!(ch, ')' | '|') {
+            owned_rest = chars[index..].iter().collect();
+            &owned_rest[ch.len_utf8()..]
+        } else {
+            ""
+        };
         update_command_substitution_case_depth(
             ch,
             false,
@@ -1514,7 +1528,7 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             // `rest` begins at `ch`: advance by its UTF-8 width, not a fixed
             // byte — multibyte chars here panicked on the byte slice
             // (niubash#139 `"${v}$(echo 中)"`).
-            &rest[ch.len_utf8()..],
+            rest,
         );
         match ch {
             '\'' => single = true,
