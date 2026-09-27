@@ -121,7 +121,15 @@ pub(super) fn has_unclosed_parameter_expansion(input: &str) -> bool {
             index += 2;
             continue;
         }
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+        if chars[index] == '$' && !single && chars.get(index + 1) == Some(&'{') {
+            // GNU parse.y:5305 read_token_word(): text inside single quotes
+            // is literal until the closing `'` — `${` there never opens a
+            // parameter expansion, so an unclosed-looking `${` in a quoted
+            // word must not keep the logical line open (rubash#190:
+            // `echo 'x=${bad' joined every later line into line 1, so a
+            // later expansion failure's same-line skip discarded the whole
+            // script tail). Inside double quotes `${` still expands and
+            // still continues, matching the test below.
             let body: String = chars[index + 2..].iter().collect();
             let context = BraceContext {
                 outer_double_quote: false,

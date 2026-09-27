@@ -203,10 +203,18 @@ impl Executor {
                             .shell_state
                             .env_vars
                             .insert("__RUBASH_EVAL_CONTEXT".to_string(), "1".to_string());
-                        eprintln!(
-                            "{}unexpected EOF while looking for matching `{close}'",
+                        // GNU eval_builtin binds the builtin's redirections
+                        // before parse_and_execute reads the string
+                        // (redir.c do_redirection_internal), so the EOF
+                        // diagnostic honors eval's own `2>/dev/null` — route
+                        // it through the command's fd-2 endpoint instead of a
+                        // raw eprintln that bypasses every redirect
+                        // (rubash#167 family, seen from rubash#190).
+                        let diagnostic = format!(
+                            "{}unexpected EOF while looking for matching `{close}'\n",
                             self.parser_diagnostic_prefix_for_line(caller_line + internal)
                         );
+                        self.write_buffered_builtin_output(cmd, &[], diagnostic.as_bytes())?;
                         match saved_eval_context {
                             Some(previous) => {
                                 self.shell_state
