@@ -271,6 +271,15 @@ pub(crate) const ASSIGN_SQ_DOLLAR: char = '\u{E30A}';
 pub(crate) const ASSIGN_SQ_BACKTICK: char = '\u{E30B}';
 /// Data `\` hoisted out of `$'...'` content (was SQ_BACKSLASH_DATA E10C).
 pub(crate) const ASSIGN_SQ_BACKSLASH: char = '\u{E30C}';
+/// Data `\` that came out of a parameter expansion in an unquoted
+/// assignment RHS (rubash#218). GNU subst.c:11862 `add_quoted_string:` runs
+/// every parameter-expansion result through `quote_string` (subst.c:4773),
+/// CTLESC-protecting each character so the final `dequote_list`
+/// (subst.c:4388 -> dequote_string subst.c:4807) can never read expansion
+/// bytes as source-word backslash syntax. This marker is the same
+/// protection scoped to the assignment-RHS walker mode; restored to a real
+/// `\` after the assignment path's final unescape pass.
+pub(crate) const ASSIGN_EXPANSION_BACKSLASH: char = '\u{E30D}';
 
 // `str::replace` takes the marker as a Pattern (char works) but the
 // replacement argument must be `&str`; provide &str spellings for every
@@ -287,6 +296,7 @@ pub(crate) const COMPOUND_EXPANSION_WS_TAG_STR: &str = "\u{E309}";
 pub(crate) const ASSIGN_SQ_DOLLAR_STR: &str = "\u{E30A}";
 pub(crate) const ASSIGN_SQ_BACKTICK_STR: &str = "\u{E30B}";
 pub(crate) const ASSIGN_SQ_BACKSLASH_STR: &str = "\u{E30C}";
+pub(crate) const ASSIGN_EXPANSION_BACKSLASH_STR: &str = "\u{E30D}";
 pub(crate) const ANSI_C_QUOTE_MARKER_STR: &str = "\u{E010}";
 pub(crate) const ANSI_C_DQUOTE_MARKER_STR: &str = "\u{E011}";
 pub(crate) const QUOTED_NULL_MARKER_STR: &str = "\u{E002}";
@@ -620,6 +630,12 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "ASSIGN_SQ_BACKSLASH",
         code: ASSIGN_SQ_BACKSLASH as u32,
+        boundaries: &[Boundary::Storage],
+        user_reachable: false,
+    },
+    MarkerInfo {
+        name: "ASSIGN_EXPANSION_BACKSLASH",
+        code: ASSIGN_EXPANSION_BACKSLASH as u32,
         boundaries: &[Boundary::Storage],
         user_reachable: false,
     },

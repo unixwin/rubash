@@ -2750,11 +2750,19 @@ pub(in crate::executor) fn quoted_case_pattern_end(
 }
 
 fn escape_case_pattern_literal(value: &str) -> String {
+    // GNU subst.c add_quoted_string, reached from the case-pattern
+    // expansion path (execute_cmd.c:3670 -> expand_word_leave_quoted):
+    // every character of a quoted literal is CTLESC-protected, and the
+    // pattern matcher (sm_loop.c) then treats it as plain data. In
+    // particular a quoted `]' inside a bracket pattern is a MEMBER, never
+    // the closer — `case c in ( *["ab]cd"]* )' matches (modernish
+    // FTL_BRACSQBR). Backslash-escaping instead carried posixpat member
+    // semantics (posixpat ok 21 keeps `[\]` open) and left `]' entirely
+    // unprotected, so the bracket closed early and the pattern could
+    // never match.
     let mut escaped = String::new();
     for ch in value.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\' | '@' | '!' | '+' | '(') {
-            escaped.push('\\');
-        }
+        escaped.push(crate::executor::markers::CTLESC);
         escaped.push(ch);
     }
     escaped

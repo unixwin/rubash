@@ -397,6 +397,21 @@ pub(super) fn token_completes_brace_group_command(token: &Token) -> bool {
     if matches!(token.kind, TokenKind::Semicolon | TokenKind::Background) {
         return true;
     }
+    // GNU parse.y:1265 compound_list: `newline_list list1' — the list may
+    // end in a bare completed command; a closed `[[ ]]' conditional is one
+    // (COND_END is in reserved_word_acceptable's list, parse.y:5920, so a
+    // following `}' is the group's close: `{ [[ a ]] }' parses). The `]]'
+    // arrives as a word-shaped token (the conditional parser matches it by
+    // raw text); the unquoted-raw check keeps quoted `"]]"' out.
+    if token.value == "]]" && token.raw == "]]" {
+        return true;
+    }
+    // An `(( ... ))' arithmetic-command token is likewise a completed
+    // compound command (`{ ((1+2)) }' parses; ARITH_CMD is in the
+    // acceptable list, parse.y:5912).
+    if token.value.starts_with("((") && token.value.ends_with("))") {
+        return true;
+    }
     if token.kind != TokenKind::Keyword {
         return false;
     }
@@ -598,6 +613,58 @@ pub(super) fn is_function_keyword_name(name: &str) -> bool {
         && !name
             .chars()
             .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
+}
+
+/// GNU parse.y:1097 `subshell: '(' compound_list ')'` and the
+/// `DO compound_list DONE` loop/select rules (parse.y:867-872, 893-993):
+/// compound_list is `newline_list list0` (parse.y:1252-1279) — newlines may
+/// precede the command list, but the list itself must contain a command.
+/// When the body slice between the delimiters holds nothing that can start
+/// a command, the yacc lookahead at the failure point is the reported
+/// token: `( )` => near `)', `( ; )` => near `;',
+/// `while false; do ; done` => near `;', `while false; do done` => near
+/// `done' (rubash#221). A case arm before `;;` is NOT this rule (an arm
+/// body may be empty) and stays accepted.
+pub(super) fn empty_compound_body_error_node(
+    tokens: &[Token],
+    body_start: usize,
+    close_index: usize,
+) -> Option<CommandNode> {
+    let close = close_index.min(tokens.len());
+    let mut index = body_start.min(close);
+    while index < close {
+        let token = &tokens[index];
+        if token.kind == TokenKind::Semicolon && token.line_break {
+            // newline_list: a physical newline before the list is fine.
+            index += 1;
+            continue;
+        }
+        // The first non-newline token decides: only tokens that can never
+        // begin list0's list1 leave the body empty.
+        let cannot_start_command = match token.kind {
+            TokenKind::Semicolon
+            | TokenKind::Background
+            | TokenKind::Pipe
+            | TokenKind::PipeErr
+            | TokenKind::And
+            | TokenKind::Or => true,
+            TokenKind::Word => matches!(token.value.as_str(), ";;" | ";&" | ";;&"),
+            TokenKind::Keyword => {
+                matches!(token.value.as_str(), "done" | "fi" | "esac" | "}" | ")")
+            }
+            _ => false,
+        };
+        if cannot_start_command {
+            return Some(super::parse_loop::mismatched_closer_node(
+                tokens, index, None, 0,
+            ));
+        }
+        return None;
+    }
+    // Only newlines (or nothing): the closer itself is the lookahead.
+    Some(super::parse_loop::mismatched_closer_node(
+        tokens, close, None, 0,
+    ))
 }
 
 /// GNU's function_def grammar accepts any single WORD as a candidate function

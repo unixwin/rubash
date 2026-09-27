@@ -155,6 +155,12 @@ pub(super) fn parse_for_command(
         if !is_keyword(tokens, i, "done") {
             return None;
         }
+        // GNU parse.y:893-935: `DO compound_list DONE` — the loop body
+        // cannot be empty (`for i in 1; do done` => near `done',
+        // rubash#221).
+        if let Some(error) = empty_compound_body_error_node(tokens, body_start, i) {
+            return Some((error, i + 1));
+        }
         let end_keyword = Some(tokens[i].value.clone());
         let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 

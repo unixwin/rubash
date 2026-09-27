@@ -956,7 +956,13 @@ impl Executor {
             let expanded_value = if compound_paren_value {
                 self.expand_compound_assignment_parameters_mut(&hoisted_value)
             } else {
-                self.expand_embedded_parameters_mut(&hoisted_value)
+                // Assignment-RHS walker mode: parameter-expansion results
+                // carry their backslashes as ASSIGN_EXPANSION_BACKSLASH so
+                // the quote-removal pass below cannot read expansion data
+                // as source-word escape syntax (GNU subst.c:11862
+                // add_quoted_string -> quote_string, subst.c:4773;
+                // rubash#218: v=${1-U} with `\\` data).
+                self.expand_embedded_parameters_assignment_rhs_mut(&hoisted_value)
             };
             // A compound assignment never takes a whole-value quote-removal
             // pass: element words carry their own quote structure through the
@@ -996,11 +1002,19 @@ impl Executor {
                 // `v=${x:+a\*b}`) are dropped because an assignment value
                 // never undergoes pathname expansion (rubash#209), and the
                 // IFS_GLUE sentinel has no meaning once the value no longer
-                // field-splits.
+                // field-splits. Backslashes that came OUT of a parameter
+                // expansion (ASSIGN_EXPANSION_BACKSLASH) are data — GNU's
+                // add_quoted_string CTLESC-protected them, so the unescape
+                // pass above never saw them as `\` (rubash#218) — restore
+                // them to real backslashes here.
                 crate::executor::markers::dequote_ctlesc_pairs(&unescape_remaining_shell_escapes(
                     &stripped,
                 ))
                 .replace(crate::executor::markers::IFS_GLUE, "")
+                .replace(
+                    crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                    "\\",
+                )
             };
             unescaped
                 .replace(DATA_SINGLE_QUOTE, "'")

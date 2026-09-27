@@ -1,5 +1,5 @@
 use super::*;
-use crate::lexer::Token;
+use crate::lexer::{Token, TokenKind};
 
 pub(super) fn parse_conditional_command(
     tokens: &[Token],
@@ -631,6 +631,18 @@ fn merge_pattern_rhs_fragments(arg_parts: Vec<CondArg>) -> Vec<CondArg> {
         }
         let regexp = current.1 == "=~";
 
+        // GNU parse.y:5464-5466: an extended-pattern `(` group only joins a
+        // word after a PATTERN_CHAR (`@ * + ? !`); at word START the `(`
+        // never joins — read_token returns it as the `(' token and
+        // parse_cond_pair reports `unexpected argument `(' to conditional
+        // binary operator` (parse.y:5223), with or without the extglob
+        // shopt (the RHS read forces extended_glob, but that only arms the
+        // PATTERN_CHAR-prefixed groups). A regexp RHS (`=~`) opens its ERE
+        // group at any position (rubash#221: `[[ a == (b|c)* ]]`).
+        if !regexp && arg_parts[index].1.starts_with('(') {
+            continue;
+        }
+
         // The first fragment always begins the RHS word.
         let (mut value, mut raw_text, _, line) = arg_parts[index].clone();
         let mut depth = unquoted_paren_delta(&arg_parts[index]);
@@ -698,7 +710,26 @@ fn strip_conditional_quote_markers(value: &str) -> String {
 }
 
 fn matching_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
-    (start + 1..tokens.len()).find(|&index| tokens[index].raw == "]]")
+    // GNU parse.y:5443-5460 read_token_word under PST_REGEXP: after `=~'
+    // an unquoted `(' consumes its balanced `(...)' group into the regex
+    // word (parse_matched_pair), and a cond grouping `(' (parse.y:5166
+    // `cond_term: '(' cond_expr ')') does the same — so a `]]' inside an
+    // open group is regex data, not the conditional terminator
+    // (`[[ a =~ ( ]]<>;&) ]]' ends at the FINAL `]]', rubash#222). A
+    // quoted/escaped paren (raw != value) never opens a group
+    // (parse.y:5417 shellquote runs before the `(' special case).
+    let mut depth = 0isize;
+    (start + 1..tokens.len()).find(|&index| {
+        let token = &tokens[index];
+        if token.kind == TokenKind::Keyword && token.raw == "(" && token.value == "(" {
+            depth += 1;
+        } else if token.kind == TokenKind::Keyword && token.raw == ")" && token.value == ")" {
+            depth = (depth - 1).max(0);
+        } else {
+            return token.raw == "]]" && depth == 0;
+        }
+        false
+    })
 }
 
 /// Unclosed `[[` (no `]]` in the token stream): collect the rest of the

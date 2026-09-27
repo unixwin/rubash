@@ -365,6 +365,16 @@ pub(super) fn redirect_target_token(tokens: &[Token], index: usize) -> Option<&T
 }
 
 pub(super) fn is_redirect_target_token(token: &Token) -> bool {
+    if token.kind == TokenKind::Word
+        && token.raw == token.value
+        && matches!(token.value.as_str(), ";;" | ";&" | ";;&")
+    {
+        // GNU case-clause terminators (parse.y:1791+ `clause: ... DSEMMI`
+        // family) can never be redirect targets: `echo > ;;` is
+        // `syntax error near unexpected token `;;'' (rubash#220). A
+        // QUOTED `';;'` word keeps its quotes in raw and stays a target.
+        return false;
+    }
     matches!(
         token.kind,
         TokenKind::Word

@@ -72,6 +72,16 @@ pub(crate) struct BraceScanResume {
     pub(crate) saw_top_level_whitespace: bool,
     pub(crate) ansi_single: bool,
     pub(crate) escaped: bool,
+    /// GNU parse.y:3465 close-acceptability: a `}' closes the group only
+    /// when the previous token can end a list (`;', `&', newline, `)' or a
+    /// completed `fi'/`done'/`esac'); otherwise it is word text
+    /// (rubash#222).
+    pub(crate) prev_accepts_close: bool,
+    /// Word-start / pure-word flags of the same close-acceptability
+    /// tracker (rubash#222).
+    pub(crate) word_start: bool,
+    pub(crate) word_plain: bool,
+    pub(crate) close_word: String,
 }
 
 /// Outcome of `skip_brace` worth remembering for the `{` at some offset.

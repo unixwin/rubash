@@ -870,8 +870,23 @@ fn run_script_file_with_init(
     // (rubash#132).
     let contents = rubash::script_driver::bytes_to_script_text(&bytes);
 
-    executor.set_env("__RUBASH_SCRIPT_NAME", script);
-    executor.set_env("BASH_ARGV0", script);
+    // GNU shell.c:1572-1601 binds dollar_vars[0] to the script name exactly
+    // as the caller spelled it. rubash's native launch cannot see that
+    // spelling: an MSYS-style caller passes `/d/...` and the MSYS runtime
+    // hands native processes a converted `D:/...` argv. The shell's own $PWD
+    // displays in the POSIX domain (shell_pwd_display_path), so $0 and
+    // BASH_SOURCE must be mapped back to that same domain or
+    // dirname/parameter-chops compose across two path domains
+    // (rubash#224: bats-core builds `1-D:\...src` when BASH_SOURCE is `D:/`
+    // while $PWD stays `/d/`). Relative and already-POSIX names pass through
+    // unchanged.
+    let script_name = if script.as_bytes().get(1) == Some(&b':') {
+        executor.script_identity_display_path(script)
+    } else {
+        script.to_string()
+    };
+    executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
+    executor.set_env("BASH_ARGV0", &script_name);
     // shell.c:1613 rebinds dollar_vars[0] to script_name at every script
     // entry, so a parent's BASH_ARGV0 assignment snapshot must not survive
     // the boundary (the __RUBASH_* keys ride the process env).

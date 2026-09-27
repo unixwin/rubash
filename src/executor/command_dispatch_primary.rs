@@ -249,21 +249,32 @@ impl Executor {
         if described || self.execute_command_describe(&cmd.words[1..]) {
             return Ok(Ok(()));
         }
-        Ok(
-            match crate::builtins::command::execute(&cmd.words[1..], &self.diagnostic_prefix())? {
-                crate::builtins::command::CommandAction::Complete(status) => {
-                    self.exit_code = status;
-                    Ok(())
-                }
-                crate::builtins::command::CommandAction::Execute {
-                    words,
-                    use_standard_path,
-                } => {
-                    let mut command = cmd.clone();
-                    command.words = words;
-                    self.execute_command_without_aliases_with_path(&command, use_standard_path)
-                }
-            },
-        )
+        // GNU execute_cmd.c: the builtin's own diagnostics go to the
+        // shell's CURRENTLY BOUND fd 1/2 (redir.c) — an `exec 2>/dev/null`
+        // must contain them (rubash#218/#222-era leak: the raw
+        // `builtins::command::execute` wrote straight to process stdio).
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let action = crate::builtins::command::execute_with_io(
+            cmd.words[1..].iter().map(String::as_str),
+            &self.diagnostic_prefix(),
+            &mut stdout,
+            &mut stderr,
+        )?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        Ok(match action {
+            crate::builtins::command::CommandAction::Complete(status) => {
+                self.exit_code = status;
+                Ok(())
+            }
+            crate::builtins::command::CommandAction::Execute {
+                words,
+                use_standard_path,
+            } => {
+                let mut command = cmd.clone();
+                command.words = words;
+                self.execute_command_without_aliases_with_path(&command, use_standard_path)
+            }
+        })
     }
 }

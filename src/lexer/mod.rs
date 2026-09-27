@@ -916,10 +916,19 @@ pub fn has_unclosed_input_syntax(input: &str) -> bool {
 
 /// POSIX-aware variant: `set -o posix` changes how `'` inside `"${...}"`
 /// scans (Interp 221), so the unclosed-delimiter probe must know the mode.
+pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
+    skip::unclosed_array_subscript_line(input)
+}
+
 pub fn has_unclosed_input_syntax_posix(input: &str, posix: bool) -> bool {
     has_unclosed_quotes(input)
         || (has_unclosed_command_substitution(input)
             && !skip::command_substitutions_balanced(input))
+        // GNU parse.y:5635-5643: an unclosed array subscript `[` swallows
+        // the rest of the input ahead of any other matched-pair construct
+        // (`x=([a` reports `]`, not `)`) — check it before the generic
+        // close-char scan (rubash#221).
+        || skip::unclosed_array_subscript_line(input).is_some()
         // A bare `(`/`{`-class delimiter can also keep a command open:
         // `ddd=(aaa` array lists and `( cmd` subshells continue on the
         // next line (GNU parse.y reads until the matching close).

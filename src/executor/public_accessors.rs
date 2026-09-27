@@ -203,6 +203,20 @@ impl Executor {
         Self::resolve_shell_path_from_env(path, &self.shell_state.env_vars)
     }
 
+    /// Display-domain form of a script identity path ($0 / BASH_SOURCE's
+    /// bottom frame). GNU shell.c:1572-1601 open_shell_script binds
+    /// dollar_vars[0] to the script name exactly as the caller spelled it;
+    /// rubash's native launch cannot see that spelling (an MSYS-style
+    /// caller's `/d/...` argv arrives converted as `D:/...`), so map a
+    /// drive-form name back into the domain PWD displays in
+    /// (shell_pwd_display_path) — $0, BASH_SOURCE and $PWD must compose in
+    /// ONE path domain or dirname/parameter-chops build mixed-domain paths
+    /// (rubash#224: bats-core's `${BATS_TEST_FILENAME##*/}` on a `D:/`
+    /// BASH_SOURCE produced `1-D:\...src`).
+    pub fn script_identity_display_path(&self, path: &str) -> String {
+        crate::executor::path::shell_pwd_display_path(path)
+    }
+
     /// Resolve a shell-visible path using an executor environment snapshot.
     ///
     /// Host layers use this when they have an environment map but do not own

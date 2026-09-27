@@ -52,7 +52,7 @@ pub fn execute(
     )
 }
 
-fn execute_with_stderr<'a, I, W>(
+pub(crate) fn execute_with_stderr<'a, I, W>(
     args: I,
     bracket: bool,
     env_vars: &HashMap<String, String>,

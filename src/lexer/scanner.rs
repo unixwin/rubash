@@ -429,6 +429,26 @@ impl<'a> Lexer<'a> {
                     Some(Token::new(TokenKind::Background, "&", start))
                 }
             }
+            // GNU parse.y:3728-3734 read_token hands a word-initial `((' to
+            // parse_dparen (parse.y:4895) BEFORE any word-level scanning:
+            // when reserved_word_acceptable holds (parse.y:4926) and the
+            // parenthesis pair is followed by `)' (parse_arith_cmd,
+            // parse.y:4965-4978), the ENTIRE body becomes one ARITH_CMD
+            // token read by parse_matched_pair (P_ARITH) as raw text —
+            // read_token's `#' comment branch (parse.y:3607) never sees the
+            // body, so `#', `;'-looking text and newlines inside stay data
+            // (rubash#222: `((# 1 + 2))' must parse). `for ((' keeps the
+            // separate-token form: the arith-for parser owns it (GNU's
+            // parse_dparen FOR branch runs before the reserved-word gate,
+            // and `for' is not in rubash's reserved_word_position list).
+            '(' if self.peek() == Some('(')
+                && self.reserved_word_position()
+                && closes_as_arithmetic_group(self.input, start) =>
+            {
+                self.advance();
+                self.skip_arith_paren();
+                Some(Token::new(TokenKind::Keyword, self.slice(start), start))
+            }
             '(' | ')' => Some(Token::new(TokenKind::Keyword, self.slice(start), start)),
             '!' => {
                 if self.peek() == Some('=') {
@@ -561,8 +581,37 @@ impl<'a> Lexer<'a> {
                 }
             }
             '#' => {
-                while self.advance().is_some_and(|ch| ch != '\n') {}
-                self.next_token()
+                // GNU parse.y:3630-3643 read_token(): a word-initial `#`
+                // comments out the rest of the physical line, and the lexer
+                // then RETURNS A NEWLINE token (`character = '\n';` falls
+                // into the newline branch) — the newline that terminates the
+                // comment still separates commands (compound_list
+                // `list1 '\n' newline_list`, parse.y:1262-1279). Emit the
+                // same line-break `;' token a bare newline produces, so a
+                // command followed by a comment line is a COMPLETED command
+                // (rubash#219: `{ case...esac; cmd # comment` + newline +
+                // `}' died as "unexpected end of file from `{'" because the
+                // `}' followed a bare word with no terminator). At EOF with
+                // no trailing newline GNU returns yacc_EOF without the
+                // newline token — keep the old fall-through there.
+                let mut terminated_by_newline = false;
+                loop {
+                    match self.advance() {
+                        Some('\n') => {
+                            terminated_by_newline = true;
+                            break;
+                        }
+                        Some(_) => continue,
+                        None => break,
+                    }
+                }
+                if terminated_by_newline {
+                    let mut token = Token::new(TokenKind::Semicolon, ";", start);
+                    token.line_break = true;
+                    Some(token)
+                } else {
+                    self.next_token()
+                }
             }
             '$' => match self.peek() {
                 Some('\'') => {

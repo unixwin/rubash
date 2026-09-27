@@ -229,12 +229,13 @@ fn test_parse_grouped_arithmetic_command_expression() {
         .map(|command| command.words.clone())
         .collect();
 
+    // GNU parse.y:4976-4982 parse_arith_cmd keeps the matched-pair body
+    // verbatim (expr.c is whitespace-insensitive): the folded `((` token
+    // carries the source text, so grouped expressions keep their source
+    // spacing instead of the old separate-token re-join.
     assert_eq!(
         words,
-        vec![
-            vec!["((", "( n = 3 )", "))"],
-            vec!["((", "( ( m = 0 ) )", "))"],
-        ]
+        vec![vec!["((", "(n = 3)", "))"], vec!["((", "((m = 0))", "))"],]
     );
     let expressions = ast
         .commands
@@ -242,7 +243,7 @@ fn test_parse_grouped_arithmetic_command_expression() {
         .filter_map(|command| command.arithmetic_command.as_ref())
         .map(|command| command.expression.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(expressions, ["( n = 3 )", "( ( m = 0 ) )"]);
+    assert_eq!(expressions, ["(n = 3)", "((m = 0))"]);
 }
 
 #[test]

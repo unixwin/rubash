@@ -340,17 +340,26 @@ impl Executor {
         };
         match endpoint {
             // Same dup2 open-file-description semantics as write_fd_endpoint:
-            // a write to an fd bound to Stdout/Stderr follows the live
-            // capture (pipe/command substitution), not the raw process stdio.
-            FdWriteEndpoint::Stdout => {
-                if stdout_capture_active() {
-                    stdout_capture_write(output)?;
-                } else if let Some(capture) = &mut self.stdout_capture {
-                    capture.write_all(output)?;
-                } else {
+            // a write to an fd bound to Stdout/Stderr follows the recorded
+            // snapshot binding (capture generation / real stdout,
+            // rubash#223), or the live capture when the fd is the alias.
+            FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&fd) {
+                Some(Some(generation)) => {
+                    let _ = write_stdout_capture_at_generation(output, *generation);
+                }
+                Some(None) => {
                     write_stdout_bytes(output)?;
                 }
-            }
+                None => {
+                    if stdout_capture_active() {
+                        stdout_capture_write(output)?;
+                    } else if let Some(capture) = &mut self.stdout_capture {
+                        capture.write_all(output)?;
+                    } else {
+                        write_stdout_bytes(output)?;
+                    }
+                }
+            },
             FdWriteEndpoint::Stderr => {
                 if let Some(capture) = &mut self.stderr_capture {
                     capture.write_all(output)?;
@@ -519,15 +528,30 @@ impl Executor {
             // GNU dup2 (`2>&1`) copies the open file description: a write to
             // an fd bound to Stdout must land wherever fd 1 currently goes —
             // the active stdout capture/pipe — not the raw process stdout.
-            FdWriteEndpoint::Stdout => {
-                if stdout_capture_active() {
-                    stdout_capture_write(output)?;
-                } else if let Some(capture) = &mut self.stdout_capture {
-                    capture.write_all(output)?;
-                } else {
+            // An fd whose marker was dup'd from fd 1 earlier holds a
+            // snapshot: that capture generation's buffer, or the real
+            // process stdout when it was bound outside any capture — never
+            // a nested capture that later owns fd 1 (rubash#223).
+            FdWriteEndpoint::Stdout => match self.fd_table.stdout_alias_generation.get(&fd) {
+                Some(Some(generation)) => {
+                    let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
+                        output,
+                        *generation,
+                    );
+                }
+                Some(None) => {
                     write_stdout_bytes(output)?;
                 }
-            }
+                None => {
+                    if stdout_capture_active() {
+                        stdout_capture_write(output)?;
+                    } else if let Some(capture) = &mut self.stdout_capture {
+                        capture.write_all(output)?;
+                    } else {
+                        write_stdout_bytes(output)?;
+                    }
+                }
+            },
             FdWriteEndpoint::Stderr => {
                 if let Some(capture) = &mut self.stderr_capture {
                     capture.write_all(output)?;
@@ -1376,6 +1400,13 @@ impl std::io::Write for GlobalStdout {
 thread_local! {
     static STDOUT_CAPTURE: std::cell::RefCell<Option<Vec<u8>>> =
         const { std::cell::RefCell::new(None) };
+    /// Outer capture buffers parked by nested `begin_stdout_capture`
+    /// scopes, oldest first. A dup2'd fd (`2>&1`) keeps writing to the
+    /// pipe it was dup'd under — the parked buffer of its generation —
+    /// even while a nested command substitution owns the active slot
+    /// (rubash#223).
+    static STDOUT_CAPTURE_PARKED: std::cell::RefCell<Vec<Vec<u8>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Background-output capture pipe for async children spawned while a stdout
@@ -1513,6 +1544,43 @@ pub(in crate::executor) fn stdout_capture_write(output: &[u8]) -> io::Result<()>
     })
 }
 
+/// Zero-based generation of the currently active capture scope (0 = first).
+/// `FdTable::stdout_alias_generation` records this at dup time so a dup2'd
+/// `Stdout` marker can resolve back to the buffer that was active then
+/// (rubash#223).
+pub(in crate::executor) fn stdout_capture_generation() -> usize {
+    STDOUT_CAPTURE_PARKED.with(|parked| parked.borrow().len())
+}
+
+/// Write to the capture buffer of `generation` — the active one when it is
+/// the current scope, the parked outer buffer while a nested capture owns
+/// the active slot. A generation beyond every live scope (its reader is
+/// gone, or the fd crossed onto a worker thread with its own capture
+/// stack) falls back to the live resolution rather than dropping
+/// (rubash#223).
+pub(in crate::executor) fn write_stdout_capture_at_generation(
+    output: &[u8],
+    generation: usize,
+) -> io::Result<()> {
+    let parked_len = stdout_capture_generation();
+    if generation == parked_len {
+        return stdout_capture_write(output);
+    }
+    if generation < parked_len {
+        return STDOUT_CAPTURE_PARKED.with(|parked| {
+            if let Some(buffer) = parked.borrow_mut().get_mut(generation) {
+                buffer.write_all(output)?;
+            }
+            Ok(())
+        });
+    }
+    if stdout_capture_active() {
+        stdout_capture_write(output)
+    } else {
+        write_stdout_bytes(output)
+    }
+}
+
 /// Begins thread-local stdout capture, returning the previous capture buffer
 /// (if any) so callers can nest captures and restore afterwards. The
 /// background-capture pipe state is saved alongside: a nested capture scope
@@ -1523,6 +1591,14 @@ pub(in crate::executor) fn begin_stdout_capture() -> Option<Vec<u8>> {
         let previous = capture.borrow_mut().take();
         *capture.borrow_mut() = Some(Vec::new());
         previous
+    });
+    // Park a copy of the outer buffer for dup2'd fds still holding its
+    // generation (rubash#223): their writes during this nested scope append
+    // to the parked copy, and `restore_stdout_capture` merges it back.
+    STDOUT_CAPTURE_PARKED.with(|parked| {
+        parked
+            .borrow_mut()
+            .push(previous.clone().unwrap_or_default());
     });
     let saved_bg = BG_CAPTURE.with(|state| state.borrow_mut().take());
     BG_CAPTURE_SAVED.with(|saved| saved.borrow_mut().push(saved_bg));
@@ -1552,8 +1628,19 @@ pub(in crate::executor) fn take_stdout_capture() -> Vec<u8> {
 
 /// Restores a previously saved capture buffer (used after nested captures).
 pub(in crate::executor) fn restore_stdout_capture(previous: Option<Vec<u8>>) {
+    // Merge the parked outer-generation copy back (rubash#223): it began as
+    // a clone of `previous` and only ever APPENDED (dup2'd fds writing
+    // during the nested scope), so when it is a superset it carries the
+    // nested scope's marker writes and becomes the restored active buffer.
+    // An unrelated buffer (asymmetric begin/restore use) falls back to the
+    // caller's `previous` unchanged.
+    let parked = STDOUT_CAPTURE_PARKED.with(|parked| parked.borrow_mut().pop());
+    let merged = match (previous, parked) {
+        (Some(previous), Some(parked)) if parked.len() >= previous.len() => Some(parked),
+        (previous, _) => previous,
+    };
     STDOUT_CAPTURE.with(|capture| {
-        *capture.borrow_mut() = previous;
+        *capture.borrow_mut() = merged;
     });
     let saved_bg = BG_CAPTURE_SAVED.with(|saved| saved.borrow_mut().pop().flatten());
     if let Some(state) = saved_bg {

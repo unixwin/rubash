@@ -643,6 +643,55 @@ impl<'a> Lexer<'a> {
                 scan.comment_start = false;
                 continue;
             }
+            // GNU parse.y:3465-3469 close-acceptability bookkeeping: a
+            // standalone `}' (or nested `{' opener) is a token only where
+            // reserved_word_acceptable (parse.y:5899) holds for the token
+            // before it — after `;', `&', `|', `(', `)', a newline, or the
+            // reserved words that may be followed by a command; after an
+            // ordinary WORD it is word text. This tracker maintains the
+            // lexical equivalent for the `{'/`}' arms below (rubash#222).
+            if c == '\n' {
+                if !scan.word_start {
+                    scan.prev_accepts_close =
+                        scan.word_plain && brace_close_acceptable_word(&scan.close_word);
+                }
+                // The newline token itself is in the acceptable set.
+                scan.prev_accepts_close = true;
+                scan.word_start = true;
+                scan.word_plain = true;
+                scan.close_word.clear();
+            } else if c.is_whitespace() {
+                if !scan.word_start {
+                    scan.prev_accepts_close =
+                        scan.word_plain && brace_close_acceptable_word(&scan.close_word);
+                }
+                scan.word_start = true;
+                scan.word_plain = true;
+                scan.close_word.clear();
+            } else if !matches!(c, '{' | '}') {
+                // Word content and operators. `{'/`}' are classified by
+                // the match arms below (they may be tokens or word text).
+                if c == '_' || c == ']' || c.is_ascii_alphanumeric() {
+                    scan.word_start = false;
+                    scan.close_word.push(c);
+                } else {
+                    match c {
+                        ';' | '&' | '|' | '(' | ')' => {
+                            scan.prev_accepts_close = true;
+                            scan.word_start = true;
+                            scan.word_plain = true;
+                            scan.close_word.clear();
+                        }
+                        // Quotes, substitutions, backslash and the rest of
+                        // the word's own characters keep the word in
+                        // progress; such a word is never a reserved word.
+                        _ => {
+                            scan.word_plain = false;
+                            scan.word_start = false;
+                        }
+                    }
+                }
+            }
             let rest = &self.input[self.position..];
             update_brace_group_case_depth(
                 c,
@@ -683,11 +732,49 @@ impl<'a> Lexer<'a> {
             match c {
                 '{' if scan.case_depth == 0 => {
                     scan.comment_start = false;
-                    scan.depth += 1;
+                    // GNU parse.y:3173 CHECK_FOR_RESERVED_WORD: `{` opens a
+                    // group only as the STANDALONE reserved word at a
+                    // reserved_word_acceptable position. `{a,b}` / `{xxx`
+                    // are ordinary words — `{` is not in shell_break_chars
+                    // (syntax.h:30) — and must not raise the depth
+                    // (rubash#222).
+                    let standalone_opener = scan.word_start
+                        && scan.prev_accepts_close
+                        && self
+                            .peek()
+                            .is_none_or(|next| "()<>;&| \t\n\r".contains(next));
+                    if standalone_opener {
+                        scan.depth += 1;
+                        // The `{` token itself is in the acceptable set.
+                        scan.prev_accepts_close = true;
+                        scan.word_start = true;
+                        scan.word_plain = true;
+                    } else {
+                        scan.word_start = false;
+                        scan.word_plain = false;
+                    }
                 }
                 '}' if scan.case_depth == 0 => {
                     scan.comment_start = false;
+                    // GNU parse.y:3465-3469: `}` closes the group only as
+                    // the standalone reserved word after an
+                    // acceptable token; after an ordinary WORD (or glued
+                    // into one, `hi}`) it is word text — an argument
+                    // (`{ foo } }; }': the first two `}` are foo's
+                    // arguments; `{ f() { echo } ; }': the first `}` is
+                    // echo's argument) (rubash#222).
+                    let standalone_closer = scan.word_start && scan.prev_accepts_close;
+                    if !standalone_closer {
+                        scan.word_start = false;
+                        scan.word_plain = false;
+                        continue;
+                    }
                     scan.depth -= 1;
+                    // The `}' token itself is in the acceptable set
+                    // (reserved_word_acceptable, parse.y:5910).
+                    scan.prev_accepts_close = true;
+                    scan.word_start = true;
+                    scan.word_plain = true;
                     if scan.depth == 0 {
                         match self.peek() {
                             Some('}') => {
@@ -878,6 +965,27 @@ struct SkipBraceScan {
     saw_top_level_whitespace: bool,
     ansi_single: bool,
     escaped: bool,
+    /// GNU parse.y:3465-3469: a `}' closes the group only when the
+    /// previous token can end a list — reserved_word_acceptable
+    /// (parse.y:5899) at the lexical level means `;', `&', a newline,
+    /// `)', `{'/`}', or a completed `fi'/`done'/`esac'. A `}' after an
+    /// ordinary word is WORD text (`{ foo } }; }' — the first two `}` are
+    /// arguments of `foo'; `f() { echo } ; }' — the first `}` is echo's
+    /// argument; rubash#222).
+    prev_accepts_close: bool,
+    /// The next character begins a new word (previous char was whitespace
+    /// or an operator token). A `}' with this false is glued into the
+    /// current word (`hi}') and is word text (syntax.h:30: `}' is not in
+    /// shell_break_chars).
+    word_start: bool,
+    /// The current word is pure unquoted identifier text so far; any
+    /// quote, substitution, backslash or metacharacter makes the finished
+    /// word ineligible as the reserved word that accepts a close.
+    word_plain: bool,
+    /// Close-acceptability tracker's own word accumulator (`_' letters,
+    /// digits and `]' — enough to spell `fi' or `]]'), cleared whenever a
+    /// word completes.
+    close_word: String,
 }
 
 impl SkipBraceScan {
@@ -894,6 +1002,12 @@ impl SkipBraceScan {
             saw_top_level_whitespace: false,
             ansi_single: false,
             escaped: false,
+            prev_accepts_close: true,
+            // The scan starts just past the opening `{' token: the next
+            // character begins the group's first word.
+            word_start: true,
+            word_plain: true,
+            close_word: String::new(),
         }
     }
 
@@ -910,6 +1024,10 @@ impl SkipBraceScan {
             saw_top_level_whitespace: resume.saw_top_level_whitespace,
             ansi_single: resume.ansi_single,
             escaped: resume.escaped,
+            prev_accepts_close: resume.prev_accepts_close,
+            word_start: resume.word_start,
+            word_plain: resume.word_plain,
+            close_word: resume.close_word,
         }
     }
 
@@ -927,6 +1045,10 @@ impl SkipBraceScan {
             saw_top_level_whitespace: self.saw_top_level_whitespace,
             ansi_single: self.ansi_single,
             escaped: self.escaped,
+            prev_accepts_close: self.prev_accepts_close,
+            word_start: self.word_start,
+            word_plain: self.word_plain,
+            close_word: self.close_word,
         }
     }
 }
@@ -1036,6 +1158,28 @@ fn update_brace_group_reserved_word_depth(
 
 fn brace_group_separator_allows_reserved_word(ch: char) -> bool {
     matches!(ch, ';' | '&' | '|' | '(' | '{' | '\n')
+}
+
+/// Words whose reserved-word token is in GNU's reserved_word_acceptable
+/// list (parse.y:5903-5933), so a following standalone `}' (or `{' opener)
+/// is a token rather than word text. NOTE: `in', `case', `for', `select'
+/// and `function' are NOT in that list.
+fn brace_close_acceptable_word(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "elif"
+            | "else"
+            | "fi"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "esac"
+            | "time"
+            | "coproc"
+            | "]]"
+    )
 }
 
 fn update_command_substitution_case_depth(
@@ -1575,4 +1719,282 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
         index += 1;
     }
     true
+}
+
+/// GNU parse.y:5635-5643 read_token_word: an unquoted `[` opens an array
+/// subscript — `parse_matched_pair (cd, '[', ']', ..., P_ARRAYSUB)` — when
+/// the word so far is a pure identifier at a command position
+/// (assignment_acceptable), or at element start inside a compound
+/// assignment (`name=(`, PST_COMPASSIGN). parse_matched_pair
+/// (parse.y:3906-3912) then reads across lines until the matching `]`;
+/// EOF reports `unexpected EOF while looking for matching `]'' at the line
+/// the `[` opened (rubash#221: `foo=([)` was silently accepted). GNU exits
+/// 1 when the subscript opened inside a compound array assignment
+/// (parse_compound_assignment EOF family, like `foo=(]`) and 2 for a
+/// command word (`a[b`). `echo a[b` stays literal — `a` is an argument,
+/// not a command-position identifier; `x=a[b` has no identifier prefix
+/// (`a` after `=` fails token_is_ident) and stays an assignment value.
+pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
+    let chars: Vec<char> = input.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    let mut ansi_single = false;
+    let mut escaped = false;
+    let mut in_comment = false;
+    // Command-position tracking (parse.y:5899 assignment_acceptable): true
+    // at input start, after a separator/operator or `('/`{', and after the
+    // reserved words that may be followed by a command.
+    let mut command_position = true;
+    let mut word = String::new();
+    // Compound-assignment `name=( ... )` depth (PST_COMPASSIGN); at element
+    // start (right after `(` or whitespace inside the list) a `[` opens a
+    // subscript with no identifier prefix needed.
+    let mut compassign_depth = 0usize;
+    let mut element_start = false;
+    let mut line = 1usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                line += 1;
+                command_position = true;
+                word.clear();
+                element_start = false;
+            }
+            index += 1;
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ansi_single {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '\'' {
+                ansi_single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '#' if word.is_empty() => {
+                in_comment = true;
+                index += 1;
+                continue;
+            }
+            '\'' => {
+                single = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '"' => {
+                double = true;
+                word.clear();
+                index += 1;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                ansi_single = true;
+                word.clear();
+                index += 2;
+                continue;
+            }
+            _ => {}
+        }
+        if ch.is_whitespace() {
+            if ch == '\n' {
+                line += 1;
+                command_position = true;
+                word.clear();
+                element_start = false;
+            } else {
+                // `if`, `then`, `while`, ... keep the next word in command
+                // position — but only when they themselves stood at command
+                // position (`echo if a[b` keeps `a` an argument); a command
+                // word like `echo` ends it. Whitespace directly after a
+                // delimiter (`; `) keeps the delimiter's decision.
+                if !word.is_empty() {
+                    command_position = command_position && is_command_position_boundary(&word);
+                }
+                word.clear();
+                if compassign_depth > 0 {
+                    element_start = true;
+                }
+            }
+            index += 1;
+            continue;
+        }
+        // `[` opens a subscript when the word prefix is a pure shell
+        // identifier at command position (parse.y:5637), or we are at
+        // element start inside a compound assignment (parse.y:5638,
+        // token_index == 0 && PST_COMPASSIGN).
+        if ch == '['
+            && ((command_position && is_pure_identifier(&word))
+                || (compassign_depth > 0 && element_start && word.is_empty()))
+        {
+            // parse_matched_pair ('[', ']'): quote/escape aware, nested
+            // `[ ... ]` pairs nest, newlines are consumed by the scan.
+            let mut depth = 1usize;
+            let mut scan = index + 1;
+            let mut q_single = false;
+            let mut q_double = false;
+            let mut q_escaped = false;
+            while scan < chars.len() {
+                let c = chars[scan];
+                if q_escaped {
+                    q_escaped = false;
+                    scan += 1;
+                    continue;
+                }
+                if q_single {
+                    if c == '\'' {
+                        q_single = false;
+                    }
+                    scan += 1;
+                    continue;
+                }
+                if q_double {
+                    if c == '\\' {
+                        q_escaped = true;
+                    } else if c == '"' {
+                        q_double = false;
+                    }
+                    scan += 1;
+                    continue;
+                }
+                match c {
+                    '\\' => q_escaped = true,
+                    '\'' => q_single = true,
+                    '"' => q_double = true,
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                scan += 1;
+            }
+            if depth > 0 {
+                // EOF inside the subscript: report at the `[` line
+                // (parse.y:3906 start_lineno), with the compound-assignment
+                // context deciding the exit status (1 inside `name=(`).
+                return Some((line, compassign_depth > 0));
+            }
+            index = scan + 1;
+            word.clear();
+            element_start = false;
+            command_position = false;
+            continue;
+        }
+        if ch == '(' {
+            // `name=(` opens a compound-assignment list; any other `(` is a
+            // subshell/grouping whose body starts a fresh command position.
+            if word.ends_with('=') {
+                compassign_depth += 1;
+                element_start = true;
+            } else {
+                command_position = true;
+            }
+            word.clear();
+            index += 1;
+            continue;
+        }
+        if ch == ')' {
+            compassign_depth = compassign_depth.saturating_sub(1);
+            element_start = false;
+            command_position = true;
+            word.clear();
+            index += 1;
+            continue;
+        }
+        if matches!(ch, ';' | '&' | '|' | '{' | '}') {
+            command_position = true;
+            word.clear();
+            element_start = false;
+            index += 1;
+            continue;
+        }
+        if ch == '`' {
+            let mut scan = index + 1;
+            while scan < chars.len() && chars[scan] != '`' {
+                if chars[scan] == '\\' {
+                    scan += 1;
+                }
+                scan += 1;
+            }
+            index = (scan + 1).min(chars.len());
+            word.clear();
+            continue;
+        }
+        if ch == '$' && chars.get(index + 1) == Some(&'(') {
+            // Command-substitution body: its internals own their scans in
+            // the recursive parse; skip the balanced unit.
+            if let Some(end) = skip_parenthesized_unit_corrected(&chars, index + 1) {
+                index = end;
+                word.clear();
+                continue;
+            }
+        }
+        word.push(ch);
+        index += 1;
+    }
+    None
+}
+
+fn is_pure_identifier(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn is_command_position_boundary(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "elif"
+            | "else"
+            | "fi"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "esac"
+            | "!"
+            | "time"
+            | "coproc"
+            | "{"
+            | "}"
+    )
 }

@@ -18,6 +18,12 @@ enum OutputTarget {
     /// write time to the active capture or the raw process stdout, never
     /// through the live fd_table[1].
     ProcessStdout,
+    /// ProcessStdout bound to the snapshot recorded at dup time
+    /// (FdTable::stdout_alias_generation): the capture generation's buffer
+    /// while a NESTED command substitution owns the active slot — the pipe
+    /// the fd actually holds — or `None` for the real process stdout when
+    /// it was bound outside any capture (rubash#223).
+    ProcessStdoutAt(Option<usize>),
     Null,
     CoprocStdin(u32),
     Path(String),
@@ -335,9 +341,13 @@ impl Executor {
                         // fd 1's live alias stays live (an `exec > f` inside
                         // the body must retarget plain stdout writes); every
                         // OTHER fd's Stdout endpoint is a dup2 snapshot of
-                        // the original stdout object (rubash#170).
+                        // the original stdout object (rubash#170) — carrying
+                        // the binding recorded at dup time when one exists
+                        // (rubash#223).
                         if *fd == 1 {
                             OutputTarget::Stdout
+                        } else if let Some(record) = self.fd_table.stdout_alias_generation.get(fd) {
+                            OutputTarget::ProcessStdoutAt(*record)
                         } else {
                             OutputTarget::ProcessStdout
                         }
@@ -678,6 +688,22 @@ impl Executor {
                     write_stdout_bytes(&bytes)?;
                 }
             }
+            OutputTarget::ProcessStdoutAt(record) => {
+                // dup2 snapshot with the recorded binding (rubash#223):
+                // route to that capture generation's buffer, or the real
+                // process stdout when bound outside any capture.
+                match record {
+                    Some(generation) => {
+                        let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
+                            &bytes,
+                            *generation,
+                        );
+                    }
+                    None => {
+                        write_stdout_bytes(&bytes)?;
+                    }
+                }
+            }
             OutputTarget::Null => {}
             OutputTarget::Closed => {
                 if !output.is_empty() && !(fd == 1 && builtin_output_write_is_unchecked(cmd)) {
@@ -826,6 +852,22 @@ impl OutputFdState {
                     write_stdout_bytes(output)?;
                     Ok(())
                 }
+            }
+            OutputTarget::ProcessStdoutAt(record) => {
+                // dup2 snapshot with the recorded binding (rubash#223):
+                // route to that capture generation's buffer, or the real
+                // process stdout when bound outside any capture.
+                match record {
+                    Some(generation) => {
+                        let _ = crate::executor::shell_options::write_stdout_capture_at_generation(
+                            output, generation,
+                        );
+                    }
+                    None => {
+                        write_stdout_bytes(output)?;
+                    }
+                }
+                Ok(())
             }
             OutputTarget::Stderr => executor.write_default_stderr(output),
             OutputTarget::Null | OutputTarget::Closed => Ok(()),

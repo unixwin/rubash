@@ -18,6 +18,11 @@ struct SavedNumberedFd {
 pub(in crate::executor) struct SavedOutputFd {
     fd: u32,
     entry: Option<FdEntry>,
+    /// dup2 snapshot record (FdTable::stdout_alias_generation) that went
+    /// with the saved entry; restored together so an inner scope's
+    /// `2>/dev/null` cannot drop a `2>&1` binding's generation
+    /// (rubash#223).
+    alias_generation: Option<Option<usize>>,
     fd_output: Option<String>,
     fd_procsub: Option<String>,
     fd_closed: Option<String>,
@@ -316,6 +321,7 @@ impl Executor {
         saved.push(SavedOutputFd {
             fd,
             entry: self.fd_table.entries.get(&fd).cloned(),
+            alias_generation: self.fd_table.stdout_alias_generation.get(&fd).cloned(),
             fd_output: self.shell_state.env_vars.get(&fd_output_key(fd)).cloned(),
             fd_procsub: self
                 .shell_state
@@ -533,6 +539,19 @@ impl Executor {
                 }
                 None => {
                     self.fd_table.entries.remove(&saved.fd);
+                }
+            }
+            // Restore the dup2 snapshot record with the entry (rubash#223):
+            // an inner scope may have cleared it (e.g. `2>/dev/null`
+            // between the `2>&1` binding and the write).
+            match saved.alias_generation {
+                Some(record) => {
+                    self.fd_table
+                        .stdout_alias_generation
+                        .insert(saved.fd, record);
+                }
+                None => {
+                    self.fd_table.stdout_alias_generation.remove(&saved.fd);
                 }
             }
             restore_optional_env_var(

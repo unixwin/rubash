@@ -870,6 +870,45 @@ pub fn run_source_with_line_offset(
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
     {
+        // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
+        // (parse.y:3906-3912): an unclosed array subscript `[` reports
+        // `unexpected EOF while looking for matching `]'' at the line the
+        // `[` opened and exits 1 — and the scan swallows any later `)`,
+        // so it must be reported ahead of the generic close-char path
+        // (rubash#221: `foo=([)` was silently accepted).
+        if let Some((open_line, inside_compassign)) =
+            crate::lexer::unclosed_array_subscript_line(input)
+        {
+            let source = input.trim_end_matches('\n');
+            let prefix = if open_line > 1 {
+                source
+                    .lines()
+                    .take(open_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_with_line_offset(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            eprintln!(
+                "{}unexpected EOF while looking for matching `]'",
+                executor.parser_diagnostic_prefix_for_line(open_line)
+            );
+            // GNU exits 1 when the subscript opened inside a compound array
+            // assignment (parse_compound_assignment EOF family) and 2 for a
+            // command word (parse.y:3567 read_token error path).
+            return if inside_compassign { 1 } else { 2 };
+        }
         // GNU's incremental reader executes complete input lines before the
         // line where the unclosed construct opened; that line itself is part
         // of the failed parse and runs nothing.

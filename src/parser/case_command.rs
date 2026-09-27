@@ -317,6 +317,41 @@ pub(super) fn parse_case_command(
         if is_case_terminator(tokens, i) {
             i += 1;
         }
+
+        // GNU parse.y:3641-3646: the newline token that ends the `;;' line
+        // triggers gather_here_documents BEFORE the next token is read, so
+        // a here-document opened in this clause (`1) cat <<EOF ;;` with the
+        // body on the following lines) is gathered BETWEEN clauses: its
+        // body text never becomes a token of the next clause's pattern, and
+        // the delimiter line's newline is just more newline_list before the
+        // next pattern/esac (parse.y:1225 pattern_list). Attach the gathered
+        // body to this clause's pending heredoc and skip it
+        // (rubash#222: t0383).
+        while i < tokens.len() {
+            match tokens[i].kind {
+                TokenKind::HereDocBody => {
+                    let body = tokens[i].value.clone();
+                    let gather_line = tokens[i].position;
+                    if let Some(clause) = clauses.last_mut() {
+                        let mut ast = Ast {
+                            commands: std::mem::take(&mut clause.body),
+                        };
+                        super::redirections::assign_heredoc_body(
+                            &mut CommandNode::new(),
+                            &mut ast,
+                            body,
+                            gather_line,
+                        );
+                        clause.body = ast.commands;
+                    }
+                    i += 1;
+                }
+                // newline_list between clauses (line-break separators
+                // around the gathered body).
+                TokenKind::Semicolon if tokens[i].line_break => i += 1,
+                _ => break,
+            }
+        }
     }
 
     if !is_keyword(tokens, i, "esac") {

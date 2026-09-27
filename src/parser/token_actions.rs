@@ -9,6 +9,81 @@ pub(super) enum TokenAction {
     Break,
 }
 
+/// GNU parse.y:532 `redirection: '>' WORD` (likewise `<', `>>', `&>',
+/// `2>' and the LESSLESS/`<<<' WORD rules): a redirection operator takes a
+/// WORD target — fd-dup digits and `(`/`<(` process substitutions are the
+/// earlier branch targets. When the token that follows the operator is one
+/// that can never begin a target (an operator, a case terminator, a
+/// subshell paren, or end-of-line), yacc reports
+/// `syntax error near unexpected token `<tok>'' — and `newline' when the
+/// operator is last on its line or at EOF (rubash#220: `foo >>|a`,
+/// `foo &>|b`, `foo &>>|c`, `echo <->`, `echo <5-10>`; `>>|`/`&>>|` are
+/// mksh operators GNU splits into operator + `|' + word).
+/// Word-shaped reserved words (`in', `then', `}') ARE legal targets in GNU
+/// and are deliberately left to their existing paths (None).
+fn missing_redirect_target_node(tokens: &[Token], index: usize) -> Option<CommandNode> {
+    let offending = |name: &str, line: usize| {
+        let mut command = CommandNode::new();
+        command.line = Some(line);
+        command.insert_assignment(
+            "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+            format!(
+                "{name}{}{line}",
+                crate::executor::markers::PARSE_ERROR_FIELD_SEP
+            ),
+        );
+        command
+    };
+    match tokens.get(index + 1) {
+        None => Some(offending("newline", tokens[index].position)),
+        Some(next) => match next.kind {
+            TokenKind::Eof => Some(offending("newline", tokens[index].position)),
+            TokenKind::Semicolon if next.line_break => {
+                Some(offending("newline", tokens[index].position))
+            }
+            TokenKind::Semicolon
+            | TokenKind::Pipe
+            | TokenKind::PipeErr
+            | TokenKind::Background
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::RedirectIn
+            | TokenKind::RedirectOut
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString => Some(offending(&next.value, next.position)),
+            TokenKind::Keyword if matches!(next.value.as_str(), "(" | ")") => {
+                Some(offending(&next.value, next.position))
+            }
+            TokenKind::Word
+                if next.raw == next.value && matches!(next.value.as_str(), ";;" | ";&" | ";;&") =>
+            {
+                Some(offending(&next.value, next.position))
+            }
+            _ => None,
+        },
+    }
+}
+
+/// Install a `syntax error near unexpected token' node as the parse result
+/// and abort the rest of the input, exactly as GNU's parser does (yyerror
+/// then jumps to top level): commands already parsed from the same
+/// physical line never run (`foo > | cat' runs nothing).
+fn abort_parse_at_syntax_error(state: &mut ParseState, error: CommandNode) {
+    let error_line = error.line;
+    while state
+        .ast
+        .commands
+        .last()
+        .is_some_and(|command| command.line == error_line)
+    {
+        state.ast.commands.pop();
+    }
+    state.current_cmd = error;
+}
+
 pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseState) -> TokenAction {
     let token = &tokens[*i];
     match token.kind {
@@ -461,6 +536,25 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
         TokenKind::Pipe | TokenKind::PipeErr => {
             if command_is_open_conditional(&state.current_cmd) {
                 push_command_word(&mut state.current_cmd, token);
+            } else if command_is_empty(&state.current_cmd) {
+                // GNU parse.y:1471 `pipeline: pipeline '|' newline_list
+                // pipeline` — `|` only ever follows a pipeline, never sits
+                // in command-start position. `foo &| bar`, `| foo`,
+                // `foo | | bar` and the case-body `a ;| b` are all
+                // `syntax error near unexpected token `|'' (rubash#220;
+                // `&|` and `;|` are mksh operators GNU rejects).
+                let mut error = CommandNode::new();
+                error.line = Some(token.position);
+                error.insert_assignment(
+                    "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+                    format!(
+                        "|{}{}",
+                        crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                        token.position
+                    ),
+                );
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             } else {
                 // Save current command with pipe flag
                 state.current_cmd.subshell |= state.in_subshell;
@@ -585,6 +679,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         state.current_cmd.redirect_in = Some(redirect);
                     }
                     *i += 1;
+                } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                    abort_parse_at_syntax_error(state, error);
+                    return TokenAction::Break;
                 }
             }
         }
@@ -596,6 +693,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 if let Some(next_i) = assign_redirect_out_target(tokens, *i, &mut state.current_cmd)
                 {
                     *i = next_i;
+                } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                    abort_parse_at_syntax_error(state, error);
+                    return TokenAction::Break;
                 }
             }
         }
@@ -603,6 +703,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             note_command_line(&mut state.current_cmd, token);
             if let Some(next_i) = assign_append_target(tokens, *i, &mut state.current_cmd) {
                 *i = next_i;
+            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             }
         }
         TokenKind::RedirectErr => {
@@ -625,6 +728,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
             {
                 *i = next_i;
+            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             }
         }
         TokenKind::RedirectErrAppend => {
@@ -646,11 +752,24 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
             {
                 *i = next_i;
+            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             }
         }
         TokenKind::HereDoc => {
             note_command_line(&mut state.current_cmd, token);
-            if *i + 1 < tokens.len() {
+            // GNU parse.y:561 `redirection: ... LESSLESS WORD` — the
+            // delimiter is a WORD. Word-shaped reserved words (`esac`,
+            // `in`, ...) read as WORDs in target position (GNU probe:
+            // `cat << esac` parses), so keep Keyword delimiters except the
+            // `('/`)' that open subshells. Operator tokens are syntax
+            // errors (`cat << ;;` => near `;;', rubash#220).
+            if *i + 1 < tokens.len()
+                && (is_redirect_target_token(&tokens[*i + 1])
+                    || (tokens[*i + 1].kind == TokenKind::Keyword
+                        && !matches!(tokens[*i + 1].value.as_str(), "(" | ")")))
+            {
                 let fd = redirect_operator_fd(&token.value)
                     .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
                 let delimiter_token = &tokens[*i + 1];
@@ -681,6 +800,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         Some(delimiter.replace(crate::executor::markers::CTLESC, ""));
                 }
                 *i += 1;
+            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             }
         }
         TokenKind::HereString => {
@@ -712,6 +834,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_fd_var_prefix(tokens, *i),
                 );
                 *i += 1;
+            } else if let Some(error) = missing_redirect_target_node(tokens, *i) {
+                abort_parse_at_syntax_error(state, error);
+                return TokenAction::Break;
             }
         }
         TokenKind::HereDocBody => {

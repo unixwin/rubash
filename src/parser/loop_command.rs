@@ -24,6 +24,15 @@ pub(super) fn parse_loop_command(
     let condition_terminator = condition_terminator_before(tokens, do_index);
     let condition_terminator_metadata = condition_terminator_metadata_before(tokens, do_index);
     let (body, done_index) = parse_loop_body(tokens, do_index + 1, source, source_line_offset)?;
+    // GNU parse.y:867-872: `DO compound_list DONE` — the loop body cannot
+    // be empty; `do done` reports near `done', `do ; done' near `;'
+    // (rubash#221). parse_loop_body_commands drops separator-only bodies,
+    // so an empty body here is exactly the empty-compound_list case.
+    if body.is_empty() {
+        if let Some(error) = empty_compound_body_error_node(tokens, do_index + 1, done_index) {
+            return Some((error, done_index + 1));
+        }
+    }
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);

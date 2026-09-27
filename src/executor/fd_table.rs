@@ -124,6 +124,16 @@ pub(crate) struct FdTable {
     /// Set when a bounded read expired mid-record — GNU still assigns the
     /// partial input and returns 128+SIGALRM (read.def:539-562).
     pub(crate) read_timed_out: bool,
+    /// dup2 snapshots for `FdWriteEndpoint::Stdout` markers (rubash#223):
+    /// `N>&1` hands fd N the stdout OBJECT fd 1 held at dup time — the
+    /// active capture buffer's generation when one was active, or the real
+    /// process stdout (`None`) when none was — so later nested captures
+    /// rebinding fd 1 never move it. Absent entry = the live fd-1 alias
+    /// (the substitution's own fd-1 marker). `write_fd_endpoint` and the
+    /// ordered-output model resolve writes through it (rubash#223: inside
+    /// `OUT="$(inner 2>&1 1>/dev/null)"` a `$(... 3>&1 1>&4)` body's
+    /// stderr writes landed in the INNER capture instead of the outer).
+    pub(crate) stdout_alias_generation: std::collections::HashMap<u32, Option<usize>>,
 }
 
 impl FdTable {
@@ -133,6 +143,7 @@ impl FdTable {
             next_dynamic_fd: 10,
             read_deadline: None,
             read_timed_out: false,
+            stdout_alias_generation: std::collections::HashMap::new(),
         };
         table.entries.insert(
             0,
@@ -209,6 +220,7 @@ impl FdTable {
         let entry = self.entry_mut(fd, dynamic);
         entry.write = Some(endpoint);
         entry.closed = false;
+        self.stdout_alias_generation.remove(&fd);
     }
 
     /// `N<&M` / `N>&M` — POSIX dup2 semantics: the descriptor is copied
@@ -225,6 +237,34 @@ impl FdTable {
             .filter(|entry| entry.read.is_some() || entry.write.is_some())
             .map(|entry| (entry.read.clone(), entry.write.clone()))
             .ok_or(FdError::Closed)?;
+        // dup2 snapshot bookkeeping (rubash#223): copying the live `Stdout`
+        // marker freezes WHICH stdout object the fd holds — the active
+        // capture's generation, or the real process stdout when no capture
+        // is active — so nested command substitutions rebinding fd 1 never
+        // hijack the write. A dup ONTO fd 1 propagates the source's record
+        // (the fd takes the source's object wholesale); fd 1 without a
+        // record stays the live alias.
+        if matches!(write, Some(FdWriteEndpoint::Stdout)) {
+            if target == 1 {
+                match self.stdout_alias_generation.get(&source) {
+                    Some(record) => {
+                        self.stdout_alias_generation.insert(target, *record);
+                    }
+                    None => {
+                        self.stdout_alias_generation.remove(&target);
+                    }
+                }
+            } else {
+                let record = if crate::executor::shell_options::stdout_capture_active() {
+                    Some(crate::executor::shell_options::stdout_capture_generation())
+                } else {
+                    None
+                };
+                self.stdout_alias_generation.insert(target, record);
+            }
+        } else {
+            self.stdout_alias_generation.remove(&target);
+        }
         let dynamic = self.is_dynamic(target);
         let entry = self.entry_mut(target, dynamic);
         entry.read = read;
@@ -265,6 +305,7 @@ impl FdTable {
         let entry = self.entry_mut(fd, false);
         entry.write = None;
         entry.closed = entry.read.is_none();
+        self.stdout_alias_generation.remove(&fd);
     }
 
     pub(crate) fn close(&mut self, fd: u32) {

@@ -20,6 +20,12 @@ pub(super) fn parse_subshell_command(
     }
 
     let close = matching_subshell_end(tokens, start)?;
+    // GNU parse.y:1097 subshell: '(' compound_list ')' — compound_list must
+    // contain a command (parse.y:1252-1279); `( )` and `( ; )` are syntax
+    // errors near the offending token (rubash#221).
+    if let Some(error) = empty_compound_body_error_node(tokens, start + 1, close) {
+        return Some((error, close + 1));
+    }
     let body = super::parse_loop::parse_body_with_diagnostics(
         &tokens[start + 1..close],
         source,

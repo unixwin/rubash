@@ -79,13 +79,38 @@ impl Executor {
         self.expand_embedded_parameters_mut_with_context(word, SubstitutionQuoteContext::Unquoted)
     }
 
+    /// Unquoted assignment-RHS walk (`v=${1-U},${2-U}`): GNU
+    /// subst.c:11862 `add_quoted_string:` passes every parameter-expansion
+    /// result through `quote_string` (subst.c:4773), CTLESC-protecting each
+    /// character, so the assignment's final dequote
+    /// (expand_string_assignment -> dequote_list, subst.c:4388) can never
+    /// read expansion bytes as source-word backslash syntax. This mode is
+    /// the port: parameter values carry their backslashes as the
+    /// ASSIGN_EXPANSION_BACKSLASH marker, and the assignment path restores
+    /// them after its final unescape pass (rubash#218 — `v=${1-U}` with
+    /// `\\` data collapsed the pair). Source-word escapes still resolve
+    /// exactly as before; only expansion-result data is protected.
+    pub(in crate::executor) fn expand_embedded_parameters_assignment_rhs_mut(
+        &mut self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_mut_inner(
+            word,
+            SubstitutionQuoteContext::Unquoted,
+            false,
+            false,
+            false,
+            true,
+        )
+    }
+
     pub(in crate::executor) fn expand_embedded_parameters_mut_with_context(
         &mut self,
         word: &str,
         context: SubstitutionQuoteContext,
     ) -> String {
         let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
-        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false)
+        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false, false)
     }
 
     // Compound array assignment RHS (`a=( ... )`): GNU defers expansion to
@@ -108,6 +133,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
         )
     }
 
@@ -131,6 +157,7 @@ impl Executor {
             SubstitutionQuoteContext::Unquoted,
             false,
             true,
+            false,
             false,
         )
     }
@@ -175,6 +202,7 @@ impl Executor {
                 segment,
                 SubstitutionQuoteContext::Unquoted,
                 true,
+                false,
                 false,
                 false,
             ));
@@ -310,6 +338,7 @@ impl Executor {
         heredoc: bool,
         alternate: bool,
         preserve_quotes: bool,
+        protect_rhs_data: bool,
     ) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let saved_parameter_state =
@@ -326,6 +355,7 @@ impl Executor {
             heredoc,
             alternate,
             preserve_quotes,
+            protect_rhs_data,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
             if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
@@ -365,7 +395,28 @@ impl Executor {
         heredoc: bool,
         alternate: bool,
         preserve_quotes: bool,
+        protect_rhs_data: bool,
     ) -> String {
+        // GNU subst.c:11862 `add_quoted_string:` -> quote_string
+        // (subst.c:4773): a parameter-expansion result merged into the word
+        // is CTLESC-protected wholesale, so no later pass on the merged word
+        // (the assignment-RHS unescape included) can read its bytes as
+        // source-word backslash syntax. Assignment-RHS mode ports this by
+        // rewriting the value's backslashes to the assignment marker; the
+        // caller restores them after its final unescape pass (rubash#218).
+        // Command-substitution sites already carry the equivalent
+        // PROTECTED_BACKSLASH protection, and $((...)) / $[...] results are
+        // numeric text, so neither needs the rewrite.
+        fn protect_rhs_value(value: &str, protect: bool) -> std::borrow::Cow<'_, str> {
+            if protect && value.contains('\\') {
+                std::borrow::Cow::Owned(value.replace(
+                    '\\',
+                    crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH_STR,
+                ))
+            } else {
+                std::borrow::Cow::Borrowed(value)
+            }
+        }
         let mut output = String::new();
         let mut chars = word.chars().peekable();
         let mut in_double = false;
@@ -775,6 +826,7 @@ impl Executor {
                 Some('@') => {
                     chars.next();
                     let value = self.shell_state.positional_params.join(" ");
+                    let value = protect_rhs_value(&value, protect_rhs_data);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -785,6 +837,7 @@ impl Executor {
                     chars.next();
                     // Bash joins `$*` with the first IFS character (not a space).
                     let value = self.positional_params_star_joined();
+                    let value = protect_rhs_value(&value, protect_rhs_data);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -821,6 +874,7 @@ impl Executor {
                         crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
                     });
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
+                        let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -843,6 +897,7 @@ impl Executor {
                                         context,
                                     )
                                 });
+                            let value = protect_rhs_value(&value, protect_rhs_data);
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                 output
                                     .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -858,6 +913,7 @@ impl Executor {
                                         context,
                                     )
                                 });
+                            let value = protect_rhs_value(&value, protect_rhs_data);
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                 output
                                     .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -875,6 +931,7 @@ impl Executor {
                                 executor
                                     .expand_word_mut_with_context(&format!("${{{name}}}"), context)
                             });
+                        let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1089,6 +1146,7 @@ impl Executor {
                     let index = first.to_digit(10).unwrap_or(0) as usize;
                     if index == 0 {
                         let value = self.script_name_value();
+                        let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1101,10 +1159,11 @@ impl Executor {
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
+                        let value = protect_rhs_value(value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                            output.push_str(&mark_expansion_whitespace(value, preserve_quotes));
+                            output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
-                            output.push_str(value);
+                            output.push_str(&value);
                         }
                     }
                 }
@@ -1127,6 +1186,7 @@ impl Executor {
                         })
                     {
                         let value = shell_safe_value(&value);
+                        let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {

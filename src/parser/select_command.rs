@@ -133,6 +133,11 @@ pub(super) fn parse_select_command(tokens: &[Token], start: usize) -> Option<(Co
         if !is_keyword(tokens, i, "done") {
             return None;
         }
+        // GNU parse.y:979-1003: `DO compound_list DONE` — the select body
+        // cannot be empty (rubash#221, same rule as while/until/for).
+        if let Some(error) = empty_compound_body_error_node(tokens, body_start, i) {
+            return Some((error, i + 1));
+        }
         let end_keyword = Some(tokens[i].value.clone());
         let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 

@@ -50,11 +50,14 @@ impl Executor {
             return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
         }
 
-        self.execute_unset_with_stderr(
-            &cmd.words[1..],
-            &arrayref_flags,
-            &mut std::io::stderr().lock(),
-        )
+        // GNU execute_cmd.c: the diagnostic goes to the shell's CURRENTLY
+        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` or capture
+        // contains it (rubash#218/#222-era leak: the raw process stderr
+        // bypassed every redirect).
+        let mut stderr = Vec::new();
+        let status = self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut stderr);
+        let _ = self.write_default_stderr(&stderr);
+        status
     }
 
     pub(in crate::executor) fn execute_unset_with_stderr<W>(

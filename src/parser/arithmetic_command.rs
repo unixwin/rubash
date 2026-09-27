@@ -18,7 +18,10 @@ pub(super) fn parse_arithmetic_command(
             .map(str::to_string);
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
-        set_arithmetic_command_words(&mut command, inner.to_string(), raw_inner);
+        // GNU parse.y:4976-4982 parse_arith_cmd keeps the matched-pair body
+        // verbatim; the expression is whitespace-insensitive (expr.c), so
+        // trim only the surrounding blanks for the structured word.
+        set_arithmetic_command_words(&mut command, inner.trim().to_string(), raw_inner);
         return Some(finish_arithmetic_command(command, tokens, start + 1));
     }
 

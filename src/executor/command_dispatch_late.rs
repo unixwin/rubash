@@ -48,11 +48,19 @@ impl Executor {
             index += 1;
         }
         self.sync_fd_terminal_marks(Some(cmd));
-        Ok(crate::builtins::test::execute(
-            &args,
+        // GNU execute_cmd.c: test's diagnostics go to the shell's CURRENTLY
+        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null` contains
+        // them (rubash#218/#222-era leak: the raw process stderr bypassed
+        // every redirect).
+        let mut stderr = Vec::new();
+        let status = crate::builtins::test::execute_with_stderr(
+            args.iter().map(String::as_str),
             bracket,
             &self.shell_state.env_vars,
-        )?)
+            &mut stderr,
+        )?;
+        let _ = self.write_default_stderr(&stderr);
+        Ok(status)
     }
 
     pub(in crate::executor) fn execute_late_builtin_command(
