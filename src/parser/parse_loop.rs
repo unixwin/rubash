@@ -110,9 +110,30 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // parse_case_command inside a case body, so ANY one reaching the
         // main loop is stray — at command start (`f() { ;; }') or
         // mid-command (`echo ;;'), where GNU's grammar also rejects it.
-        if options.stray_close_is_error
-            && ((super::is_unquoted_operator(&tokens[i], ")") && !state.in_subshell)
-                || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
+        if (matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
+            || (options.stray_close_is_error
+                && super::is_unquoted_operator(&tokens[i], ")")
+                && !state.in_subshell)
+        {
+            push_unexpected_token_error(&mut state, tokens, i, &options);
+            break;
+        }
+
+        // GNU parse.y:1264-1290 (list grammar): every `;' (and `&')
+        // separator must follow a COMPLETED list1 immediately —
+        // `list1 ';' newline_list list1', with list0's terminal form
+        // `list1 ';' newline_list' allowing only newlines after the final
+        // separator. A `;' at list start (`; :'), after another separator
+        // (`: ; ;'), or after a newline (`:' NEWLINE `;': the newline
+        // already terminated the list1, and no production admits a `;'
+        // there) is `syntax error near unexpected token `;''. Newline
+        // separator tokens (line_break) are the linebreak production and
+        // remain legal wherever they appear. `&' follows the same rules
+        // (parse.y:1281-1285). A redirection operator still expecting its
+        // word operand also cannot precede a separator (`echo > ;').
+        if matches!(tokens[i].kind, TokenKind::Semicolon | TokenKind::Background)
+            && !tokens[i].line_break
+            && separator_lacks_preceding_command(tokens, i)
         {
             push_unexpected_token_error(&mut state, tokens, i, &options);
             break;
@@ -731,7 +752,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && matches!(token.value.as_str(), "while" | "until")
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((loop_cmd, next_i)) = parse_loop_command(tokens, i) {
+        if let Some((loop_cmd, next_i)) = parse_loop_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, loop_cmd);
             return Some(next_i);
         }
@@ -788,7 +814,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "for"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((for_cmd, next_i)) = parse_for_command(tokens, i) {
+        if let Some((for_cmd, next_i)) = parse_for_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, for_cmd);
             return Some(next_i);
         }
@@ -910,7 +941,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "case"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((case_cmd, next_i)) = parse_case_command(tokens, i) {
+        if let Some((case_cmd, next_i)) = parse_case_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, case_cmd);
             return Some(next_i);
         }
@@ -1085,7 +1121,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.kind == TokenKind::Keyword
         && token.value == "("
     {
-        if let Some((subshell_cmd, next_i)) = parse_subshell_command(tokens, i) {
+        if let Some((subshell_cmd, next_i)) = parse_subshell_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, subshell_cmd);
             return Some(next_i);
         }
@@ -1109,7 +1150,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
     }
 
     if command_allows_compound_start(&state.current_cmd) {
-        if let Some((brace_cmd, next_i)) = parse_brace_group_command(tokens, i) {
+        if let Some((brace_cmd, next_i)) = parse_brace_group_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, brace_cmd);
             return Some(next_i);
         }
@@ -1133,6 +1179,59 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
 
 fn command_allows_compound_start(command: &CommandNode) -> bool {
     command_is_empty(command) || command_is_pending_inversion(command)
+}
+
+/// Compound-body re-parse that keeps the enclosing parse's diagnostic
+/// context. Body token slices carry absolute script-line positions, and
+/// GNU yyerror echoes the whole physical input line (parse.y:6813-6824
+/// print_offending_line over shell_input_line), so a syntax error raised
+/// inside a compound body must slice the ORIGINAL source text, not join
+/// the body fragment (`{ :; ; }' is echoed in full, not as `: ; ;').
+/// Callers without source context (alias/coproc reparses) pass None/0
+/// and keep the fragment-join fallback.
+pub(super) fn parse_body_with_diagnostics(
+    tokens: &[Token],
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Vec<CommandNode> {
+    parse_with_options(
+        tokens,
+        ParseLoopOptions {
+            diagnostic_text: source.map(str::to_string),
+            source_line_offset,
+            ..ParseLoopOptions::default()
+        },
+    )
+    .commands
+}
+
+/// True when the separator at `index` (a `;'/`&' token with
+/// `line_break == false`) has no completed command immediately before it:
+/// list start (`index == 0`, also the start of any compound-body token
+/// slice), or the previous token is itself a separator/connector, or a
+/// redirection operator still expecting its word operand. Mirrors the
+/// GNU list grammar (parse.y:1264-1290), where a separator is only
+/// grammatical directly after a completed `list1`.
+fn separator_lacks_preceding_command(tokens: &[Token], index: usize) -> bool {
+    match index.checked_sub(1) {
+        None => true,
+        Some(prev) => matches!(
+            tokens[prev].kind,
+            TokenKind::Semicolon
+                | TokenKind::Background
+                | TokenKind::Pipe
+                | TokenKind::PipeErr
+                | TokenKind::And
+                | TokenKind::Or
+                | TokenKind::RedirectIn
+                | TokenKind::RedirectOut
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::Append
+                | TokenKind::HereDoc
+                | TokenKind::HereString
+        ),
+    }
 }
 
 /// GNU parse.y reports `syntax error near unexpected token `X'' on the
@@ -1933,16 +2032,16 @@ pub(super) fn parse_time_prefixed_compound_command(
     }
 
     let (mut command, next_i) = if is_keyword(tokens, i, "for") {
-        parse_for_command(tokens, i)?
+        parse_for_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "if") {
         parse_if_command(tokens, i, None, 0)?
     } else if tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
     {
-        parse_loop_command(tokens, i)?
+        parse_loop_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "case") {
-        parse_case_command(tokens, i)?
+        parse_case_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "select") {
         parse_select_command(tokens, i)?
     } else if is_keyword(tokens, i, "coproc") {
@@ -1958,11 +2057,11 @@ pub(super) fn parse_time_prefixed_compound_command(
                 && token.value.ends_with('}')
         })
     {
-        parse_brace_group_command(tokens, i)?
+        parse_brace_group_command(tokens, i, None, 0)?
     } else if let Some(parsed) = parse_arithmetic_command(tokens, i) {
         parsed
     } else if is_keyword(tokens, i, "(") {
-        parse_subshell_command(tokens, i)?
+        parse_subshell_command(tokens, i, None, 0)?
     } else {
         return None;
     };

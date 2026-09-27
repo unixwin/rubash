@@ -4,6 +4,8 @@ use crate::lexer::Token;
 pub(super) fn parse_subshell_command(
     tokens: &[Token],
     start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     if !is_keyword(tokens, start, "(") {
         return None;
@@ -18,7 +20,11 @@ pub(super) fn parse_subshell_command(
     }
 
     let close = matching_subshell_end(tokens, start)?;
-    let body = parse(&tokens[start + 1..close]).commands;
+    let body = super::parse_loop::parse_body_with_diagnostics(
+        &tokens[start + 1..close],
+        source,
+        source_line_offset,
+    );
 
     let mut command = CommandNode::new();
     // GNU make_cmd.c:784 sets temp->line = line_number, which is the

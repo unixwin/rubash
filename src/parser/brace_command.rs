@@ -5,6 +5,8 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn parse_brace_group_command(
     tokens: &[Token],
     start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     let token = tokens.get(start)?;
     if token.kind == TokenKind::Keyword
@@ -63,7 +65,11 @@ pub(super) fn parse_brace_group_command(
             open_delimiter_metadata: delimiter_metadata("{"),
             close_delimiter: "}".to_string(),
             close_delimiter_metadata: delimiter_metadata("}"),
-            body: parse(&body_tokens).commands,
+            body: super::parse_loop::parse_body_with_diagnostics(
+                &body_tokens,
+                source,
+                source_line_offset,
+            ),
         }));
         return Some(finish_compound_command(command, tokens, start + 1));
     }
@@ -98,7 +104,11 @@ pub(super) fn parse_brace_group_command(
         open_delimiter_metadata: token_metadata(&tokens[start]),
         close_delimiter: "}".to_string(),
         close_delimiter_metadata: token_metadata(&tokens[i]),
-        body: parse(&tokens[start + 1..i]).commands,
+        body: super::parse_loop::parse_body_with_diagnostics(
+            &tokens[start + 1..i],
+            source,
+            source_line_offset,
+        ),
     }));
     Some(finish_compound_command(command, tokens, i + 1))
 }

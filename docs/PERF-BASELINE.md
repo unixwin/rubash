@@ -78,7 +78,7 @@ is documented in the harness header. TSVs land in
 | 22-configure-full-n | `-n` full bash configure (24753 L) | >120000 | 46 | >2600x | TIMEOUT (rubash) |
 | 23-nvm-parse-n | `-n` nvm.sh v0.40.8 | 18748 | 22 | **852.2x** | OK |
 | 24-nvm-load | source nvm.sh v0.40.8 | 14402 | 38 | **379.0x** | OK |
-| 25-yes-head-read | `yes \| head \| while read` | - | 650 | - | TIMEOUT (rubash; #206 shape) |
+| 25-yes-head-read | `yes \| head \| while read` | - | 650 | - | TIMEOUT (rubash; #206 shape; **see #243 correction below — not a hang**) |
 
 ### Reading the numbers
 
@@ -113,6 +113,26 @@ is documented in the harness header. TSVs land in
   GNU runs both in ~6 ms. The row is a canary: RC2 until that parse gap
   closes, then it becomes a timing row.
 
+## Correction (2026-09-27, wt4/perffix lane): probe 25 is NOT a hang (rubash#243)
+
+Reproduced from script files at BOTH 9bf2df9e (the commit the baseline was
+recorded on) and 7dfdaeb0 (this lane's base), debug binaries, `timeout -k 5`:
+
+| shape | 9bf2df9e debug | 7dfdaeb0 debug | 7dfdaeb0 release |
+|---|---|---|---|
+| `yes \| head -100000 \| while read -r l; do :; done` | rc=0, 40.5 s | rc=0, 40.6 s | rc=0, 6.0 s |
+| `yes \| head -100000 \| while read; do :; done` | — | rc=0, 23.3 s | rc=0, 3.5 s |
+
+RSS stayed flat at ~10 MB for the whole run (the pre-#206-fix blowup was GBs).
+The #206 fix (62c7e5fd `execute_external_prefix_concurrently`) holds; the
+baseline TIMEOUT row was the harness's `PERF: runs=3 timeout=20` truncating a
+~23-41 s debug run (release ~3.5-6 s, matching the 62c7e5fd verification).
+The read-tail loop cost — the probe-13 family, ~0.4 ms/line in debug — is
+the amplifier. No bisect was needed (nothing regressed); the probe timeout
+is now 120 s (benchmarks/25-yes-head-read.sh) and the class is pinned by
+`perf_canary_yes_head_read_terminates` in tests/regression.rs (N=10000,
+60 s bound). #243 is a measurement artifact, not a rubash bug.
+
 ## Corpus provenance (fetched / vendored, offline-capable)
 
 | Corpus | Source | Version | License |
@@ -143,3 +163,80 @@ is documented in the harness header. TSVs land in
    as interactive input); `bash -c exit file` treats it as `$0`.
 5. rubash `-n` on bash's configure aborts at line 5345 (multi-line
    `as_fn_error` message string) — rc=2 on CRLF copy, rc=1/hang on LF copy.
+
+## Perffix lane results (2026-09-27, wt4/perffix on 7dfdaeb0)
+
+### Side-findings 1+2 are FIXED in this lane (rubash#241 sub-items)
+
+- `}}`/`}x` now lex as literal WORDS: GNU syntax.h:29-30 puts `}` in
+  neither `shell_meta_chars` nor `shell_break_chars`, and
+  CHECK_FOR_RESERVED_WORD (parse.y:3168, exact STREQ at parse.y:3174-3175)
+  yields the reserved `}` only for the exact one-character word in an
+  acceptable position outside a case pattern (parse.y:3177, 5899).
+  `{{ echo hi; }}` now runs both words as commands (GNU parity: 127,
+  two `command not found` lines); `echo } }x }}` prints `} }x }}`.
+- `;;`/`;&`/`;;&` reaching the main list loop is now unconditionally a
+  syntax error (GNU parse.y:3711-3717 SEMI_SEMI lexing; grammar admits
+  them only in case_clause_sequence, parse.y:1237-1247). `{ :;;}` and
+  `{ ;; :; }` reject with GNU's exact message.
+- The whole empty-separator class is fixed per GNU's list grammar
+  (parse.y:1264-1290): a `;`/`&` must follow a completed command
+  immediately — leading `;`, `; ;`, `: <newline> ; :`, `: & & :`,
+  `if :; then :; ; fi` all reject; `{ :; }`, `{ : ; }`, trailing `;`,
+  `cat <<EOF ; :`, `case x in a) : ; esac`, `for ((i=0;;i++))` stay
+  legal. Compound-body reparses now thread the enclosing source text so
+  the error echoes the full physical line (GNU parse.y:6813-6824
+  print_offending_line).
+- Verification: 35-shape GNU-diff matrix (both sides from script files,
+  rc + full stdout/stderr), 34 PASS; the 1 non-PASS is a pre-existing
+  background-job stdout-ordering divergence (`echo bg &` output arrives
+  after the next command's) that this lane did not touch. Pinned by
+  `parse_acceptance_gnu_separator_and_brace_word_rules` in
+  tests/regression.rs. Raw matrix: `target/issue-suites/results/perffix/`.
+
+### Sub-item dispositions (not this lane's fixes — duplicate evidence)
+
+- Side-finding 3 (multi-line nested braces) and 5 (configure `-n`): the
+  failing constructs are brace-group scans spanning newlines — the same
+  brace_scan_cache/skip_brace family the regfix lane was dispatched for;
+  regfix has produced no commits yet (wt4/regfix == 1f30c090). The
+  configure:5345 abort isolates to `{ { ...<newline>...;}\ncmd; } ;; #(`
+  inside a case arm (GNU parses, rubash rc=2); depth-3+ two-line
+  `{ { {\n:; } } }` fails while depth-2 passes on this base. Evidence:
+  `target/issue-suites/results/perffix/{asfn5345,n2}.sh` runs.
+- NEW evidence for regfix: `tests/regression.rs
+  upstream_suite_slice_snapshots` (comsub2) is RED AT BIRTH — it fails
+  identically at 1f30c090, the commit that created the snapshot (nested
+  funsub `echo ${ echo X${ echo nested; }Y; }` → "syntax error near
+  unexpected token `}'", GNU prints `XnestedY`). Reproduced in a scratch
+  worktree with third_party populated. regfix's "snapshot 甄别" item.
+- Side-finding (new, unfixed): a glued closer `}}` — `f() { :; }}` — GNU
+  reports `unexpected end of file from `{` command` (the word `}}` never
+  closes the group) while rubash treats the first `}` as the closer.
+  skip_brace counts any `}` as a closer; GNU needs the exact `}` word.
+
+### Hot-path profile (Task 3; RUBASH_EXEC_PROFILE + scratch counters, since removed)
+
+- **Re-tokenization is ELIMINATED as a cost center for the interpreter
+  probes**: probes 04/05/15 run 10-15 tokenize calls (~0 ms) and 3
+  parses total per script — ASTs are built once and executed from AST.
+  The queued "批式 tokenizer 每趟重词法化 → 增量读取器" deep-subsystem
+  item does not cover these probes' cost.
+- Top cost centers (debug, relative): (1) assignment execution path
+  (`execute_empty_words_command`, 28% of probe 15 wall — mostly
+  legitimate RHS parameter-expansion work); (2) `expand_command_words`
+  (27% of probe 04); (3) the per-command preamble fixed costs —
+  comsub/extglob diagnostic re-scans (6-16%), current-line env insert,
+  alias/redirect/function-lookup checks (1-6% each). Arithmetic
+  evaluation itself is 23% of probe 05 and already has the rubash#156
+  fast admission.
+- Landed win: admission whitelists on the two per-command diagnostic
+  re-scans (`raw.contains('$')||raw.contains('`')` before the comsub
+  DFA; `raw.contains('(')` before the extglob DFA) — provably
+  equivalent (comsub_residuals only reports residuals introduced by
+  those characters), ~5% off the scans phase, ≤1% wall on these probes.
+  Everything else measured (validate/alias/stdin-preexpand/strip/
+  function-lookup/assignment-classify segments) is ≤14 ms per probe —
+  the per-command overhead is distributed, not concentrated; no single
+  safe structural win of >5% exists in this layer without semantic
+  rework of expansion/assignment internals.

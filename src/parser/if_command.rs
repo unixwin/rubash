@@ -16,7 +16,7 @@ pub(super) fn parse_if_command(
     let keyword_metadata = build_keyword_metadata(&tokens[start]);
     let then_keyword = tokens[then_index].value.clone();
     let then_keyword_metadata = build_keyword_metadata(&tokens[then_index]);
-    let condition = parse_if_body_commands(&tokens[start + 1..then_index]);
+    let condition = parse_if_body_commands(&tokens[start + 1..then_index], source, line_offset);
     if condition.is_empty() {
         return None;
     }
@@ -24,7 +24,7 @@ pub(super) fn parse_if_command(
     let condition_terminator_metadata = condition_terminator_metadata_before(tokens, then_index);
     let mut index = then_index + 1;
 
-    let (then_body, boundary) = parse_if_section(tokens, index)?;
+    let (then_body, boundary) = parse_if_section(tokens, index, source, line_offset)?;
     // GNU parse.y: `then`/`elif`/`else` bodies are non-empty command lists.
     if then_body.is_empty() {
         return None;
@@ -38,10 +38,10 @@ pub(super) fn parse_if_command(
         let elif_then = find_if_then(tokens, index + 1)?;
         let elif_then_keyword = tokens[elif_then].value.clone();
         let elif_then_keyword_metadata = build_keyword_metadata(&tokens[elif_then]);
-        let condition = parse_if_body_commands(&tokens[index + 1..elif_then]);
+        let condition = parse_if_body_commands(&tokens[index + 1..elif_then], source, line_offset);
         let condition_terminator = condition_terminator_before(tokens, elif_then);
         let condition_terminator_metadata = condition_terminator_metadata_before(tokens, elif_then);
-        let (body, next_boundary) = parse_if_section(tokens, elif_then + 1)?;
+        let (body, next_boundary) = parse_if_section(tokens, elif_then + 1, source, line_offset)?;
         if body.is_empty() {
             return None;
         }
@@ -61,7 +61,7 @@ pub(super) fn parse_if_command(
     let (else_keyword, else_keyword_metadata, else_body) = if is_keyword(tokens, index, "else") {
         let else_keyword = tokens[index].value.clone();
         let else_keyword_metadata = build_keyword_metadata(&tokens[index]);
-        let (body, next_boundary) = parse_if_section(tokens, index + 1)?;
+        let (body, next_boundary) = parse_if_section(tokens, index + 1, source, line_offset)?;
         if body.is_empty() {
             return None;
         }
@@ -144,7 +144,12 @@ fn find_if_then(tokens: &[Token], start: usize) -> Option<usize> {
     None
 }
 
-fn parse_if_section(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, usize)> {
+fn parse_if_section(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
@@ -171,12 +176,18 @@ fn parse_if_section(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>,
     }
 
     tokens.get(index)?;
-    Some((parse_if_body_commands(&tokens[start..index]), index))
+    Some((
+        parse_if_body_commands(&tokens[start..index], source, source_line_offset),
+        index,
+    ))
 }
 
-fn parse_if_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
-    parse(tokens)
-        .commands
+fn parse_if_body_commands(
+    tokens: &[Token],
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Vec<CommandNode> {
+    super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()

@@ -782,7 +782,29 @@ impl<'a> Lexer<'a> {
                 token.extglob_gate = self.extended_glob;
                 Some(token)
             }
-            '}' => Some(Token::new(TokenKind::Keyword, "}", start)),
+            '}' => {
+                // GNU syntax.h:29-30: `}' is neither a shell metacharacter
+                // (shell_meta_chars "()<>;&|") nor a word-break char
+                // (shell_break_chars "()<>;&| \t\n"), so read_token_word
+                // collects `}}'/`}x'/`}{' as ONE word; CHECK_FOR_RESERVED_WORD
+                // (parse.y:3168, exact STREQ at parse.y:3174-3175) yields the
+                // reserved `}' token only when the whole word is exactly `}'
+                // in a reserved-word-acceptable position (parse.y:5899)
+                // outside a case pattern list (parse.y:3177). `{{ echo hi; }}'
+                // therefore lexes `{{' and `}}' as literal words (GNU runs
+                // both as commands: "{{: command not found" / "}}: command
+                // not found"), and `echo } }x }}' passes three arguments.
+                if self.parse_state.case_pattern
+                    || !self.reserved_word_position()
+                    || self.input[start + 1..]
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| !"()<>;&| \t\n\r".contains(ch))
+                {
+                    return Some(self.finish_word_token(start, false));
+                }
+                Some(Token::new(TokenKind::Keyword, "}", start))
+            }
             _ => Some(self.finish_word_token(start, true)),
         }
     }

@@ -1,7 +1,12 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
-pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+pub(super) fn parse_case_command(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports nested compound lists and
     // redirections on the compound command. This covers the common
     // `case word in pattern) list terminator` shape.
@@ -283,7 +288,11 @@ pub(super) fn parse_case_command(tokens: &[Token], start: usize) -> Option<(Comm
 
         let body_start = i;
         i = case_body_end(tokens, i);
-        let body = parse(&tokens[body_start..i]).commands;
+        let body = super::parse_loop::parse_body_with_diagnostics(
+            &tokens[body_start..i],
+            source,
+            source_line_offset,
+        );
         let terminator_text = case_terminator(tokens, i).map(|_| tokens[i].value.clone());
         let terminator_metadata =
             case_terminator(tokens, i).map(|_| build_keyword_metadata(&tokens[i]));

@@ -545,7 +545,15 @@ impl Executor {
                 // and swallowed the closing `)` (rubash#168). Without the
                 // secondary check here the executor re-killed scripts the
                 // driver had already accepted.
-                if crate::lexer::has_unclosed_command_substitution(raw)
+                // Admission whitelist (not a symptom blacklist): every
+                // residual has_unclosed_command_substitution can report is
+                // introduced by `$(`, `$'`, `${` or a backtick
+                // (lexer/continuation.rs comsub_residuals), so a raw with
+                // no `$` and no backtick is provably clean and the
+                // char-by-char DFA never needs to run. A false admission
+                // is impossible; a miss only costs the scan.
+                if (raw.contains('$') || raw.contains('`'))
+                    && crate::lexer::has_unclosed_command_substitution(raw)
                     && !crate::lexer::command_substitutions_balanced(raw)
                 {
                     self.mark_parse_error();
@@ -565,7 +573,10 @@ impl Executor {
             && cmd
                 .word_metadata
                 .iter()
-                .any(|metadata| unterminated_extglob(&metadata.raw))
+                // Same admission shape: unterminated_extglob can only
+                // leave depth > 0 when an extglob operator is followed by
+                // `(`, so a raw without `(` is provably clean.
+                .any(|metadata| metadata.raw.contains('(') && unterminated_extglob(&metadata.raw))
         {
             self.mark_parse_error();
             eprintln!(

@@ -1,7 +1,12 @@
 use super::*;
 use crate::lexer::Token;
 
-pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+pub(super) fn parse_loop_command(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     let (kind, until) = if is_keyword(tokens, start, "while") {
         (LoopKind::While, false)
     } else if is_keyword(tokens, start, "until") {
@@ -11,13 +16,14 @@ pub(super) fn parse_loop_command(tokens: &[Token], start: usize) -> Option<(Comm
     };
 
     let do_index = find_loop_do(tokens, start + 1)?;
-    let condition = parse_loop_body_commands(&tokens[start + 1..do_index]);
+    let condition =
+        parse_loop_body_commands(&tokens[start + 1..do_index], source, source_line_offset);
     if condition.is_empty() {
         return None;
     }
     let condition_terminator = condition_terminator_before(tokens, do_index);
     let condition_terminator_metadata = condition_terminator_metadata_before(tokens, do_index);
-    let (body, done_index) = parse_loop_body(tokens, do_index + 1)?;
+    let (body, done_index) = parse_loop_body(tokens, do_index + 1, source, source_line_offset)?;
 
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
@@ -59,7 +65,12 @@ fn find_loop_do(tokens: &[Token], start: usize) -> Option<usize> {
     None
 }
 
-fn parse_loop_body(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, usize)> {
+fn parse_loop_body(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
     let mut stack = Vec::new();
     let mut index = start;
     while index < tokens.len() {
@@ -82,12 +93,18 @@ fn parse_loop_body(tokens: &[Token], start: usize) -> Option<(Vec<CommandNode>, 
     if !is_keyword(tokens, index, "done") {
         return None;
     }
-    Some((parse_loop_body_commands(&tokens[start..index]), index))
+    Some((
+        parse_loop_body_commands(&tokens[start..index], source, source_line_offset),
+        index,
+    ))
 }
 
-fn parse_loop_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
-    parse(tokens)
-        .commands
+fn parse_loop_body_commands(
+    tokens: &[Token],
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Vec<CommandNode> {
+    super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()

@@ -566,6 +566,145 @@ as_fn_mkdir_p () {
     );
 }
 
+/// The `yes | head | while read` termination canary (rubash#206/#243).
+/// Pre-#206-fix (before 62c7e5fd) this shape never terminated and RSS grew
+/// unbounded (the sequential stage loop `wait_with_output`'d stage-0 `yes`
+/// into one Vec forever; GNU execute_cmd.c:2620 execute_pipeline forks every
+/// left element on pipe(2) instead). Post-fix it finishes rc=0 with bounded
+/// RSS: ~7 s for N=10000 in debug (this canary), ~23-41 s for N=100000
+/// (release ~3.5-6 s). rubash#243's "never terminates" report was the
+/// perf-suite timeout=20 truncating the N=100000 debug run, not a
+/// regression — this canary pins the class so a real one shows up as a
+/// timeout instead of an RSS explosion. `yes`/`head` need no PATH: the
+/// concurrent external admission falls back to the internal pipeline
+/// utilities (src/main.rs run_internal_pipeline_utility).
+#[test]
+fn perf_canary_yes_head_read_terminates() {
+    let _guard = HEAVY_TEST_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("rubash-perf-yhr-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create perf scratch");
+    std::fs::write(
+        dir.join("yhr.sh"),
+        "yes | head -10000 | while read -r l; do :; done\necho \"RC=$?\"\nexit 0\n",
+    )
+    .expect("write yhr script");
+    let started = Instant::now();
+    let out = run_rubash_in(&dir, &["yhr.sh"], Duration::from_secs(90));
+    let elapsed = started.elapsed();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !out.timed_out,
+        "yes|head|read pipeline did not terminate in 90s (#206 class regression)"
+    );
+    assert_eq!(
+        out.code,
+        Some(0),
+        "yhr.sh exit status, stderr: {:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.stdout, b"RC=0\n", "yhr.sh stdout");
+    assert!(
+        elapsed < Duration::from_secs(60),
+        "yes|head|read N=10000 took {:.1}s (bound 60s; #206/#243 class)",
+        elapsed.as_secs_f32()
+    );
+}
+
+/// The GNU brace/separator acceptance rules (rubash#241 side-findings,
+/// fixed in the perffix lane). Four classes, each verified byte-for-byte
+/// against WSL GNU bash 5.3.0 (matrix under
+/// target/issue-suites/results/perffix/matrix.sh):
+///
+/// 1. `}}'/`}x' are literal WORDS, not reserved `}' tokens — GNU
+///    syntax.h:29-30 puts `}' in neither shell_meta_chars nor
+///    shell_break_chars, and CHECK_FOR_RESERVED_WORD (parse.y:3168,
+///    STREQ at parse.y:3174-3175) needs the whole word to be exactly
+///    `}'. `{{ echo hi; }}' runs both words as commands (127), and
+///    `echo } }x }}' prints exactly `} }x }}'.
+/// 2. `;;' (SEMI_SEMI, parse.y:3711-3717) is grammatical only in
+///    case_clause_sequence (parse.y:1237-1247): `{ :;;}' and `{ ;; :; }'
+///    are rc=2 `syntax error near unexpected token `;;''.
+/// 3. An empty separator segment is never grammatical: the list grammar
+///    (parse.y:1264-1290) requires `list1 ';' newline_list list1', so
+///    `; :', `: ; ; :', `: <newline> ; :' and `: & & :' are rc=2 errors
+///    naming `;' (or `&').
+/// 4. Legal shapes stay legal: `{ :; }', `{ : ; }', trailing `; :',
+///    `cat <<EOF ; :', `case $x in a) : ; esac', `for ((i=0;;i++))'.
+#[test]
+fn parse_acceptance_gnu_separator_and_brace_word_rules() {
+    let _guard = HEAVY_TEST_LOCK.lock().unwrap();
+    let dir = std::env::temp_dir().join(format!("rubash-pa-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch");
+
+    let reject = [
+        ("{{ :; }\n", "`}'"),
+        ("{ :;;}\n", "`;;'"),
+        ("{ :; ; }\n", "`;'"),
+        ("; :\n", "`;'"),
+        (": ; ; :\n", "`;'"),
+        (":\n; :\n", "`;'"),
+        (": & & :\n", "`&'"),
+        ("if :; then :; ; fi\n", "`;'"),
+    ];
+    for (index, (source, token)) in reject.iter().enumerate() {
+        std::fs::write(dir.join(format!("rej{index}.sh")), source).expect("write");
+        let out = run_rubash_in(&dir, &[&format!("rej{index}.sh")], Duration::from_secs(30));
+        assert_eq!(
+            out.code,
+            Some(2),
+            "rej{index} ({source:?}) rc, stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("syntax error near unexpected token {token}")),
+            "rej{index} ({source:?}) stderr: {stderr}"
+        );
+    }
+
+    // `}}' is a literal word: GNU runs `{{' / `}}' as commands (127).
+    std::fs::write(dir.join("word.sh"), "{{ echo hi; }}\n").expect("write");
+    let out = run_rubash_in(&dir, &["word.sh"], Duration::from_secs(30));
+    assert_eq!(out.code, Some(127));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("{{: command not found"), "stderr: {stderr}");
+    assert!(stderr.contains("}}: command not found"), "stderr: {stderr}");
+
+    std::fs::write(dir.join("args.sh"), "echo } }x }}\n").expect("write");
+    let out = run_rubash_in(&dir, &["args.sh"], Duration::from_secs(30));
+    assert_eq!(out.code, Some(0));
+    assert_eq!(out.stdout, b"} }x }}\n");
+
+    // The legal neighborhood must stay legal (rc 0, no stderr).
+    let accept = [
+        "{ :; }\n",
+        "{ : ; }\n",
+        ": ;\n",
+        "cat <<EOF ; :\nbody\nEOF\n",
+        "case $x in a) : ; esac\n",
+        "for ((i=0;;i++)); do break; done\n",
+        "f() {\n:\n}\nf\n",
+    ];
+    for (index, source) in accept.iter().enumerate() {
+        std::fs::write(dir.join(format!("acc{index}.sh")), source).expect("write");
+        let out = run_rubash_in(&dir, &[&format!("acc{index}.sh")], Duration::from_secs(30));
+        assert_eq!(
+            out.code,
+            Some(0),
+            "acc{index} ({source:?}) rc, stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            out.stderr.is_empty(),
+            "acc{index} ({source:?}) stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The bash_completion full-file `bash -n` canary (rubash#131): GNU and
 /// rubash both reject the corpus at line 1820 with rc 2. The corpus is
 /// GPL-2.0+ and is deliberately NOT vendored (target-ecosys license

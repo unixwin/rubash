@@ -1,7 +1,12 @@
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
-pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
+pub(super) fn parse_for_command(
+    tokens: &[Token],
+    start: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): GNU Bash supports all `for_command`
     // grammar alternatives, nested compound lists, redirections on compound
     // commands and reserved-word parsing state. This maps common
@@ -116,7 +121,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         do_keyword_metadata,
         end_keyword,
         end_keyword_metadata,
-    ) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i) {
+    ) = if let Some((body, next_i)) = parse_for_brace_body(tokens, i, source, source_line_offset) {
         (
             body,
             next_i,
@@ -154,7 +159,7 @@ pub(super) fn parse_for_command(tokens: &[Token], start: usize) -> Option<(Comma
         let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 
         (
-            parse_for_body_commands(&tokens[body_start..i]),
+            parse_for_body_commands(&tokens[body_start..i], source, source_line_offset),
             i + 1,
             CommandBodyKind::DoDone,
             do_keyword,
@@ -236,9 +241,12 @@ fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, delimiter, delimiter))
 }
 
-fn parse_for_body_commands(tokens: &[Token]) -> Vec<CommandNode> {
-    parse(tokens)
-        .commands
+fn parse_for_body_commands(
+    tokens: &[Token],
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Vec<CommandNode> {
+    super::parse_loop::parse_body_with_diagnostics(tokens, source, source_line_offset)
         .into_iter()
         .filter(|command| !command_is_empty(command))
         .collect()
@@ -268,7 +276,12 @@ fn for_brace_body_start(tokens: &[Token], index: usize) -> bool {
     })
 }
 
-fn parse_for_brace_body(tokens: &[Token], index: usize) -> Option<(Vec<CommandNode>, usize)> {
+fn parse_for_brace_body(
+    tokens: &[Token],
+    index: usize,
+    source: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(Vec<CommandNode>, usize)> {
     let token = tokens.get(index)?;
     if token.kind == TokenKind::Keyword
         && token.value.starts_with('{')
@@ -281,7 +294,10 @@ fn parse_for_brace_body(tokens: &[Token], index: usize) -> Option<(Vec<CommandNo
             .trim_end_matches('}')
             .trim();
         let body_tokens = crate::lexer::tokenize(inner);
-        return Some((parse_for_body_commands(&body_tokens), index + 1));
+        return Some((
+            parse_for_body_commands(&body_tokens, source, source_line_offset),
+            index + 1,
+        ));
     }
 
     if !is_keyword(tokens, index, "{") {
@@ -290,5 +306,8 @@ fn parse_for_brace_body(tokens: &[Token], index: usize) -> Option<(Vec<CommandNo
 
     let i = matching_brace_group_end(tokens, index)?;
 
-    Some((parse_for_body_commands(&tokens[index + 1..i]), i + 1))
+    Some((
+        parse_for_body_commands(&tokens[index + 1..i], source, source_line_offset),
+        i + 1,
+    ))
 }
