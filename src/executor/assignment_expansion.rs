@@ -1631,7 +1631,19 @@ impl Executor {
                         }
                     }
                 }
-                values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                if let Some(mut fields) =
+                    self.whole_word_parameter_compound_fields(&token_raw, false)
+                {
+                    // Whole-word $param/${param...} element: one storage
+                    // expansion, then IFS field split (or a single joined
+                    // element when quoted) — never a re-parseable string
+                    // (GNU arrayfunc.c:557 expand_compound_array_assignment,
+                    // see whole_word_parameter_compound_fields).
+                    changed = true;
+                    values.append(&mut fields);
+                } else {
+                    values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
+                }
             } else {
                 // GNU expand_words_no_vars -> shell_expand_word_list expands
                 // simple $0, $1, ... $N positional parameters in compound
@@ -1701,6 +1713,27 @@ impl Executor {
                         values.push(stored);
                         continue;
                     }
+                }
+                if let Some(mut fields) =
+                    self.whole_word_parameter_compound_fields(&token_raw, false)
+                {
+                    // Whole-word $param/${param...} element: one storage
+                    // expansion, then IFS field split (or a single joined
+                    // element when quoted) — never a re-parseable string
+                    // (GNU arrayfunc.c:557 expand_compound_array_assignment,
+                    // see whole_word_parameter_compound_fields).
+                    changed = true;
+                    values.append(&mut fields);
+                    continue;
+                }
+                if let Some(word) = self.subscripted_parameter_element(&token_raw) {
+                    // Raw `[sub]=$param` word: W_ASSIGNMENT|W_NOSPLIT
+                    // (parse.y:5786-5796) — the whole expanded value lands
+                    // at the subscript, unsplit (see
+                    // subscripted_parameter_element).
+                    changed = true;
+                    values.push(word);
+                    continue;
                 }
                 values.push(self.compound_plain_element_value(&token_raw, bare, &mut changed));
             }
@@ -1967,44 +2000,132 @@ impl Executor {
         let unquoted_inner = strip_matching_quotes(inner);
         let is_quoted = unquoted_inner != inner;
         let parameter = if is_quoted { &unquoted_inner } else { inner };
-        let value = if let Some(name) = single_unquoted_parameter_name(parameter) {
-            self.shell_variable_value(name).unwrap_or_default()
-        } else if let Some(name) = whole_word_braced_parameter_body(parameter) {
-            let name = name.replace("\\\"", "\"").replace("\\'", "'");
-            self.array_element_parameter_value(&name)?
-        } else {
+        let fields = self.whole_word_parameter_compound_fields(parameter, is_quoted)?;
+        Some(format!("({})", fields.join(" ")))
+    }
+
+    /// GNU arrayfunc.c:557 expand_compound_array_assignment on a whole-word
+    /// `$name` / `${name...}` element token: expand_words_no_vars
+    /// (subst.c:12590) expands the word exactly once from storage — text
+    /// that arrived through the variable's value is data, so a `$(...)`
+    /// inside it never re-executes — then field-splits the unquoted result
+    /// and globs each field. Field-split products are plain words:
+    /// W_ASSIGNMENT is set only by the parser on raw `[sub]=value` tokens
+    /// (parse.y:5786-5796 read_token_word, `assignment (token,
+    /// PST_COMPASSIGN)')`, so assign_compound_array_list
+    /// (arrayfunc.c:745-747 `(list->word->flags & W_ASSIGNMENT) && w[0]=='['`)
+    /// assigns them sequentially. Tag each field with
+    /// ARRAY_FIELD_SPLIT_MARKER so the element splitter does not re-read
+    /// `[sub]=` text produced by expansion (issue #198: `var=($value)` with
+    /// value='[$(echo total 0)]=1 [2]=2]'). A double-quoted token keeps
+    /// W_QUOTED no-split semantics (subst.c:12050 `word->flags & W_NOSPLIT`
+    /// arm of expand_word_internal's caller): ONE element, joined text —
+    /// `${arr[*]}` joins with IFS[0] there (issue #194). Single-quoted
+    /// tokens are literal data and are not claimed (return None).
+    fn whole_word_parameter_compound_fields(
+        &self,
+        token: &str,
+        force_quoted: bool,
+    ) -> Option<Vec<String>> {
+        let dq_wrapped = token.starts_with('\u{E302}') && token.ends_with('\u{E302}');
+        let core = token.trim_matches('\u{E302}');
+        let unquoted = strip_matching_quotes(core);
+        // Double quotes suppress field splitting; single quotes additionally
+        // suppress the expansion itself, so a `'$v'` element stays literal.
+        let is_double_quoted = force_quoted
+            || dq_wrapped
+            || (unquoted != core && core.starts_with('"') && core.ends_with('"'));
+        if !is_double_quoted && unquoted != core {
             return None;
-        };
-        // GNU expand_compound_array_assignment: parse_string_to_word_list
-        // sets W_QUOTED on a quoted word ("$value"), and shell_expand_word_list
-        // does not field-split W_QUOTED words. A quoted parameter in a
-        // compound assignment stays one element (array19.sub:
-        // declare -a var=("$value") stores [0]="a b c", not 3 elements).
-        // The word also lacks W_ASSIGNMENT (only the parser sets it), so
-        // assign_compound_array_list (arrayfunc.c:753) does NOT check
-        // [subscript]=value form. Tag with ARRAY_FIELD_SPLIT_MARKER so
-        // append_array_value skips the subscript detection (otherwise
-        // "[$(echo total 0)]=1 [2]=2]" from a variable value would be
-        // misparsed as a subscript assignment and the $(...) re-executed).
-        if is_quoted {
-            return Some(format!(
-                "({ARRAY_FIELD_SPLIT_MARKER}{})",
-                quote_compound_field_value(&value)
-            ));
         }
-        let values = field_split_values_with_ifs(
-            &value,
-            self.shell_state.env_vars.get("IFS").map(String::as_str),
-        )
-        .into_iter()
-        .map(|value| {
-            format!(
+        let value = self.whole_word_parameter_single_value(unquoted)?;
+        if is_double_quoted {
+            return Some(vec![format!(
                 "{ARRAY_FIELD_SPLIT_MARKER}{}",
                 quote_compound_field_value(&value)
+            )]);
+        }
+        Some(
+            field_split_values_with_ifs(
+                &value,
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
             )
-        })
-        .collect::<Vec<_>>();
-        Some(format!("({})", values.join(" ")))
+            .into_iter()
+            .map(|value| {
+                format!(
+                    "{ARRAY_FIELD_SPLIT_MARKER}{}",
+                    quote_compound_field_value(&value)
+                )
+            })
+            .collect(),
+        )
+    }
+
+    /// The single expansion of a whole-word `$name` / `${name...}` parameter
+    /// token (shared by the element and `[sub]=` word forms). Returns None
+    /// when the token is not a whole-word parameter.
+    fn whole_word_parameter_single_value(&self, unquoted: &str) -> Option<String> {
+        if let Some(name) = single_unquoted_parameter_name(unquoted) {
+            return Some(self.shell_variable_value(name).unwrap_or_default());
+        }
+        let body = whole_word_braced_parameter_body(unquoted)?;
+        let name = body.replace("\\\"", "\"").replace("\\'", "'");
+        match self.array_element_parameter_value(&name) {
+            Some(value) => Some(value),
+            None => {
+                // Indexed `${arr[*]}`: array_element_parameter_value returns
+                // None for `*`/`@` subscripts by design (its single-element
+                // contract, arrays/executor.rs), but the whole-word element
+                // wants string_list_dollar_star's IFS[0] join of ALL members
+                // (subst.c:9210+ list_of_params ->
+                // join_array_parameter_values; issue #194:
+                // var=( "${arr[*]}" ) is ONE element "A B C").
+                let array_name = name
+                    .strip_suffix("[*]")
+                    .filter(|name| is_shell_name(name))?;
+                let storage = self.parameter_array_storage(array_name)?;
+                Some(self.join_array_parameter_values(&storage, &name))
+            }
+        }
+    }
+
+    /// GNU parse.y:5786-5796 read_token_word sets
+    /// W_ASSIGNMENT|W_NOSPLIT|W_NOGLOB on a raw `[sub]=value` compound word
+    /// (the `assignment (token, PST_COMPASSIGN)` check), so
+    /// expand_words_no_vars expands the whole word as ONE string — no field
+    /// split, no glob — and assign_compound_array_list (arrayfunc.c:839-842
+    /// `val = w + len + 2`) takes everything after the first `]=` as the
+    /// element value verbatim. A `[sub]=$param` / `[sub]="$param"` element
+    /// therefore stores the single expanded value at the subscript, and
+    /// `[..]=` text inside that value is never re-read as a subscript
+    /// (issue #198 matrix: `M=([2]=$v)` with v='[9]=q [r]=w' stores
+    /// M[2]='[9]=q [r]=w').
+    fn subscripted_parameter_element(&self, token_raw: &str) -> Option<String> {
+        let (sub_end, tail) =
+            crate::executor::subscript_expansion::scan_compound_subscript(token_raw, 0)?;
+        if tail != crate::executor::subscript_expansion::CompoundSubscriptTail::Assignment {
+            return None;
+        }
+        let after = &token_raw[sub_end + 1..];
+        let (operator, rhs) = after
+            .strip_prefix("+=")
+            .map(|rhs| ("+=", rhs))
+            .unwrap_or(("=", after.strip_prefix('=')?));
+        let dq_wrapped = rhs.starts_with('\u{E302}') && rhs.ends_with('\u{E302}');
+        let core = rhs.trim_matches('\u{E302}');
+        let unquoted = strip_matching_quotes(core);
+        // W_NOSPLIT applies to the whole word regardless of RHS quoting; a
+        // single-quoted RHS is literal (no expansion), handled elsewhere.
+        if !dq_wrapped && unquoted != core && core.starts_with('\'') {
+            return None;
+        }
+        let value = self.whole_word_parameter_single_value(unquoted)?;
+        Some(format!(
+            "{}{}{}",
+            &token_raw[..sub_end + 1],
+            operator,
+            quote_compound_field_value(&value)
+        ))
     }
 
     pub(in crate::executor) fn expand_quoted_array_assignment_value(

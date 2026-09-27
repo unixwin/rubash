@@ -617,6 +617,19 @@ impl Executor {
         let mut out = String::with_capacity(inner.len());
         let mut index = 0usize;
         let mut token_start = true;
+        // GNU assign_compound_array_list (arrayfunc.c:745-747) checks the
+        // subscript form with `w[0] == '['` on the WORD only: a `[` inside a
+        // quoted element value is data and never resolves. parse_string_to
+        // word_list (arrayfunc.c:580) tokenizes with real quoting, so the
+        // rewrite walk must track quote state — without it, a field-split
+        // product (ARRAY_FIELD_SPLIT_MARKER + wrapped value, issue #198) or
+        // a quoted `[k]=v` value (`a=([0]="x [p]=y")`) had every
+        // whitespace-delimited `[..]=` span inside the value resolved as a
+        // subscript. Escapes: `\x` is literal inside `"` and outside quotes;
+        // `'` has no escapes.
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
         while index < inner.len() {
             // GNU expand_compound_array_assignment (arrayfunc.c:557) hands the
             // stored list to parse_string_to_word_list (arrayfunc.c:580),
@@ -632,8 +645,21 @@ impl Executor {
                 .chars()
                 .next()
                 .expect("index < inner.len() yields a char");
-            // A `[` at a token start may begin a `[sub]=value` element.
-            if ch == '[' && token_start {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+                index += ch.len_utf8();
+                continue;
+            }
+            match ch {
+                '\\' if !in_single => escaped = true,
+                '\'' if !in_double => in_single = !in_single,
+                '"' if !in_single => in_double = !in_double,
+                _ => {}
+            }
+            // A `[` at a token start may begin a `[sub]=value` element —
+            // never inside quotes (see the tracking comment above).
+            if ch == '[' && token_start && !in_single && !in_double {
                 if let Some((sub_end, after)) = scan_compound_subscript(inner, index) {
                     let sub = &inner[index + 1..sub_end];
                     if after == CompoundSubscriptTail::Assignment {
@@ -709,7 +735,9 @@ impl Executor {
             }
             out.push(ch);
             index += ch.len_utf8();
-            token_start = ch.is_ascii_whitespace();
+            // Token boundaries exist only outside quotes: whitespace inside
+            // '...'/"..." is element data, not a word separator.
+            token_start = ch.is_ascii_whitespace() && !in_single && !in_double;
         }
         Ok(format!("({out})"))
     }

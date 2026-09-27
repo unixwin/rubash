@@ -7,6 +7,8 @@ use regex::Regex;
 
 #[path = "cli_tests/bashdb_compat.rs"]
 mod bashdb_compat;
+#[path = "cli_tests/compat_issue198_194_compound_param_elements.rs"]
+mod compat_issue198_194_compound_param_elements;
 #[path = "cli_tests/compat_issue78_multiline_arrays.rs"]
 mod compat_issue78_multiline_arrays;
 #[path = "cli_tests/compat_issue_regressions.rs"]

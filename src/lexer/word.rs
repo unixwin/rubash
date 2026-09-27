@@ -280,6 +280,22 @@ impl<'a> Lexer<'a> {
                     array_subscript_depth += 1;
                     extglob_operator = false;
                 }
+                '#' if (compound_paren_depth > 0 || in_array_value)
+                    && self.compound_body_comment_starts() =>
+                {
+                    // GNU parse.y:3630-3644 read_token + parse.y:7140-7147
+                    // parse_compound_assignment: inside a compound-assignment
+                    // body each element token is pulled through read_token,
+                    // and a word-initial `#' discards through EOL and yields
+                    // '\n', which the compound loop allows (parse.y:7142).
+                    // The comment text is therefore never seen by the paren
+                    // matcher — a `)' inside `1 # c )' cannot close the
+                    // assignment early. Word-initial mirrors read_token's
+                    // token start: preceded by whitespace or the opening
+                    // `('; quoted `#'s never reach this arm (their skip_*
+                    // spans consume them).
+                    while self.advance().is_some_and(|ch| ch != '\n') {}
+                }
                 '<' | '>' if self.peek_after(1) == Some('(') => {
                     // GNU parse.y:5514-5524: `<(`/`>(` mid-word — parse_comsub
                     // reads the `(list)` body into the same token.
@@ -327,6 +343,17 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
+    }
+
+    /// GNU parse.y:3630-3644 read_token: inside a compound-assignment body a
+    /// `#' starts a comment only at a token boundary — the byte before it is
+    /// whitespace or the opening `(`. A mid-word `#' (as in `1#c`) is literal
+    /// token text, matching read_token_word's word assembly.
+    fn compound_body_comment_starts(&self) -> bool {
+        matches!(
+            self.input.as_bytes().get(self.position.wrapping_sub(1)),
+            Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'(')
+        )
     }
 
     // True when the word begun at word_start is exactly "name=" or
