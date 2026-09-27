@@ -56,3 +56,4 @@
 ## CI 从未绿过（用户发现 2026-09-28）——cifix 车道在途
 三类红：macOS 2 个 uname 测试（linuxrun 改了 darwin 形态没跟上）、Windows golden_nounset_exit_matrix（本地绿 CI 红=最小 PATH 环境嫌疑）、nquote 快照（redgate 车道在修）。教训已记：回收流程加第五道门禁=gh run watch 远端 CI 结论。
 - 三新车道：perf2（#241/#242 二攻：分配churn+完成命令边界检查点）、misc2（#254 builtin comsub xtrace/#255 ble 28570/#236 CTLESC glob/#238 环境甄别）、corpus3（git test-lib 框架/FFmpeg configure/OpenSSH configure/bash-it 测试套件——先查覆盖清单）。**开放板 9 单现已全部有主**（omb: #251-253；perf2: #241/242；misc2: #236/238/254/255）
+- redgate ✅ 回收（d929ce5a：nquote 回归=标记对拆裂（对=单元修复）；comsub2 瞬态自愈；printf=harness 假零+2 真 bug（shopt 多选项/跨度全括号计数）——regression 23/23 恢复、Linux comsub2/printf 0 差异；教训：diff 对 NUL 输出报 Binary 被账本计 0，harness 需 --text 或字节级比较）
