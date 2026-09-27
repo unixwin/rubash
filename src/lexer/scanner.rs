@@ -545,6 +545,29 @@ impl<'a> Lexer<'a> {
                     }
                     return Some(token);
                 }
+                // GNU parse.y read_token: `{` is a reserved word only as a
+                // standalone token — read_token_word treats a brace glued
+                // to a word character (`{xxx) as an ordinary word that
+                // ends at the first shell break char (`{` is not in
+                // shell_break_chars, syntax.h:30). Such a word never opens
+                // a group and must NOT be scanned across whitespace for a
+                // matching `}`: `if {[catch {` tokenizes as `if' `{[catch'
+                // `{' and EOF inside the `if' then reports "unexpected end
+                // of file from `if' command on line 1" (rubash#135; the
+                // cross-whitespace swallow used to fold the rest of the
+                // file into one Word token and cascade into a spurious
+                // `;' token error).
+                if self.input[start + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|ch| !"()<>;&| \t\n\r".contains(ch))
+                {
+                    let mut token = self.finish_word_token(start, false);
+                    if token.kind == TokenKind::Word && is_brace_expansion(&token.raw) {
+                        token.kind = TokenKind::BraceExpand;
+                    }
+                    return Some(token);
+                }
                 let scan = self.skip_brace();
                 if !scan.closed {
                     // GNU parse.y read_token: `{` is an ordinary word

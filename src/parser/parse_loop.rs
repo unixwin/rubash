@@ -39,6 +39,10 @@ pub(super) struct ParseState {
     /// echo the physical offending line the way parse.y y.error does —
     /// token reconstruction cannot recover the original whitespace.
     pub(super) diagnostic_text: Option<String>,
+    /// options.source_line_offset: how far token positions were shifted,
+    /// so a diagnostic computed from `diagnostic_text` line counts maps
+    /// back to absolute script lines.
+    pub(super) source_line_offset: usize,
 }
 
 /// Parse tokens into an AST
@@ -63,6 +67,7 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
             .diagnostic_text
             .clone()
             .or_else(|| options.source_text.clone()),
+        source_line_offset: options.source_line_offset,
     };
 
     let mut i = 0;
@@ -671,6 +676,29 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             }
             None => unclosed_keyword_eof_node(tokens, i, "if"),
         };
+        // GNU parse.y: line_number at EOF is PHYSICAL — every newline
+        // read advances it, including comment-only and blank trailing
+        // lines that produce no tokens (rubash#135: `if {[catch {` plus
+        // comment lines reports the last physical line + 1, not the last
+        // token line + 1). GNU reads a final newline even when the input
+        // lacks one (an EOL-less `if {` still reports line 2), so the
+        // EOF line is newline-count + 1 unconditionally.
+        if let Some(text) = state.diagnostic_text.as_deref() {
+            let physical_eof = state.source_line_offset
+                + text.chars().filter(|c| *c == '\n').count()
+                + usize::from(!text.ends_with('\n'))
+                + 1;
+            for (name, value) in command.assignments.iter_mut() {
+                if name == "__RUBASH_PARSE_ERROR_EOF_COMPOUND__" {
+                    let mut fields = value.split(PARSE_ERROR_FIELD_SEP);
+                    let compound = fields.next().unwrap_or("if").to_string();
+                    let open_line = fields.next().unwrap_or("1").to_string();
+                    *value = format!(
+                        "{compound}{PARSE_ERROR_FIELD_SEP}{open_line}{PARSE_ERROR_FIELD_SEP}{physical_eof}"
+                    );
+                }
+            }
+        }
         // Keep the original token stream available to the executor.  Bash
         // expands aliases while parsing, so an alias such as `f=fi` can
         // close this compound command even though the first parse did not
@@ -1527,6 +1555,14 @@ fn if_frame_offender(region: &[Token]) -> Option<usize> {
     for (index, token) in region.iter().enumerate() {
         if stack.len() == 1 && token.kind == TokenKind::Semicolon {
             if expect_command {
+                // GNU parse.y linebreak: newline_list folds any run of
+                // newlines between list terms — `if x\n\ny\nthen` is
+                // legal, and a comment-only line contributes nothing but
+                // its newline. Only a literal `;` with no command before
+                // it offends (`if ;`, `if x; ;`).
+                if token.line_break {
+                    continue;
+                }
                 return Some(index); // `if ;`, `if x; ;`, `if x; then ;`
             }
             expect_command = true;
