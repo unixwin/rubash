@@ -39,3 +39,4 @@
 - TASK-BOARD 建立（ab63f0e5）
 - param2 ✅ 回收（54e8df34：#208/#209/#211/#212 全修关闭，今日 25 单）；待办：#211 残余边缘 = continuation.rs 船长 diff（funsub push term_ready:true @501 + 613 臂加 top.term_ready 门）
 - ecosuite ✅ 回收（7cbb21ed：modernish/mvdan/nvm/bats 四套件首跑，#218-#224 七单开立）→ **ecofix 车道在途**（wt4/ecofix，修完重跑套件）
+- linuxrun ✅ 回收（4d648499：Linux 原生可跑——uname/chmod/test -x 四修 + 17/24 套件字节一致 + nvm 加载干净）；16 单（#225-#240）→ **linuxfix 车道在途**（#226 不可杀优先）
