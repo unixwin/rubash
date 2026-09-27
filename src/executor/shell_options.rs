@@ -384,6 +384,40 @@ impl Executor {
         false
     }
 
+    /// GNU redir.c opens `/dev/std*`, `/dev/fd/N` and `/proc/self/fd/N`
+    /// through the OS fd-alias layer: the kernel resolves the open() to a
+    /// dup of fd N's CURRENT open file description
+    /// (execution_misc::dev_stdio_redirect_fd; the input side is
+    /// niubash#118). For a built-in writer this means: an explicit fd-table
+    /// binding writes through `write_output_fd_redirect`, and an IMPLICIT
+    /// std fd (no entry — the shell's own stdout/stderr) writes to that
+    /// channel's default stream. Re-opening the alias as a literal Windows
+    /// path instead bound the write to the CONOUT$ console device, which
+    /// either bypassed the real — possibly redirected or captured — stream
+    /// (output vanished under pipes) or failed outright with Permission
+    /// denied (rubash#216: `u > /dev/stderr` with a heredoc `cat` body).
+    /// Returns None when the target is not an fd alias (caller opens the
+    /// path) or the alias refers to a closed/unbound non-std fd (caller's
+    /// literal open reports the failure the way GNU's open() would).
+    pub(in crate::executor) fn write_dev_stdio_redirect_output(
+        &mut self,
+        target: &str,
+        output: &[u8],
+    ) -> Option<Result<(), ExecuteError>> {
+        let fd = redirect_target_fd(target)?;
+        if self.fd_table.is_closed(fd) {
+            return None;
+        }
+        if self.fd_table.output_endpoint(fd).is_some() {
+            return Some(self.write_output_fd_redirect(target, output).map(|_| ()));
+        }
+        match fd {
+            1 => Some(self.write_default_stdout(output)),
+            2 => Some(self.write_default_stderr(output)),
+            _ => None,
+        }
+    }
+
     pub(in crate::executor) fn output_fd_redirects_to_stderr(&self, target: &str) -> bool {
         if redirect_target_fd(target).map_or(false, |fd| {
             matches!(

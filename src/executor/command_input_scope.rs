@@ -459,6 +459,41 @@ impl Executor {
                             .insert(fd_closed_key(fd), "1".to_string());
                         continue;
                     }
+                    // GNU redir.c:767-955 do_redirection_internal opens
+                    // /dev/std*, /dev/fd/N and /proc/self/fd/N through the
+                    // OS fd-alias layer: the kernel resolves the open() to a
+                    // dup of fd N's CURRENT open file description
+                    // (execution_misc::dev_stdio_redirect_fd documents the
+                    // same for the input side, niubash#118). Opening the
+                    // name as a literal Windows path instead bound the
+                    // group's fd to the CONOUT$ console device, whose bytes
+                    // bypass the real — possibly redirected or captured —
+                    // stderr stream: a body's output vanished under pipes,
+                    // and an external child re-opening the name failed with
+                    // Permission denied (rubash#216). Dup the target fd's
+                    // live binding here, with the implicit-std fallback the
+                    // DuplicateOutput arm uses for a source with no
+                    // fd-table entry (rubash#170 nest4).
+                    if let Some(source_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                        if self.fd_table.dup_output(fd, source_fd).is_ok() {
+                            self.record_output_fd_ledger(fd);
+                            continue;
+                        }
+                        if source_fd <= 2 && !self.fd_table.entries.contains_key(&source_fd) {
+                            let endpoint = if source_fd == 1 {
+                                FdWriteEndpoint::Stdout
+                            } else {
+                                FdWriteEndpoint::Stderr
+                            };
+                            self.fd_table.open_output(fd, endpoint, false);
+                            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                            self.record_output_fd_ledger(fd);
+                            continue;
+                        }
+                        // Source closed or unbound: fall through to the
+                        // literal open, whose failure reports like GNU's
+                        // open() on the alias would.
+                    }
                     if !redirect.append {
                         self.create_redirect_output(&target, redirect.clobber)?;
                     }

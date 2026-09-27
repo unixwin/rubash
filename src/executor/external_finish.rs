@@ -10,17 +10,19 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = &cmd.redirect_out {
             let target = self.expand_redirect_target(redirect);
-            if self.has_output_fd_target(&target) {
-                self.write_output_fd_redirect(&target, output)?;
-                return Ok(());
+            // /dev/std*, /dev/fd/N: resolve as a dup of the aliased fd's
+            // current binding (implicit std fds write their default stream)
+            // instead of reopening the alias as a literal Windows path
+            // (write_dev_stdio_redirect_output, rubash#216).
+            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+                return result;
             }
             let mut file = self.create_redirect_output(&target, redirect.clobber)?;
             file.write_all(output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
-            if self.has_output_fd_target(&target) {
-                self.write_output_fd_redirect(&target, output)?;
-                return Ok(());
+            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+                return result;
             }
             let mut file = OpenOptions::new()
                 .create(true)

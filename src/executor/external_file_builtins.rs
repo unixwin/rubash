@@ -801,6 +801,15 @@ impl Executor {
                 filter(&crate::executor::substitution_metadata::shell_text_to_raw_bytes(&input));
             if let Some(redirect) = &cmd.append {
                 let target = self.expand_redirect_target(redirect);
+                // /dev/std*, /dev/fd/N aliases resolve as a dup of the
+                // aliased fd (write_dev_stdio_redirect_output) — reopening
+                // the alias as a literal path hit CONOUT$ and failed with
+                // Permission denied under a redirected stderr (rubash#216).
+                if let Some(result) = self.write_dev_stdio_redirect_output(&target, &output) {
+                    result?;
+                    self.exit_code = 0;
+                    return Ok(true);
+                }
                 let mut file = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -812,6 +821,11 @@ impl Executor {
 
             if let Some(redirect) = &cmd.redirect_out {
                 let target = self.expand_redirect_target(redirect);
+                if let Some(result) = self.write_dev_stdio_redirect_output(&target, &output) {
+                    result?;
+                    self.exit_code = 0;
+                    return Ok(true);
+                }
                 let mut file = self.create_redirect_output(&target, redirect.clobber)?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
