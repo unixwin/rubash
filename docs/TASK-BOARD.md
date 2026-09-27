@@ -33,3 +33,7 @@
 - docs/PERF-BASELINE.md — 性能基线（perfsuite 在建）
 - docs/LINUX-RUN-STATUS.md — Linux 原生状态（linuxrun 在建）
 - docs/cross-platform-gap-ledger.md — 旧跨平台缺口账本（历史参考，现状以本表为准）
+
+## 2026-09-27 晚更新
+- corpus2 ✅ 回收（25c7b912：CORPUS-COVERAGE.md 总表 175+ issue 挖掘 + 钉死夹具）；新单 #214-#217 → **corpusfix 车道在途**（wt4/corpusfix，含 ble.sh 整文件解析修复）
+- TASK-BOARD 建立（ab63f0e5）
