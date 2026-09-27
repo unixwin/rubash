@@ -904,6 +904,25 @@ impl Executor {
                     // \x10 marks the field as a word-expansion product so the
                     // storage layer stores it bare even when it looks like a
                     // [subscript]= assignment (GNU: the flag is parse-time only).
+                    //
+                    // A field that ended in a COMPOUND_EXPANSION_WS_TAG /
+                    // IFS_GLUE pair was split AT that tagged whitespace (the
+                    // word-stage transport for an unquoted substitution's
+                    // field boundaries, embedded_mutations
+                    // mark_expansion_whitespace). GNU discards the split
+                    // boundary itself: subst.c field splitting (list_string,
+                    // subst.c:9311-9400) drops the IFS characters that
+                    // terminate a field, so the element value never keeps
+                    // them. Leaving the tag in the field text made the
+                    // storage-side split_indexed_tagged_token re-split the
+                    // already-quoted element mid-word and store the orphan
+                    // quote/marker bytes as data (`local -a w=( $(declare -F
+                    // foo) )` stored [0]=`foo" \x10"1`). Bare PUA-zone marker
+                    // chars are never user data here (literal zone chars
+                    // travel E400-escaped), so stripping them is safe.
+                    let field = field
+                        .replace(crate::executor::markers::IFS_GLUE, "")
+                        .replace(crate::executor::markers::COMPOUND_EXPANSION_WS_TAG, "");
                     elements.push(format!(
                         "{ARRAY_FIELD_SPLIT_MARKER}{}",
                         quote_compound_field_value(&field)

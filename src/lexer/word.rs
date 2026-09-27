@@ -1,6 +1,7 @@
 use super::classification::{
-    assignment_rhs_is_fully_single_quoted, assignment_value_is_quoted, is_assignment, is_keyword,
-    mark_quoted_assignment_value, protect_fully_single_quoted_assignment, quoted_literal_tilde,
+    assignment_rhs_is_fully_single_quoted, assignment_rhs_opens_compound,
+    assignment_value_is_quoted, is_assignment, is_keyword, mark_quoted_assignment_value,
+    protect_fully_single_quoted_assignment, quoted_literal_tilde,
 };
 use super::quotes::{
     remove_shell_quotes_assignment, remove_shell_quotes_outside_backticks,
@@ -22,7 +23,7 @@ impl<'a> Lexer<'a> {
         // that merely contain `=` and `$(` (e.g. `echo "B: $(printf 'v=[%s]'
         // "$(printf 'mid')")"`) must still go through quote removal, otherwise
         // the trailing `"` leaks into the expanded argument.
-        let value = if is_assignment(&raw) && raw.contains("=(") {
+        let value = if is_assignment(&raw) && assignment_rhs_opens_compound(&raw) {
             // GNU parse.y:5652-5671 read_token_word: a compound array
             // assignment (`name=(...)` or `name[sub]=(...)`) preserves the
             // raw parenthesized RHS text verbatim. parse_compound_assignment
@@ -34,6 +35,15 @@ impl<'a> Lexer<'a> {
             // tokenize the raw text with the original quoting intact.
             // remove_shell_quotes_outside_backticks would convert `\"` to a
             // data marker, corrupting the element tokenization.
+            //
+            // Compound detection is positional, not textual: parse.y:5648-5657
+            // peeks the character immediately after the assignment `=` and
+            // only an unquoted `(` begins parse_compound_assignment. An `=(`
+            // inside a quoted RHS (`a4='x=(1) y'`, `d1="a=(b)"`) is data —
+            // the raw text must still go through quote removal and store the
+            // scalar with the quotes stripped. The old `raw.contains("=(")`
+            // test matched those quoted spans and leaked the outer quotes
+            // into the stored value (BASH_REMATCH probes then carried them).
             raw.to_string()
         } else if is_assignment(&raw) && assignment_rhs_is_fully_single_quoted(&raw) {
             // GNU subst.c never scans a single-quoted span: a wholly

@@ -36,6 +36,20 @@ pub(super) fn is_assignment(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// True when the assignment `=` is immediately followed by an unquoted `(` —
+/// GNU parse.y:5648-5657 read_token_word peeks the character right after the
+/// `=` that ends the assignment name (an `+=` consumes one extra `=`) and
+/// only `peek_char == '('` starts parse_compound_assignment. An `=(` inside
+/// a quoted RHS (`a='x=(1)'`, `a="x=(1)"`) is data and must not select the
+/// verbatim compound path.
+pub(super) fn assignment_rhs_opens_compound(word: &str) -> bool {
+    let Some((_, rhs)) = word.split_once('=') else {
+        return false;
+    };
+    let rhs = rhs.strip_prefix('=').unwrap_or(rhs);
+    rhs.starts_with('(')
+}
+
 pub(super) fn is_brace_expansion(word: &str) -> bool {
     word.starts_with('{')
         && word.ends_with('}')

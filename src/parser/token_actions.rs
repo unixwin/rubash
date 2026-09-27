@@ -250,7 +250,11 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             None,
                         );
                     }
-                    state.current_cmd.insert_assignment(var_name, var_value);
+                    state.current_cmd.insert_assignment_with_raw(
+                        var_name,
+                        var_value,
+                        raw_assignment_value,
+                    );
                 } else {
                     let mut word = token.value.clone();
                     let raw_word = token.raw.clone();

@@ -1039,19 +1039,36 @@ impl Executor {
             };
             return vec![word.replace(DATA_DOLLAR, "$")];
         }
-        if !word.starts_with(STORAGE_WORD_PREFIX) {
-            if let Some(values) = self.braced_alternate_word_values(word, raw) {
+        // GNU parse.y read_token_word / general.c:480 assignment(): an
+        // assignment-shaped `name=value` operand of a declaration builtin
+        // (declare/typeset/local/export/readonly) carries W_ASSIGNMENT into
+        // word expansion, and subst.c expand_word_internal answers it with
+        // assignment-RHS semantics (expand_string_assignment, subst.c:4357 —
+        // PF_ASSIGNRHS joins `$@` with spaces, subst.c:3006
+        // string_list_dollar_at; `${a[@]}` joins likewise): NO field
+        // splitting, so `typeset t=$@` with `set -- a b` binds t="a b"
+        // while `echo x=$@` (a plain word) yields the two words `x=a` `b`.
+        // The word-list fan-outs below (braced alternates, `[@]` arrays,
+        // quoted-positional-at segments) model the plain-word boundary
+        // semantics and must not claim a declaration operand; the tail of
+        // this function returns the single joined word via
+        // assignment_builtin_receives_assignment_word.
+        let declare_assignment_word = assignment_builtin_receives_assignment_word(cmd, index, word);
+        if !declare_assignment_word {
+            if !word.starts_with(STORAGE_WORD_PREFIX) {
+                if let Some(values) = self.braced_alternate_word_values(word, raw) {
+                    return values;
+                }
+            }
+            if let Some(values) = self.array_at_word_values(word) {
+                if word_is_unquoted_array_list_expansion(word) {
+                    return field_split_array_values_with_ifs(
+                        values,
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
+                    );
+                }
                 return values;
             }
-        }
-        if let Some(values) = self.array_at_word_values(word) {
-            if word_is_unquoted_array_list_expansion(word) {
-                return field_split_array_values_with_ifs(
-                    values,
-                    self.shell_state.env_vars.get("IFS").map(String::as_str),
-                );
-            }
-            return values;
         }
         // Unquoted `$@` expands to one word per positional parameter
         // (quoted `"$@"` is handled by quoted_positional_at_word_values_with_raw).
@@ -1088,9 +1105,11 @@ impl Executor {
         {
             return self.shell_state.positional_params.clone();
         }
-        if let Some(values) =
+        if let Some(values) = if declare_assignment_word {
+            None
+        } else {
             self.quoted_positional_at_word_values_with_raw(word, raw, cmd.word_kinds.get(index))
-        {
+        } {
             // GNU quoted-$@ + quoted-null retention (see
             // raw_quoted_at_word_has_quoted_null): `"$@"''` with no
             // positional parameters is one empty argument, not zero
@@ -1376,10 +1395,7 @@ impl Executor {
             return vec![strip_ifs_protection_markers(&expanded)];
         }
         if assignment_builtin_receives_assignment_word(cmd, index, word) {
-            return vec![strip_assignment_builtin_command_subst_quotes(
-                &strip_ifs_protection_markers(&expanded),
-                raw,
-            )];
+            return vec![strip_ifs_protection_markers(&expanded)];
         }
         // An unquoted ${arr[@]@K}/${arr[@]@Q} word needs no special path:
         // the generic `expanded` text already carries the transform result
@@ -1507,14 +1523,30 @@ impl Executor {
         // `$@`/`$*` inside the word must expand to their own field boundaries
         // (subst.c param_expand), which the String-based path cannot express,
         // so only those fragments are routed through the re-expansion path.
+        // GNU subst.c:780 string_extract(SX_VARNAME) terminates the name at
+        // the first operator character OUTSIDE a `[...]` subscript —
+        // skipsubscript (subst.c:816 -> skip_matched_pair subst.c:2086)
+        // consumes the whole bracketed span first, so an operator character
+        // inside a subscript (`${map["a-b c"]}`) is part of the key, never a
+        // `:-`/`-` operator. The naive split_once below split at the first
+        // `-` of a quoted subscript key and turned the lookup into
+        // `${map[a]-b c]}` (unset-default on a truncated key).
         let (var_name, alternate, use_when_set, require_non_empty, narrow) =
-            if let Some((var_name, alternate)) = name.split_once(":+") {
+            if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(name, ":+")
+            {
                 (var_name, alternate, true, true, false)
-            } else if let Some((var_name, alternate)) = name.split_once('+') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(name, '+')
+            {
                 (var_name, alternate, true, false, false)
-            } else if let Some((var_name, alternate)) = name.split_once(":-") {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
+            {
                 (var_name, alternate, false, true, true)
-            } else if let Some((var_name, alternate)) = name.split_once('-') {
+            } else if let Some((var_name, alternate)) =
+                super::expand_braced_ops::split_once_outside_subscript(name, '-')
+            {
                 (var_name, alternate, false, false, true)
             } else {
                 return None;
@@ -2232,29 +2264,6 @@ fn raw_word_contains_process_substitution(raw: Option<&str>) -> bool {
         index += 1;
     }
     false
-}
-
-fn strip_assignment_builtin_command_subst_quotes(expanded: &str, raw: Option<&str>) -> String {
-    let Some(raw_value) = raw.and_then(|raw| raw.split_once('=').map(|(_, value)| value)) else {
-        return expanded.to_string();
-    };
-    let raw_value = raw_value.trim();
-    if !(raw_value.starts_with('"')
-        && raw_value.ends_with('"')
-        && (raw_value.contains("$(") || raw_value.contains('`')))
-    {
-        return expanded.to_string();
-    }
-    let Some((name, value)) = expanded.split_once('=') else {
-        return expanded.to_string();
-    };
-    let Some(value) = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        return expanded.to_string();
-    };
-    format!("{}={}", name, value)
 }
 
 fn expanded_word_has_process_substitution(word: &str) -> bool {

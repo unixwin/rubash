@@ -584,6 +584,20 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
     };
 
     for command in commands {
+        // GNU execute_cmd.c:5322 execute_function applies only the
+        // redirects written in the definition text (`f() { ...; } 2>err`) —
+        // an enclosing compound/source fd-2 binding never becomes part of
+        // the function, exactly as the fd-1 skip above (rubash#161). The
+        // stderr applicator lacked this guard, so
+        // `. ./inner.sh >/dev/null 2>/dev/null` injected a `2>>` into the
+        // definition node; define_function then persisted it through
+        // function_definition_redirects and re-applied it at EVERY call
+        // (the callee's stderr silently went to the captured /dev/null)
+        // and declare -f re-serialized it as `} 2>> /dev/null`
+        // (rubash#202 class 1).
+        if command.function_command.is_some() {
+            continue;
+        }
         let inherits_stderr =
             command.redirect_err.is_none() && command.redirect_err_append.is_none();
         if inherits_stderr {

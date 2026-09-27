@@ -1081,6 +1081,14 @@ pub struct CommandNode {
     pub word_kinds: Vec<TokenKind>,
     /// Variable assignments
     pub assignments: Vec<(String, String)>,
+    /// Raw (source-text) RHS of each assignment, index-aligned with
+    /// `assignments` when populated by the parser. GNU parse.y keeps each
+    /// assignment token's full word text (quotes ride in word->word until
+    /// expansion), and print_cmd.c print_simple_command prints that text
+    /// verbatim — `declare -f` shows `X=""`, not a re-quoted `X=''`
+    /// (rubash#202). Entries may be empty (synthetic / error-marker
+    /// assignments), in which case printers fall back to value rendering.
+    pub assignment_raws: Vec<String>,
     /// Structured compound array assignment words parsed from `name=(...)`.
     pub compound_assignments: Vec<CompoundAssignment>,
     /// Structured array element assignment words parsed from `name[index]=value`.
@@ -1197,6 +1205,12 @@ impl CommandNode {
     pub fn insert_assignment(&mut self, name: String, value: String) {
         self.assignments.push((name, value));
     }
+    /// Insert an assignment keeping its raw source RHS (print_cmd.c prints
+    /// the word text verbatim; see `assignment_raws`).
+    pub fn insert_assignment_with_raw(&mut self, name: String, value: String, raw_rhs: String) {
+        self.assignment_raws.push(raw_rhs);
+        self.assignments.push((name, value));
+    }
     pub fn get_assignment(&self, name: &str) -> Option<&String> {
         self.assignments
             .iter()
@@ -1220,6 +1234,7 @@ impl CommandNode {
             word_metadata: Vec::new(),
             word_kinds: Vec::new(),
             assignments: Vec::new(),
+            assignment_raws: Vec::new(),
             compound_assignments: Vec::new(),
             array_element_assignments: Vec::new(),
             process_substitutions: Vec::new(),

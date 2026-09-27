@@ -265,15 +265,18 @@ impl Printer {
         } else if let Some(if_command) = &cmd.if_command {
             self.print_if_command(if_command);
         } else if let Some(arithmetic) = &cmd.arithmetic_command {
-            let expression = match arithmetic.expression.trim() {
-                trimmed if !trimmed.is_empty() => trimmed.to_string(),
-                _ => arithmetic
-                    .raw_expression
-                    .as_ref()
-                    .map(|raw| raw.trim().to_string())
-                    .unwrap_or_default(),
+            // GNU print_cmd.c:871-876 print_arith_command: `((` + the
+            // expression's word text + `))`, joined with " " only BETWEEN
+            // word-list elements. The expression is one word carrying its
+            // source spacing, so `((NUM_JOBS++))`, `(( NUM_JOBS++ ))` and
+            // `((x = 1 + 2))` all reprint exactly as written — the old
+            // trim-and-repad normalized every form to `(( expr ))`
+            // (rubash#202 class 4).
+            let expression = match arithmetic.raw_expression.as_ref() {
+                Some(raw) if !raw.trim().is_empty() => raw.clone(),
+                _ => arithmetic.expression.trim().to_string(),
             };
-            self.cprintf(&format!("(( {expression} ))"));
+            self.cprintf(&format!("(({expression}))"));
         } else if let Some(conditional) = &cmd.conditional_command {
             self.print_conditional_command(conditional);
         } else if let Some(subshell) = &cmd.subshell_command {
@@ -410,21 +413,40 @@ impl Printer {
     }
 
     fn print_simple_command(&mut self, cmd: &CommandNode) {
+        // GNU print_cmd.c print_simple_command prints each assignment word's
+        // TEXT as lexed (quotes ride in word->word until expansion, not at
+        // parse): `declare -f` shows `X=""` and `PS1="$(printf 'p %s' "")"`
+        // exactly as written. Prefer the parser-recorded raw RHS
+        // (assignment_raws, index-aligned with assignments) and fall back to
+        // value re-quoting only for synthetic entries (rubash#202 classes
+        // 2/4: nested comsub quotes printed as `\"`, `""` printed as `''`).
+        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         let mut parts: Vec<String> = cmd
             .assignments
             .iter()
-            .map(|(name, value)| {
-                // `a+=(...)` compounds ride the COMPOUND_ASSIGNMENT_MARKER
-                // with the parenthesized source text verbatim (parser
-                // token_actions.rs); the name already carries the `+`.
-                // print_cmd.c reprints assignments as source-level text
-                // only (xtrace_print_assignment, print_cmd.c:514), so the
-                // transport marker must never survive into declare -f
-                // output (rubash#126).
+            .enumerate()
+            .map(|(index, (name, value))| {
                 if let Some(source) =
                     value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
                 {
+                    // `a+=(...)` compounds ride the COMPOUND_ASSIGNMENT_MARKER
+                    // with the parenthesized source text verbatim (parser
+                    // token_actions.rs); the name already carries the `+`.
+                    // print_cmd.c reprints assignments as source-level text
+                    // only (xtrace_print_assignment, print_cmd.c:514), so the
+                    // transport marker must never survive into declare -f
+                    // output (rubash#126).
                     format!("{name}={source}")
+                } else if raws_aligned {
+                    let raw = &cmd.assignment_raws[index];
+                    if raw.is_empty() {
+                        format!("{name}={}", render_assignment_value(value))
+                    } else {
+                        // GNU's assignment word text carries ANSI-C spans
+                        // decoded (parse.y:5566-5575); see
+                        // decode_ansi_c_word_spans.
+                        format!("{name}={}", decode_ansi_c_word_spans(raw))
+                    }
                 } else {
                     format!("{name}={}", render_assignment_value(value))
                 }
@@ -491,7 +513,9 @@ impl Printer {
                 rendered = rendered.replacen(&node.text, &replacement, 1);
             }
         }
-        rendered
+        // GNU's word text carries ANSI-C spans decoded (parse.y:5566-5575);
+        // decode raw `$'...'` spans the same way before printing.
+        decode_ansi_c_word_spans(&rendered)
     }
 
     /// Re-serialize a command substitution body (print_comsub): newlines in
@@ -781,12 +805,52 @@ impl Printer {
 
     fn print_conditional_command(&mut self, conditional: &ConditionalCommand) {
         self.cprintf("[[ ");
-        for (index, arg) in conditional.args.iter().enumerate() {
+        let rendered: Vec<String> = conditional
+            .args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                self.render_standalone_word(arg, conditional.arg_metadata.get(index))
+            })
+            .collect();
+        // parse.y:5187-5194: a bare cond TERM whose next token is the end,
+        // `&&`, `||` or `)` is parsed as an explicit COND_UNARY `-n` operand
+        // ("Special case. [[ x ]] is equivalent to [[ -n x ]]"), and
+        // print_cond_node (print_cmd.c:881) prints the stored op — so GNU
+        // re-serializes `[[ x && y ]]` as `[[ -n x && -n y ]]`. Rubash keeps
+        // the [[ ]] body as a flat arg list; reproduce the wrap at print
+        // time. Terms that are OPERANDS of a unary/binary operator (prev is
+        // Unary/Binary) are not wrapped, and operator matching runs on the
+        // rendered word (a quoted `"&&"` keeps its quotes and classifies as
+        // a term, exactly like GNU's token stream).
+        let mut parts: Vec<String> = Vec::with_capacity(rendered.len());
+        let mut prev: Option<CondToken> = None;
+        for (index, word) in rendered.iter().enumerate() {
+            let kind = classify_cond_token(Some(word.as_str()));
+            if matches!(kind, CondToken::Term)
+                && matches!(
+                    prev,
+                    None | Some(CondToken::Lpar | CondToken::And | CondToken::Or | CondToken::Not)
+                )
+                && matches!(
+                    classify_cond_token(rendered.get(index + 1).map(String::as_str)),
+                    CondToken::End
+                        | CondToken::Rpar
+                        | CondToken::And
+                        | CondToken::Or
+                        | CondToken::Term
+                )
+            {
+                parts.push("-n".to_string());
+            }
+            parts.push(word.clone());
+            prev = Some(kind);
+        }
+        for (index, part) in parts.iter().enumerate() {
             if index > 0 {
                 self.cprintf(" ");
             }
-            let rendered = self.render_standalone_word(arg, conditional.arg_metadata.get(index));
-            self.cprintf(&rendered);
+            self.cprintf(part);
         }
         // The parser keeps the closing `]]` in args (command_text.rs renders
         // `[[ {args}` verbatim); only add the delimiter when it is absent.
@@ -1232,4 +1296,205 @@ fn render_assignment_value(value: &str) -> String {
     } else {
         format!("'{quoted_value}'")
     }
+}
+
+/// Token classes of the flat `[[ ... ]]` argument list used to reproduce
+/// parse.y's bare-term `-n` wrap at print time (see
+/// print_conditional_command). Operator membership follows the exact GNU
+/// tables: test.c:760 test_unop and test.c:707 test_binop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CondToken {
+    Lpar,
+    Rpar,
+    And,
+    Or,
+    Not,
+    Unary,
+    Binary,
+    /// The parser keeps the closing `]]` as the final argument.
+    End,
+    Term,
+}
+
+fn classify_cond_token(word: Option<&str>) -> CondToken {
+    let Some(word) = word else {
+        return CondToken::Term;
+    };
+    match word {
+        "(" => CondToken::Lpar,
+        ")" => CondToken::Rpar,
+        "]]" => CondToken::End,
+        "&&" => CondToken::And,
+        "||" => CondToken::Or,
+        "!" => CondToken::Not,
+        _ => {
+            if cond_test_unop(word) {
+                CondToken::Unary
+            } else if cond_test_binop(word) {
+                CondToken::Binary
+            } else {
+                CondToken::Term
+            }
+        }
+    }
+}
+
+/// test.c:760 test_unop: `-` + one of the test unary letters (two chars).
+fn cond_test_unop(op: &str) -> bool {
+    let bytes = op.as_bytes();
+    bytes.len() == 2
+        && bytes[0] == b'-'
+        && matches!(
+            bytes[1],
+            b'a' | b'b'
+                | b'c'
+                | b'd'
+                | b'e'
+                | b'f'
+                | b'g'
+                | b'h'
+                | b'k'
+                | b'n'
+                | b'o'
+                | b'p'
+                | b'r'
+                | b's'
+                | b't'
+                | b'u'
+                | b'v'
+                | b'w'
+                | b'x'
+                | b'z'
+                | b'G'
+                | b'L'
+                | b'O'
+                | b'S'
+                | b'N'
+                | b'R'
+        )
+}
+
+/// test.c:707 test_binop: `=`, `<`, `>`, `==`, `!=`, `=~`, `!~` plus the
+/// four-letter forms -nt -ot -lt -gt -eq -ef -ne -ge -le.
+fn cond_test_binop(op: &str) -> bool {
+    matches!(
+        op,
+        "=" | "<"
+            | ">"
+            | "=="
+            | "!="
+            | "=~"
+            | "!~"
+            | "-nt"
+            | "-ot"
+            | "-lt"
+            | "-gt"
+            | "-eq"
+            | "-ef"
+            | "-ne"
+            | "-ge"
+            | "-le"
+    )
+}
+
+/// GNU parse.y read_token_word (5566-5575, sh_single_quote) decodes an
+/// ANSI-C `$'...'` span at PARSE time and stores the decoded bytes wrapped
+/// in plain single quotes in the word text — so print_cmd.c re-serializes
+/// `$'a\nb'` as `'a<LF>b'` with the literal bytes (rubash#202 class 4).
+/// Reproduce that transformation on the raw word/assignment text: decode
+/// every ANSI-C span that sits in an UNQUOTED region and re-wrap it in
+/// `'...'`. `$'` inside `"..."` or `'...'` is literal data and stays.
+fn decode_ansi_c_word_spans(text: &str) -> String {
+    if !text.contains("$'") {
+        return text.to_string();
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if in_double {
+            if ch == '\\' {
+                out.push(ch);
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+                out.push(ch);
+            } else {
+                out.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            out.push(ch);
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                out.push(ch);
+                escaped = true;
+                index += 1;
+            }
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                index += 1;
+            }
+            '"' => {
+                in_double = true;
+                out.push(ch);
+                index += 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'\'') => {
+                // Scan the span body: a backslash escapes any following
+                // char (including the closing quote); a bare `'` ends it.
+                let mut cursor = index + 2;
+                let mut end = None;
+                while cursor < chars.len() {
+                    if chars[cursor] == '\\' {
+                        cursor += 2;
+                        continue;
+                    }
+                    if chars[cursor] == '\'' {
+                        end = Some(cursor);
+                        break;
+                    }
+                    cursor += 1;
+                }
+                match end {
+                    Some(end) => {
+                        let body: String = chars[index + 2..end].iter().collect();
+                        out.push('\'');
+                        out.push_str(&crate::lexer::decode_ansi_c_quoted(&body));
+                        out.push('\'');
+                        index = end + 1;
+                    }
+                    // Unterminated span: leave the rest untouched.
+                    None => {
+                        out.push_str(&chars[index..].iter().collect::<String>());
+                        return out;
+                    }
+                }
+            }
+            _ => {
+                out.push(ch);
+                index += 1;
+            }
+        }
+    }
+    out
 }
