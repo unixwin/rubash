@@ -1109,7 +1109,9 @@ fn escaped_quote_array_subscript_is_a_syntax_error() {
         .output()
         .expect("run escaped array-subscript probe");
 
-    assert_eq!(output.status.code(), Some(2));
+    // GNU: `" ": arithmetic syntax error: operand expected` is a runtime
+    // subscript evaluation error, exit 1 (probe 2026-09-27).
+    assert_eq!(output.status.code(), Some(1));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(String::from_utf8_lossy(&output.stderr).contains("operand expected"));
 }
@@ -2573,8 +2575,12 @@ fn c_command_kill_rejects_invalid_pid_operand() {
         .expect("run rubash");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("kill: abc: arguments must be process or job IDs"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("kill: `abc': not a pid or valid job spec"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -3099,7 +3105,7 @@ fn invalid_cli_shell_option_fails_before_command_string() {
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid shell option name"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid option name"));
 }
 
 #[test]
@@ -3573,7 +3579,7 @@ fn invalid_cli_shopt_option_fails_before_command_string() {
 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid shell option name"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid option name"));
 }
 
 #[test]

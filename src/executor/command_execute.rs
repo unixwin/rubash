@@ -130,8 +130,35 @@ impl Executor {
         let mut expanded = if cmd.arithmetic_command.is_some() {
             cmd.clone()
         } else {
-            self.expand_command_words(cmd)?
+            match self.expand_command_words(cmd) {
+                Ok(expanded) => expanded,
+                // GNU expr.c expr_streval: an unbound variable under `set -u`
+                // raises FORCE_EOF from ANY expansion position — the word
+                // expansion's DISCARD classification (ExpansionFailure) must
+                // not downgrade it. `$((missing+1))` as a command argument
+                // abandons the command list and exits the noninteractive
+                // shell (127 under `-c` via shell.c:1471, 1 in script mode;
+                // probe 2026-09-27).
+                Err(ExecuteError::ExpansionFailure(_))
+                    if self.shell_state.arithmetic_nounset_error.replace(false) =>
+                {
+                    self.shell_state.arithmetic_expansion_error.set(false);
+                    let code = self.expansion_fatal_status();
+                    self.exit_code = code;
+                    return Err(ExecuteError::ExitCode(code));
+                }
+                Err(error) => return Err(error),
+            }
         };
+        // Same FORCE_EOF mapping when word expansion completed without an
+        // error result but latched the nounset flag. The `(( ))` command
+        // form keeps its own check in command_dispatch_late.
+        if self.shell_state.arithmetic_nounset_error.replace(false) {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            let code = self.expansion_fatal_status();
+            self.exit_code = code;
+            return Err(ExecuteError::ExitCode(code));
+        }
         if let Some(code) = self.current_shell_substitution_exit.take() {
             // A `${ ...; exit N; }` body aborts the enclosing (sub)shell with
             // N (GNU subst.c nofork exit propagation; comsub26.sub line 32).

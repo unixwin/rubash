@@ -505,8 +505,13 @@ impl Executor {
             let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
             self.write_redirected_command_stderr(cmd, line.as_bytes())?;
             if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
-                self.exit_code = 1;
-                return Err(ExecuteError::ExitCode(1));
+                // Same FORCE_EOF mapping as execute_empty_words_command
+                // above: shell.c:1471 maps it to 127 under `-c`, 1 in
+                // script mode. This site hardcoded 1, so `set -u` unbound
+                // exits under `bash -uc` lost the 127 (probe 2026-09-27).
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
             }
             self.exit_code = status;
             if status == 1 {
