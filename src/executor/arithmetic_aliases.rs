@@ -52,12 +52,7 @@ impl Executor {
         // list abort; DISCARD is chosen only by array_expand_index /
         // make_variable_value / word-expansion callers.
         if let Some(record) = crate::executor::arithmetic::take_arith_eval_error() {
-            eprintln!(
-                "{}{}: {}",
-                self.diagnostic_prefix(),
-                label,
-                record.render(true)
-            );
+            eprintln!("{}{}: {}", self.diagnostic_prefix(), label, record.render());
         } else if let Some(token) = arithmetic_division_by_zero_token(expression) {
             eprintln!(
                 "{}{}: {expression}: division by 0 (error token is \"{token}\")",
@@ -165,7 +160,7 @@ impl Executor {
         // evalexp frame).
         let record_opt = crate::executor::arithmetic::take_arith_eval_error();
         if let Some(record) = record_opt {
-            let rendered = record.render(true);
+            let rendered = record.render();
             eprintln!("{}((: {}", self.diagnostic_prefix(), rendered);
             use std::io::Write;
             let _ = std::io::stderr().flush();

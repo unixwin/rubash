@@ -437,10 +437,10 @@ impl Executor {
                                 )
                                 .unwrap_or_else(|| {
                                     format!(
-                                        "{expression}: syntax error in expression (error token is \"{expression}\")"
+                                        "{expression}: arithmetic syntax error in expression (error token is \"{expression}\")"
                                     )
                                 });
-                                eprintln!("{}: {message}", self.diagnostic_prefix());
+                                eprintln!("{}{message}", self.diagnostic_prefix());
                             }
                         }
                         continue;

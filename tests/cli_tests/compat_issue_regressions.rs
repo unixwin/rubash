@@ -1796,11 +1796,14 @@ fn backtick_command_substitution_preserves_raw_c0_variable_payload() {
 }
 
 // GNU Bash expr.c: an expression ending right after an operator has
-// no right-hand operand.  In the $(( )) expansion context 5.3.0(1) reports
-// plain "syntax error: operand expected" (verified WSL 5.3.0(1); command
-// contexts ((/let/[[ add the "arithmetic" prefix), and evalerror prints the
-// suffix of the expression from the start of that operator token (lasttp).
-// `j=` used to be silent in rubash.
+// no right-hand operand.  Every 5.3.0 evalerror message carries the
+// `arithmetic` prefix unconditionally (expr.c:1120/1507; probe 2026-09-27,
+// WSL /usr/local/bin/bash 5.3.0(1) script file: `echo $((j=))` →
+// `j=: arithmetic syntax error: operand expected (error token is "=")`),
+// and evalerror prints the suffix of the expression from the start of that
+// operator token (lasttp). `j=` used to be silent in rubash; the earlier
+// "plain syntax error" wording here was a 5.2.21 probe (5.2 drops the
+// prefix in the expansion context; 5.3 never does).
 #[test]
 fn arithmetic_empty_assignment_rhs_reports_operand_expected() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -1811,7 +1814,7 @@ fn arithmetic_empty_assignment_rhs_reports_operand_expected() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("j=: syntax error: operand expected (error token is \"=\")"),
+        stderr.contains("j=: arithmetic syntax error: operand expected (error token is \"=\")"),
         "stderr: {stderr}"
     );
 }
@@ -1834,8 +1837,10 @@ fn arithmetic_for_empty_assignment_init_reports_error() {
     );
 }
 
-// GNU 5.2.21 readtok: `7++` after a number splits into two single `+`
-// operators, so the error token is the second `+`, not `++`.
+// GNU 5.3.0 readtok: `7++` after a number splits into two single `+`
+// operators, so the error token is the second `+`, not `++` (probe
+// 2026-09-27: `7++: arithmetic syntax error: operand expected (error
+// token is "+")`).
 #[test]
 fn arithmetic_trailing_increment_after_number_token_is_single_plus() {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
@@ -1846,36 +1851,38 @@ fn arithmetic_trailing_increment_after_number_token_is_single_plus() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("7++: syntax error: operand expected (error token is \"+\")"),
+        stderr.contains("7++: arithmetic syntax error: operand expected (error token is \"+\")"),
         "stderr: {stderr}"
     );
 }
 
-// GNU 5.2.21: trailing multi-char operators report the full operator as
+// GNU 5.3.0: trailing multi-char operators report the full operator as
 // the error token (`**`, `<=`, `+=`), and only real assignment operators
-// with a numeric left-hand side are "attempted assignment to non-variable".
+// with a numeric left-hand side are "attempted assignment to non-variable"
+// (all messages carry the `arithmetic` prefix in every context — matrix
+// probe 2026-09-27 against WSL /usr/local/bin/bash 5.3.0(1)).
 #[test]
 fn arithmetic_trailing_operator_tokens_match_gnu() {
     for (expr, expected) in [
         (
             "3**",
-            "3**: syntax error: operand expected (error token is \"**\")",
+            "3**: arithmetic syntax error: operand expected (error token is \"**\")",
         ),
         (
             "7<=",
-            "7<=: syntax error: operand expected (error token is \"<=\")",
+            "7<=: arithmetic syntax error: operand expected (error token is \"<=\")",
         ),
         (
             "7&&",
-            "7&&: syntax error: operand expected (error token is \"&&\")",
+            "7&&: arithmetic syntax error: operand expected (error token is \"&&\")",
         ),
         (
             "j==",
-            "j==: syntax error: operand expected (error token is \"==\")",
+            "j==: arithmetic syntax error: operand expected (error token is \"==\")",
         ),
         (
             "j+=",
-            "j+=: syntax error: operand expected (error token is \"+=\")",
+            "j+=: arithmetic syntax error: operand expected (error token is \"+=\")",
         ),
         (
             "7+=",

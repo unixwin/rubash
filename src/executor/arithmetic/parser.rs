@@ -74,21 +74,19 @@ impl ArithEvalError {
     }
 
     /// GNU expr.c:1526-1535 evalerror format: `%s: %s (error token is
-    /// "%s")`. In the word-expansion context of a `-c` invocation GNU's
-    /// message strings drop the `arithmetic` prefix (verified 5.3:
-    /// `bash -c 'echo $((+))'` -> `syntax error: operand expected`),
-    /// while command contexts (`((`, `let`, `[[`) always keep it.
-    pub(crate) fn render(&self, command_context: bool) -> String {
-        let msg = if command_context {
-            self.msg.clone()
-        } else {
-            self.msg
-                .replacen("arithmetic syntax error", "syntax error", 1)
-        };
+    /// "%s")`. The message is verbatim from the expr.c evalerror site —
+    /// every 5.3.0 site carries the `arithmetic` prefix unconditionally
+    /// (expr.c:485/529/1120/1507/1509); only the `name:` prefix
+    /// (`this_command_name`: `let`, `((`) varies by caller, and that is
+    /// added by the diagnostic sites, not here. (5.2.21 dropped the
+    /// prefix in the word-expansion context; probe 2026-09-27:
+    /// `/usr/local/bin/bash tmp.sh` with `echo $((j=))` prints
+    /// `j=: arithmetic syntax error: operand expected (error token is "=")`.)
+    pub(crate) fn render(&self) -> String {
         format!(
             "{}: {} (error token is \"{}\")",
             self.display(),
-            msg,
+            self.msg,
             self.token()
         )
     }
@@ -117,6 +115,16 @@ pub(super) struct ConditionalArithParser<'a> {
     /// token an operator or none) from "invalid arithmetic operator"
     /// (previous token an operand) on it.
     pub(super) last_tok_operand: bool,
+    /// GNU expr.c global `noeval` — the depth of short-circuited regions
+    /// (`explor`/`expland` RHS, `expcond` untaken branches increment it,
+    /// expr.c:690/719/655/666). While set, variable reads short-circuit
+    /// to 0 (`expr_streval` returns immediately, expr.c:1164-1167), binds
+    /// are skipped (expr.c:607-615, 1097-1105) and division-by-zero /
+    /// negative-exponent evalerrors are suppressed (expr.c:909-920,
+    /// 977-991) — but SYNTAX errors still fire (exp0:1120 and readtok's
+    /// junk branch are unguarded). Nested `evalexp` frames reset it
+    /// (expr.c:426), which rubash models by constructing fresh parsers.
+    pub(super) noeval: usize,
 }
 
 impl ConditionalArithParser<'_> {

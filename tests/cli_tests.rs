@@ -1693,8 +1693,26 @@ fn malformed_parameter_expansions_return_status_two() {
 
 #[test]
 fn array_subscript_diagnostics_match_bash_for_assignment_and_expansion() {
+    // GNU 5.3.0 (WSL /usr/local/bin/bash, script-file probe 2026-09-27)
+    // reports `name[sub]: bad array subscript` for standalone bad-subscript
+    // assignments — the LHS name and subscript only, never `=value`
+    // (error.c:438-443 err_badarraysub, reached from arrayfunc.c
+    // array_variable_name via assign_array_element after the word was
+    // split at the first `=`), and bare `name: bad array subscript` for a
+    // bad subscript at expansion time. Formerly this test pointed at an
+    // uncommitted probe under target/ and expected `b[]=bcde: ...` wording
+    // that GNU does not print for any invocation form (assignment,
+    // declare, let, and compound-assignment forms all probed).
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
-        .arg("target/issue-suites/results/arith-array-probes-20220822/array-probe.sh")
+        .arg("-c")
+        .arg(concat!(
+            "b=(this is a test)\n",
+            "echo \"b=<${b[*]}> b0=<${b[0]}>\"\n",
+            "b[]=bcde\n",
+            "b[*]=aaa\n",
+            "c[-2]=4\n",
+            "echo \"cneg=<${c[-4]}>\"\n",
+        ))
         .output()
         .expect("run rubash");
 
@@ -1704,10 +1722,22 @@ fn array_subscript_diagnostics_match_bash_for_assignment_and_expansion() {
         "b=<this is a test> b0=<this>\ncneg=<>\n"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("b[]=bcde: bad array subscript"));
-    assert!(stderr.contains("b[*]=aaa: bad array subscript"));
-    assert!(stderr.contains("c[-2]=4: bad array subscript"));
-    assert!(stderr.contains("c: bad array subscript"));
+    assert!(
+        stderr.contains("b[]: bad array subscript"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("b[*]: bad array subscript"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("c[-2]: bad array subscript"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("c: bad array subscript"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1719,8 +1749,11 @@ fn readonly_array_element_argument_matches_bash_identifier_diagnostic() {
         .expect("run rubash");
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("readonly: `a[1]`: not a valid identifier"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("readonly: `a[1]': not a valid identifier"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

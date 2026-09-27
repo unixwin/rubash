@@ -388,7 +388,7 @@ impl Executor {
             )
             .unwrap_or_else(|| {
                 format!(
-                    "{expression}: syntax error in expression (error token is \"{expression}\")"
+                    "{expression}: arithmetic syntax error in expression (error token is \"{expression}\")"
                 )
             });
             let actual_fatal = self

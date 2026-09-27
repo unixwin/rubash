@@ -36,11 +36,15 @@ impl ConditionalArithParser<'_> {
     /// operand-expected: `ch` is a character that cannot start an operand.
     /// When it cannot begin a token at all and the previous token was an
     /// operand, GNU reports "invalid arithmetic operator" (`2 @ 3`); a
-    /// recognized operator char or a non-operand predecessor reports
-    /// "operand expected" (`5 + * 3`, `x ] ` is `]` junk after STR ->
-    /// invalid operator).
+    /// recognized operator char, a non-operand predecessor, or END OF INPUT
+    /// reports "operand expected" (`5 + * 3`, `x ] ` is `]` junk after STR
+    /// -> invalid operator; `7<=` at EOF -> exp0's operand expected,
+    /// expr.c:1331-1337 returns curtok 0 before the junk branch).
     fn fail_operand_position(&mut self) -> Option<i128> {
-        if !self.peek().is_some_and(is_arithop_char) && self.last_tok_operand {
+        if self
+            .peek()
+            .is_some_and(|ch| !is_arithop_char(ch) && self.last_tok_operand)
+        {
             self.fail_invalid_operator()
         } else {
             self.fail_operand_expected()

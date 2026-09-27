@@ -538,7 +538,7 @@ impl Executor {
         // The subscript's nested evalexp recorded the real evalerror state —
         // its frame expression IS the subscript text, with lasttp inside it.
         if let Some(record) = take_arith_eval_error() {
-            eprintln!("{}{}", self.diagnostic_prefix(), record.render(true));
+            eprintln!("{}{}", self.diagnostic_prefix(), record.render());
         } else {
             let token = indexed_noexpand_error_token(resolved);
             eprintln!(
@@ -1043,6 +1043,7 @@ pub(in crate::executor) fn trailing_input_token(
         diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
+        noeval: 0,
     };
     let parsed_ok = parser.parse_comma().is_some();
     parser.skip_ws();
@@ -1094,6 +1095,7 @@ fn indexed_noexpand_error_token(resolved: &str) -> String {
         diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
+        noeval: 0,
     };
     let _ = parser.parse_comma();
     parser.skip_ws();
@@ -1643,46 +1645,46 @@ fn normalize_arithmetic_quotes(input: &str) -> std::borrow::Cow<'_, str> {
 /// failed to evaluate (`$(( 1.5 ))`, `$(( 2 ** -1 ))`, division by zero, ...).
 /// Rubash used to silently drop these; Bash reports them on stderr with rc=1.
 ///
-/// GNU bash 5.3.0(1) has an invocation-mode split for `$(( ))` expansion
-/// diagnostics that is observable only in the expansion context, not in
-/// command contexts:
-///   - `bash script.sh`  → `arithmetic syntax error: ...`
-///   - `bash -c '...'`   → `syntax error: ...`
-/// Command contexts (`(( ))`, `let`, `for ((;;))`, `[[ ]]`) always carry the
-/// `arithmetic` prefix regardless of mode. Rubash tags `-c` invocations with
-/// `__RUBASH_IS_C=1` (main.rs:253), so an expansion-context diagnostic
-/// mirrors GNU only when that flag is absent. See
-/// [`arithmetic_command_error_message`] for the always-`arithmetic` variant.
+/// GNU bash 5.3.0 keeps the `arithmetic` prefix on every evalerror message
+/// in every context — `$(( ))` word expansion (script file AND `-c`),
+/// `(( ))`, `let`, `[[ ]]`. The expr.c messages are unconditional
+/// compile-time strings (expr.c:485 `arithmetic syntax error in
+/// expression`, 529 `attempted assignment to non-variable`, 1120/1507
+/// `arithmetic syntax error: operand expected`, 1509 `arithmetic syntax
+/// error: invalid arithmetic operator`); only `this_command_name`
+/// (`let:`, `((:`) varies, and the caller prefixes that. 5.2.21 dropped
+/// the prefix in the expansion context — rubash's former split (and the
+/// `__RUBASH_IS_C` probe) reproduced 5.2, not 5.3. Probes 2026-09-27,
+/// WSL `/usr/local/bin/bash` 5.3.0(1): script `echo $((j=))` →
+/// `j=: arithmetic syntax error: operand expected (error token is "=")`;
+/// matrix `-c "echo $((7<=))"` → `7<=: arithmetic syntax error: operand
+/// expected (error token is "<=")`.
 pub(in crate::executor) fn arithmetic_error_message(
     expression: &str,
     trailing_space: bool,
-    env_vars: &HashMap<String, String>,
+    _env_vars: &HashMap<String, String>,
 ) -> Option<String> {
-    let command_context = env_vars.get("__RUBASH_IS_C").map(String::as_str) != Some("1");
-    arithmetic_error_message_ctx(expression, trailing_space, command_context)
+    arithmetic_error_message_ctx(expression, trailing_space)
 }
 
-/// Command-context variant: `(( ))` / `let` / `[[ ]]` diagnostics carry an
-/// `arithmetic` prefix (verified bash 5.3.0: `(( 7++ ))` → `((: 7++ :
-/// arithmetic syntax error: operand expected (error token is "+ ")`).
+/// Command-context variant (`(( ))` / `let` / `[[ ]]`): identical message
+/// text — the context shows up only in the caller-supplied `let:`/`((:`
+/// prefix (verified bash 5.3.0: `(( 7++ ))` → `((: 7++ : arithmetic
+/// syntax error: operand expected (error token is "+ ")`).
 pub(in crate::executor) fn arithmetic_command_error_message(
     expression: &str,
     trailing_space: bool,
 ) -> Option<String> {
-    arithmetic_error_message_ctx(expression, trailing_space, true)
+    arithmetic_error_message_ctx(expression, trailing_space)
 }
 
-fn arithmetic_error_message_ctx(
-    expression: &str,
-    trailing_space: bool,
-    command_context: bool,
-) -> Option<String> {
+fn arithmetic_error_message_ctx(expression: &str, trailing_space: bool) -> Option<String> {
     // The real evaluation recorded the GNU evalerror state
     // (expr.c:1524-1535): the failing frame's expression text and lasttp.
     // Prefer it over the expression-text heuristics below — GNU's
     // diagnostic never re-derives the token from the whole string.
     if let Some(record) = take_arith_eval_error() {
-        return Some(record.render(command_context));
+        return Some(record.render());
     }
     // GNU expr.c evalerror skips the expression's leading whitespace at
     // display time (expr.c:1528: `for (t = expression; whitespace (*t); t++)`)
@@ -1691,16 +1693,10 @@ fn arithmetic_error_message_ctx(
     // text, never the raw expansion.
     let expression = expression.trim_start();
     let token_space = if trailing_space { " " } else { "" };
-    let operand_expected = if command_context {
-        "arithmetic syntax error: operand expected"
-    } else {
-        "syntax error: operand expected"
-    };
-    let invalid_operator = if command_context {
-        "arithmetic syntax error: invalid arithmetic operator"
-    } else {
-        "syntax error: invalid arithmetic operator"
-    };
+    // expr.c:1120/1507 and 1509 — context-free message strings (see the
+    // arithmetic_error_message doc comment for the 5.2-vs-5.3 history).
+    let operand_expected = "arithmetic syntax error: operand expected";
+    let invalid_operator = "arithmetic syntax error: invalid arithmetic operator";
     if let Some(token) = arithmetic_division_by_zero_token(expression) {
         return Some(format!(
             "{expression}: division by 0 (error token is \"{token}\")"
@@ -1784,13 +1780,7 @@ fn arithmetic_error_message_ctx(
         let msg = match kind {
             TrailingInputKind::OperandExpected => operand_expected,
             TrailingInputKind::InvalidOperator => invalid_operator,
-            TrailingInputKind::InExpression => {
-                if command_context {
-                    "arithmetic syntax error in expression"
-                } else {
-                    "syntax error in expression"
-                }
-            }
+            TrailingInputKind::InExpression => "arithmetic syntax error in expression",
         };
         return Some(format!("{expression}: {msg} (error token is \"{token}\")"));
     }
@@ -1798,7 +1788,7 @@ fn arithmetic_error_message_ctx(
     // An operator missing its right-hand operand (`j=`, `7++`, `3**`,
     // `j+=`, `7<=`, ...).  GNU expr.c reports these from the recursive
     // descent with the error token taken from lasttp.
-    if let Some(message) = trailing_operator_error(expression, trailing_space, command_context) {
+    if let Some(message) = trailing_operator_error(expression, trailing_space) {
         return Some(message);
     }
 
@@ -2216,6 +2206,7 @@ fn eval_mutable_arith_result(
         diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
+        noeval: 0,
     };
     if std::env::var("RUBASH_DEBUG_ARITH").is_ok() {
         eprintln!("ARITH-INPUT: {normalized:?}");
@@ -2578,7 +2569,6 @@ fn empty_ternary_true_branch_token(expression: &str) -> Option<String> {
 pub(in crate::executor) fn trailing_operator_error(
     expression: &str,
     _trailing_space: bool,
-    command_context: bool,
 ) -> Option<String> {
     // Bare `++` / `--` keep their dedicated diagnostic.
     let trimmed = expression.trim();
@@ -2732,10 +2722,9 @@ pub(in crate::executor) fn trailing_operator_error(
     );
     let message = if assignment && prev_kind != ArithTokenKind::Str {
         "attempted assignment to non-variable"
-    } else if command_context {
-        "arithmetic syntax error: operand expected"
     } else {
-        "syntax error: operand expected"
+        // expr.c:1120 — context-free message (see arithmetic_error_message).
+        "arithmetic syntax error: operand expected"
     };
     let token = &expression[last_start..];
     // The token is the raw remainder from lasttp to the end of the

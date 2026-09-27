@@ -237,7 +237,7 @@ impl Executor {
                     )
                     .unwrap_or_else(|| {
                         format!(
-                            "{display}: syntax error in expression (error token is \"{display}\")"
+                            "{display}: arithmetic syntax error in expression (error token is \"{display}\")"
                         )
                     });
                     self.write_diagnostic_fd2(
@@ -706,7 +706,7 @@ impl Executor {
             )
             .unwrap_or_else(|| {
                 format!(
-                    "{expression}: syntax error in expression (error token is \"{expression}\")"
+                    "{expression}: arithmetic syntax error in expression (error token is \"{expression}\")"
                 )
             });
             // GNU expr.c: when the expression is entirely an operator with no
@@ -723,17 +723,10 @@ impl Executor {
                     crate::executor::arithmetic::trailing_input_token(expression)
                 {
                     if token.trim() == expression.trim() {
-                        let command_context = self
-                            .shell_state
-                            .env_vars
-                            .get("__RUBASH_IS_C")
-                            .map(String::as_str)
-                            != Some("1");
-                        let operand_expected = if command_context {
-                            "arithmetic syntax error: operand expected"
-                        } else {
-                            "syntax error: operand expected"
-                        };
+                        // expr.c:1120 — context-free message (5.3.0 keeps the
+                        // `arithmetic` prefix everywhere; see
+                        // arithmetic::arithmetic_error_message's doc comment).
+                        let operand_expected = "arithmetic syntax error: operand expected";
                         let display = expression.trim_start();
                         message =
                             format!("{display}: {operand_expected} (error token is \"{token}\")");

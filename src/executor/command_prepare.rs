@@ -924,7 +924,25 @@ impl Executor {
             if let Some(value) = self.eval_arithmetic_expansion_value(expression) {
                 return vec![value.to_string()];
             }
-            self.shell_state.arithmetic_expansion_error.set(true);
+            // GNU expr.c:1524-1535 evalerror prints its diagnostic from the
+            // expansion site — `echo "$((7<=))"` reports exactly like the
+            // unquoted form (probe 2026-09-27: this fast path used to set
+            // the error gate without printing, so every quoted whole-word
+            // arithmetic failure was silently swallowed). The replace gate
+            // keeps one diagnostic per command, like the walker sites.
+            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                let message = crate::executor::arithmetic::arithmetic_error_message(
+                    expression,
+                    true,
+                    &self.shell_state.env_vars,
+                )
+                .unwrap_or_else(|| {
+                    format!(
+                        "{expression}: arithmetic syntax error in expression (error token is \"{expression}\")"
+                    )
+                });
+                eprintln!("{}{message}", self.diagnostic_prefix());
+            }
             // GNU expr.c raises evalerror from the actual evaluation;
             // classify from the recorded real-environment category.
             let actual_fatal = self

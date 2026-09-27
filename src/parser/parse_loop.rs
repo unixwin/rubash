@@ -658,9 +658,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && token.value == "if"
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((if_cmd, next_i)) =
-            parse_if_command(tokens, i, state.diagnostic_text.as_deref())
-        {
+        if let Some((if_cmd, next_i)) = parse_if_command(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, if_cmd);
             return Some(next_i);
         }
@@ -671,9 +674,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         // that, input ended inside the command ("from `if' command on
         // line N").
         let mut command = match if_frame_offender(&tokens[i + 1..]) {
-            Some(rel) => {
-                mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
-            }
+            Some(rel) => mismatched_closer_node(
+                tokens,
+                i + 1 + rel,
+                state.diagnostic_text.as_deref(),
+                state.source_line_offset,
+            ),
             None => unclosed_keyword_eof_node(tokens, i, "if"),
         };
         // GNU parse.y: line_number at EOF is PHYSICAL — every newline
@@ -743,9 +749,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], opener) {
                 None => unclosed_keyword_eof_node(tokens, i, opener),
-                Some(rel) => {
-                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
-                }
+                Some(rel) => mismatched_closer_node(
+                    tokens,
+                    i + 1 + rel,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
             };
             state.current_cmd = command;
             state
@@ -863,9 +872,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "for") {
                 None => unclosed_keyword_eof_node(tokens, i, "for"),
-                Some(rel) => {
-                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
-                }
+                Some(rel) => mismatched_closer_node(
+                    tokens,
+                    i + 1 + rel,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
             };
             state.current_cmd = command;
             state
@@ -946,6 +958,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                                     tokens,
                                     i + 1 + tail_start,
                                     state.diagnostic_text.as_deref(),
+                                    state.source_line_offset,
                                 ),
                             );
                             Some(command)
@@ -959,6 +972,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                             tokens,
                             i + 1 + tail_start + 1,
                             state.diagnostic_text.as_deref(),
+                            state.source_line_offset,
                         )),
                     }
                 }
@@ -968,6 +982,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                         tokens,
                         i + 1 + rel,
                         state.diagnostic_text.as_deref(),
+                        state.source_line_offset,
                     ),
                 }),
                 _ => None,
@@ -1007,9 +1022,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         {
             let command = match first_mismatched_closer(&tokens[i + 1..], "select") {
                 None => unclosed_keyword_eof_node(tokens, i, "select"),
-                Some(rel) => {
-                    mismatched_closer_node(tokens, i + 1 + rel, state.diagnostic_text.as_deref())
-                }
+                Some(rel) => mismatched_closer_node(
+                    tokens,
+                    i + 1 + rel,
+                    state.diagnostic_text.as_deref(),
+                    state.source_line_offset,
+                ),
             };
             state.current_cmd = command;
             state
@@ -1144,17 +1162,23 @@ fn push_unexpected_token_error(
         state.ast.commands.pop();
     }
     // GNU echoes only the offending input line, from its first
-    // token, not the rest of the file (parse.y y.error prints the
-    // current input line). With the original text available (eval
-    // reparse) echo that line verbatim; token reconstruction cannot
-    // recover the original spacing.
+    // token, not the rest of the file (parse.y:6813-6824
+    // print_offending_line prints the current `shell_input_line`).
+    // With the original text available (script driver, eval reparse)
+    // echo that line verbatim; token reconstruction cannot recover the
+    // original spacing. Token positions are absolute script LINES and
+    // `source_line_offset` is the line shift the caller applied
+    // (script_driver.rs `token.position += line_offset`), so the line
+    // within the text is `position - offset`, 1-based — never a byte
+    // offset (rubash#204: the old byte-offset read reported line N's
+    // number with line 1's text).
     let verbatim = options
         .diagnostic_text
         .as_ref()
         .or(options.source_text.as_ref())
         .and_then(|text| {
-            let source_offset = tokens[i].position.checked_sub(options.source_line_offset)?;
-            source_line_at_byte_offset(text, source_offset)
+            let line_in_text = tokens[i].position.checked_sub(options.source_line_offset)?;
+            source_line_by_number(text, line_in_text)
         });
     let source = verbatim.unwrap_or_else(|| {
         let line_number = tokens[i].position;
@@ -1712,11 +1736,22 @@ fn if_frame_offender(region: &[Token]) -> Option<usize> {
 
 /// Physical input line containing `tokens[index]` — verbatim from the
 /// original source when available (GNU parse.y y.error echoes the line as
-/// read), else reconstructed from same-line token raws.
-fn offending_line_text(tokens: &[Token], index: usize, source: Option<&str>) -> String {
+/// read), else reconstructed from same-line token raws. `line_offset` is
+/// the caller's line shift (`ParseLoopOptions::source_line_offset`), so
+/// the line within `source` is `position - line_offset`.
+fn offending_line_text(
+    tokens: &[Token],
+    index: usize,
+    source: Option<&str>,
+    line_offset: usize,
+) -> String {
     if let Some(text) = source {
-        if let Some(line) = text.lines().nth(tokens[index].position.saturating_sub(1)) {
-            return line.to_string();
+        if let Some(line) = tokens[index]
+            .position
+            .checked_sub(line_offset)
+            .and_then(|line_in_text| source_line_by_number(text, line_in_text))
+        {
+            return line;
         }
     }
     let line = tokens[index].position;
@@ -1747,6 +1782,7 @@ pub(super) fn mismatched_closer_node(
     tokens: &[Token],
     bad_index: usize,
     diagnostic_text: Option<&str>,
+    line_offset: usize,
 ) -> CommandNode {
     let bad = &tokens[bad_index];
     let mut command = CommandNode::new();
@@ -1762,7 +1798,7 @@ pub(super) fn mismatched_closer_node(
     );
     command.insert_assignment(
         "__RUBASH_PARSE_SOURCE__".to_string(),
-        offending_line_text(tokens, bad_index, diagnostic_text),
+        offending_line_text(tokens, bad_index, diagnostic_text, line_offset),
     );
     command
 }
@@ -1893,7 +1929,7 @@ pub(super) fn parse_time_prefixed_compound_command(
     let (mut command, next_i) = if is_keyword(tokens, i, "for") {
         parse_for_command(tokens, i)?
     } else if is_keyword(tokens, i, "if") {
-        parse_if_command(tokens, i, None)?
+        parse_if_command(tokens, i, None, 0)?
     } else if tokens
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
@@ -1968,19 +2004,12 @@ pub(super) fn parse_time_prefixed_shell_command(
     Some((commands.remove(0), end))
 }
 
-fn source_line_at_byte_offset(text: &str, offset: usize) -> Option<String> {
-    if offset > text.len() || !text.is_char_boundary(offset) {
-        return None;
-    }
-    let line_start = text[..offset]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let line_end = text[offset..]
-        .find('\n')
-        .map(|index| offset + index)
-        .unwrap_or(text.len());
-    Some(text[line_start..line_end].to_string())
+/// The 1-based `line` of `text`, verbatim. Token positions are line
+/// numbers (parse.y `line_number`), so diagnostic line echo is a line
+/// lookup, not a byte-offset slice (rubash#204).
+fn source_line_by_number(text: &str, line: usize) -> Option<String> {
+    let line = line.checked_sub(1)?;
+    text.lines().nth(line).map(str::to_string)
 }
 
 fn time_prefixed_shell_command_end(tokens: &[Token], mut index: usize) -> usize {

@@ -474,7 +474,7 @@ impl Executor {
             return Some(result);
         }
         let message =
-            crate::executor::arithmetic::take_arith_eval_error().map(|record| record.render(true));
+            crate::executor::arithmetic::take_arith_eval_error().map(|record| record.render());
         let message = message.or_else(|| {
             crate::executor::arithmetic::arithmetic_error_message(
                 value,

@@ -6,6 +6,7 @@ pub(super) fn parse_if_command(
     tokens: &[Token],
     start: usize,
     source: Option<&str>,
+    line_offset: usize,
 ) -> Option<(CommandNode, usize)> {
     if !is_keyword(tokens, start, "if") {
         return None;
@@ -80,7 +81,7 @@ pub(super) fn parse_if_command(
         // GNU reports the token that actually arrived where `fi` was
         // expected, at that token's line (`if x; then y; done` →
         // `near unexpected token `done'` at done's line).
-        let command = mismatched_closer_node(tokens, index, source);
+        let command = mismatched_closer_node(tokens, index, source, line_offset);
         return Some((command, tokens.len()));
     }
 

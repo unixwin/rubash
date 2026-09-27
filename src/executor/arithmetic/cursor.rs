@@ -24,34 +24,6 @@ impl ConditionalArithParser<'_> {
         self.input[self.pos..].starts_with(value.as_bytes())
     }
 
-    pub(super) fn skip_arithmetic_rhs(&mut self, boundaries: &[&str]) {
-        let mut depth = 0usize;
-        while self.pos < self.input.len() {
-            if depth == 0
-                && boundaries
-                    .iter()
-                    .any(|boundary| self.input[self.pos..].starts_with(boundary.as_bytes()))
-            {
-                return;
-            }
-
-            match self.input[self.pos] {
-                b'(' => {
-                    depth += 1;
-                    self.pos += 1;
-                }
-                b')' => {
-                    if depth == 0 {
-                        return;
-                    }
-                    depth -= 1;
-                    self.pos += 1;
-                }
-                _ => self.pos += 1,
-            }
-        }
-    }
-
     pub(super) fn skip_arithmetic_conditional_branch(&mut self, boundaries: &[&str]) {
         let mut depth = 0usize;
         let mut ternary_depth = 0usize;

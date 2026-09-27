@@ -333,17 +333,22 @@ impl Executor {
             .function_definition_locations
             .get(name)
             .map(|location| location.line);
+        // GNU execute_cmd.c:5351: `line_number = function_line_number =
+        // tc->line` — tc is the function's BODY group command, so the
+        // ambient line for the body is the `{` line, not the `name()`
+        // definition line (they differ for multi-line definitions; the
+        // select identifier check inherits it, execute_cmd.c:3001-3010).
+        let body_open_line = call_cmd
+            .function_command
+            .as_ref()
+            .and_then(|function| function.body_open_line)
+            .or(self
+                .shell_state
+                .function_definition_locations
+                .get(name)
+                .and_then(|location| location.body_open_line))
+            .or(definition_line);
         if function_traced {
-            let body_open_line = call_cmd
-                .function_command
-                .as_ref()
-                .and_then(|function| function.body_open_line)
-                .or(self
-                    .shell_state
-                    .function_definition_locations
-                    .get(name)
-                    .and_then(|location| location.body_open_line))
-                .or(definition_line);
             if let Some(line) = body_open_line {
                 self.shell_state
                     .env_vars
@@ -371,10 +376,10 @@ impl Executor {
         // redirections to real descriptors for the body's duration
         // (redir.c do_redirections, undone on return), so `f 3>&1` makes a
         // body's `1>&3` resolve fd 3 to the call's binding. The body's
-        // ambient line_number is the function DEFINITION line
+        // ambient line_number is the body-open line
         // (execute_cmd.c:5351 line_number = function_line_number = tc->line).
         let result = self.with_compound_output_redirects(call_cmd, |executor| {
-            executor.with_ambient_line(definition_line, |executor| {
+            executor.with_ambient_line(body_open_line, |executor| {
                 executor.execute_ast_inner(body_ast)
             })
         });

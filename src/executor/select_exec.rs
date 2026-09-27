@@ -12,11 +12,20 @@ impl Executor {
         select_command: &SelectCommand,
     ) -> Result<(), ExecuteError> {
         if !is_shell_name(&select_command.variable) {
-            // GNU execute_cmd.c reports via builtin_error with no command
-            // segment: "./errors.tests: line 50: `1': not a valid identifier".
+            // GNU execute_select_command (execute_cmd.c:3001-3010) runs
+            // check_identifier BEFORE `line_number = select_command->line`
+            // (3013) — the reverse of execute_for_command (2996-2999),
+            // which stamps first. The failure therefore reports the
+            // AMBIENT line: the function body-open line inside a function
+            // (execute_cmd.c:5351 tc->line), or the reader's last line at
+            // top level — never the `select` keyword's own line
+            // (rubash#201 repro B: `{` on line 2, select on line 3, GNU
+            // reports 2). The report has no command segment:
+            // "./errors.tests: line 50: `1': not a valid identifier".
+            let line = self.ambient_line.get().or(cmd.line).unwrap_or(1);
             eprintln!(
                 "{}`{}': not a valid identifier",
-                self.diagnostic_prefix(),
+                self.diagnostic_prefix_for_line(line),
                 select_command.variable
             );
             self.exit_code = if self.posix_mode_enabled() { 2 } else { 1 };

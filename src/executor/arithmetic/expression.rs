@@ -42,8 +42,10 @@ impl ConditionalArithParser<'_> {
                 let rhs_start = self.pos;
                 let rhs = self.parse_assignment()?;
                 // GNU expr.c:549-555: `a /= 0` / `a %= 0` evalerrors
-                // "division by 0" with lasttp at the RHS operand.
-                if matches!(op, "/=" | "%=") && rhs == 0 {
+                // "division by 0" with lasttp at the RHS operand — unless
+                // the assignment sits in a noeval region, where the RHS
+                // becomes 1 and the (suppressed) bind proceeds.
+                if matches!(op, "/=" | "%=") && rhs == 0 && self.noeval == 0 {
                     return self.fail("division by 0", rhs_start);
                 }
                 return self.assign_lvalue(&lvalue, op, rhs);
@@ -141,7 +143,14 @@ impl ConditionalArithParser<'_> {
         }
 
         if condition == 0 {
-            self.skip_arithmetic_conditional_branch(&[":"]);
+            // GNU expr.c:645-655: the true branch parses under noeval
+            // (EXP_LOWEST — assignments are legal there, just unbound) —
+            // so `0?3+:2` still errors "operand expected" with lasttp at
+            // the token that failed to start an operand (`:2`).
+            self.noeval += 1;
+            let branch = self.parse_comma();
+            self.noeval -= 1;
+            branch?;
             self.skip_ws();
             // GNU expr.c:653-654: no `:` -> "`:' expected for conditional
             // expression" with lasttp at the current token.
@@ -186,11 +195,20 @@ impl ConditionalArithParser<'_> {
             self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
             return self.fail("attempted assignment to non-variable", op_pos);
         }
-        self.skip_arithmetic_conditional_branch(&[",", ")", ":"]);
+        // GNU expr.c:655-668: the false branch parses under noeval with
+        // `expcond` — malformed text (`1?2:3+`) errors "operand expected"
+        // while reads/binds are suppressed.
+        self.noeval += 1;
+        let branch = self.parse_conditional();
+        self.noeval -= 1;
+        branch?;
         Some(true_value)
     }
 
-    /// GNU expr.c:678-702 explor.
+    /// GNU expr.c:678-702 explor. The RHS is parsed unconditionally under
+    /// `noeval` (expr.c:690-691) — GNU never skips the text, it only
+    /// suppresses reads/binds — so a malformed RHS (`7||`, `7||@`) still
+    /// evalerrors "operand expected" with lasttp at the operator.
     pub(super) fn parse_logical_or(&mut self) -> Option<i128> {
         let mut left = self.parse_logical_and()?;
         loop {
@@ -208,16 +226,21 @@ impl ConditionalArithParser<'_> {
                 return self.fail("attempted assignment to non-variable", op_pos);
             }
             if left != 0 {
-                self.skip_arithmetic_rhs(&["||", ",", "?", ":", ")"]);
+                self.noeval += 1;
+                let right = self.parse_logical_and();
+                self.noeval -= 1;
+                right?;
                 left = 1;
-                continue;
+            } else {
+                let right = self.parse_logical_and()?;
+                left = i128::from(left != 0 || right != 0);
             }
-            let right = self.parse_logical_and()?;
-            left = i128::from(left != 0 || right != 0);
         }
     }
 
-    /// GNU expr.c:705-729 expland.
+    /// GNU expr.c:705-729 expland. Same noeval parse of the short-circuited
+    /// RHS (expr.c:717-718): `0&&` errors "operand expected" with lasttp at
+    /// `&&`.
     pub(super) fn parse_logical_and(&mut self) -> Option<i128> {
         let mut left = self.parse_bitwise_or()?;
         loop {
@@ -232,11 +255,14 @@ impl ConditionalArithParser<'_> {
                 return self.fail("attempted assignment to non-variable", op_pos);
             }
             if left == 0 {
-                self.skip_arithmetic_rhs(&["&&", "||", ",", "?", ":", ")"]);
-                continue;
+                self.noeval += 1;
+                let right = self.parse_bitwise_or();
+                self.noeval -= 1;
+                right?;
+            } else {
+                let right = self.parse_bitwise_or()?;
+                left = i128::from(left != 0 && right != 0);
             }
-            let right = self.parse_bitwise_or()?;
-            left = i128::from(left != 0 && right != 0);
         }
     }
 
@@ -304,28 +330,38 @@ impl ConditionalArithParser<'_> {
         }
     }
 
-    /// GNU expr.c:783-831 expcompar.
+    /// GNU expr.c:783-831 expcompar. The operator token is noted as it is
+    /// consumed — like every other precedence level — so a failing RHS
+    /// parse reports `lasttp` at the comparison operator itself
+    /// (`7<=` at end of input -> "operand expected", token `<=`,
+    /// readtok set lasttp when it read the operator, expr.c:1342).
     pub(super) fn parse_comparison(&mut self) -> Option<i128> {
         let mut left = self.parse_shift()?;
         loop {
             self.skip_ws();
             let op_start = self.pos;
             let result = if self.starts_with("==") {
+                self.note_op(op_start);
                 self.pos += 2;
                 Some(left == self.parse_shift()?)
             } else if self.starts_with("!=") {
+                self.note_op(op_start);
                 self.pos += 2;
                 Some(left != self.parse_shift()?)
             } else if self.starts_with(">=") {
+                self.note_op(op_start);
                 self.pos += 2;
                 Some(left >= self.parse_shift()?)
             } else if self.starts_with("<=") {
+                self.note_op(op_start);
                 self.pos += 2;
                 Some(left <= self.parse_shift()?)
             } else if self.peek() == Some(b'>') {
+                self.note_op(op_start);
                 self.pos += 1;
                 Some(left > self.parse_shift()?)
             } else if self.peek() == Some(b'<') {
+                self.note_op(op_start);
                 self.pos += 1;
                 Some(left < self.parse_shift()?)
             } else {
@@ -334,7 +370,6 @@ impl ConditionalArithParser<'_> {
             let Some(result) = result else {
                 return Some(left);
             };
-            self.note_op(op_start);
             left = i128::from(result);
         }
     }
@@ -412,9 +447,14 @@ impl ConditionalArithParser<'_> {
                     self.pos += 1;
                     self.skip_ws();
                     let rhs_start = self.pos;
-                    let rhs = self.parse_power()?;
+                    let mut rhs = self.parse_power()?;
                     if rhs == 0 {
-                        return self.fail("division by 0", rhs_start);
+                        // GNU expr.c:909-920: under noeval the divisor
+                        // becomes 1 instead of evalerroring.
+                        if self.noeval == 0 {
+                            return self.fail("division by 0", rhs_start);
+                        }
+                        rhs = 1;
                     }
                     value = bash_arith((value as i64).wrapping_div(rhs as i64) as i128);
                 }
@@ -423,9 +463,14 @@ impl ConditionalArithParser<'_> {
                     self.pos += 1;
                     self.skip_ws();
                     let rhs_start = self.pos;
-                    let rhs = self.parse_power()?;
+                    let mut rhs = self.parse_power()?;
                     if rhs == 0 {
-                        return self.fail("division by 0", rhs_start);
+                        // GNU expr.c:909-920: noeval suppresses the
+                        // evalerror and divides by 1 instead.
+                        if self.noeval == 0 {
+                            return self.fail("division by 0", rhs_start);
+                        }
+                        rhs = 1;
                     }
                     // GNU expr.c:923-926: INTMAX_MIN % -1 is 0 (avoids
                     // SIGFPE from undefined behavior on x86).
@@ -459,7 +504,12 @@ impl ConditionalArithParser<'_> {
             }
             let rhs = self.parse_power()?;
             if rhs < 0 {
-                return self.fail("exponent less than 0", tok);
+                // GNU expr.c:977-991: under noeval the negative-exponent
+                // evalerror is suppressed and the result is 1.
+                if self.noeval == 0 {
+                    return self.fail("exponent less than 0", tok);
+                }
+                return Some(1);
             }
             checked_arithmetic_pow(value, rhs)
         } else {

@@ -15,6 +15,12 @@ use crate::executor::{
 
 impl ConditionalArithParser<'_> {
     pub(super) fn lvalue_value(&mut self, lvalue: &ArithLValue) -> Option<i128> {
+        // GNU expr.c:1164-1167 expr_streval: under noeval the whole read
+        // (array lookup, subscript evaluation, dynamic special variables)
+        // short-circuits to 0 before any side effect runs.
+        if self.noeval > 0 {
+            return Some(0);
+        }
         match lvalue {
             ArithLValue::Scalar(name) => self.variable_value(name),
             ArithLValue::Indexed { name, index } => {
@@ -66,6 +72,13 @@ impl ConditionalArithParser<'_> {
     /// DISCARD, which the `__RUBASH_ARITH_SUBSCRIPT_EXPR` marker lets the
     /// caller reproduce).
     pub(super) fn eval_subscript_index(&mut self, subscript: &str) -> Option<i128> {
+        // GNU expr.c:1164-1167: subscript evaluation lives inside
+        // expr_streval (array_variable_part -> array_expand_index), which
+        // returns 0 under noeval before touching the subscript — so
+        // `0?a[n++]+=5:2` never bumps n.
+        if self.noeval > 0 {
+            return Some(0);
+        }
         // \x1e-marker subscripts were already expanded by the caller's
         // array_expand_index-equivalent pass (mod.rs
         // expand_arith_indexed_subscripts); an empty expansion evaluates
@@ -354,6 +367,7 @@ impl ConditionalArithParser<'_> {
             diags: Vec::new(),
             last_tok_start: 0,
             last_tok_operand: false,
+            noeval: 0,
         };
         let value = parser.parse_comma();
         parser.skip_ws();
@@ -385,6 +399,12 @@ impl ConditionalArithParser<'_> {
         delta: i128,
         prefix: bool,
     ) -> Option<i128> {
+        // GNU expr.c:1081-1105: under noeval the STR's value came from the
+        // expr_streval short-circuit (0) and the ++/-- bind is skipped
+        // entirely — `7||x++` leaves x untouched and evaluates to 0.
+        if self.noeval > 0 {
+            return Some(0);
+        }
         // GNU expr.c:1081-1105: post-inc/dec reads the STR's value via
         // expr_streval first (an IndexedRaw subscript evaluates here, once),
         // then binds the saved lvalue.
@@ -404,6 +424,12 @@ impl ConditionalArithParser<'_> {
         op: &str,
         rhs: i128,
     ) -> Option<i128> {
+        // GNU expr.c:607-615 expassign: the bind is skipped under noeval —
+        // no readonly check, no current-value read, no write. The computed
+        // value is still returned to the caller.
+        if self.noeval > 0 {
+            return Some(rhs);
+        }
         // Resolve a deferred (raw) subscript now — after the RHS has been
         // evaluated, so side effects in the RHS are visible to the subscript
         // (GNU expr.c:1395-1401 + expr_bind_variable re-evaluation).
