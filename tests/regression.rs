@@ -19,7 +19,10 @@
 //!
 //! Every fixture runs in its own empty temp directory with a minimal PATH
 //! (rubash emulates cat/mkdir/grep/sed when they are absent), a bounded
-//! per-test timeout, and a clean environment (no BASH_ENV / WINUXSH_ROOT).
+//! per-test timeout, and an AIRTIGHT environment: `env_clear` plus a
+//! machine-infrastructure whitelist (see `run_rubash_in`), so no ambient
+//! user/tool variable — whose name may collide with a fixture variable —
+//! can influence a golden.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -218,13 +221,42 @@ fn run_rubash_in(dir: &Path, args: &[&str], limit: Duration) -> RunOutcome {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
     cmd.args(args)
         .current_dir(dir)
-        .env_remove("OLDPWD")
-        .env_remove("BASH_ENV")
-        .env_remove("WINUXSH_ROOT")
+        // Airtight environment (cifix lane 2026-09-27): a golden must not
+        // depend on ambient variables. golden_nounset_exit_matrix passed
+        // locally but failed on CI because a runner-side variable whose
+        // name case-insensitively matched the fixture's `$m2` reached the
+        // child: on Windows `std::env::var` is case-insensitive, so the
+        // engine's bare-$NAME env fallback treated `$m2` as bound while
+        // GNU (variables.c, exact-case lookup) — and therefore the WSL
+        // golden — has it unbound. Drop every user/tool variable and pass
+        // only machine infrastructure plus the minimal PATH, so a local
+        // run, a CI runner and any future image observe the same fixture
+        // world. (Suite snapshots deliberately keep the ambient env:
+        // their bytes were recorded with it.)
+        .env_clear()
         .env("PATH", minimal_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if cfg!(windows) {
+        // Windows-process infrastructure only: values never enter golden
+        // bytes (no fixture prints them), and the child needs SystemRoot
+        // for OS services and TEMP for any internal temp-file use.
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "WINDIR",
+            "COMSPEC",
+            "PATHEXT",
+            "OS",
+            "TEMP",
+            "TMP",
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                cmd.env(name, value);
+            }
+        }
+    }
     let mut child = cmd.spawn().expect("spawn rubash");
     wait_bounded(&mut child, limit)
 }

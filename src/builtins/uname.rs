@@ -2,12 +2,16 @@
 //!
 //! uname(1)/arch(1) semantics with the persona-valued fields from
 //! `crate::executor::identity`: the fields no PATH binary can supply
-//! honestly (`-s`, `-r`, `-o`) come from the identity persona, `-n`/`-m`
-//! from the host, `-p`/`-i` report `unknown` like the MSYS2 port. Field
-//! order follows coreutils uname: `s n r v m [p] [i] o`, and `-a` prints
-//! `s n r v m o` — exactly the Git Bash shape (probe 2026-09-26:
-//! `MINGW64_NT-10.0-19044 X12-C 3.6.3-7674c51e.x86_64 2025-07-01 09:13 UTC
-//! x86_64 Msys`).
+//! honestly (`-s`, `-r`, `-o`) come from the identity persona (uname(2)
+//! utsname fields on unix), `-n`/`-m` from the host, `-p`/`-i` are
+//! platform-sourced per coreutils uname.c (`unknown` where the platform
+//! has no source, which the MSYS2/Windows persona reports for both).
+//! Field order follows coreutils uname: `s n r v m [p] [i] o`, and `-a`
+//! prints `s n r v m [p] [i] o` omitting `unknown` p/i — exactly the Git
+//! Bash shape on Windows (probe 2026-09-26: `MINGW64_NT-10.0-19044 X12-C
+//! 3.6.3-7674c51e.x86_64 2025-07-01 09:13 UTC x86_64 Msys`) and the WSL
+//! coreutils 9.4 shape on Linux (`Linux X12-C 5.10.16.3-... x86_64
+//! x86_64 x86_64 GNU/Linux`).
 //!
 //! The engine answers `uname`/`arch` itself instead of spawning a PATH
 //! binary: identity is strategic information and must not depend on what
@@ -133,21 +137,26 @@ pub fn execute_uname(args: &[String]) -> IdentityToolOutput {
     };
     let mut first = true;
     if fields.all {
-        // coreutils -a = -s -n -r -v -m -p -i -o; the MSYS2 port skips the
-        // empty p/i slots, and so does `-a` here (match the Git Bash shape).
+        // coreutils -a = -s -n -r -v -m -p -i -o, OMITTING the p/i slots
+        // when they are `unknown` (uname.c: `if (! (toprint == UINT_MAX &&
+        // element == unknown)) print_element (element)`; --help: "except
+        // omit -p and -i if unknown"). One rule reproduces every shape:
+        // glibc Linux keeps both (WSL probe: `... x86_64 x86_64 x86_64
+        // GNU/Linux`), darwin keeps -p (`arm`/`i386`) and omits -i, and
+        // the MSYS2/Windows persona skips both (the Git Bash probe shape
+        // `... x86_64 Msys`).
         push(&identity::sysname(), &mut first);
         push(&identity::nodename(), &mut first);
         push(&identity::release(), &mut first);
         push(&identity::kernel_version(), &mut first);
         push(identity::machine(), &mut first);
-        // On unix the p/i slots are populated (utsname.machine fallback —
-        // WSL coreutils 9.4 probe: `... x86_64 x86_64 x86_64 GNU/Linux`),
-        // so -a keeps all eight fields; the skip above is the Windows
-        // persona shape only.
-        #[cfg(unix)]
-        {
-            push(&identity::processor(), &mut first);
-            push(&identity::hardware_platform(), &mut first);
+        let processor = identity::processor();
+        if processor != "unknown" {
+            push(&processor, &mut first);
+        }
+        let hardware_platform = identity::hardware_platform();
+        if hardware_platform != "unknown" {
+            push(&hardware_platform, &mut first);
         }
         push(&identity::operating_system(), &mut first);
     } else {
@@ -342,27 +351,66 @@ mod uname_tests {
         let out = execute_uname(&["-a".to_string()]);
         let text = stdout(&out);
         // The kernel-version slot itself contains spaces (MSYS2 prints a
-        // build timestamp there), so anchor the shape at both ends: s ...
-        // m o with the machine/os tail and the sysname head in place, and
-        // p/i slots skipped under -a (matching the MSYS2 port).
+        // build timestamp, Linux prints `#1 SMP ...`, darwin prints
+        // `Darwin Kernel Version ...`), so anchor the shape at both ends
+        // instead of word-counting.
         assert!(
             text.starts_with(&format!("{} {}", identity::sysname(), identity::nodename())),
             "-a head: {text}"
         );
-        assert!(
-            text.trim_end().ends_with(&format!(
-                " {} {}",
-                identity::machine(),
-                identity::operating_system()
-            )),
-            "-a tail: {text}"
+        // -a tail per platform. coreutils 9.4 uname.c prints
+        // s n r v m [p] [i] o and OMITS the p/i slots when they are
+        // `unknown` (`if (! (toprint == UINT_MAX && element == unknown))
+        // print_element (element)`; --help: "except omit -p and -i if
+        // unknown"), so the machine/os anchors differ per platform:
+        //
+        // - Windows (MSYS persona): p/i are `unknown` -> tail `m o`
+        //   (the Git Bash probe shape, see the module doc).
+        // - Linux (glibc): p/i print the machine field (WSL coreutils 9.4
+        //   probe 2026-09-27: `... x86_64 x86_64 x86_64 GNU/Linux`) ->
+        //   tail `m m m o`; asserted with identity::machine() three times
+        //   because on the glibc targets rubash builds for (x86_64,
+        //   aarch64) utsname.machine equals the Rust arch spelling.
+        // - macOS: coreutils uname.c fills -p from its compile-time
+        //   `__APPLE__` arm (`__arm__`/`__arm64__` -> "arm",
+        //   `__i386__`/`__x86_64__` -> "i386"; the sysctl path is guarded
+        //   `! defined __APPLE__`) and has no -i source on darwin (no
+        //   Solaris sysinfo; UNAME_HARDWARE_PLATFORM is FreeBSD/NetBSD/
+        //   OpenBSD only) -> tail `m arm o` on an aarch64-apple-darwin
+        //   build (`m i386 o` on x86_64), with -i omitted as `unknown`.
+        //   BSD /usr/bin/uname on macOS agrees on -p ("arm") and does not
+        //   offer -i. (`-m` itself still reports the Rust target arch
+        //   spelling "aarch64", a persona simplification; coreutils prints
+        //   utsname.machine "arm64" — darwin -m is not asserted here.)
+        #[cfg(target_os = "linux")]
+        let expected_tail = format!(
+            "{} {} {} {}",
+            identity::machine(),
+            identity::machine(),
+            identity::machine(),
+            identity::operating_system()
         );
-        // The p/i slots report "unknown" on real Linux/macOS hosts (GNU
-        // coreutils does the same); only assert they don't replace the
-        // machine/OS tail, not that the word is absent.
+        #[cfg(target_os = "macos")]
+        let expected_tail = format!(
+            "{} {} {}",
+            identity::machine(),
+            if cfg!(target_arch = "aarch64") {
+                "arm"
+            } else {
+                "i386"
+            },
+            identity::operating_system()
+        );
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let expected_tail = format!("{} {}", identity::machine(), identity::operating_system());
+        assert!(
+            text.trim_end().ends_with(&format!(" {expected_tail}")),
+            "-a tail: {text} (expected ... {expected_tail})"
+        );
+        // An `unknown` p/i value must never survive into the -a tail.
         assert!(
             !text.trim_end().ends_with("unknown"),
-            "-a tail must be machine+os, not unknown: {text}"
+            "-a tail must be machine(+p/i)+os, not unknown: {text}"
         );
     }
 
@@ -378,14 +426,42 @@ mod uname_tests {
     #[test]
     fn processor_and_hardware_platform_report_unknown() {
         let out = execute_uname(&["-p".to_string(), "-i".to_string()]);
-        // MSYS2 persona reports `unknown` for both; unix reports the
-        // utsname.machine fallback (coreutils 9.4 on Linux prints the
-        // machine value for -p/-i, e.g. x86_64).
-        #[cfg(unix)]
+        // Explicit -p/-i print the literal `unknown` when the platform has
+        // no source for the slot (the -a omission rule does not apply to
+        // explicit flags — coreutils 9.4 uname.c prints `unknown` there).
+        // Per platform (sources cited in identity::processor /
+        // identity::hardware_platform):
+        // - Windows (MSYS persona): no source for either ->
+        //   `unknown unknown` (the MSYS2 coreutils port shape).
+        // - Linux (glibc): sysinfo(SI_ARCHITECTURE)/SI_PLATFORM print the
+        //   machine field (WSL coreutils 9.4 probe 2026-09-27: x86_64
+        //   x86_64; utsname.machine equals the Rust arch spelling).
+        // - macOS: -p comes from the compile-time `__APPLE__` arm
+        //   (`__arm__`/`__arm64__` -> "arm", `__i386__`/`__x86_64__` ->
+        //   "i386"; the sysctl path is guarded `! defined __APPLE__`;
+        //   BSD /usr/bin/uname's native_arch() agrees: "arm"/"i386"), and
+        //   -i has no darwin source -> `arm unknown` on an
+        //   aarch64-apple-darwin build, `i386 unknown` on x86_64.
+        // - Other unix: unported sysctl sources -> both `unknown`.
+        #[cfg(target_os = "linux")]
         assert_eq!(
             stdout(&out),
             format!("{} {}\n", identity::machine(), identity::machine())
         );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            stdout(&out),
+            format!(
+                "{} unknown\n",
+                if cfg!(target_arch = "aarch64") {
+                    "arm"
+                } else {
+                    "i386"
+                }
+            )
+        );
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+        assert_eq!(stdout(&out), "unknown unknown\n");
         #[cfg(not(unix))]
         assert_eq!(stdout(&out), "unknown unknown\n");
     }

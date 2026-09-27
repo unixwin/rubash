@@ -240,12 +240,32 @@ pub fn processor() -> &'static str {
     "unknown"
 }
 
-/// `uname -p` (processor) on unix: coreutils 9.4 on this WSL host prints
-/// the machine field (`x86_64`) — utsname has no separate processor slot,
-/// and the probe of `/usr/bin/uname -p` is the observed contract.
+/// `uname -p` (processor) on unix. coreutils 9.4 `src/uname.c` sources the
+/// processor element per platform: glibc fills it through
+/// `sysinfo (SI_ARCHITECTURE)` (WSL coreutils 9.4 probe 2026-09-27: `-p`
+/// prints the machine field, `x86_64`, same as utsname.machine), while a
+/// darwin build has ONLY the compile-time `__APPLE__` arm —
+/// `__arm__`/`__arm64__` -> `arm`, `__i386__`/`__x86_64__` -> `i386` —
+/// because the sysctl path is guarded `! defined __APPLE__` and Solaris
+/// `sysinfo` is absent there. BSD `/usr/bin/uname` on macOS agrees on the
+/// `-p` value (its `native_arch()` returns `arm`/`i386` on Apple builds).
 #[cfg(unix)]
 pub fn processor() -> String {
-    unix_utsname_field(|u| &u.machine)
+    if cfg!(target_os = "macos") {
+        return match std::env::consts::ARCH {
+            "arm" | "aarch64" => "arm",
+            "x86" | "x86_64" => "i386",
+            _ => "unknown",
+        }
+        .to_string();
+    }
+    if cfg!(target_os = "linux") {
+        return unix_utsname_field(|u| &u.machine);
+    }
+    // Other unix: coreutils would sysctl(CTL_HW, UNAME_PROCESSOR) (e.g.
+    // FreeBSD HW_MACHINE_ARCH); unported here, so report the portable
+    // `unknown` fallback instead of guessing a value.
+    "unknown".to_string()
 }
 
 /// `uname -i` (hardware platform): MSYS2 reports `unknown`; keep the form.
@@ -254,11 +274,21 @@ pub fn hardware_platform() -> &'static str {
     "unknown"
 }
 
-/// `uname -i` (hardware platform) on unix: same utsname.machine fallback
-/// as `uname -p` (WSL coreutils 9.4 probe: x86_64).
+/// `uname -i` (hardware platform) on unix. coreutils 9.4 `src/uname.c`
+/// sources `-i` through Solaris-style `sysinfo (SI_PLATFORM)` — available
+/// on glibc, where the WSL coreutils 9.4 probe (2026-09-27) shows `-i`
+/// printing the machine field (`x86_64`, same as utsname.machine) — or
+/// through the `UNAME_HARDWARE_PLATFORM` sysctl, defined only for
+/// FreeBSD/NetBSD (`HW_MODEL`) and OpenBSD. A darwin build has neither
+/// arm, so coreutils `uname -i` on macOS prints the `unknown` literal
+/// (BSD `/usr/bin/uname` on Apple does not offer `-i` at all — its getopt
+/// string is "amnoprsv").
 #[cfg(unix)]
 pub fn hardware_platform() -> String {
-    unix_utsname_field(|u| &u.machine)
+    if cfg!(target_os = "linux") {
+        return unix_utsname_field(|u| &u.machine);
+    }
+    "unknown".to_string()
 }
 
 /// `uname -o` (operating system): `Msys` under the MSYS persona (the MSYS2
