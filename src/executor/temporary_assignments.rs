@@ -986,7 +986,28 @@ impl Executor {
                 }
             } else if is_array_storage(&current)
                 || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, base_name)
+                || (value.starts_with('(') && value.ends_with(')'))
             {
+                // GNU subst.c:3611-3620 do_assignment_internal: a compound
+                // `name+=(list)` word has assign_list set, so it ALWAYS goes
+                // through do_compound_assignment (subst.c:3441) — never the
+                // scalar bind at the bottom. For a target that is not yet an
+                // array, find_or_make_array_variable (arrayfunc.c:454) makes
+                // one: unset binds a fresh array (make_new_array_variable,
+                // arrayfunc.c:478), an existing scalar converts with its
+                // value as element 0 (convert_var_to_array, arrayfunc.c:498
+                // — `s=abc; s+=("x y")` yields ([0]="abc" [1]="x y")), and
+                // an integer scalar converts too, keeping the attribute and
+                // evaluating each element (`declare -i i; i+=(1+2)` yields
+                // declare -ai i=([0]="3"); assign_compound_array_list starts
+                // at last_ind = array_max_index+1 = 0 for the fresh array,
+                // arrayfunc.c:743). array_values("") is empty, so an unset
+                // current seeds no phantom element 0. The store tail below
+                // marks ARRAY_VARS from the STORAGE_WORD_PREFIX render
+                // append_array_value returns, exactly like the non-append
+                // compound branch (rubash#214: v+=("word") on an unset
+                // variable used to fall through to append_scalar_value and
+                // store the serialized `("word")` literal as a scalar).
                 match append_array_value(
                     &current,
                     &value,

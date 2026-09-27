@@ -755,7 +755,12 @@ pub(super) fn append_array_value(
                 let current = entries.get(&index).cloned().unwrap_or_default();
                 let rhs = unquote_storage_value(&dequote_compound_element_rhs(rhs));
                 let value = if integer {
-                    (eval_arith_value(&current) + eval_arith_value(&rhs)).to_string()
+                    // GNU make_array_variable_value (arrayfunc.c:173-195) with
+                    // ASS_APPEND: both operands go through make_variable_value
+                    // → evalexp (variables.c:2920-2946), the full evaluator.
+                    (eval_conditional_arith_value(&current, env_vars).unwrap_or(0)
+                        + eval_conditional_arith_value(&rhs, env_vars).unwrap_or(0))
+                    .to_string()
                 } else {
                     append_scalar_value(&current, &rhs)
                 };
@@ -891,8 +896,18 @@ pub(super) fn append_array_value(
     }
 
     if integer {
+        // GNU arrayfunc.c:213 make_array_variable_value → variables.c:2920
+        // make_variable_value: an integer-attributed variable evaluates every
+        // assigned element with the FULL arithmetic evaluator (evalexp,
+        // expr.c) — `declare -i y; y+=(2*3)` stores [1]="6". The naive
+        // split('+') parser returned 0 for any `*`/`-`/`/` element. On a
+        // fatal evaluation GNU jumps out and aborts the assignment; storing
+        // the raw text (the ASS_NOLONGJMP `goto make_value' fallback,
+        // variables.c:2928) is the non-fatal approximation used here.
         for element in entries.values_mut() {
-            *element = eval_arith_value(element).to_string();
+            if let Some(value) = eval_conditional_arith_value(element, env_vars) {
+                *element = value.to_string();
+            }
         }
     }
 
