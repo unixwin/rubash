@@ -1241,6 +1241,16 @@ pub(in crate::executor) fn funsub_introducer(ch: char) -> Option<bool> {
 /// never closes the construct), and `{`/`}` nest so an inner `${...}` or
 /// brace group does not terminate the body. `None` (closing `}` never
 /// found) falls through to the existing parameter diagnostics.
+///
+/// GNU parse.y:4451 parse_comsub parses the body with the real parser
+/// (yyparse, DOLBRACE), so the closing `}` must be a LONE WORD in command
+/// position — parse.y:3465-3468 special_case_tokens returns the `}' token
+/// only when reserved_word_acceptable(last_read_token) holds: after `;`,
+/// `&`, `|`, a newline, or a closed `{ }`/`( )` command construct, and with
+/// a word-breaking character (blanks, `()<>;&|`) or end of input after it.
+/// A `}` inside a word (`\"}\" in `${ echo \"}\"; }`, `a}b`, `x=}`) is word
+/// text, and a `{` opens a brace group only in command position
+/// (`${ echo {; }` runs `echo {`).
 pub(in crate::executor) fn extract_funsub_body(
     chars: &mut std::iter::Peekable<impl Iterator<Item = char>>,
 ) -> Option<(String, bool)> {
@@ -1253,6 +1263,10 @@ pub(in crate::executor) fn extract_funsub_body(
     let mut escaped = false;
     let mut brace_depth = 0usize;
     let mut paren_depth = 0usize;
+    // Command position: true at body start and after a command terminator
+    // (`;` `&` `|` newline) or a closed `{ }` group / `( )` subshell — the
+    // same term model continuation.rs's funsub delimiter carries.
+    let mut term = true;
     while let Some(ch) = chars.next() {
         if escaped {
             body.push(ch);
@@ -1262,31 +1276,71 @@ pub(in crate::executor) fn extract_funsub_body(
         if ch == '\\' && !single {
             body.push(ch);
             escaped = true;
-            continue;
-        }
-        if ch == '\'' && !double {
-            single = !single;
-            body.push(ch);
-            continue;
-        }
-        if ch == '"' && !single {
-            double = !double;
-            body.push(ch);
-            continue;
-        }
-        if !single && !double {
-            match ch {
-                '(' => paren_depth += 1,
-                ')' => paren_depth = paren_depth.saturating_sub(1),
-                '{' if paren_depth == 0 => brace_depth += 1,
-                '}' if paren_depth == 0 => {
-                    if brace_depth == 0 {
-                        return Some((body, valsub));
-                    }
-                    brace_depth -= 1;
-                }
-                _ => {}
+            if !double {
+                term = false;
             }
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            body.push(ch);
+            continue;
+        }
+        if double {
+            if ch == '"' {
+                double = false;
+            }
+            body.push(ch);
+            continue;
+        }
+        let mut word_text = false;
+        match ch {
+            '\'' => {
+                single = true;
+                term = false;
+            }
+            '"' => {
+                double = true;
+                term = false;
+            }
+            '(' => {
+                paren_depth += 1;
+                term = false;
+            }
+            ')' if paren_depth > 0 => {
+                paren_depth -= 1;
+                // A closed outermost `( ... )` is a complete command.
+                term = paren_depth == 0;
+            }
+            '{' if term && paren_depth == 0 => {
+                brace_depth += 1;
+                // A command follows the opening brace.
+                term = true;
+            }
+            '}' if term && paren_depth == 0 => {
+                // parse.y:5407-5416 read_token_word: a word BEGINNING with
+                // `}` in command position (reserved_word_acceptable)
+                // terminates the substitution even when more characters
+                // follow (`${| REPLY=x; }-tail`); term==false covers the
+                // mid-word case (`a}b`, `\"}`) — those `}` are word text.
+                if brace_depth > 0 {
+                    // A closed `{ }` group is a complete command: the
+                    // funsub's own `}` may follow without another
+                    // separator (`${ { echo x; } }`).
+                    brace_depth -= 1;
+                    term = true;
+                } else {
+                    return Some((body, valsub));
+                }
+            }
+            ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
+            ' ' | '\t' | '\r' => {}
+            _ => word_text = true,
+        }
+        if word_text {
+            term = false;
         }
         body.push(ch);
     }

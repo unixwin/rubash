@@ -717,29 +717,80 @@ fn splice_substitution_body(
 /// Extent of a `${ command; }' funsub body: `open` is the index of `{` —
 /// scan to the `}` that returns depth to 0, skipping quoted spans and
 /// escape pairs (mirrors Lexer::skip_braced's funsub branch, skip.rs).
-/// Returns the index just past the closing `}`.
+/// GNU parse.y:4451 parse_comsub parses the body with the real parser, so
+/// the closing `}` must be a LONE WORD in command position
+/// (parse.y:3465-3468 special_case_tokens +
+/// reserved_word_acceptable): after `;', `&', `|', a newline, or a closed
+/// `{ }'/`( )' command construct, and with a word-breaking char (or end
+/// of input) following. Returns the index just past the closing `}`.
 fn skip_funsub_body(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;
     let mut double = false;
+    // Command position: true at body start and after a command terminator
+    // (`;` `&` `|` newline) or a closed `{ }` group / `( )` subshell.
+    let mut term = true;
+    let mut paren_depth = 0usize;
     while index < chars.len() {
         let ch = chars[index];
         if ch == '\\' && !single {
+            if !double {
+                term = false;
+            }
             index += 2;
             continue;
         }
-        match ch {
-            '\'' if !double => single = !single,
-            '"' if !single => double = !double,
-            '{' if !single && !double => depth += 1,
-            '}' if !single && !double => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index + 1);
-                }
+        if single {
+            if ch == '\'' {
+                single = false;
             }
-            _ => {}
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                single = true;
+                term = false;
+            }
+            '"' => {
+                double = true;
+                term = false;
+            }
+            '(' => {
+                paren_depth += 1;
+                term = false;
+            }
+            ')' if paren_depth > 0 => {
+                paren_depth -= 1;
+                term = paren_depth == 0;
+            }
+            '{' if term && paren_depth == 0 => {
+                depth += 1;
+                term = true;
+            }
+            '}' if term && paren_depth == 0 => {
+                // parse.y:5407-5416: a word beginning with `}` in command
+                // position terminates the substitution; term==false covers
+                // mid-word `}` (`a}b`, `\"}`) as word text.
+                if depth > 1 {
+                    depth -= 1;
+                    term = true;
+                    index += 1;
+                    continue;
+                }
+                return Some(index + 1);
+            }
+            ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
+            ' ' | '\t' | '\r' => {}
+            _ => term = false,
         }
         index += 1;
     }

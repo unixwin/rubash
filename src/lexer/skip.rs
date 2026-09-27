@@ -329,9 +329,16 @@ impl<'a> Lexer<'a> {
     pub(super) fn skip_braced(&mut self, outer_double_quote: bool) {
         let start = self.position.saturating_sub(2);
         // Bash 5.3 funsub: `${ command; }` / `${|command;}` bodies are
-        // command lists where every plain `{`/`}` (function bodies, brace
-        // groups) nests the match — the parameter-expansion scanner would
-        // close the span at the first unquoted `}`.
+        // command lists parsed by the real parser (parse.y:4451 parse_comsub
+        // -> yyparse with DOLBRACE): a `}` only ends the body when it is a
+        // LONE WORD in command position — parse.y:3465-3468
+        // special_case_tokens returns the `}' token only when
+        // reserved_word_acceptable(last_read_token) holds (after `;', `&',
+        // `|', a newline, or a closed command construct). A `}` inside a
+        // word (`\"}\" in `${ echo \"}\"; }`, `a}b`, `x=}`) is word text, and
+        // a `{` opens a brace group only in command position (parse.y:3460;
+        // `${ echo {; }` runs `echo {`). Same term model as
+        // continuation.rs's funsub delimiter.
         if self
             .input
             .get(start + 2..start + 3)
@@ -341,6 +348,11 @@ impl<'a> Lexer<'a> {
             let mut single = false;
             let mut double = false;
             let mut escaped = false;
+            // Command position: true at body start and after a command
+            // terminator (`;` `&` `|` newline) or a closed `{ }` group /
+            // `( )` subshell.
+            let mut term = true;
+            let mut paren_depth = 0usize;
             while let Some(c) = self.advance() {
                 if escaped {
                     escaped = false;
@@ -348,19 +360,66 @@ impl<'a> Lexer<'a> {
                 }
                 if c == '\\' && !single {
                     escaped = true;
+                    if !double {
+                        term = false;
+                    }
+                    continue;
+                }
+                if single {
+                    if c == '\'' {
+                        single = false;
+                    }
+                    continue;
+                }
+                if double {
+                    if c == '"' {
+                        double = false;
+                    }
                     continue;
                 }
                 match c {
-                    '\'' if !double => single = !single,
-                    '"' if !single => double = !double,
-                    '{' if !single && !double => depth += 1,
-                    '}' if !single && !double => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            return;
-                        }
+                    '\'' => {
+                        single = true;
+                        term = false;
                     }
-                    _ => {}
+                    '"' => {
+                        double = true;
+                        term = false;
+                    }
+                    '(' => {
+                        paren_depth += 1;
+                        term = false;
+                    }
+                    ')' if paren_depth > 0 => {
+                        paren_depth -= 1;
+                        // A closed outermost `( ... )` is a complete command.
+                        term = paren_depth == 0;
+                    }
+                    '{' if term && paren_depth == 0 => {
+                        depth += 1;
+                        // A command follows the opening brace.
+                        term = true;
+                    }
+                    '}' if term && paren_depth == 0 => {
+                        // parse.y:5407-5416 read_token_word: a word BEGINNING
+                        // with `}` in command position (reserved_word_
+                        // acceptable) terminates the substitution even when
+                        // more characters follow (`${| REPLY=x; }-tail`).
+                        // term==false covers the mid-word case (`a}b`,
+                        // `\"}`) — those `}` are word text.
+                        if depth > 1 {
+                            // A closed `{ }` group is a complete command:
+                            // the funsub's own `}` may follow without
+                            // another separator (`${ { echo x; } }`).
+                            depth -= 1;
+                            term = true;
+                            continue;
+                        }
+                        return;
+                    }
+                    ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
+                    ' ' | '\t' | '\r' => {}
+                    _ => term = false,
                 }
             }
             return;

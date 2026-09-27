@@ -1329,13 +1329,27 @@ impl Executor {
             return None;
         }
 
+        // GNU parse.y:4451 parse_comsub parses the funsub body with the
+        // real parser (yyparse, DOLBRACE), so the closing `}` must be a
+        // LONE WORD in command position (parse.y:3465-3468
+        // special_case_tokens + reserved_word_acceptable): after `;`, `&`,
+        // `|`, a newline, or a closed `{ }`/`( )` command construct, and
+        // with a word-breaking char or end of input following. A `}` inside
+        // a word (`\"}` in `${ echo \"}\"; }`, `a}b`, `x=}`) is word text,
+        // and a `{` opens a brace group only in command position. Same
+        // term model as continuation.rs's funsub delimiter and
+        // extract_funsub_body.
         let mut depth = 1usize;
         let mut source = String::new();
         let mut single = false;
         let mut double = false;
         let mut escaped = false;
         let mut closed = false;
-        for source_ch in chars.by_ref() {
+        let mut term = true;
+        let mut paren_depth = 0usize;
+        // `while let` (not `for ... in chars.by_ref()`): the lone-`}` check
+        // needs chars.peek() while the loop owns the iterator.
+        while let Some(source_ch) = chars.next() {
             if escaped {
                 source.push(source_ch);
                 escaped = false;
@@ -1344,31 +1358,74 @@ impl Executor {
             if source_ch == '\\' && !single {
                 source.push(source_ch);
                 escaped = true;
+                if !double {
+                    term = false;
+                }
                 continue;
             }
+            if single {
+                if source_ch == '\'' {
+                    single = false;
+                }
+                source.push(source_ch);
+                continue;
+            }
+            if double {
+                if source_ch == '"' {
+                    double = false;
+                }
+                source.push(source_ch);
+                continue;
+            }
+            let mut word_text = false;
             match source_ch {
-                '\'' if !double => {
-                    single = !single;
-                    source.push(source_ch);
+                '\'' => {
+                    single = true;
+                    term = false;
                 }
-                '"' if !single => {
-                    double = !double;
-                    source.push(source_ch);
+                '"' => {
+                    double = true;
+                    term = false;
                 }
-                '{' if !single && !double => {
+                '(' => {
+                    paren_depth += 1;
+                    term = false;
+                }
+                ')' if paren_depth > 0 => {
+                    paren_depth -= 1;
+                    // A closed outermost `( ... )` is a complete command.
+                    term = paren_depth == 0;
+                }
+                '{' if term && paren_depth == 0 => {
                     depth += 1;
-                    source.push(source_ch);
+                    // A command follows the opening brace.
+                    term = true;
                 }
-                '}' if !single && !double => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
+                '}' if term && paren_depth == 0 => {
+                    // parse.y:5407-5416 read_token_word: a word BEGINNING
+                    // with `}` in command position (reserved_word_
+                    // acceptable) terminates the substitution even when more
+                    // characters follow; term==false covers the mid-word
+                    // case (`a}b`, `\"}`) — those `}` are word text.
+                    if depth > 1 {
+                        // A closed `{ }` group is a complete command: the
+                        // funsub's own `}` may follow without another
+                        // separator.
+                        depth -= 1;
+                        term = true;
+                    } else {
                         closed = true;
                         break;
                     }
-                    source.push(source_ch);
                 }
-                _ => source.push(source_ch),
+                ';' | '&' | '|' | '\n' if paren_depth == 0 => term = true,
+                ' ' | '\t' | '\r' => {}
+                _ => word_text = true,
             }
+            if word_text {
+                term = false;
+            }
+            source.push(source_ch);
         }
 
         if closed {
