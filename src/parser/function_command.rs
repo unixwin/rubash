@@ -9,6 +9,24 @@ pub(super) fn parse_function_command(
     tokens: &[Token],
     start: usize,
 ) -> Option<(CommandNode, usize)> {
+    parse_function_command_with_diagnostic(tokens, start, None, 0)
+}
+
+/// GNU parse.y function_def: the body is a `compound_command' parsed by the
+/// SAME yyparse run — a stray `)' / `;;' inside it is the yacc
+/// `syntax error near unexpected token' production (parse.y:6724 yyerror →
+/// parse.y:6833 report_syntax_error → parse.y:6861 message +
+/// parse.y:6867 print_offending_line, EX_BADUSAGE=2), aborting the whole
+/// input. rubash parses bodies as nested token slices, so the nested parse
+/// must run with the driver's strictness (`stray_close_is_error`) and the
+/// original source text so the diagnostic echoes the physical offending
+/// line (parse.y print_offending_line), not reconstructed token spacing.
+pub(super) fn parse_function_command_with_diagnostic(
+    tokens: &[Token],
+    start: usize,
+    diagnostic_text: Option<&str>,
+    source_line_offset: usize,
+) -> Option<(CommandNode, usize)> {
     // TODO(parse.y/execute_cmd.c): Bash has full function_def grammar,
     // including `function name`, redirections, nested compound commands, and
     // parser-state-sensitive reserved words. This maps the upstream builtins
@@ -109,7 +127,7 @@ pub(super) fn parse_function_command(
                 token.position += base - 1;
             }
         }
-        let mut body = parse(&body_tokens).commands;
+        let mut body = parse_function_body(&body_tokens, diagnostic_text, source_line_offset);
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
@@ -165,7 +183,9 @@ pub(super) fn parse_function_command(
         // GNU parse.y:6890-6901: `name() (` reaching EOF unclosed reports
         // "unexpected end of file from `(' command on line N" — do not let
         // the `?` fall back to a `(`-unexpected simple command.
-        let Some((mut body, close_i)) = parse_parenthesized_function_body(tokens, i) else {
+        let Some((mut body, close_i)) =
+            parse_parenthesized_function_body(tokens, i, diagnostic_text, source_line_offset)
+        else {
             let command = unclosed_paren_eof_node(tokens, i);
             return Some((command, tokens.len()));
         };
@@ -191,7 +211,9 @@ pub(super) fn parse_function_command(
         return Some(finish_function_command(command, tokens, close_i + 1));
     }
 
-    if let Some((mut body, body_end)) = parse_function_command_sequence_body(tokens, i) {
+    if let Some((mut body, body_end)) =
+        parse_function_command_sequence_body(tokens, i, diagnostic_text, source_line_offset)
+    {
         let mut command = CommandNode::new();
         command.line = tokens.get(start).map(|token| token.position);
         command.function_command = Some(function_command(
@@ -258,7 +280,7 @@ pub(super) fn parse_function_command(
         return Some((command, tokens.len()));
     };
 
-    let body = parse(&tokens[body_start..i]).commands;
+    let body = parse_function_body(&tokens[body_start..i], diagnostic_text, source_line_offset);
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|token| token.position);
     command.function_command = Some(function_command(
@@ -286,6 +308,19 @@ fn finish_function_command(
     tokens: &[Token],
     index: usize,
 ) -> (CommandNode, usize) {
+    // GNU parse.y function_def: a syntax error anywhere in the body makes
+    // the entire definition fail — yyerror aborts the parse before the
+    // function is ever defined. The strict body parse parks its
+    // `__RUBASH_PARSE_ERROR__' node inside the body; return THAT node in
+    // place of the definition so the executor's standard parse-error arm
+    // reports both GNU lines (message + offending line) and aborts with
+    // EX_BADUSAGE=2 instead of silently defining a broken function
+    // (rubash#213: `f() { echo ); }' used to define and rc=0).
+    if let Some(function) = command.function_command.as_ref() {
+        if let Some(error) = find_body_parse_error(&function.body) {
+            return (error, index);
+        }
+    }
     let (command, mut next_i) = finish_compound_command(command, tokens, index);
     while tokens
         .get(next_i)
@@ -294,6 +329,128 @@ fn finish_function_command(
         next_i += 1;
     }
     (command, next_i)
+}
+
+/// Parse a function-body token slice with the driver's strictness: a `)' or
+/// case terminator at command position is a syntax error node, not a
+/// silently dropped token. `diagnostic_text' is the original source text
+/// (parse.y shell_input_line) so the error echoes the physical offending
+/// line; body token positions are absolute script lines, so the outer
+/// parse's `source_line_offset' maps them into that text.
+fn parse_function_body(
+    tokens: &[Token],
+    diagnostic_text: Option<&str>,
+    source_line_offset: usize,
+) -> Vec<CommandNode> {
+    crate::parser::parse_with_options(
+        tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: diagnostic_text.map(str::to_string),
+            source_line_offset,
+            ..Default::default()
+        },
+    )
+    .commands
+}
+
+/// Depth-first search for a parse-error node anywhere in a function body
+/// tree. Returns a clone of the node carrying the
+/// `__RUBASH_PARSE_ERROR__'/`__RUBASH_PARSE_SOURCE__' pair (line numbers
+/// and verbatim source ride on it), or None when the whole body parsed.
+fn find_body_parse_error(commands: &[CommandNode]) -> Option<CommandNode> {
+    for command in commands {
+        if command.has_assignment("__RUBASH_PARSE_ERROR__") {
+            return Some(command.clone());
+        }
+        let nested: Option<&Vec<CommandNode>> =
+            if let Some(function) = command.function_command.as_ref() {
+                Some(&function.body)
+            } else if let Some(group) = command.brace_group.as_ref() {
+                Some(&group.body)
+            } else if let Some(subshell) = command.subshell_command.as_ref() {
+                Some(&subshell.body)
+            } else if let Some(coproc) = command.coproc_command.as_ref() {
+                coproc.body.as_ref()
+            } else {
+                None
+            };
+        if let Some(found) = nested.and_then(|body| find_body_parse_error(body)) {
+            return Some(found);
+        }
+        if let Some(for_command) = command.for_command.as_ref() {
+            if let Some(found) = find_body_parse_error(&for_command.body) {
+                return Some(found);
+            }
+        }
+        if let Some(if_command) = command.if_command.as_ref() {
+            for branch in if_command
+                .condition
+                .iter()
+                .chain(if_command.then_body.iter())
+                .chain(
+                    if_command
+                        .elif_branches
+                        .iter()
+                        .flat_map(|branch| branch.condition.iter().chain(branch.body.iter())),
+                )
+                .chain(if_command.else_body.iter().flatten())
+            {
+                if let Some(found) = find_body_parse_error(std::slice::from_ref(branch)) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(loop_command) = command.loop_command.as_ref() {
+            for branch in loop_command
+                .condition
+                .iter()
+                .chain(loop_command.body.iter())
+            {
+                if let Some(found) = find_body_parse_error(std::slice::from_ref(branch)) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(select_command) = command.select_command.as_ref() {
+            if let Some(found) = find_body_parse_error(&select_command.body) {
+                return Some(found);
+            }
+        }
+        if let Some(case_command) = command.case_command.as_ref() {
+            for clause in &case_command.clauses {
+                if let Some(found) = find_body_parse_error(&clause.body) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(pipeline) = command.pipeline_command.as_ref() {
+            if let Some(found) = find_body_parse_error(&pipeline.stages) {
+                return Some(found);
+            }
+        }
+        if let Some(and_or) = command.and_or_list.as_ref() {
+            if let Some(found) = find_body_parse_error(&and_or.commands) {
+                return Some(found);
+            }
+        }
+        if let Some(time) = command.time_command.as_ref() {
+            if let Some(found) = find_body_parse_error(std::slice::from_ref(&time.command)) {
+                return Some(found);
+            }
+        }
+        if let Some(background) = command.background_command.as_ref() {
+            if let Some(found) = find_body_parse_error(std::slice::from_ref(&background.command)) {
+                return Some(found);
+            }
+        }
+        if let Some(inverted) = command.inverted_command.as_ref() {
+            if let Some(found) = find_body_parse_error(std::slice::from_ref(&inverted.command)) {
+                return Some(found);
+            }
+        }
+    }
+    None
 }
 
 fn function_command(
@@ -369,6 +526,8 @@ fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
 fn parse_function_command_sequence_body(
     tokens: &[Token],
     start: usize,
+    diagnostic_text: Option<&str>,
+    source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     let end = match tokens.get(start)?.value.as_str() {
         "[[" => matching_function_conditional_end(tokens, start)?,
@@ -376,7 +535,10 @@ fn parse_function_command_sequence_body(
         "while" | "until" => matching_function_loop_end(tokens, start)?,
         _ => return None,
     };
-    Some((parse(&tokens[start..=end]).commands, end + 1))
+    Some((
+        parse_function_body(&tokens[start..=end], diagnostic_text, source_line_offset),
+        end + 1,
+    ))
 }
 
 fn matching_function_conditional_end(tokens: &[Token], start: usize) -> Option<usize> {
@@ -442,6 +604,8 @@ fn parse_function_compound_body(tokens: &[Token], start: usize) -> Option<(Comma
 pub(super) fn parse_parenthesized_function_body(
     tokens: &[Token],
     start: usize,
+    diagnostic_text: Option<&str>,
+    source_line_offset: usize,
 ) -> Option<(Vec<CommandNode>, usize)> {
     if !is_keyword(tokens, start, "(") {
         return None;
@@ -470,7 +634,7 @@ pub(super) fn parse_parenthesized_function_body(
         return None;
     }
 
-    let mut body = parse(&tokens[start + 1..i]).commands;
+    let mut body = parse_function_body(&tokens[start + 1..i], diagnostic_text, source_line_offset);
     if let Some(first) = body.first_mut() {
         first.subshell = true;
     }

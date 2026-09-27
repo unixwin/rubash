@@ -81,10 +81,110 @@ impl Executor {
             return hit.clone();
         }
         let expanded = self.expand_word(&redirect.target);
+        // GNU redir.c:905 do_redirection_internal resolves every file-redirect
+        // operand through redirection_expand (redir.c:298), which runs the
+        // full word-list pipeline (expand_words_no_vars): brace expansion,
+        // the word expansion, then pathname expansion. Heredoc/herestring
+        // operands do NOT (redir.c:396-397 heredoc_expand uses
+        // expand_string_to_string — single string, no field list, no glob).
+        let expanded = self.expand_redirect_operand_fields(redirect, expanded);
         self.redirect_target_memo
             .borrow_mut()
             .insert(key, expanded.clone());
         expanded
+    }
+
+    /// GNU redir.c:298 redirection_expand → subst.c:12590
+    /// expand_words_no_vars: a file-redirect operand goes through the same
+    /// word-list pipeline as command arguments — brace expansion first (on
+    /// the quoted raw word: braces.c find_first_valid_brace skips quoted
+    /// spans, so `> "li{teral"` keeps its literal braces), then pathname
+    /// expansion (glob_expand_word_list). A word list of zero or more than
+    /// one field is the AMBIGUOUS_REDIRECT condition (redir.c:325-333
+    /// returns NULL; redir.c:911-912 reports). The carrier here is a single
+    /// String, so multiple fields are joined with ' ' — the representation
+    /// field-split `$var` operands already use — and the ambiguity gate
+    /// (`redirect_target_is_ambiguous`) recognizes them through the raw
+    /// word's unquoted expansion introducers.
+    fn expand_redirect_operand_fields(
+        &self,
+        redirect: &crate::parser::Redirect,
+        expanded: String,
+    ) -> String {
+        use crate::parser::RedirectKind;
+        if matches!(
+            redirect.kind,
+            RedirectKind::HereDoc | RedirectKind::HereString
+        ) {
+            return expanded;
+        }
+        let raw = redirect.target_metadata.raw.as_str();
+        // Pathname expansion obeys quoting exactly like an argument word
+        // (pathexp.c unquoted_glob_pattern_p): a glob metachar inside
+        // quotes is literal data (`> "a?b"` creates that literal file,
+        // never a match). GNU redir.c:902-912 (do_redirection_internal)
+        // additionally sets W_NOGLOB on the redirectee when
+        // `posixly_correct && interactive_shell == 0': in POSIX mode a
+        // non-interactive shell performs NO filename expansion on redirect
+        // operands, even one that would expand to a single filename
+        // (redir.tests 178-184: `set -o posix; cat < redir1.*' fails with
+        // redir1.*: No such file or directory).
+        let posix_noglob = self.posix_mode_enabled()
+            && !self
+                .shell_state
+                .env_vars
+                .contains_key("__RUBASH_INTERACTIVE");
+        let suppress_glob = posix_noglob
+            || super::command_prepare::raw_word_suppresses_pathname_expansion(
+                Some(raw),
+                Some(&redirect.target_metadata),
+            );
+        let branches = if self.is_brace_expand_enabled() {
+            super::command_prepare::expand_braces_with_optional_raw(&redirect.target, Some(raw))
+        } else {
+            vec![redirect.target.clone()]
+        };
+        if branches.len() > 1 {
+            // Each brace alternative is one field of the operand word list;
+            // more than one alternative is already the ambiguous condition
+            // (`> a{b,c}` -> `ab ac`), so join for the gate exactly like a
+            // field-split expansion.
+            return branches
+                .iter()
+                .map(|branch| self.expand_word(branch))
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+        // A single branch that the brace machinery rewrote (`> out{1..1}`
+        // -> `out1`) replaces the operand for the rest of the pipeline;
+        // an unchanged word keeps the already-expanded string so word
+        // substitution side effects still run exactly once.
+        let expanded = if branches.len() == 1 && branches[0] != redirect.target {
+            self.expand_word(&branches[0])
+        } else {
+            expanded
+        };
+        if suppress_glob {
+            return expanded;
+        }
+        match glob::pathname_expand_word(&expanded, &self.shell_state.env_vars) {
+            // Multiple matches are multiple fields (`> $multi` where the
+            // value globs to two files, or a literal `> amb*` with two
+            // matches): joined for the ambiguity gate, GNU reports
+            // AMBIGUOUS_REDIRECT and opens nothing.
+            glob::PathnameExpansion::Matches(matches) if matches.len() > 1 => matches.join(" "),
+            // A single match is the resolved filename GNU opens
+            // (`> amb1*` with one match opens amb1); an empty match list
+            // (nullglob) is the zero-field ambiguous condition carried as
+            // the empty string the gate already reports.
+            glob::PathnameExpansion::Matches(matches) => {
+                matches.into_iter().next().unwrap_or_default()
+            }
+            // NoMatch keeps the literal pattern (nullglob off, glob.c
+            // returns the pattern itself); Fail is the failglob pattern
+            // text, also kept verbatim.
+            glob::PathnameExpansion::NoMatch | glob::PathnameExpansion::Fail(_) => expanded,
+        }
     }
 
     pub(crate) fn expand_word(&self, word: &str) -> String {

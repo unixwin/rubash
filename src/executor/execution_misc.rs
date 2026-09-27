@@ -274,10 +274,23 @@ pub(in crate::executor) fn redirect_target_is_ambiguous(raw: &str, expanded: &st
         match ch {
             '\'' if !double_quoted => single_quoted = !single_quoted,
             '"' if !single_quoted => double_quoted = !double_quoted,
-            '$' if !single_quoted && !double_quoted => {
-                has_unquoted_expansion = true;
-            }
             _ => {}
+        }
+        if single_quoted || double_quoted {
+            continue;
+        }
+        // GNU redir.c:298 redirection_expand resolves the operand with
+        // expand_words_no_vars, whose full pipeline — parameter/command/
+        // process substitution, brace expansion, field splitting, pathname
+        // expansion — is the only way one operand word becomes several
+        // fields. Every one of those expansions is introduced by an
+        // UNQUOTED introducer character; quoted or escaped text can never
+        // add a field (`> "a b"` opens one file whose name contains the
+        // space). The introducer class is `$` and the backtick
+        // (substitution), `{` (braces.c brace expansion), and the glob
+        // metacharacters `*`, `?`, `[` (pathexp.c unquoted_glob_pattern_p).
+        if matches!(ch, '$' | '`' | '{' | '*' | '?' | '[') {
+            has_unquoted_expansion = true;
         }
     }
 

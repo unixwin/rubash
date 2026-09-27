@@ -105,13 +105,14 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         // closers are consumed inside their own constructs (in_subshell is
         // set while a `( ... )` body is open), so any `)` reaching the main
         // loop — at command start or mid-command (`echo x)`) — is GNU's
-        // `syntax error near unexpected token `)''. `;;` et al are only
-        // stray at command position, where a `;;` terminator has no open
-        // clause.
+        // `syntax error near unexpected token `)''. Case terminators
+        // (`;;', `;&', `;;;&') are likewise consumed by
+        // parse_case_command inside a case body, so ANY one reaching the
+        // main loop is stray — at command start (`f() { ;; }') or
+        // mid-command (`echo ;;'), where GNU's grammar also rejects it.
         if options.stray_close_is_error
             && ((super::is_unquoted_operator(&tokens[i], ")") && !state.in_subshell)
-                || (command_is_empty(&state.current_cmd)
-                    && matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&")))
+                || matches!(tokens[i].raw.as_str(), ";;" | ";&" | ";;;&"))
         {
             push_unexpected_token_error(&mut state, tokens, i, &options);
             break;
@@ -894,7 +895,12 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         || (token.kind == TokenKind::Keyword && token.value == "!"))
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((function_cmd, next_i)) = parse_function_command(tokens, i) {
+        if let Some((function_cmd, next_i)) = parse_function_command_with_diagnostic(
+            tokens,
+            i,
+            state.diagnostic_text.as_deref(),
+            state.source_line_offset,
+        ) {
             push_compound_command(state, function_cmd);
             return Some(next_i);
         }

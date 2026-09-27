@@ -967,8 +967,10 @@ pub(in crate::executor) fn bash_style_unexpected_token_message(message: &str) ->
 }
 
 pub(in crate::executor) fn parse_error_source_display(source: &str) -> String {
+    // GNU parse.y:6867 print_offending_line echoes the physical input line
+    // verbatim — leading whitespace included (`  echo )' keeps its indent)
+    // — so do not trim here.
     source
-        .trim()
         .replace(";then", "; then")
         .replace("then<W", "then <W")
 }
