@@ -141,10 +141,13 @@ impl Executor {
         // alternate word reaches expansion only when that word is actually
         // evaluated (`${x-${'x1'%'t'}}` with x set is silent in GNU).
         if braced_name_ends_on_quote(name) {
-            eprintln!(
-                "{}{}: bad substitution",
-                self.diagnostic_prefix(),
-                bad_substitution_display(word)
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}{}: bad substitution\n",
+                    self.diagnostic_prefix(),
+                    bad_substitution_display(word)
+                )
+                .as_bytes(),
             );
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
@@ -157,10 +160,13 @@ impl Executor {
         // a bad name nested in an unevaluated word (`${x:-${(M)y}}` with x
         // set) stays silent, matching GNU's lazy expansion.
         if braced_name_is_bad_substitution(name) {
-            eprintln!(
-                "{}{}: bad substitution",
-                self.diagnostic_prefix(),
-                bad_substitution_display(word)
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}{}: bad substitution\n",
+                    self.diagnostic_prefix(),
+                    bad_substitution_display(word)
+                )
+                .as_bytes(),
             );
             self.shell_state.parameter_bad_substitution.set(true);
             return String::new();
@@ -340,7 +346,10 @@ impl Executor {
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
                 if let Some(name) = arithmetic_unbound_variable(&expression, &overlaid) {
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
-                        eprintln!("{}{}: unbound variable", self.diagnostic_prefix(), name);
+                        self.write_diagnostic_fd2(
+                            format!("{}{}: unbound variable\n", self.diagnostic_prefix(), name)
+                                .as_bytes(),
+                        );
                     }
                     // GNU expr.c expr_streval: an unbound variable under `set
                     // -u` raises FORCE_EOF and exits the shell (127 in -c
@@ -395,7 +404,9 @@ impl Executor {
                 self.shell_state.arithmetic_fatal_error.set(true);
             }
             if !self.shell_state.arithmetic_expansion_error.replace(true) {
-                eprintln!("{}{}", self.diagnostic_prefix(), message);
+                self.write_diagnostic_fd2(
+                    format!("{}{}\n", self.diagnostic_prefix(), message).as_bytes(),
+                );
             }
         }
 

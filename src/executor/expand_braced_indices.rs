@@ -412,10 +412,13 @@ impl Executor {
                         return parameter_char_length(&element).to_string();
                     }
                 } else if index < 0 {
-                    eprintln!(
-                        "{}[{}]: bad array subscript",
-                        self.diagnostic_prefix(),
-                        index
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}[{}]: bad array subscript\n",
+                            self.diagnostic_prefix(),
+                            index
+                        )
+                        .as_bytes(),
                     );
                     self.shell_state.arithmetic_nonfatal_error.set(true);
                     return String::new();
@@ -441,10 +444,13 @@ impl Executor {
                 // GNU reports the raw (unexpanded) subscript text in the
                 // error: `[$unset]: bad array subscript`.
                 if key.is_empty() {
-                    eprintln!(
-                        "{}[{}]: bad array subscript",
-                        self.diagnostic_prefix(),
-                        raw_key
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}[{}]: bad array subscript\n",
+                            self.diagnostic_prefix(),
+                            raw_key
+                        )
+                        .as_bytes(),
                     );
                     self.shell_state.arithmetic_nonfatal_error.set(true);
                     return String::new();

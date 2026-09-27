@@ -433,6 +433,37 @@ impl Executor {
         Ok(())
     }
 
+    /// GNU error.c report_error writes diagnostics to fd 2 *as currently
+    /// bound by the shell's redirections* — an enclosing subshell/group
+    /// redirect or `2>&1` dup2 has already moved fd 2 before the expansion
+    /// runs, so `( eval 'bad ${}' ) 2>/dev/null` silences the message.
+    /// Expansion diagnostics raised from `&self` deep-expansion methods
+    /// cannot use write_fd_endpoint (its capture arms need &mut), so this
+    /// mirrors its fd-2 dispatch with interior-immutable writes only: the
+    /// fd table's endpoint decides between drop (closed), the bound file,
+    /// fd 1's destination (`2>&1`), and the process stderr. Raw `eprintln!`
+    /// at those call sites bypassed every enclosing redirect (rubash#167).
+    pub(in crate::executor) fn write_diagnostic_fd2(&self, output: &[u8]) {
+        if self.fd_table.is_closed(2) {
+            return;
+        }
+        let Some(endpoint) = self.fd_table.output_endpoint(2) else {
+            return;
+        };
+        let result = match endpoint {
+            FdWriteEndpoint::Stdout => write_global_stdout(output),
+            FdWriteEndpoint::Stderr => write_stderr_bytes(output),
+            // A stderr fd bound to a coprocess input or process-substitution
+            // path is not a diagnostics destination; report on the terminal
+            // stream like GNU's stderr fallback.
+            FdWriteEndpoint::CoprocStdin { .. } | FdWriteEndpoint::ProcessSubstitution { .. } => {
+                write_stderr_bytes(output)
+            }
+            FdWriteEndpoint::File(file_fd) => crate::fd::write_all(file_fd.handle, output),
+        };
+        let _ = result;
+    }
+
     pub(in crate::executor) fn has_output_fd_target(&self, target: &str) -> bool {
         redirect_target_fd(target).is_some_and(|fd| {
             !self.fd_table.is_closed(fd) && self.fd_table.output_endpoint(fd).is_some()

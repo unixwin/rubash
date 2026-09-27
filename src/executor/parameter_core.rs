@@ -240,7 +240,9 @@ impl Executor {
                             "{display}: syntax error in expression (error token is \"{display}\")"
                         )
                     });
-                    eprintln!("{}{}", self.diagnostic_prefix(), message);
+                    self.write_diagnostic_fd2(
+                        format!("{}{}\n", self.diagnostic_prefix(), message).as_bytes(),
+                    );
                 }
                 return String::new();
             }
@@ -738,7 +740,9 @@ impl Executor {
                     }
                 }
             }
-            eprintln!("{}{}: {}", self.diagnostic_prefix(), var_name, message);
+            self.write_diagnostic_fd2(
+                format!("{}{}: {}\n", self.diagnostic_prefix(), var_name, message).as_bytes(),
+            );
             use std::io::Write;
             let _ = std::io::stderr().flush();
         }
