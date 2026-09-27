@@ -95,17 +95,25 @@ impl Executor {
         // GNU declare.def declares -t on functions: set/clear the trace
         // attribute (trace_p(var) in execute_cmd.c). A traced function
         // inherits the DEBUG and RETURN traps even with functrace off.
+        // GNU declare.def:334 parses each option cluster independently, and
+        // the per-name dispatch (declare.def:503-531) tests the CALL-WIDE
+        // flag set: `flags_on == att_function && flags_off == 0' displays,
+        // anything else silently sets/clears attributes. So `-t' may live
+        // in its own cluster (`declare -f -t NAME', rubash#217) — requiring
+        // `f' and `t' in the same cluster made the separated form fall
+        // through to the display branch and print the body.
         let set_trace = args
             .iter()
-            .any(|arg| arg.starts_with('-') && arg.contains('t') && arg.contains('f'));
+            .any(|arg| arg.starts_with('-') && arg.contains('t'));
         let clear_trace = args
             .iter()
-            .any(|arg| arg.starts_with('+') && arg.contains('t') && arg.contains('f'));
+            .any(|arg| arg.starts_with('+') && arg.contains('t'));
         let print = args
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
         let exported_functions = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
         let readonly_functions = marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS);
+        let traced_functions = marked_env_names(&self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS);
         if names.is_empty() {
             let mut functions: Vec<_> = self.shell_state.functions.iter().collect();
             functions.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -117,11 +125,29 @@ impl Executor {
                     continue;
                 }
                 if function_names_only {
+                    // GNU setattr.def:415 var_attribute_string emits the
+                    // attribute characters in a fixed order — f, then r,
+                    // then t, then x (a A f i n r t x c l u) — from the
+                    // function's OWN attribute bits, and setattr.def:484
+                    // show_var_attributes with nodefs=1 prints
+                    // `declare -<flags> name' for every listed function,
+                    // so a traced one renders `declare -ft f' and a
+                    // `declare -ftx k' earlier in the session keeps both
+                    // bits in a later plain `declare -F' (rubash#217
+                    // facet 1). The exported_only/readonly call flags
+                    // above only FILTER which functions are listed
+                    // (setattr.def:337 `var->attributes & attribute').
+                    let is_exported = exported_functions.iter().any(|exported| *exported == *name);
+                    let is_readonly = readonly_functions.iter().any(|rn| *rn == *name);
+                    let is_traced = traced_functions.iter().any(|tn| *tn == *name);
                     let mut flags = String::from("-f");
-                    if readonly {
+                    if is_readonly {
                         flags.push('r');
                     }
-                    if exported_only {
+                    if is_traced {
+                        flags.push('t');
+                    }
+                    if is_exported {
                         flags.push('x');
                     }
                     writeln!(stdout, "declare {flags} {name}")?;
@@ -160,41 +186,41 @@ impl Executor {
             if exported_only && !is_exported && !set_export_attribute {
                 continue;
             }
+            // GNU declare.def:503-531: the per-name branch first applies the
+            // WHOLE call-wide flag set (`VSETATTR (var, flags_on); VUNSETATTR
+            // (var, flags_off)'), and only then decides whether to display —
+            // displaying iff `flags_on == att_function && flags_off == 0'.
+            // Applying each attribute with its own early `continue' left
+            // later attributes unset when an earlier one was present
+            // (`declare -ftr m' marked readonly and skipped the trace mark,
+            // rubash#217). A single `attribute_ops' gate restores the
+            // all-then-display order; `-p' keeps the display alive
+            // (declare.def:397 pflag branch).
+            let attribute_ops = clear_export_attribute
+                || set_export_attribute
+                || readonly
+                || set_trace
+                || clear_trace;
             if clear_export_attribute {
                 unmark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
-                if !print {
-                    continue;
-                }
-            } else if set_export_attribute {
+            }
+            if set_export_attribute {
                 mark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
-                if !print && !function_names_only {
-                    continue;
-                }
             }
             if readonly {
                 mark_env_name(&mut self.shell_state.env_vars, READONLY_FUNCTIONS, name);
-                if !print {
-                    continue;
-                }
             }
             if set_trace {
                 mark_env_name(&mut self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS, name);
-                if !print {
-                    continue;
-                }
             }
             if clear_trace {
                 unmark_env_name(&mut self.shell_state.env_vars, FUNC_TRACE_FUNCTIONS, name);
-                if !print {
-                    continue;
-                }
+            }
+            if attribute_ops && !print {
+                continue;
             }
             if function_names_only {
-                if exported_only {
-                    writeln!(stdout, "declare -fx {name}")?;
-                } else {
-                    self.write_function_name(name, stdout)?;
-                }
+                self.write_function_name(name, stdout)?;
             } else {
                 self.write_function_definition(
                     name,
