@@ -424,6 +424,40 @@ pub(crate) fn bytes_to_shell_text(bytes: &[u8]) -> String {
     output
 }
 
+/// Script-entry byte decoding. GNU shell.c reads script files as raw bytes
+/// with no encoding gate — general.c:718 check_binary_file (ELF magic /
+/// NUL within the first line, two when `#!`) is the only rejection — so a
+/// script carrying ISO-8859/CJK stray bytes runs normally (rubash#132).
+/// Unlike `bytes_to_shell_text` this leaves valid UTF-8 untouched (no
+/// carrier escaping: script bytes like form feed must keep whatever lexer
+/// meaning they already have) and rides each byte of an invalid sequence
+/// as a raw-byte marker pair, so the output boundary
+/// (`decode_raw_byte_markers`, e.g. echo) restores the original byte.
+pub(crate) fn bytes_to_script_text(bytes: &[u8]) -> String {
+    if std::str::from_utf8(bytes).is_ok() {
+        // Zero-change fast path: every currently-runnable script decodes to
+        // exactly the String String::from_utf8 produced.
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut output = String::new();
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(text) => {
+                output.push_str(text);
+                break;
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                output.push_str(std::str::from_utf8(&remaining[..valid]).unwrap_or_default());
+                push_raw_byte_marker(&mut output, remaining[valid]);
+                remaining = &remaining[valid + 1..];
+            }
+        }
+    }
+    output
+}
+
 #[allow(dead_code)]
 pub(in crate::executor) fn split_expanded_fragments(
     fragments: &[ExpandedFragment],

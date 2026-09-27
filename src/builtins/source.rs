@@ -22,7 +22,6 @@ use invocation::{SourceInvocation, SourceParseError};
 
 use crate::executor::{ExecuteError, Executor};
 use crate::parser::CommandNode;
-use std::fs;
 use std::io::Write;
 
 pub fn execute(executor: &mut Executor, args: &[String]) -> Result<(), ExecuteError> {
@@ -162,9 +161,9 @@ where
             Some(text) => text,
             None => {
                 use std::io::Read;
-                let mut buffer = String::new();
-                match std::io::stdin().read_to_string(&mut buffer) {
-                    Ok(_) => buffer,
+                let mut buffer = Vec::new();
+                match std::io::stdin().read_to_end(&mut buffer) {
+                    Ok(_) => crate::script_driver::bytes_to_script_text(&buffer),
                     Err(_) => {
                         executor.set_exit_code(1);
                         return Ok(());
@@ -202,7 +201,11 @@ where
         return Ok(());
     };
 
-    let source = match fs::read_to_string(&source_path) {
+    // GNU `source` has no UTF-8 validity gate either (builtins/source.def
+    // reads the file as raw bytes); rubash#132: invalid-sequence bytes ride
+    // as raw-byte marker pairs instead of failing the read as a spurious
+    // "No such file or directory".
+    let source = match crate::script_driver::read_script_bytes(&source_path) {
         Ok(source) => source,
         Err(_) => {
             writeln!(

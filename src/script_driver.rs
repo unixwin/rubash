@@ -1698,3 +1698,20 @@ pub fn check_binary_file(sample: &[u8]) -> bool {
     }
     false
 }
+
+/// Script-entry decoding companion to `check_binary_file`: GNU shell.c has
+/// no UTF-8 validity gate on script files, so after the binary-file check
+/// the raw bytes decode with invalid-sequence bytes carried as raw-byte
+/// marker pairs (rubash#132; general.c:718 check_binary_file is the only
+/// rejection). See substitution_metadata::bytes_to_script_text.
+pub fn bytes_to_script_text(bytes: &[u8]) -> String {
+    crate::executor::substitution_metadata::bytes_to_script_text(bytes)
+}
+
+/// Read a script-language file the way GNU shell.c does: raw bytes, then
+/// `check_binary_file`, then script-text decoding. Errors use the io error
+/// message (callers own their diagnostics).
+pub fn read_script_bytes(path: &std::path::Path) -> std::io::Result<String> {
+    let bytes = std::fs::read(path)?;
+    Ok(crate::executor::substitution_metadata::bytes_to_script_text(&bytes))
+}

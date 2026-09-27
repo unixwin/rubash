@@ -663,7 +663,7 @@ bash [GNU long option] [option] script-file ...
 /// successfully (shell.c:830-831).
 fn run_pretty_print(executor: &mut Executor, script: &str) -> i32 {
     let path = executor.resolve_shell_path(script);
-    let Ok(contents) = fs::read_to_string(&path) else {
+    let Ok(contents) = rubash::script_driver::read_script_bytes(&path) else {
         let shell_name = executor
             .get_env("__RUBASH_SHELL_NAME")
             .or_else(|| executor.get_env("BASH_ARGV0"))
@@ -856,13 +856,12 @@ fn run_script_file_with_init(
         eprintln!("cannot execute binary file");
         return 126;
     }
-    let contents = match String::from_utf8(bytes) {
-        Ok(contents) => contents,
-        Err(_) => {
-            eprintln!("cannot execute binary file");
-            return 126;
-        }
-    };
+    // general.c:718 check_binary_file is GNU's ONLY script rejection gate
+    // (ELF magic / NUL in the first line, two with `#!`); shell.c reads the
+    // rest as raw bytes with no UTF-8 validity check, so invalid-sequence
+    // bytes decode as raw-byte marker pairs instead of refusing the script
+    // (rubash#132).
+    let contents = rubash::script_driver::bytes_to_script_text(&bytes);
 
     executor.set_env("__RUBASH_SCRIPT_NAME", script);
     executor.set_env("BASH_ARGV0", script);
@@ -936,7 +935,7 @@ fn run_stdin_script_with_init(executor: &mut Executor, init_file: Option<&str>) 
 
 fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
     let path = executor.resolve_shell_path(init_file);
-    let contents = match fs::read_to_string(path) {
+    let contents = match rubash::script_driver::read_script_bytes(&path) {
         Ok(contents) => contents,
         Err(e) => {
             eprintln!(
