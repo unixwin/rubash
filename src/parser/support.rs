@@ -598,6 +598,18 @@ pub(super) fn command_accepts_embedded_arithmetic_command(cmd: &CommandNode) -> 
     ) && cmd.words.len() == 1
 }
 
+/// GNU parse.y:1054-1061 function_def: `WORD '(' ')' newline_list
+/// function_body` — the grammar accepts ANY word as the candidate name; `{`
+/// and `}` are ordinary word characters (syntax.h:29-30), so
+/// `ble/x:{s}/d` and `{x}' parse as function definitions (rubash#244).
+/// Character rejection happens only at definition time
+/// (execute_cmd.c:6289 execute_intern_function -> general.c:445
+/// valid_function_word), which the executor models separately
+/// (executor/function_calls.rs define_function). What remains here is only
+/// what can never be an unquoted word's text: real shell break characters
+/// and operator bytes (these only reach a word value inside `$(...)` /
+/// `${...}` spans — the `$' family, owned by the executor's W_HASDOLLAR
+/// check).
 pub(super) fn is_function_name(name: &str) -> bool {
     if name.is_empty() || name.contains('=') {
         return false;
@@ -605,14 +617,17 @@ pub(super) fn is_function_name(name: &str) -> bool {
 
     !name
         .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
+        .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | ';' | '&' | '|'))
 }
 
+/// Same grammar class for the `function name { ... }' keyword form
+/// (parse.y:1056-1061): any WORD, with `{`/`}` legal name characters
+/// (rubash#244). See is_function_name for the executor-level split.
 pub(super) fn is_function_keyword_name(name: &str) -> bool {
     !name.is_empty()
         && !name
             .chars()
-            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | '{' | '}' | ';' | '&' | '|'))
+            .any(|ch| ch.is_whitespace() || matches!(ch, '(' | ')' | ';' | '&' | '|'))
 }
 
 /// GNU parse.y:1097 `subshell: '(' compound_list ')'` and the

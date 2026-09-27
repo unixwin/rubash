@@ -185,8 +185,14 @@ impl<'a> Lexer<'a> {
         let mut compound_paren_depth = 0usize;
         while let Some(c) = self.peek() {
             let in_array_value = array_assignment && array_value_paren_depth > 0;
-            if " \t\n|&;<>(){}".contains(c)
-                && c != '}'
+            // GNU syntax.h:29-30 shell_break_chars "()<>;&| \t\n": `{`/`}` are
+            // NOT word-break characters, so read_token_word (parse.y:5305)
+            // gathers them as ordinary word text mid-word (rubash#244: the
+            // function name `ble/x:{s}/d` must stay one word). A brace only
+            // becomes the reserved `{`/`}` token when it is the whole word in
+            // command position, which next_token's `{`/`}` dispatch decides
+            // before this scanner runs.
+            if " \t\n|&;<>()".contains(c)
                 // GNU parse.y:5494-5524 read_token_word shellexp()
                 // (syntax.h:84): a `<`/`>` immediately followed by `(` is a
                 // process substitution and part of the word — the `(...)`
@@ -233,24 +239,10 @@ impl<'a> Lexer<'a> {
                     // with the gate open at read time, never sees) this shape.
                     self.extglob_split_pending = true;
                 }
-                if c == '{' {
-                    if self.position == word_start {
-                        self.advance();
-                        self.skip_brace();
-                        extglob_operator = false;
-                        continue;
-                    }
-                    // GNU parse.y treats `{`/`}` as ordinary characters inside
-                    // a word: only a brace that starts the word opens a brace
-                    // group or expansion (read_token_word's metacharacter set
-                    // is ` \t\n|&;<>` plus the parens). `x={ sourced_fn }` is
-                    // the assignment word `x={` plus the command `sourced_fn`
-                    // with argument `}` (dbg-support.tests:121), matching
-                    // GNU's temporary-assignment + function-call execution.
-                    self.advance();
-                    extglob_operator = false;
-                    continue;
-                }
+                // `{` no longer reaches this arm at all: it is not in the
+                // break set above, so a mid-word brace falls through to the
+                // plain-character advance below — ordinary word text, the
+                // same class as the removed special case (rubash#244).
                 break;
             }
             match c {

@@ -1085,26 +1085,18 @@ impl Executor {
             && value.starts_with('(')
             && value.ends_with(')')
             && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
-            && is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, base_name)
-            && integer_compound_assignment_is_scalar(&value)
         {
-            // Bash keeps `typeset -i x; x=(1+2)` scalar.  A compound
-            // assignment becomes an array only when it contains indexed o
-            // multiple elements; the single arithmetic expression is still
-            // assigned through the integer attribute.
-            match self.eval_integer_assignment_checked(&value[1..value.len() - 1]) {
-                Some(result) => result.to_string(),
-                None => return false,
-            }
-        } else if compound_assignment
-            && value.starts_with('(')
-            && value.ends_with(')')
-            && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base_name)
-        {
-            // variables.c/arrayfunc.c: a compound `name=(...)` assignment
-            // always makes an array, even when the variable previously had
-            // the integer attribute (`typeset -i x; x=([0]=7+11)` becomes an
-            // integer array with x[0]=18, not a scalar arithmetic result).
+            // GNU arrayfunc.c:454-500 find_or_make_array_variable: a compound
+            // `name=(...)` assignment on a non-array variable CONVERTS it to
+            // an indexed array (convert_var_to_array, arrayfunc.c:498)
+            // unconditionally — there is no "single arithmetic expression
+            // stays scalar" carve-out in 5.2 or 5.3 (rubash#246: both
+            // /usr/local/bin/bash 5.3.0 and /usr/bin/bash 5.2.21 print
+            // `declare -ai t=([0]="6")` for `declare -i t; t=(2*3)`), and
+            // the integer attribute still evaluates each element
+            // (arrayfunc.c:526-552 assign_array_var_from_word_list ->
+            // bind_array_var_internal -> make_variable_value, so
+            // `x=([0]=7+11)` gives x[0]=18).
             match append_array_value(
                 "()",
                 &value,
@@ -1216,11 +1208,4 @@ impl Executor {
         sync_shell_assignment_process_env(&self.shell_state.env_vars, base_name, value);
         true
     }
-}
-
-fn integer_compound_assignment_is_scalar(value: &str) -> bool {
-    let Some(inner) = value.strip_prefix('(').and_then(|v| v.strip_suffix(')')) else {
-        return false;
-    };
-    !inner.is_empty() && !inner.chars().any(|ch| ch.is_whitespace()) && !inner.contains(['[', ']'])
 }

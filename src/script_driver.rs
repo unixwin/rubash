@@ -130,6 +130,10 @@ pub fn run_script_with_history_in(
         // actually declared a heredoc, so other scripts group exactly as before.
         let mut paren_depth: i64 = 0;
         let mut saw_heredoc = false;
+        // Carried `((`/`$((` arithmetic depth: a multi-line arithmetic
+        // command keeps its shift operators out of the heredoc scan across
+        // its continuation lines (GNU parse_dparen reads the whole body).
+        let mut heredoc_arith_depth: i64 = 0;
         let start_line = index + 1;
         while index < raw_lines.len() {
             let raw = raw_lines[index];
@@ -152,7 +156,8 @@ pub fn run_script_with_history_in(
                 }
             } else {
                 let expanded_line = expand_group_aliases(executor, text);
-                let declared = stdin_heredoc_declarations(&expanded_line);
+                let declared =
+                    stdin_heredoc_line_declarations(&expanded_line, &mut heredoc_arith_depth);
                 // Only line-spanning substitutions need the paren gate: a
                 // heredoc declared inside $( ) or <( ) keeps the group open
                 // past its terminator until the substitution closes.
@@ -591,6 +596,7 @@ fn line_paren_delta(line: &str) -> i64 {
 /// never scanned for `<<` operators.
 pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
     let mut pending: Vec<(String, bool)> = Vec::new();
+    let mut arith_depth = 0i64;
     for line in text.split('\n') {
         if let Some((delimiter, strip_tabs)) = pending.first().cloned() {
             let candidate = if strip_tabs {
@@ -603,9 +609,16 @@ pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
             }
             continue;
         }
-        pending.extend(scan_heredoc_operators(line));
+        pending.extend(scan_heredoc_operators_with_state(line, &mut arith_depth));
     }
     pending
+}
+
+/// One physical line of the driver's heredoc-declaration scan, carrying the
+/// open arithmetic-command paren depth across lines so a multi-line `((`
+/// never leaks its shift operators as heredoc declarations.
+pub fn stdin_heredoc_line_declarations(line: &str, arith_depth: &mut i64) -> Vec<(String, bool)> {
+    scan_heredoc_operators_with_state(line, arith_depth)
 }
 
 /// `<<`/`<<-` operator declarations on one physical line. GNU parse.y
@@ -615,15 +628,83 @@ pub fn stdin_heredoc_declarations(text: &str) -> Vec<(String, bool)> {
 /// a word boundary, `$(...)`/`<(...)`/backquote bodies are reparsed so a
 /// `<<` inside them is live syntax, and the delimiter is remembered
 /// dequoted (quoting only suppresses body expansion, never the match).
+///
+/// GNU parse.y:3727-3728 read_token hands a `((' to parse_dparen
+/// (parse.y:4895) BEFORE the redirection branch (parse.y:3690-3706) can lex
+/// `<<`: the whole `((...))` body is arithmetic text consumed by
+/// parse_arith_cmd/parse_matched_pair, so `<<`/`<<=` there are the shift
+/// operators, never REDIR_LESSLESS (same class as rubash#181's
+/// inside_arithmetic_command guard in the tokenizer). A `$((...))`
+/// arithmetic expansion in a word gets the same treatment. Without this,
+/// `((__ble_weight<<=1,...))` (ble.sh:6733) declared a phantom heredoc with
+/// delimiter `=1,` that never terminates, so the group driver accumulated
+/// the rest of the file into one pending group — O(n^2) re-scans per line
+/// and a mis-parse of the merged text (rubash#244/#245: ble.sh -n died at
+/// line 28355 after 117 s; GNU parses instantly, rc=0).
 fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
+    let mut arith_depth = 0i64;
+    scan_heredoc_operators_with_state(line, &mut arith_depth)
+}
+
+fn scan_heredoc_operators_with_state(line: &str, arith_depth: &mut i64) -> Vec<(String, bool)> {
     let chars: Vec<char> = line.chars().collect();
     let mut declarations = Vec::new();
     let mut expect_delim: Option<bool> = None;
     let mut i = 0usize;
+    // Command-position tracking for the `((` dispatch, mirroring GNU
+    // parse_dparen's reserved_word_acceptable gate: a line start, an
+    // operator boundary, or a command keyword puts a following `((` in
+    // command position.
+    let mut at_command = true;
     while i < chars.len() {
+        if *arith_depth > 0 {
+            // Arithmetic body: parens nest the span; quoted spans are
+            // opaque; `<<` is the shift operator, never a heredoc.
+            match chars[i] {
+                '\\' => i += 2,
+                '\'' | '"' => {
+                    let q = chars[i];
+                    i += 1;
+                    while i < chars.len() && chars[i] != q {
+                        if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                '(' => {
+                    *arith_depth += 1;
+                    i += 1;
+                }
+                ')' => {
+                    *arith_depth -= 1;
+                    i += 1;
+                    if *arith_depth == 0 {
+                        at_command = true;
+                    }
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
         match chars[i] {
             ' ' | '\t' => i += 1,
             '#' => break,
+            '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
+                // `$((` arithmetic expansion inside a word: the body is
+                // arithmetic text (parse.y read_token_word ->
+                // parse_matched_pair), so `<<` there never declares.
+                *arith_depth = 2;
+                i += 3;
+            }
+            '(' if chars.get(i + 1) == Some(&'(') && at_command => {
+                // Command-position `((` arithmetic command: parse_dparen
+                // consumes the whole body before read_token's redirection
+                // branch ever runs (parse.y:3727-3728).
+                *arith_depth = 2;
+                i += 2;
+            }
             '<' => {
                 if chars.get(i + 1) == Some(&'<') {
                     match chars.get(i + 2) {
@@ -640,14 +721,75 @@ fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
                 } else {
                     i += 1;
                 }
+                at_command = false;
             }
-            '>' | '|' | '&' | ';' | '(' | ')' => i += 1,
+            '>' | '|' | '&' | ';' | '(' | ')' => {
+                i += 1;
+                at_command = true;
+            }
             _ => {
                 // One word, honoring quoting; comparison text is dequoted.
                 let mut word = String::new();
                 while i < chars.len() {
                     match chars[i] {
                         ' ' | '\t' | '<' | '>' | '|' | '&' | ';' | '(' | ')' => break,
+                        '$' if chars.get(i + 1) == Some(&'(') && chars.get(i + 2) == Some(&'(') => {
+                            // `$((` arithmetic expansion is one atomic word
+                            // piece (read_token_word -> parse_matched_pair):
+                            // consume the whole span into the word so its
+                            // shift operators never lex as `<<` redirections
+                            // (parse.y:3727 keeps the body away from
+                            // read_token's redirection branch). A span still
+                            // open at end of line propagates its depth into
+                            // the carried state so continuation lines keep
+                            // the suppression.
+                            *arith_depth = 2;
+                            word.push('$');
+                            i += 1;
+                            while i < chars.len() && *arith_depth > 0 {
+                                match chars[i] {
+                                    '\\' => {
+                                        word.push(chars[i]);
+                                        i += 1;
+                                        if i < chars.len() {
+                                            word.push(chars[i]);
+                                            i += 1;
+                                        }
+                                    }
+                                    '\'' | '"' => {
+                                        let q = chars[i];
+                                        word.push(chars[i]);
+                                        i += 1;
+                                        while i < chars.len() && chars[i] != q {
+                                            if q == '"' && chars[i] == '\\' && i + 1 < chars.len() {
+                                                word.push(chars[i]);
+                                                i += 1;
+                                            }
+                                            word.push(chars[i]);
+                                            i += 1;
+                                        }
+                                        if i < chars.len() {
+                                            word.push(chars[i]);
+                                            i += 1;
+                                        }
+                                    }
+                                    '(' => {
+                                        *arith_depth += 1;
+                                        word.push(chars[i]);
+                                        i += 1;
+                                    }
+                                    ')' => {
+                                        *arith_depth -= 1;
+                                        word.push(chars[i]);
+                                        i += 1;
+                                    }
+                                    _ => {
+                                        word.push(chars[i]);
+                                        i += 1;
+                                    }
+                                }
+                            }
+                        }
                         '\\' => {
                             i += 1;
                             if i < chars.len() {
@@ -673,6 +815,24 @@ fn scan_heredoc_operators(line: &str) -> Vec<(String, bool)> {
                         }
                     }
                 }
+                // A following `((` is in command position only after these
+                // keywords (GNU reserved_word_acceptable word set).
+                at_command = i >= chars.len()
+                    || matches!(
+                        word.as_str(),
+                        "if" | "then"
+                            | "else"
+                            | "elif"
+                            | "while"
+                            | "until"
+                            | "do"
+                            | "in"
+                            | "case"
+                            | "!"
+                            | "time"
+                            | "coproc"
+                            | "function"
+                    );
                 if let Some(strip_tabs) = expect_delim.take() {
                     if !word.is_empty() {
                         declarations.push((word, strip_tabs));

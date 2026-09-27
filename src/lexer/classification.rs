@@ -58,8 +58,17 @@ pub(super) fn is_brace_expansion(word: &str) -> bool {
         && (word[1..word.len() - 1].contains("..") || word.contains(','))
 }
 
+/// GNU syntax.h:29-30: `shell_meta_chars "()<>;&|"` and
+/// `shell_break_chars "()<>;&| \t\n"` — `{` and `}` are NOT shell
+/// metacharacters or word-break characters, so read_token_word (parse.y:5305)
+/// collects them as ordinary word text. A brace only leaves the word stream
+/// when the WHOLE token is the reserved `{`/`}` (CHECK_FOR_RESERVED_WORD,
+/// parse.y:3168, exact STREQ in command position), which next_token's `{`/`}`
+/// dispatch decides before any word scanning starts. Keeping `{}` out of this
+/// set is what makes `$(echo a){b}`, `` `echo a`{b} `` and `ble/x:{s}/d` single
+/// words like GNU (rubash#244).
 pub(super) fn is_word_delimiter(ch: char) -> bool {
-    " \t\r\n|&;<>(){}".contains(ch)
+    " \t\r\n|&;<>()".contains(ch)
 }
 
 pub(super) fn assignment_value_is_quoted(raw: &str) -> bool {

@@ -651,10 +651,9 @@ impl<'a> Lexer<'a> {
                     // after the close is literal word text too (GNU probe:
                     // `echo ${x-d{}}` is the single word d{}; splitting it
                     // off made the trailing brace a standalone word).
-                    if self
-                        .peek()
-                        .is_some_and(|ch| !is_word_delimiter(ch) || ch == '{' || ch == '}')
-                    {
+                    // `{`/`}` are not word delimiters (syntax.h:29-30), so
+                    // is_word_delimiter alone answers the continuation.
+                    if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
                         return Some(self.finish_word_token(start, false));
                     }
                     Some(Token::new(TokenKind::Variable, self.slice(start), start))
@@ -802,10 +801,10 @@ impl<'a> Lexer<'a> {
                         return Some(Token::new(kind, &value, start));
                     }
                 }
-                if self
-                    .peek()
-                    .is_some_and(|ch| !is_word_delimiter(ch) || ch == '{')
-                {
+                // `{`/`}` are not word delimiters (syntax.h:29-30): any brace
+                // glued to the closed group keeps the word alive, matching
+                // read_token_word's metacharacter set.
+                if self.peek().is_some_and(|ch| !is_word_delimiter(ch)) {
                     return Some(self.finish_word_token(start, false));
                 }
                 let v = self.slice(start);
