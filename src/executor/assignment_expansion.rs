@@ -1009,7 +1009,18 @@ impl Executor {
         let mut cursor = 0usize;
         for span in spans {
             let raw = value.get(span.start..span.end)?;
-            let prefix = self.expand_embedded_parameters_mut(value.get(cursor..span.start)?);
+            // GNU dequote_string (subst.c:4807) runs on the stored
+            // assignment value: the CTLESC markers the quote scanner puts
+            // before quoted glob metacharacters are dropped, because an
+            // assignment value never undergoes pathname expansion. The
+            // fragment byte splice below re-tags every C0 byte as DATA
+            // (bytes_to_shell_text), which would freeze the markers into
+            // literal  bytes in storage and every later read
+            // (rubash#179: x="a*$(echo hi)*b"; echo $x printed
+            // a*hi*b).
+            let prefix = crate::executor::markers::dequote_ctlesc_pairs(
+                &self.expand_embedded_parameters_mut(value.get(cursor..span.start)?),
+            );
             word.append_literal(&prefix, true);
             let output = if let Some(source) = raw
                 .strip_prefix("$(")
@@ -1027,7 +1038,9 @@ impl Executor {
             word.append_substitution(output);
             cursor = span.end;
         }
-        let suffix = self.expand_embedded_parameters_mut(value.get(cursor..)?);
+        let suffix = crate::executor::markers::dequote_ctlesc_pairs(
+            &self.expand_embedded_parameters_mut(value.get(cursor..)?),
+        );
         word.append_literal(&suffix, true);
         self.last_command_substitution_status.set(word.status);
         Some(word.materialize_lossy_at_boundary())
